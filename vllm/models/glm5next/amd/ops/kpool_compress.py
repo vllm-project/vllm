@@ -431,10 +431,7 @@ def _kpool_decode_update_batched_kernel(
     the tail-ring slots that tokens t < t* (same request) just stashed in this
     same invocation. ``tl.range`` iterates sequentially within the program, so
     those stashes are visible to the later completion read. Cross-request
-    programs are independent (distinct tail blocks). The ring holds RING >=
-    POOL_SIZE slots, enough for the open pool's committed keys plus a
-    speculative step's 1 + num_spec rows: rows stashed for drafts that are
-    later rejected must not overwrite keys a redone pool completion reads.
+    programs are independent (distinct tail blocks). RING >= POOL_SIZE.
     """
     req = tl.program_id(0)
     offs = tl.arange(0, BLOCK_D)
@@ -448,7 +445,7 @@ def _kpool_decode_update_batched_kernel(
         pos_valid = (cache_loc >= 0) & (pos >= 0)
 
         slot = safe_pos % POOL_SIZE
-        phys_slot = safe_pos % RING  # RING >= POOL_SIZE; see Glm5NextTailCache
+        phys_slot = safe_pos % RING
 
         # Derive the tail block from THIS token's tail_slot (the request's block
         # is constant across a pool, but a padded / invalid entry carries a

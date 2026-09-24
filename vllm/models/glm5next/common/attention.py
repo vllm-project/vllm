@@ -161,8 +161,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
 
     Holds the trailing incomplete pool's raw K + gate score: one block of
-    ring slots per request (``index_kpool`` rounded up to cover a speculative
-    step's rows, see ``get_kv_cache_spec``), overwritten in place by ``pos % ring``
+    ``ring`` slots per request, overwritten in place by ``pos % ring``
     as decode/spec-decode advances. Prefill seeds it (instead of discarding the
     tail raw K+gate); the connector transfers it across PD; decode reads it to
     compress the boundary pool correctly. ``KpoolTailSpec`` /
@@ -192,10 +191,9 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
-        # The open pool's committed keys plus a speculative step's rows, in
-        # whole pools: a spec step stashes 1 + num_spec rows before acceptance,
-        # and a rejected pool-completing draft must not leave the drafts behind
-        # it overwriting the committed keys its redo reads.
+        # Drafts are stashed before acceptance. With a one-pool ring, the
+        # drafts behind a rejected pool-completing draft overwrite the keys
+        # read by its redo.
         span = self._index_kpool + vllm_config.num_speculative_tokens
         ring = self._index_kpool * cdiv(span, self._index_kpool)
         return KpoolTailSpec(

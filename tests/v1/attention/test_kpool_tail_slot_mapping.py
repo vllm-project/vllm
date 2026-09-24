@@ -296,10 +296,8 @@ def test_builder_reuses_slot_mapping_storage():
 
 
 class TailRingMirror:
-    """Mirror of _kpool_tail_seed_kernel / _kpool_decode_update_batched_kernel
-    addressing: block = tail_slot // ring, ring offset = pos % ring; a pool
-    completing at pos reads ring slots (pool_start + s) % ring and uses the
-    current token's own K/score for the last member."""
+    """Mirror of the tail-ring addressing in _kpool_tail_seed_kernel and
+    _kpool_decode_update_batched_kernel."""
 
     def __init__(self, num_blocks, kpool=KPOOL, ring=None):
         self.kpool = kpool
@@ -459,10 +457,8 @@ def test_triton_mapping_reads_strided_block_table():
 
 @pytest.mark.parametrize("ring_pools", [1, 2])
 def test_rejected_completing_draft_needs_ring_slots(ring_pools):
-    """A speculative step stashes 1 + num_spec rows before acceptance. If the
-    pool-completing token is a rejected draft, the drafts behind it must not
-    have overwritten the pool's committed keys, or the redo compresses wrong
-    keys. One pool of ring fails this; two pools hold."""
+    """With a one-pool ring, the drafts behind a rejected pool-completing draft
+    overwrote the pool's earlier keys, so its redo compressed wrong keys."""
     ring_size = ring_pools * KPOOL
     truth = TailRingMirror(num_blocks=2, ring=ring_size)
     ring = TailRingMirror(num_blocks=2, ring=ring_size)
@@ -471,19 +467,19 @@ def test_rejected_completing_draft_needs_ring_slots(ring_pools):
     def slot(pos):
         return block * ring_size + pos % ring_size
 
-    for pos in range(4, 7):  # committed keys of the open pool [4, 5, 6, 7]
+    for pos in range(4, 7):
         truth.stash(slot(pos), pos, *token_kv(0, pos))
         ring.stash(slot(pos), pos, *token_kv(0, pos))
     expected = truth.complete(slot(7), 7, *token_kv(0, 7))
 
-    # Spec step [7d, 8d, 9d, 10d]: 7d completes the pool with a wrong key and
-    # is later rejected; 8d, 9d, 10d are stashed behind it.
+    # Draft 7 completes the pool and is rejected. With a one-pool ring, drafts
+    # 8..10 overwrite the slots of positions 4..6, which are read by the redo
+    # of 7.
     for pos in range(7, 11):
         k, s = token_kv(9, pos)  # draft values
         if pos % KPOOL == KPOOL - 1:
             ring.complete(slot(pos), pos, k, s)
         ring.stash(slot(pos), pos, k, s)
-    # Redo of position 7 with the accepted key.
     redo = ring.complete(slot(7), 7, *token_kv(0, 7))
     if ring_pools == 1:
         assert not torch.allclose(redo, expected)

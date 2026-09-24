@@ -295,8 +295,6 @@ def _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos):
 @pytest.mark.parametrize("pool_size", [4, 16])
 @pytest.mark.parametrize("ring_pools", [1, 2])
 def test_decode_writer_matches_prefill_writer(pool_size, ring_pools):
-    """Compare production decode and prefill writers for pool sizes 4 and 16,
-    with a tail ring of one pool and of two pools (speculative slots)."""
     ring = ring_pools * pool_size
     n_pools, page, nblk = 8, 64, 4
     n_tok = n_pools * pool_size
@@ -356,15 +354,12 @@ def test_decode_writer_matches_prefill_writer(pool_size, ring_pools):
 
 @pytest.mark.parametrize("ring_pools", [1, 2])
 def test_rejected_draft_redo_needs_ring_slots(ring_pools):
-    """A speculative step stashes 1 + num_spec rows before acceptance. With a
-    ring of exactly one pool the drafts after a pool-completing draft
-    overwrite that pool's committed keys, so redoing the completion after the
-    draft is rejected compresses wrong keys. Two pools of ring keep them."""
+    """With a one-pool ring, the drafts behind a rejected pool-completing draft
+    overwrote the pool's earlier keys, so its redo compressed wrong keys."""
     pool, spec, page, nblk = 4, 3, 64, 2
     ring = ring_pools * pool
     dev = "cuda"
     torch.manual_seed(1)
-    # Ground truth: the prefill writer over the true tokens of pools 0..2.
     n_tok = 3 * pool
     k = torch.randn(n_tok, HEAD_DIM, dtype=torch.bfloat16, device=dev)
     score = torch.randn(n_tok, HEAD_DIM, dtype=torch.bfloat16, device=dev)
@@ -408,12 +403,9 @@ def test_rejected_draft_redo_needs_ring_slots(ring_pools):
             round_scale=ROUND_SCALE,
         )
 
-    # Plain decode up to position 6: pool 0 done, pool 1 holds positions 4..6.
     for t in range(7):
         step([t], k[t], score[t])
-    # Spec step: verified token 7 (completes pool 1 correctly), then drafts
-    # 8, 9, 10 whose values are all wrong. They must not clobber the ring
-    # slots pool 1 still needs.
+    # Control: verified token 7 completes pool 1 before drafts 8..10 are stashed.
     drafts = torch.randn(spec, HEAD_DIM, dtype=torch.bfloat16, device=dev)
     draft_scores = torch.randn(spec, HEAD_DIM, dtype=torch.bfloat16, device=dev)
     step(
@@ -421,21 +413,13 @@ def test_rejected_draft_redo_needs_ring_slots(ring_pools):
         torch.cat([k[7:8], drafts]),
         torch.cat([score[7:8], draft_scores]),
     )
-    # Pool 1 was written from ring slots 4, 5, 6 plus token 7 itself. With a
-    # one-pool ring the drafts at 8, 9, 10 overwrote slots 4, 5, 6 *after*
-    # that write, so this first write is still right; the corruption shows on
-    # the next completion that reads slot state written by rejected drafts.
-    # All drafts are rejected: the next step re-emits 8, 9, 10, 11 with true
-    # values, and pool 2 completes from ring slots 8, 9, 10 stashed now.
-    step([8, 9, 10, 11], k[8:12], score[8:12])
+    step([8, 9, 10, 11], k[8:12], score[8:12])  # all drafts rejected
     for p in (1, 2):
         assert torch.equal(pool_bytes(kv, p), pool_bytes(kv_ref, p)), p
 
-    # The hazard proper: the pool-completing token is itself a rejected draft.
-    # Decode to position 5, then a spec step [6, 7d, 8d, 9d]: draft 7d
-    # completes pool 1 with a wrong key, and with a one-pool ring drafts 8d, 9d
-    # land on the slots holding the committed keys of positions 4 and 5. The
-    # redo [7, 8, 9, 10] recompresses pool 1 from those slots.
+    # Draft 7 completes pool 1 and is rejected. With a one-pool ring, drafts
+    # 8 and 9 overwrite the slots of positions 4 and 5, which are read by the
+    # redo of 7.
     kv.zero_()
     tail.zero_()
     for t in range(6):
@@ -448,7 +432,7 @@ def test_rejected_draft_redo_needs_ring_slots(ring_pools):
     step([7, 8, 9, 10], k[7:11], score[7:11])
     pool1_ok = torch.equal(pool_bytes(kv, 1), pool_bytes(kv_ref, 1))
     if ring_pools == 1:
-        assert not pool1_ok, "one-pool ring unexpectedly survived a rejected draft"
+        assert not pool1_ok, "expected a one-pool ring to corrupt pool 1"
     else:
         assert pool1_ok
 
