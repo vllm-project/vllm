@@ -519,6 +519,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _validate_message_truncation_type_before(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            for msg in messages:
+                if (
+                    isinstance(msg, dict)
+                    and "truncate" in msg
+                    and type(msg["truncate"]) is not bool
+                ):
+                    raise ValueError("Chat message truncate must be a boolean")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_messages_before(cls, data: Any) -> Any:
         """Pre-process message dicts before Pydantic field validation.
 
@@ -560,6 +576,48 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_message_truncation(self) -> "ChatCompletionRequest":
+        if any(
+            isinstance(msg, dict)
+            and "truncate" in msg
+            and type(msg["truncate"]) is not bool
+            for msg in self.messages
+        ):
+            raise ValueError("Chat message truncate must be a boolean")
+        marked = [
+            msg
+            for msg in self.messages
+            if isinstance(msg, dict) and msg.get("truncate") is True
+        ]
+        if not marked:
+            return self
+        if len(marked) != 1:
+            raise ValueError("Exactly one chat message may have truncate=true")
+        if self.truncate_prompt_tokens is not None:
+            raise ValueError(
+                "Message truncation cannot be combined with truncate_prompt_tokens"
+            )
+        if self.kv_transfer_params and self.kv_transfer_params.get("prompt_token_ids"):
+            raise ValueError(
+                "Message truncation cannot be used with reused prompt token IDs"
+            )
+        message = marked[0]
+        if message["role"] in ("system", "developer"):
+            raise ValueError("System and developer messages cannot be truncated")
+        if any(
+            not isinstance(msg, dict)
+            or (
+                msg.get("content") is not None
+                and not isinstance(msg.get("content"), str)
+            )
+            for msg in self.messages
+        ):
+            raise ValueError("Message truncation supports text-only chat requests")
+        if not isinstance(message.get("content"), str):
+            raise ValueError("Only plain-text chat messages can be truncated")
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
@@ -1057,6 +1115,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     - Tool use is not supported (``tools`` must be omitted).
     - Beam search is not supported (``use_beam_search`` must be False or omitted).
     - The ``n`` parameter must be 1 (or omitted).
+    - Per-message truncation is not supported (``truncate`` must be False or omitted).
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
@@ -1123,6 +1182,22 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             data = data.model_dump(exclude_unset=True)
         if not isinstance(data, dict):
             return data
+        conversations = data.get("messages")
+        if isinstance(conversations, list):
+            for messages in conversations:
+                if not isinstance(messages, list):
+                    continue
+                if any(
+                    isinstance(message, dict)
+                    and "truncate" in message
+                    and message["truncate"] is not False
+                    for message in messages
+                ):
+                    raise VLLMValidationError(
+                        "Batch chat completions do not support message truncation. "
+                        "Use /v1/chat/completions for individual conversations.",
+                        parameter="messages",
+                    )
         if data.get("use_beam_search"):
             raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "

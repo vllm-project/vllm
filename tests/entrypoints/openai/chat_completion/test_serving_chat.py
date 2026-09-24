@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from openai import OpenAI
+from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role
 
 from tests.entrypoints.openai.utils import (
     accumulate_streaming_response,
@@ -519,6 +521,10 @@ class TestGPTOSSSpeculativeChat:
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
+TRUNCATION_CHAT_TEMPLATE = (
+    "{% for message in messages %}{{ message['role'] }}: "
+    "{{ message['content'] }}\n{% endfor %}assistant:"
+)
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
@@ -1226,6 +1232,316 @@ async def test_serving_chat_truncation_side_controls_prompt_truncation():
         truncation_side="left",
     )
     assert left_token_ids == full_token_ids[-4:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("max_tokens", "min_tokens"), [(None, 0), (None, 8), (8, 0)])
+async def test_serving_chat_truncates_only_marked_text_message(max_tokens, min_tokens):
+    model_config = MockModelConfig()
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.online_renderer.chat_template = TRUNCATION_CHAT_TEMPLATE
+    candidate = "repeated answer " * 100
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "Follow the grading instructions."},
+        {"role": "user", "content": "Grade the candidate against the rubric."},
+        {"role": "user", "content": candidate, "truncate": True},
+    ]
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=max_tokens,
+        min_tokens=min_tokens,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+    conversation, engine_inputs = result
+    prompt_ids = serving_chat._extract_prompt_components(engine_inputs[0]).token_ids
+    assert prompt_ids is not None
+    assert len(prompt_ids) <= model_config.max_model_len - (
+        max_tokens or max(1, min_tokens)
+    )
+    rendered_prompt = serving_chat.online_renderer.renderer.tokenizer.decode(prompt_ids)
+    assert "Follow the grading instructions." in rendered_prompt
+    assert "Grade the candidate against the rubric." in rendered_prompt
+    assert conversation[0]["content"] == messages[0]["content"]
+    assert conversation[1]["content"] == messages[1]["content"]
+    assert candidate.startswith(conversation[2]["content"])
+    assert len(conversation[2]["content"]) < len(candidate)
+    assert request.messages[2]["content"] == candidate
+
+    unmarked = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {k: v for k, v in msg.items() if k != "truncate"} for msg in messages
+        ],
+        max_tokens=max_tokens,
+        min_tokens=min_tokens,
+    )
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.render_chat_request(unmarked)
+
+    fitting_messages = messages[:2] + [{"role": "user", "content": "A short answer."}]
+    fitting_marked = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=fitting_messages[:2]
+        + [{"role": "user", "content": "A short answer.", "truncate": True}],
+        max_tokens=max_tokens,
+        min_tokens=min_tokens,
+    )
+    fitting_unmarked = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=fitting_messages,
+        max_tokens=max_tokens,
+        min_tokens=min_tokens,
+    )
+    marked_result = await serving_chat.render_chat_request(fitting_marked)
+    unmarked_result = await serving_chat.render_chat_request(fitting_unmarked)
+    assert not isinstance(marked_result, ErrorResponse)
+    assert not isinstance(unmarked_result, ErrorResponse)
+    assert (
+        marked_result[1][0]["prompt_token_ids"]
+        == unmarked_result[1][0]["prompt_token_ids"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_truncation_preserves_later_fitting_bpe_prefix():
+    model_config = MockModelConfig()
+    model_config.max_model_len = 4
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.online_renderer.chat_template = "{{ messages[0]['content'] }}"
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "testingab", "truncate": True}],
+        max_tokens=3,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+    conversation, engine_inputs = result
+    assert conversation[0]["content"] == "testing"
+    assert len(engine_inputs[0]["prompt_token_ids"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_truncation_with_empty_content_template_fallback():
+    model_config = MockModelConfig()
+    model_config.max_model_len = 4
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.online_renderer.chat_template = (
+        "{{ messages[0]['content'] if messages[0]['content'] "
+        "else ('fallback ' * 100) }}"
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "testingab", "truncate": True}],
+        max_tokens=3,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+    conversation, engine_inputs = result
+    assert conversation[0]["content"] == "testing"
+    assert len(engine_inputs[0]["prompt_token_ids"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_streams_truncated_message():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.generate.return_value = _single_request_output(
+        _make_metrics_request_output()
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.online_renderer.chat_template = TRUNCATION_CHAT_TEMPLATE
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "Keep this instruction."},
+            {"role": "user", "content": "candidate " * 100, "truncate": True},
+        ],
+        min_tokens=8,
+        stream=True,
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+    assert isinstance(response, AsyncIterator)
+    chunks = [chunk async for chunk in response]
+    assert any('"choices"' in chunk for chunk in chunks)
+    engine_input = mock_engine.generate.call_args.args[0]
+    sampling_params = mock_engine.generate.call_args.args[1]
+    assert sampling_params.min_tokens == 8
+    assert sampling_params.max_tokens >= 8
+    assert len(engine_input["prompt_token_ids"]) <= 92
+    prompt = mock_engine.renderer.tokenizer.decode(engine_input["prompt_token_ids"])
+    assert "Keep this instruction." in prompt
+    assert request.messages[1]["content"] == "candidate " * 100
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_rejects_truncation_when_other_messages_do_not_fit():
+    model_config = MockModelConfig()
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.online_renderer.chat_template = TRUNCATION_CHAT_TEMPLATE
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "instructions " * 100},
+            {"role": "user", "content": "answer " * 100, "truncate": True},
+        ],
+        max_tokens=8,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert isinstance(result, ErrorResponse)
+    assert result.error.code == 400
+    assert "marked message cannot fit" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_preserves_tool_parser_adjustments_after_truncation():
+    model_config = MockModelConfig()
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+    serving_chat = _build_serving_chat(
+        mock_engine, tool_parser="hermes", enable_auto_tools=True
+    )
+    serving_chat.online_renderer.chat_template = TRUNCATION_CHAT_TEMPLATE
+    serving_chat.online_renderer.parser = serving_chat.parser_cls
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "candidate " * 100, "truncate": True}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "grade",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        tool_choice={"type": "function", "function": {"name": "grade"}},
+        max_tokens=8,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+    assert request.structured_outputs is not None
+    assert request.structured_outputs.structural_tag is not None
+    assert request.skip_special_tokens is False
+    assert request.messages[0]["content"] == "candidate " * 100
+
+
+@pytest.mark.asyncio
+async def test_harmony_chat_truncates_marked_text_message():
+    model_config = MockModelConfig()
+    model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    model_config.max_model_len = 128
+    renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+    )
+    candidate = "repeated answer " * 100
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "Follow the grading instructions."},
+            {"role": "user", "content": candidate, "truncate": True},
+        ],
+        max_tokens=8,
+    )
+
+    result = await renderer.render_chat(request)
+    assert not isinstance(result, ErrorResponse)
+    _, engine_inputs = result
+    assert engine_inputs[0]["type"] == "token"
+    assert len(engine_inputs[0]["prompt_token_ids"]) <= 120
+    assert request.messages[1]["content"] == candidate
+
+    unmarked = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "Follow the grading instructions."},
+            {"role": "user", "content": candidate},
+        ],
+        max_tokens=8,
+    )
+    unmarked_result = await renderer.render_chat(unmarked)
+    assert not isinstance(unmarked_result, ErrorResponse)
+    assert len(unmarked_result[1][0]["prompt_token_ids"]) > 120
+
+
+def test_serving_chat_rejects_ambiguous_message_truncation():
+    with pytest.raises(ValueError, match="must be a boolean"):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "text", "truncate": "false"}],
+        )
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "text", "truncate": True}],
+            truncate_prompt_tokens=10,
+        )
+
+    with pytest.raises(ValueError, match="Exactly one"):
+        ChatCompletionRequest(
+            messages=[
+                {"role": "user", "content": "first", "truncate": True},
+                {"role": "user", "content": "second", "truncate": True},
+            ],
+        )
+
+    with pytest.raises(ValueError, match="System and developer"):
+        ChatCompletionRequest(
+            messages=[{"role": "system", "content": "text", "truncate": True}],
+        )
+
+    with pytest.raises(ValueError, match="text-only"):
+        ChatCompletionRequest(
+            messages=[
+                {"role": "user", "content": "shorten me", "truncate": True},
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            ],
+        )
+
+
+def test_message_truncation_accepts_unmarked_harmony_messages():
+    message = OpenAIHarmonyMessage.from_role_and_content(Role.USER, "hello")
+    request = ChatCompletionRequest(messages=[message])
+    assert request.messages[0] == message
+
+    with pytest.raises(ValueError, match="text-only"):
+        ChatCompletionRequest(
+            messages=[
+                {"role": "user", "content": "shorten me", "truncate": True},
+                message,
+            ],
+        )
 
 
 @pytest.mark.asyncio

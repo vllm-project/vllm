@@ -175,10 +175,132 @@ class OnlineRenderer:
         *,
         skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
+        marked = [
+            i
+            for i, msg in enumerate(request.messages)
+            if isinstance(msg, dict) and msg.get("truncate") is True
+        ]
+        if marked:
+            return await self._render_chat_with_message_truncation(
+                request, marked[0], skip_mm_cache=skip_mm_cache
+            )
+        return await self._render_chat_once(request, skip_mm_cache=skip_mm_cache)
+
+    async def _render_chat_with_message_truncation(
+        self,
+        request: ChatCompletionRequest,
+        message_index: int,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
+        content = request.messages[message_index]["content"]
+        assert isinstance(content, str)
+        max_input_tokens = request.build_tok_params(self.model_config).max_input_tokens
+        assert max_input_tokens is not None
+        if request.max_tokens is None and request.max_completion_tokens is None:
+            max_input_tokens -= max(1, request.min_tokens)
+
+        async def render_selected(
+            length: int,
+        ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
+            original_message = request.messages[message_index]
+            selected_message = original_message.copy()
+            selected_message["content"] = content[:length]
+            selected_message.pop("truncate", None)
+            request.messages[message_index] = selected_message
+            try:
+                # Parser adjustments must reach the request used for generation.
+                return await self._render_chat_once(
+                    request, skip_mm_cache=skip_mm_cache
+                )
+            finally:
+                request.messages[message_index] = original_message
+
+        async def render_prefix(
+            length: int,
+        ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse | None:
+            candidate = request.model_copy(deep=True)
+            candidate.messages[message_index]["content"] = content[:length]
+            candidate.messages[message_index].pop("truncate", None)
+            try:
+                result = await self._render_chat_once(
+                    candidate, skip_mm_cache=skip_mm_cache
+                )
+            except VLLMValidationError as exc:
+                if exc.parameter not in ("input_text", "input_tokens"):
+                    raise
+                return None
+            if isinstance(result, ErrorResponse):
+                return result
+            _, engine_inputs = result
+            if len(engine_inputs) != 1 or engine_inputs[0]["type"] != "token":
+                return self.create_error_response(
+                    "Message truncation supports text-only chat requests",
+                    param="messages",
+                )
+            if len(engine_inputs[0]["prompt_token_ids"]) > max_input_tokens:
+                return None
+            return result
+
+        full_result = await render_prefix(len(content))
+        if full_result is not None:
+            if isinstance(full_result, ErrorResponse):
+                return full_result
+            return await render_selected(len(content))
+
+        empty_result = await render_prefix(0)
+        if isinstance(empty_result, ErrorResponse):
+            return empty_result
+        best_length = 0
+        low = 1
+        if empty_result is None:
+            # Some templates expand empty content differently from nonempty text.
+            for length in range(1, min(len(content), 17)):
+                result = await render_prefix(length)
+                if isinstance(result, ErrorResponse):
+                    return result
+                if result is not None:
+                    best_length = length
+                    low = length + 1
+                    break
+            else:
+                return self.create_error_response(
+                    "The marked message cannot fit within the available context length",
+                    param="messages",
+                )
+
+        high = len(content) - 1
+        while low <= high:
+            mid = (low + high) // 2
+            result = await render_prefix(mid)
+            if isinstance(result, ErrorResponse):
+                return result
+            if result is None:
+                high = mid - 1
+            else:
+                best_length = mid
+                low = mid + 1
+
+        # Token counts can decrease when a longer prefix forms a single token.
+        # Check nearby prefixes that binary search may have skipped.
+        for length in range(best_length + 1, min(len(content), best_length + 17)):
+            result = await render_prefix(length)
+            if isinstance(result, ErrorResponse):
+                return result
+            if result is not None:
+                best_length = length
+
+        return await render_selected(best_length)
+
+    async def _render_chat_once(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
-        Called directly by render_chat_request and delegated to by
-        OpenAIServingChat.render_chat_request after its engine-aware checks.
+        Called by render_chat after handling any marked message truncation.
 
         Decode-side token reuse (ids forwarded in ``kv_transfer_params``) is
         handled deeper, in ``preprocess_chat`` / ``_make_request_with_harmony``,

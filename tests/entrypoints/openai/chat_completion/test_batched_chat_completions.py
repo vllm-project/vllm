@@ -15,10 +15,21 @@ from vllm.entrypoints.openai.chat_completion.batch_serving import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_batch_rejects_message_truncation() -> None:
+    messages = [[{"role": "user", "content": "long message", "truncate": True}]]
+    with pytest.raises(VLLMValidationError, match="do not support message truncation"):
+        BatchChatCompletionRequest(messages=messages)
+
+    BatchChatCompletionRequest(
+        messages=[[{"role": "user", "content": "short message", "truncate": False}]]
+    )
 
 
 @pytest.fixture(scope="module")
