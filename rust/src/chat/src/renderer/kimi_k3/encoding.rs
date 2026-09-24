@@ -205,6 +205,9 @@ pub(super) fn render_request_with_media_order(
                 write_assistant_message(&mut out, content, thinking)?;
             }
             ChatMessage::ToolResponse { .. } => unreachable!("handled above"),
+            ChatMessage::Custom { role, .. } => {
+                return Err(Error::UnsupportedChatRole { role: role.clone() });
+            }
         }
     }
     flush_tool_run(&mut out, &mut pending_tool_run, &tool_call_id_index)?;
