@@ -46,6 +46,10 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.request_id import (
+    bind_external_request_id_from_request,
+    get_external_request_id,
+)
 from vllm.logger import init_logger
 
 _COHERE_PATH_PREFIX = "/cohere/"
@@ -91,10 +95,9 @@ if _SDK_AVAILABLE:
         """
         if raw_request is None:
             return None
-        meta = getattr(raw_request.state, "request_metadata", None)
-        if meta is not None and getattr(meta, "request_id", None):
-            return meta.request_id
-        return raw_request.headers.get("X-Request-Id")
+        return get_external_request_id(raw_request) or raw_request.headers.get(
+            "X-Request-Id"
+        )
 
     def _error_response(
         error: ErrorResponse,
@@ -139,7 +142,9 @@ if _SDK_AVAILABLE:
         try:
             result = await handler.create_chat_v2(request, raw_request)
         except Exception as e:  # noqa: BLE001 - report as 500 for parity
-            logger.exception("Error in /cohere/v2/chat: %s", e)
+            bind_external_request_id_from_request(logger, raw_request).exception(
+                "Error in /cohere/v2/chat: %s", e
+            )
             return JSONResponse(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 content=CohereError(
@@ -195,7 +200,9 @@ if _SDK_AVAILABLE:
             chat_request = handler.to_chat_completion_request(request)
             result = await render_handler.render_chat_request(chat_request)
         except Exception as e:  # noqa: BLE001 - report as 500 for parity
-            logger.exception("Error in /cohere/v2/chat/render: %s", e)
+            bind_external_request_id_from_request(logger, raw_request).exception(
+                "Error in /cohere/v2/chat/render: %s", e
+            )
             return JSONResponse(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 content=CohereError(

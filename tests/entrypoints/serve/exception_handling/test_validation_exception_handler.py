@@ -11,6 +11,7 @@ field name was readily available from `error['loc']`.
 """
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     clean_loc_for_param,
     validation_exception_handler,
 )
+from vllm.entrypoints.serve.utils.request_id import get_external_request_id
 
 
 def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
@@ -31,6 +33,26 @@ def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
         ),
         state=SimpleNamespace(),  # no request_metadata -> hasattr(...) is False
     )
+
+
+def test_unassigned_request_id_ignores_header():
+    request = _fake_request()
+    request.headers = {"X-Request-Id": "raw-header-id"}
+    assert get_external_request_id(request) is None
+
+
+@pytest.mark.asyncio
+async def test_validation_error_log_uses_assigned_id(caplog):
+    request = _fake_request(log_error_stack=True)
+    request.state.request_metadata = SimpleNamespace(request_id="chatcmpl-external")
+    error = RequestValidationError(
+        [{"type": "missing", "loc": ("body", "prompt"), "msg": "required"}]
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await validation_exception_handler(request, error)
+
+    assert caplog.records[-1].request_id == "chatcmpl-external"
 
 
 class TestValidationErrorParamFallback:

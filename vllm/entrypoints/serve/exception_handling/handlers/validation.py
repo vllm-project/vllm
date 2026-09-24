@@ -9,8 +9,9 @@ from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
 
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.serve.utils.request_id import get_external_request_id
 from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 
 from ..utils import sanitize_message
 
@@ -148,11 +149,10 @@ def clean_loc_for_param(loc: tuple) -> str:
 
 async def validation_exception_handler(req: Request, exc: RequestValidationError):
     if req.app.state.args.log_error_stack:
-        logger.exception(
+        request_id = get_external_request_id(req)
+        bind_external_request_id(logger, request_id).exception(
             "RequestValidationError caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
+            request_id,
         )
 
     param = None

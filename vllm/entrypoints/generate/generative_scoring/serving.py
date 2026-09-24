@@ -27,7 +27,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -247,7 +247,9 @@ class ServingGenerativeScoring(BaseServing):
                 request, tokenizer, self.model_config.max_model_len
             )
         except (ValueError, TypeError) as e:
-            logger.exception("Error building prompts")
+            bind_external_request_id(logger, request_id).exception(
+                "Error building prompts"
+            )
             return self.create_error_response(e)
 
         # Create sampling params for scoring
@@ -302,7 +304,9 @@ class ServingGenerativeScoring(BaseServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except Exception as e:
-            logger.exception("Error during generation")
+            bind_external_request_id(logger, request_id).exception(
+                "Error during generation"
+            )
             return self.create_error_response(e)
 
         # Process results to extract label token probabilities
