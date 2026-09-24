@@ -29,11 +29,11 @@ from vllm.config import CacheConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
-from vllm.v1.core.kv_cache_utils import (
-    get_kv_cache_config_from_groups,
-    is_kv_cache_spec_uniform,
-    resolve_kv_cache_block_sizes,
+from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+    _is_kv_cache_spec_uniform,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -55,6 +55,8 @@ from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import allocate_kv_cache
+
+_default_builder = DefaultKVCacheConfigBuilder()
 
 NUM_BLOCKS = 64
 BLOCK_BYTES = 4096
@@ -483,7 +485,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     specs = _dsa_specs(num_layers, block_size)
     # Differing head sizes make the specs non-identical but same-type, which is
     # what lands both caches of a layer in one group.
-    assert not is_kv_cache_spec_uniform(specs)
+    assert not _is_kv_cache_spec_uniform(specs)
     assert UniformTypeKVCacheSpecs.is_uniform_type(specs)
     group = KVCacheGroupSpec(
         list(specs),
@@ -502,8 +504,8 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     num_blocks = 4
-    kv_cache_config = get_kv_cache_config_from_groups(
-        vllm_config, [group], sum(pages) * num_blocks
+    kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
+        vllm_config, [group], num_blocks=4
     )
     assert kv_cache_config.num_blocks == num_blocks
     assert len(set(pages)) > 1, "the mixed page sizes are what this test covers"
@@ -561,8 +563,8 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
-    kv_cache_config = get_kv_cache_config_from_groups(
-        vllm_config, [group], sum(pages) * rank_blocks
+    kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
+        vllm_config, [group], num_blocks=rank_blocks
     )
     assert kv_cache_config.num_blocks == rank_blocks
 
@@ -611,8 +613,9 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         vllm_config.attention_config.hisparse_config = None
         vllm_config.kv_transfer_config = None
 
-        page_bytes = sum(spec.page_size_bytes for spec in specs.values())
-        config = get_kv_cache_config_from_groups(vllm_config, [group], page_bytes * 4)
+        config = _default_builder.get_kv_cache_config_from_groups(
+            vllm_config, [group], num_blocks=4
+        )
         scheduler_block_size, _ = resolve_kv_cache_block_sizes(config, vllm_config)
         assert scheduler_block_size == 128 * dcp_size
         placements.append(
