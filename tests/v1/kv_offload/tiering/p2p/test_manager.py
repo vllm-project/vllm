@@ -538,7 +538,7 @@ class TestSubmitLoad:
 class TestPromotionLatency:
     def test_p2p_load_without_transfer_time_records_promotion_latency(self):
         """P2P load results omit transfer_time; the manager records promotion
-        latency from job registration to completion."""
+        latency from job creation to completion."""
         p2p_tier = _make_manager()
         primary_kv_view = memoryview(np.zeros((5, 16), dtype=np.uint8))
 

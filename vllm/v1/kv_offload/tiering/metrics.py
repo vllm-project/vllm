@@ -11,7 +11,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
-    JobId,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -57,7 +56,6 @@ class TieringMetricsTracker:
         self._primary_chunk_size = primary_chunk_size
         self._request_states: dict[str, _RequestMetricsState] = {}
         self._tier_states = [_TierState() for _ in tier_types]
-        self._job_start_times: dict[JobId, float] = {}
         self._stats = OffloadingConnectorStats()
 
     @functools.cache  # noqa: B019
@@ -118,7 +116,6 @@ class TieringMetricsTracker:
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
             state.primary_write_chunk_count += chunk_count
-            self._job_start_times[transfer_job.job_id] = time.monotonic()
         else:
             state.active_cascade_count += 1
             state.primary_read_chunk_count += chunk_count
@@ -181,7 +178,6 @@ class TieringMetricsTracker:
         return stats
 
     def assert_idle(self) -> None:
-        assert not self._job_start_times
         assert all(
             state.active_promotion_count == 0
             and state.active_cascade_count == 0
@@ -243,18 +239,15 @@ class TieringMetricsTracker:
             )
 
     def _observe_promotion_latency(self, job_metadata: _JobMetadataLike) -> None:
-        """Record promotion time from job registration to reported completion.
+        """Record promotion time from job creation to reported completion.
 
         This is broader than the tier-reported `JobResult.transfer_time`, which
         covers only the active data movement, and so includes tier queueing.
         Failed promotions are observed too; PROMOTION_JOB_FAILURES counts them.
         """
-        start_time = self._job_start_times.pop(job_metadata.transfer_job.job_id, None)
-        if start_time is None:
-            return
         self._stats.observe_histogram(
             TieringOffloadingMetrics.PROMOTION_LATENCY,
-            time.monotonic() - start_time,
+            time.monotonic() - job_metadata.transfer_job.submit_time,
             self.tier_label(job_metadata.tier_idx),
         )
 
