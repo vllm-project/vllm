@@ -327,7 +327,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/utils/import_utils.py
-  - scripts/benchmark_helion_kernels.py
+  - tools/benchmark_helion_kernels.py
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
@@ -1995,7 +1995,7 @@ steps:
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Model Executor" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -3773,6 +3773,47 @@ steps:
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
 
+- label: ":amd: (MI355) Fusion E2E TP2 Quick" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/distributed/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - tests/compile/fusions_e2e/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    not +quant_fp8 and not +rms_norm and Llama-3 and
+    ROCM_AITER_UNIFIED_ATTN'
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    +quant_fp8 and +rms_norm and qwen3 and
+    ROCM_AITER_UNIFIED_ATTN'
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
+    ROCM_AITER_MLA'
+
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server) %N"
@@ -4084,6 +4125,33 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc-rocm.txt
+
+- label: ":amd: (MI355) LM Eval TurboQuant t3nc"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/test-amd.yaml
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/triton_unified_attention.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+  - vllm/v1/attention/ops/flydsl_kernels/
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
 - label: ":amd: (MI355) LM Eval Small Models Distributed"
   timeout_in_minutes: 55
