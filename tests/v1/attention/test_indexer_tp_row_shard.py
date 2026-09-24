@@ -403,7 +403,7 @@ def test_row_sharding_gate_rejects_unsupported_configurations(
     monkeypatch: pytest.MonkeyPatch, kwargs: dict, env: dict, expected: bool
 ) -> None:
     """The gate is the whole safety envelope; nothing else guards the exchange."""
-    monkeypatch.setattr(indexer.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(indexer.current_platform, "is_cuda_alike", lambda: True)
     for name, value in env.items():
         monkeypatch.setattr(indexer.envs, name, value)
     args = {"dcp_world_size": 1, "use_pcp": False, "tp_size": 4, **kwargs}
@@ -427,7 +427,7 @@ def test_row_sharding_gate_rejects_unsupported_configurations(
 def test_row_sharding_gate_follows_the_mixed_batch_cudagraph_mode(
     monkeypatch: pytest.MonkeyPatch, cudagraph_mode, expected: bool
 ) -> None:
-    monkeypatch.setattr(indexer.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(indexer.current_platform, "is_cuda_alike", lambda: True)
     supported = indexer.tp_prefill_row_sharding_supported(
         _sharding_config(cudagraph_mode),
         dcp_world_size=1,

@@ -187,7 +187,10 @@ class PrepareUniformDecodeKernel(
 
 # Keep the replicated path for short prefills; on TP4 sharding starts at 64K
 # rows, where the all-gather overhead is amortized by the saved MQA work.
-MIN_TP_SHARD_ROWS_PER_RANK = 16_384
+# ROCm starts sharding at 2048 rows per rank: on MI325X at TP4 the replicated
+# kpool indexer costs ~58 ms per 16K-token prefill chunk, so one 16K chunk is
+# already worth splitting.
+MIN_TP_SHARD_ROWS_PER_RANK = 2_048 if current_platform.is_rocm() else 16_384
 
 
 def balanced_prefill_row_shard(
@@ -233,7 +236,7 @@ def tp_prefill_row_sharding_supported(
     """Whether replicated prefill rows may be sharded across TP ranks."""
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
     return (
-        current_platform.is_cuda()
+        current_platform.is_cuda_alike()
         and dcp_world_size == 1
         and not use_pcp
         and tp_size > 1
