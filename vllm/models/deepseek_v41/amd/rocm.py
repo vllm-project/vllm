@@ -960,7 +960,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         """
         swa_only = attn_metadata is None
 
-        num_prefills = swa_metadata.num_prefills
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -989,21 +988,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             N = 0
 
         M = N + self.window_size + self.max_num_batched_tokens
-        num_chunks = (num_prefills + self.PREFILL_CHUNK_SIZE - 1) // (
-            self.PREFILL_CHUNK_SIZE
+        chunk_plan = swa_metadata.get_prefill_chunk_plan(
+            compress_ratio=self.compress_ratio,
+            prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
+            has_compressed=not swa_only,
         )
+        assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
 
         workspace = current_workspace_manager().get_simultaneous(
             *self._prefill_workspace_shapes(M, num_prefill_tokens, q)
         )
-        kv = workspace[0]
+        kv_rows = workspace[0].view(-1, q.shape[-1])
         if mxfp8_out is not None:
             output = workspace[1]
         assert output is not None
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
-            chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
+        for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
+            kv = kv_rows[: chunk_size * chunk_M].view(chunk_size, chunk_M, -1)
             if not swa_only:
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
@@ -1028,7 +1029,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 gather_lens=gather_lens[chunk_start:chunk_end],
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
-                offset=N,
+                offset=chunk_N,
                 use_fnuz=current_platform.is_fp8_fnuz(),
             )
 
@@ -1049,8 +1050,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.window_size,
                 self.compress_ratio,
                 top_k,
-                M,
-                N,
+                chunk_M,
+                chunk_N,
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
