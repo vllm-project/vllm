@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -1398,6 +1399,20 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
+    monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
+    config = ParallelConfig(cpu_distributed_timeout_seconds=30)
+    with (
+        patch(
+            "vllm.distributed.utils.rendezvous",
+            return_value=iter([(torch.distributed.HashStore(), 0, 1)]),
+        ),
+        patch("vllm.distributed.utils.init_gloo_process_group") as init_group,
+    ):
+        config.stateless_init_dp_group()
+    assert init_group.call_args.kwargs["timeout"] == timedelta(seconds=30)
 
 
 @pytest.mark.parametrize(
