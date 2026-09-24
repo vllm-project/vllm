@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+    _LMCACHE_CACHE_SALT_TAG,
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.v1.outputs import KVConnectorOutput
 
 
@@ -783,3 +786,164 @@ class TestIntegrationScenarios:
         assert aggregated_events[0].block_hashes == ["hash_common"]
         assert aggregated_events[0].parent_block_hash == "parent_common"
         assert aggregated_events[0].token_ids == [1, 2, 3]
+
+
+def _cache_salt_tag(sampling_params: SamplingParams | None) -> str | None:
+    if sampling_params is None or not isinstance(sampling_params.extra_args, dict):
+        return None
+    kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
+    if not isinstance(kv_transfer_params, dict):
+        return None
+    return kv_transfer_params.get(_LMCACHE_CACHE_SALT_TAG)
+
+
+def _salt_connector() -> MagicMock:
+    connector = MagicMock(spec=LMCacheConnectorV1)
+    connector._pending_external_cache_salts = {}
+    connector._lmcache_engine = MagicMock()
+    connector._lmcache_engine.get_num_new_matched_tokens.return_value = 0
+    connector.get_num_new_matched_tokens = (
+        LMCacheConnectorV1.get_num_new_matched_tokens.__get__(
+            connector, LMCacheConnectorV1
+        )
+    )
+    connector.update_state_after_alloc = (
+        LMCacheConnectorV1.update_state_after_alloc.__get__(
+            connector, LMCacheConnectorV1
+        )
+    )
+    connector.build_connector_meta = LMCacheConnectorV1.build_connector_meta.__get__(
+        connector, LMCacheConnectorV1
+    )
+    connector._bind_cache_salt = LMCacheConnectorV1._bind_cache_salt.__get__(
+        connector, LMCacheConnectorV1
+    )
+    connector._stamp_scheduler_output_cache_salts = (
+        LMCacheConnectorV1._stamp_scheduler_output_cache_salts.__get__(
+            connector, LMCacheConnectorV1
+        )
+    )
+    connector.request_finished = LMCacheConnectorV1.request_finished.__get__(
+        connector, LMCacheConnectorV1
+    )
+    return connector
+
+
+def test_lookup_stamps_cache_salt_before_engine_sees_request():
+    connector = _salt_connector()
+    seen: dict[str, str | None] = {}
+
+    def _lookup(request, num_computed_tokens):
+        del num_computed_tokens
+        seen["tag"] = _cache_salt_tag(request.sampling_params)
+        return 4
+
+    connector._lmcache_engine.get_num_new_matched_tokens.side_effect = _lookup
+    params = SamplingParams.from_optional(
+        extra_args={"kv_transfer_params": {"lmcache.tag.user": "kept"}}
+    )
+    request = SimpleNamespace(
+        request_id="req-a",
+        cache_salt="tenant-a",
+        sampling_params=params,
+    )
+
+    assert connector.get_num_new_matched_tokens(request, 0) == (4, False)
+    assert seen["tag"] == "tenant-a"
+    assert _cache_salt_tag(request.sampling_params) == "tenant-a"
+    assert (
+        request.sampling_params.extra_args["kv_transfer_params"]["lmcache.tag.user"]
+        == "kept"
+    )
+
+
+def test_distinct_cache_salts_stamp_distinct_tags():
+    params_a = SamplingParams.from_optional()
+    params_b = SamplingParams.from_optional()
+    request_a = SimpleNamespace(
+        request_id="a", cache_salt="tenant-a", sampling_params=params_a
+    )
+    request_b = SimpleNamespace(
+        request_id="b", cache_salt="tenant-b", sampling_params=params_b
+    )
+    connector = _salt_connector()
+    connector.get_num_new_matched_tokens(request_a, 0)
+    connector.get_num_new_matched_tokens(request_b, 0)
+
+    assert _cache_salt_tag(params_a) == "tenant-a"
+    assert _cache_salt_tag(params_b) == "tenant-b"
+    assert _cache_salt_tag(params_a) != _cache_salt_tag(params_b)
+
+
+def test_absent_cache_salt_does_not_add_tag():
+    connector = _salt_connector()
+    params = SamplingParams.from_optional()
+    request = SimpleNamespace(
+        request_id="plain", cache_salt=None, sampling_params=params
+    )
+
+    connector.get_num_new_matched_tokens(request, 0)
+
+    assert _cache_salt_tag(params) is None
+    assert params.extra_args is None
+
+
+def test_cache_salt_overwrites_conflicting_lmcache_tag():
+    connector = _salt_connector()
+    params = SamplingParams.from_optional(
+        extra_args={
+            "kv_transfer_params": {_LMCACHE_CACHE_SALT_TAG: "attacker-salt"},
+        }
+    )
+    request = SimpleNamespace(
+        request_id="req", cache_salt="tenant-secret", sampling_params=params
+    )
+
+    connector.get_num_new_matched_tokens(request, 0)
+
+    assert _cache_salt_tag(params) == "tenant-secret"
+
+
+def test_lookup_without_sampling_params_restores_request_and_passes_salt():
+    connector = _salt_connector()
+    seen: dict[str, str | None] = {}
+
+    def _lookup(request, num_computed_tokens):
+        del num_computed_tokens
+        seen["tag"] = _cache_salt_tag(request.sampling_params)
+        return 0
+
+    connector._lmcache_engine.get_num_new_matched_tokens.side_effect = _lookup
+    request = SimpleNamespace(
+        request_id="pool-1", cache_salt="tenant-a", sampling_params=None
+    )
+
+    connector.get_num_new_matched_tokens(request, 0)
+
+    assert seen["tag"] == "tenant-a"
+    assert request.sampling_params is None
+    assert connector._pending_external_cache_salts["pool-1"] == "tenant-a"
+
+
+def test_store_metadata_stamps_salt_then_restores_sampling_params():
+    connector = _salt_connector()
+    request = SimpleNamespace(
+        request_id="pool-1", cache_salt="tenant-a", sampling_params=None
+    )
+    connector.update_state_after_alloc(request, None, 0)
+    assert request.sampling_params is None
+
+    new_req = SimpleNamespace(req_id="pool-1", sampling_params=None)
+    scheduler_output = SimpleNamespace(scheduled_new_reqs=[new_req])
+    seen: dict[str, str | None] = {}
+
+    def _build(output):
+        seen["tag"] = _cache_salt_tag(output.scheduled_new_reqs[0].sampling_params)
+        return "meta"
+
+    connector._lmcache_engine.build_connector_meta.side_effect = _build
+
+    assert connector.build_connector_meta(scheduler_output) == "meta"
+    assert seen["tag"] == "tenant-a"
+    assert new_req.sampling_params is None
+    assert "pool-1" not in connector._pending_external_cache_salts

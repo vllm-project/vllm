@@ -30,6 +30,37 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# LMCache folds only ``lmcache.tag.*`` entries into CacheEngineKey identity.
+# ``cache_salt`` is not one of those entries unless we stamp it here.
+_LMCACHE_CACHE_SALT_TAG = "lmcache.tag.cache_salt"
+
+
+def _sampling_params_with_cache_salt(sampling_params: Any, cache_salt: str) -> Any:
+    """Return sampling params whose LMCache tag carries ``cache_salt``.
+
+    Existing params are updated in place. When ``sampling_params`` is None, a
+    new object is returned and the caller must not leave it on the request.
+    """
+    from vllm.sampling_params import SamplingParams
+
+    if sampling_params is None:
+        return SamplingParams.from_optional(
+            extra_args={
+                "kv_transfer_params": {_LMCACHE_CACHE_SALT_TAG: cache_salt},
+            }
+        )
+
+    extra_args = sampling_params.extra_args
+    if not isinstance(extra_args, dict):
+        extra_args = {}
+        sampling_params.extra_args = extra_args
+    kv_transfer_params = extra_args.get("kv_transfer_params")
+    if not isinstance(kv_transfer_params, dict):
+        kv_transfer_params = {}
+        extra_args["kv_transfer_params"] = kv_transfer_params
+    kv_transfer_params[_LMCACHE_CACHE_SALT_TAG] = cache_salt
+    return sampling_params
+
 
 class LMCacheKVEvents(KVConnectorKVEvents):
     """Concrete implementation of KVConnectorKVEvents using KVEventAggregator."""
@@ -108,6 +139,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self._lmcache_engine = cls(vllm_config, role, self)
 
         self._kv_cache_events: LMCacheKVEvents | None = None
+        # req_id -> cache_salt for requests that have no sampling params.
+        # The store path reads NewRequestData, which would otherwise drop the
+        # salt. Populated on lookup/alloc and consumed in build_connector_meta.
+        self._pending_external_cache_salts: dict[str, str] = {}
 
     # ==============================
     # Worker-side methods
@@ -279,15 +314,66 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             external KV cache beyond what is already computed.
 
         """
-        return self._lmcache_engine.get_num_new_matched_tokens(
-            request, num_computed_tokens
-        ), False
+        temporary_params = self._bind_cache_salt(request)
+        try:
+            return self._lmcache_engine.get_num_new_matched_tokens(
+                request, num_computed_tokens
+            ), False
+        finally:
+            if temporary_params:
+                request.sampling_params = None
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         """Update KVConnector state after block allocation."""
-        self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
+        # Lookup is skipped once the request has local tokens. Stamp here so
+        # the shared sampling params still carry the salt into the store.
+        temporary_params = self._bind_cache_salt(request)
+        try:
+            self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
+        finally:
+            if temporary_params:
+                request.sampling_params = None
+
+    def _bind_cache_salt(self, request: "Request") -> bool:
+        """Attach ``cache_salt`` to the request's LMCache tag namespace.
+
+        Returns True when a temporary sampling-params object was installed
+        and must be removed before the request is handed to the worker.
+        """
+        cache_salt = request.cache_salt
+        if not cache_salt:
+            return False
+        if request.sampling_params is None:
+            self._pending_external_cache_salts[request.request_id] = cache_salt
+            request.sampling_params = _sampling_params_with_cache_salt(None, cache_salt)
+            return True
+        _sampling_params_with_cache_salt(request.sampling_params, cache_salt)
+        return False
+
+    def _stamp_scheduler_output_cache_salts(
+        self, scheduler_output: SchedulerOutput
+    ) -> list[tuple[Any, Any]]:
+        """Temporarily tag new requests that could not keep sampling params.
+
+        Returns ``(new_request, original_sampling_params)`` pairs to restore.
+        """
+        restores: list[tuple[Any, Any]] = []
+        pending = self._pending_external_cache_salts
+        if not pending:
+            return restores
+        for new_req in scheduler_output.scheduled_new_reqs:
+            cache_salt = pending.pop(new_req.req_id, None)
+            if not cache_salt:
+                continue
+            original = new_req.sampling_params
+            new_req.sampling_params = _sampling_params_with_cache_salt(
+                original, cache_salt
+            )
+            if original is None:
+                restores.append((new_req, original))
+        return restores
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -301,7 +387,12 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
 
         """
-        return self._lmcache_engine.build_connector_meta(scheduler_output)
+        restores = self._stamp_scheduler_output_cache_salts(scheduler_output)
+        try:
+            return self._lmcache_engine.build_connector_meta(scheduler_output)
+        finally:
+            for new_req, original in restores:
+                new_req.sampling_params = original
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -340,6 +431,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             returned by the engine.
 
         """
+        self._pending_external_cache_salts.pop(request.request_id, None)
         return self._lmcache_engine.request_finished(request, block_ids)
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
