@@ -69,6 +69,11 @@ def main():
     parser.add_argument("--publisher-gpu", default="2")
     parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--publish-ipc", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--batch-probe",
+        action="store_true",
+        help="Use one fixed prompt batch for cold-A and warm-B comparison.",
+    )
     args = parser.parse_args()
     print(sys.executable, sys.prefix, flush=True)
     if args.publish_ipc:
@@ -110,6 +115,34 @@ def main():
         return response.json()["results"][0]
 
     def generate():
+        if args.batch_probe:
+            prompts = [
+                "The capital of France is",
+                "1 + 1 =",
+                "Write a short greeting:",
+                "The largest planet is",
+                "Water freezes at",
+                "Complete: reload testing is",
+                "Name one primary color:",
+                "A triangle has",
+            ]
+            choices = []
+            for start in (0, 4):
+                response = requests.post(
+                    base + "/v1/completions",
+                    json={
+                        "model": "experiment",
+                        "prompt": prompts[start : start + 4],
+                        "temperature": 0,
+                        "top_k": 1,
+                        "max_tokens": 1,
+                        "seed": 0,
+                    },
+                    timeout=180,
+                )
+                response.raise_for_status()
+                choices.extend(response.json()["choices"])
+            return choices
         results = []
         for prompt in (
             "The capital of France is",
@@ -151,15 +184,20 @@ def main():
                     "--port",
                     str(args.port),
                     "--max-model-len",
-                    "128",
+                    "4096",
                     "--enforce-eager",
                     "--gpu-memory-utilization",
-                    "0.3",
+                    "0.8",
                     "--kv-cache-memory-bytes",
                     "268435456",
                     "--moe-backend",
                     args.moe_backend,
                     "--no-enable-flashinfer-autotune",
+                    "--kernel-config",
+                    (
+                        '{"enable_cutedsl_warmup":false,'
+                        '"linear_backend_per_quant":{"mxfp8":"emulation"}}'
+                    ),
                     "--worker-extension-cls",
                     "reload_trace_evidence.ReloadTraceEvidence",
                     "--weight-transfer-config",
@@ -211,6 +249,8 @@ def main():
                             "--output",
                             str(args.output / "update.json"),
                         ]
+                        if args.batch_probe:
+                            command.append("--freeze-engram-lookup")
                         publisher_gpu = args.publisher_gpu
                     else:
                         command = [
@@ -231,6 +271,13 @@ def main():
                         )
                     evidence["warm_b"] = inspect()
                     evidence["warm_b_parameters"] = inspect_parameters()
+                    if args.batch_probe:
+                        requests.post(
+                            base + "/reset_prefix_cache", timeout=180
+                        ).raise_for_status()
+                        requests.post(
+                            base + "/reset_encoder_cache", timeout=180
+                        ).raise_for_status()
                     requests.post(base + "/resume", timeout=180).raise_for_status()
                     evidence["warm_b_output"] = generate()
             finally:

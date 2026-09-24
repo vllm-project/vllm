@@ -3,6 +3,7 @@
 """Worker extension for inspecting production reload tracing in day0 tests."""
 
 import hashlib
+from itertools import chain
 
 import torch
 
@@ -11,18 +12,26 @@ from vllm.model_executor.model_loader.reload.integration import get_model_reload
 
 class ReloadTraceEvidence:
     def inspect_model_parameters(self):
-        """Return content and storage identities for every model parameter."""
+        """Inspect parameters and buffers, excluding frozen lookup tensors."""
         result = {}
-        for name, parameter in self.model_runner.model.named_parameters():
+        model = self.model_runner.model
+        for name, parameter in chain(
+            model.named_parameters(), model.named_buffers()
+        ):
+            if getattr(parameter, "reload_frozen", False):
+                continue
             value = parameter.detach()
             raw = value.contiguous().reshape(-1).view(torch.uint8)
+            digest = hashlib.sha256()
+            for start in range(0, raw.numel(), 8 * 1024 * 1024):
+                digest.update(raw[start : start + 8 * 1024 * 1024].cpu().numpy())
             result[name] = {
-                "id": id(value),
+                "id": id(parameter),
                 "ptr": value.data_ptr(),
                 "shape": list(value.shape),
                 "dtype": str(value.dtype),
                 "numel": value.numel(),
-                "hash": hashlib.sha256(raw.cpu().numpy().tobytes()).hexdigest(),
+                "hash": digest.hexdigest(),
             }
         assert result
         return result

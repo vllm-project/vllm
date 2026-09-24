@@ -26,6 +26,7 @@ from vllm.models.common.ops.fused_qk_rmsnorm import (
     _FUSED_Q_KV_RMSNORM_KERNEL,
     fused_q_kv_rmsnorm,
 )
+from vllm.models.deepseek_v4.common.weight_loader import attn_sink_weight_loader
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
 )
@@ -239,6 +240,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
         )
+        self.attn_sink.weight_loader = attn_sink_weight_loader
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,

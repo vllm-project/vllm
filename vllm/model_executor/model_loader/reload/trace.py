@@ -82,6 +82,13 @@ def _argument_key(value: Any) -> Any:
     """
     if isinstance(value, (tuple, list)):
         return tuple(_argument_key(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(
+            sorted(
+                (_argument_key(key), _argument_key(item))
+                for key, item in value.items()
+            )
+        )
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise ReloadError(f"Unsupported loader argument in arrival key: {type(value)}")

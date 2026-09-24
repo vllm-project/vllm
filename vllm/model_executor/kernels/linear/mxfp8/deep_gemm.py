@@ -42,10 +42,22 @@ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight.data
+        weight, scale = self.process_reload_tensors(
+            layer, layer.weight.data, layer.weight_scale.data
+        )
+        replace_parameter(layer, "weight", weight)
+        replace_parameter(layer, "weight_scale", scale)
+        layer.weight_block_size = [1, 32]
+
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del layer
         if weight.ndim == 3:
-            return
-        scale = layer.weight_scale.data
+            return weight, scale
         assert weight.dtype == torch.float8_e4m3fn and weight.ndim == 2
         assert scale.shape == (weight.shape[0], weight.shape[1] // 32)
         assert self.config.bmm_batch_size is not None
@@ -57,9 +69,7 @@ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
             is_bmm=True,
             bmm_batch_size=self.config.bmm_batch_size,
         )
-        replace_parameter(layer, "weight", weight)
-        replace_parameter(layer, "weight_scale", scale)
-        layer.weight_block_size = [1, 32]
+        return weight, scale
 
     def apply_weights(
         self,

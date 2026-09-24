@@ -613,6 +613,41 @@ def test_reload_trace_tied_plain_parameters_have_one_owner():
     torch.testing.assert_close(model.head.weight, torch.full((2,), 3.0))
 
 
+def test_reload_trace_skips_frozen_parameters():
+    """Fixed lookup tables stay cold-load-only while normal weights reload."""
+    from vllm.model_executor.model_loader.reload.integration import (
+        create_model_reload_tracer,
+    )
+
+    model = torch.nn.Module()
+    model.lookup = torch.nn.Module()
+    model.linear = torch.nn.Module()
+
+    lookup = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+    lookup.weight_loader = default_weight_loader
+    lookup.reload_frozen = True
+    model.lookup.weight = lookup
+
+    weight = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+    weight.weight_loader = default_weight_loader
+    model.linear.weight = weight
+
+    trace = create_model_reload_tracer(model)
+    assert "lookup" not in trace.states
+    assert "linear" in trace.states
+
+    with trace.observe():
+        lookup.weight_loader(lookup, torch.ones(4))
+        weight.weight_loader(weight, torch.full((4,), 2.0))
+    trace.bind_runtime()
+
+    with trace.round():
+        weight.weight_loader(weight, torch.full((4,), 3.0))
+
+    torch.testing.assert_close(lookup, torch.ones(4))
+    torch.testing.assert_close(weight, torch.full((4,), 3.0))
+
+
 @pytest.mark.parametrize("preserve", [False, True])
 def test_reload_trace_repeated_rounds_keep_storage_and_checkpoint(preserve):
     """Reload changes values, not runtime identity; preservation keeps raw input."""

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.deepseek_v4.common.weight_loader import attn_sink_weight_loader
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
@@ -312,6 +313,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
         )
+        self.attn_sink.weight_loader = attn_sink_weight_loader
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,
@@ -884,7 +886,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             #           kernel allocates and returns the padded q tensor.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-            return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            quant_insert = (
+                torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
+            )
+            # Older stable extensions predate the two feature flags. Keep the
+            # call compatible with those extensions while preferring the
+            # explicit path when the rebuilt operator is available.
+            schema = quant_insert.default._schema
+            args = (
                 q,
                 kv,
                 swa_kv_cache_2d,
@@ -894,9 +903,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 self.padded_heads,
                 self.eps,
                 swa_metadata.block_size,
-                False,
-                self.kv_mxfp8,
             )
+            if len(schema.arguments) >= 11:
+                return quant_insert(*args, False, self.kv_mxfp8)
+            return quant_insert(*args)
 
         # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
         # row in its element dtype (no Q padding). bf16 rewrites q in place;

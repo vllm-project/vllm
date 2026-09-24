@@ -122,6 +122,12 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
         # Parameter as embed_tokens.weight. The first state owns its loader and
         # slots; later states bind the alias for runtime identity checks only.
         for role, param in module.named_parameters(recurse=False):
+            # Some model components contain large immutable lookup tables.
+            # They participate in cold loading but are not reload inputs.
+            # The marker is attached by the owning module so the generic
+            # tracer does not need model-specific name matching.
+            if getattr(param, "reload_frozen", False):
+                continue
             owner = copy_owners.get(id(param))
             if owner is not None:
                 aliases[role] = param

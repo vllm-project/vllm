@@ -48,17 +48,27 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         return kMxfp8Dynamic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight.data  # [N, K]
+        weight, weight_scale = self.process_reload_tensors(
+            layer, layer.weight.data, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(
+            weight_scale.contiguous(), requires_grad=False
+        )
+
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del layer
         N, K = weight.shape
 
         scale_k = K // MXFP8_BLOCK_SIZE
-        weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
+        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
         weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
-
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
-        )
+        return weight, weight_scale_swizzled
 
     def apply_weights(
         self,
@@ -139,18 +149,28 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         return kMxfp8Dynamic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight.data  # [N, K]
+        weight, weight_scale = self.process_reload_tensors(
+            layer, layer.weight.data, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight, requires_grad=False)
+        layer.weight_scale = Parameter(
+            weight_scale.contiguous(), requires_grad=False
+        )
+
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del layer
+        weight = weight.contiguous()
         N, K = weight.shape
 
         scale_k = K // MXFP8_BLOCK_SIZE
-        weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
+        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
         weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
-
-        # Store weight column-major [K, N] as mm_mxfp8 expects for operand B.
-        layer.weight = Parameter(weight.contiguous().t(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
-        )
+        return weight.t(), weight_scale_swizzled
 
     def apply_weights(
         self,

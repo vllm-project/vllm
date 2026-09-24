@@ -4,10 +4,11 @@
 
 import inspect
 import math
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from functools import partial
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 
@@ -68,6 +69,73 @@ class _CanonicalReloadPolicy:
 
     def prepare_for_load(self, state: ReloadState) -> None:
         raise NotImplementedError
+
+
+@dataclass
+class ModelOptLinearReloadPolicy(_CanonicalReloadPolicy):
+    """Reload ModelOpt tensors through the cold-selected processing plan.
+
+    ModelOpt's cold PWAL may transpose weights or squeeze block-scale
+    dimensions. Reload receives the original checkpoint layout, so conversion
+    is delegated to the kernel's tensor-only processing entry point.
+    """
+
+    processing_plan_getter: Callable[[], Any | None] | None = None
+
+    def bind(self, state: ReloadState) -> None:
+        self.runtime_shapes = {
+            role: tuple(target.tensor.shape) for role, target in state.targets.items()
+        }
+        method = state.module.quant_method
+        self.processing_plan = (
+            self.processing_plan_getter()
+            if self.processing_plan_getter is not None
+            else getattr(method, "processing_plan", None)
+        )
+        if self.processing_plan is None:
+            raise ReloadError(
+                f"{state.key}: ModelOpt processing plan was not created "
+                "before runtime binding"
+            )
+        processing_plan = self.processing_plan
+        self.kernel = processing_plan.kernel
+        if self.kernel is not getattr(method, "kernel", None):
+            raise ReloadError(f"{state.key}: ModelOpt processing plan kernel is stale")
+
+    def validate(self, state: ReloadState) -> None:
+        if {
+            role: tuple(target.tensor.shape) for role, target in state.targets.items()
+        } != self.runtime_shapes:
+            raise ReloadError("ModelOpt FP8 runtime layout changed since binding")
+
+    def prepare_for_load(self, state: ReloadState) -> None:
+        state.prepare_sources(reuse_roles=())
+
+    def _match_runtime_shape(
+        self, state: ReloadState, role: str, value: torch.Tensor
+    ) -> torch.Tensor:
+        target = state.targets[role].tensor
+        if tuple(value.shape) == self.runtime_shapes[role]:
+            return value
+        if role == "weight" and tuple(value.t().shape) == self.runtime_shapes[role]:
+            return value.t().contiguous().t()
+        if value.numel() == target.numel():
+            return value.reshape(target.shape).contiguous()
+        raise ReloadError(
+            f"{state.key}/{role}: cannot convert checkpoint shape "
+            f"{tuple(value.shape)} to runtime shape {tuple(target.shape)}"
+        )
+
+    def finish(self, state: ReloadState) -> None:
+        self.validate(state)
+        values = {role: state.work(role) for role in state.roles}
+        processing_plan = self.processing_plan
+        if processing_plan is None:
+            raise ReloadError(f"{state.key}: ModelOpt processing plan is unavailable")
+        converted = processing_plan.process_reload_tensors(state.module, values)
+        for role, value in converted.items():
+            if role in state.targets:
+                state.copy_(role, value)
 
 
 @dataclass
