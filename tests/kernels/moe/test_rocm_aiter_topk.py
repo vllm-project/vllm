@@ -243,11 +243,6 @@ def test_rocm_aiter_topk_gating_matches_softmax_reference(
     renormalize: bool,
 ):
     """Numerical check vs softmax + topk, including Qwen3.8 (E=512, k=10)."""
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if not rocm_aiter_ops.topk_gating_available():
-        pytest.skip("aiter.ops.topk.topk_gating is not available")
-
     torch.manual_seed(0)
     gating_output = torch.randn(
         (num_tokens, num_experts), dtype=torch.bfloat16, device="cuda"
@@ -285,11 +280,6 @@ def test_rocm_aiter_topk_gating_matches_softmax_reference(
 
 
 def test_rocm_aiter_topk_gating_torch_compile_compatibility():
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if not rocm_aiter_ops.topk_gating_available():
-        pytest.skip("aiter.ops.topk.topk_gating is not available")
-
     token, expert, topk, renormalize = 4, 512, 10, True
     gating_output = torch.randn((token, expert), dtype=torch.bfloat16, device="cuda")
     device = gating_output.device
