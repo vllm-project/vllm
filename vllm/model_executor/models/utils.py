@@ -78,10 +78,14 @@ class WeightsMapper:
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
 
-    def _map_name(self, key: str) -> str | None:
-        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+    def map_name(self, key: str) -> str | None:
+        """Map a weight name; returns ``None`` if the weight should be ignored."""
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
+
+    def _map_name(self, key: str) -> str | None:
+        """Backward-compatible alias for :meth:`map_name`."""
+        return self.map_name(key)
 
     def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
         """Map a weight name and extract any shard_id metadata.
