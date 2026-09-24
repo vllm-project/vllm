@@ -26,6 +26,7 @@
 import typing
 from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from itertools import islice
+from typing import NamedTuple
 
 import regex as re
 import torch
@@ -40,6 +41,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.hpc import HpcIHCPostPre, HpcIHCPre
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -72,6 +74,14 @@ from .hc import HYV4HCHeadLayer, HYV4HCLayer
 from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
+
+
+class IHCCarry(NamedTuple):
+    """State carried between adjacent decoder layers by fused iHC."""
+
+    mlp_out: torch.Tensor
+    residual: torch.Tensor
+    post_gates: torch.Tensor
 
 
 def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
@@ -149,6 +159,45 @@ class HYV4DecoderLayer(nn.Module):
             config, layer_idx, prefix=f"{prefix}.hc_mlp_layer"
         )
 
+        self.hpc_attn_pre_norm: HpcIHCPre | None = None
+        self.hpc_mlp_post_pre: HpcIHCPostPre | None = None
+        self.hpc_attn_post_pre: HpcIHCPostPre | None = None
+        attn_pre = getattr(self.hc_attn_layer, "hc_pre", None)
+        mlp_pre = getattr(self.hc_mlp_layer, "hc_pre", None)
+        if (
+            self.enable_ihc
+            and attn_pre is not None
+            and mlp_pre is not None
+            and HpcIHCPostPre.support(config.hc_mult, config.hidden_size)
+        ):
+            self.hpc_attn_pre_norm = HpcIHCPre(
+                hc_mult=config.hc_mult,
+                hidden_size=config.hidden_size,
+                magnitude=config.hc_magnitude,
+                hc_eps=config.hc_eps,
+                norm_eps=config.rms_norm_eps,
+                fallback_op=attn_pre,
+                norm_owner=self.input_layernorm,
+            )
+            self.hpc_mlp_post_pre = HpcIHCPostPre(
+                hc_mult=config.hc_mult,
+                hidden_size=config.hidden_size,
+                magnitude=config.hc_magnitude,
+                hc_eps=config.hc_eps,
+                norm_eps=config.rms_norm_eps,
+                pre_owner=mlp_pre,
+                norm_owner=self.post_attention_layernorm,
+            )
+            self.hpc_attn_post_pre = HpcIHCPostPre(
+                hc_mult=config.hc_mult,
+                hidden_size=config.hidden_size,
+                magnitude=config.hc_magnitude,
+                hc_eps=config.hc_eps,
+                norm_eps=config.rms_norm_eps,
+                pre_owner=attn_pre,
+                norm_owner=self.input_layernorm,
+            )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -207,6 +256,39 @@ class HYV4DecoderLayer(nn.Module):
 
         # Under iHC the residual is carried inside hidden_states.
         return hidden_states, None
+
+    def _forward_ihc_fused(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        carry: IHCCarry | None,
+        is_last_on_rank: bool,
+    ) -> tuple[torch.Tensor, IHCCarry | None]:
+        """Run iHC while carrying an unfinished MLP boundary across layers."""
+        assert self.hpc_attn_pre_norm is not None
+        assert self.hpc_mlp_post_pre is not None
+        assert self.hpc_attn_post_pre is not None
+
+        if carry is None:
+            residual = self.hc_attn_layer.prepare_input(hidden_states)
+            hidden_states, post_gates = self.hpc_attn_pre_norm(residual)
+        else:
+            residual, hidden_states, post_gates = self.hpc_attn_post_pre(
+                carry.mlp_out, carry.residual, carry.post_gates
+            )
+
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+        residual, hidden_states, post_gates = self.hpc_mlp_post_pre(
+            hidden_states, residual, post_gates
+        )
+        hidden_states = self.mlp(hidden_states)
+        if is_last_on_rank:
+            hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
+            return hidden_states, None
+        return hidden_states, IHCCarry(hidden_states, residual, post_gates)
 
 
 class HYV4Model(nn.Module):
@@ -374,8 +456,26 @@ class HYV4Model(nn.Module):
             # prepare_input, and residual is unused.
             residual = None if self.enable_ihc else intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+        num_layers = self.end_layer - self.start_layer
+        first_layer = self.layers[self.start_layer] if num_layers else None
+        use_cross = (
+            self.enable_ihc
+            and first_layer is not None
+            and getattr(first_layer, "hpc_attn_post_pre", None) is not None
+        )
+        layers = islice(self.layers, self.start_layer, self.end_layer)
+        if use_cross:
+            carry: IHCCarry | None = None
+            for index, layer in enumerate(layers):
+                hidden_states, carry = layer._forward_ihc_fused(
+                    positions,
+                    hidden_states,
+                    carry,
+                    is_last_on_rank=index == num_layers - 1,
+                )
+        else:
+            for layer in layers:
+                hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             if self.enable_ihc:
