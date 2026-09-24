@@ -13,8 +13,8 @@ from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import gl, gluon, tl, triton
 
-# (hidden_size, num_experts): DeepSeek-V4.1-Flash.
-ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES = frozenset({(7168, 384)})
+# (hidden_size, num_experts): DeepSeek-V4.1-Flash and DeepSeek-V4-Pro.
+ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES = frozenset({(5120, 384), (7168, 384)})
 _MAX_TOKENS = 1536
 
 
@@ -38,17 +38,46 @@ def _router_gate_softplus_sqrt_gluon(logits):
 
 
 @gluon.jit
+def _router_gate_row_bias_gluon(
+    correction_bias_ptr,
+    bias_vl_ptr,
+    input_ids_ptr,
+    image_sentinel_lo,
+    row,
+    experts,
+    N: gl.constexpr,
+    HAS_BIAS: gl.constexpr,
+    HAS_BIAS_VL: gl.constexpr,
+):
+    bias = gl.zeros_like(experts.to(gl.float32))
+    if HAS_BIAS:
+        bias = gl.load(correction_bias_ptr + experts, experts < N, 0.0)
+    if HAS_BIAS_VL:
+        token = gl.load(input_ids_ptr + row).to(gl.int64)
+        is_image = (token >= image_sentinel_lo) & (token < image_sentinel_lo + 5)
+        if is_image:
+            bias = gl.load(bias_vl_ptr + experts, experts < N, 0.0)
+    return bias
+
+
+@gluon.jit
 def _router_gate_reduce_topk_gluon(
     partial_logits_ptr,
     correction_bias_ptr,
+    bias_vl_ptr,
+    input_ids_ptr,
+    is_padding_ptr,
     topk_weights_ptr,
     topk_ids_ptr,
     routed_scaling_factor,
-    M: gl.constexpr,
+    image_sentinel_lo,
+    M,
     N: gl.constexpr,
     SPLIT_K: gl.constexpr,
     TOPK: gl.constexpr,
     HAS_BIAS: gl.constexpr,
+    HAS_BIAS_VL: gl.constexpr,
+    HAS_PADDING: gl.constexpr,
     RENORMALIZE: gl.constexpr,
     BLOCK_N: gl.constexpr,
     BLOCK_S: gl.constexpr,
@@ -67,8 +96,18 @@ def _router_gate_reduce_topk_gluon(
     logits = gl.sum(partial, axis=0)
     scores = _router_gate_softplus_sqrt_gluon(logits)
     ranked = scores
-    if HAS_BIAS:
-        ranked += gl.load(correction_bias_ptr + experts, experts < N, 0.0)
+    if HAS_BIAS or HAS_BIAS_VL:
+        ranked += _router_gate_row_bias_gluon(
+            correction_bias_ptr,
+            bias_vl_ptr,
+            input_ids_ptr,
+            image_sentinel_lo,
+            row,
+            experts,
+            N,
+            HAS_BIAS,
+            HAS_BIAS_VL,
+        )
     ranked = gl.where(experts < N, ranked, -float("inf"))
     ranked = gl.where(ranked == 0.0, 0.0, ranked)
     bits = ranked.to(gl.uint32, bitcast=True)
@@ -89,9 +128,17 @@ def _router_gate_reduce_topk_gluon(
     if RENORMALIZE:
         weight_sum = gl.sum(selected_weights, axis=0)
         scale = scale / gl.where(weight_sum > 0.0, weight_sum, 1.0)
+    selected_weights = selected_weights * scale
+    # A constexpr guard: merging it into the load's condition would trace a
+    # load from the absent padding pointer.
+    if HAS_PADDING:  # noqa: SIM102
+        # Padding rows get expert -1, which the fused MoE skips.
+        if gl.load(is_padding_ptr + row):
+            selected_ids = gl.full_like(selected_ids, -1)
+            selected_weights = gl.zeros_like(selected_weights)
     gl.store(
         topk_weights_ptr + row * TOPK + slots,
-        selected_weights * scale,
+        selected_weights,
         mask=slots < TOPK,
     )
     gl.store(
@@ -101,12 +148,12 @@ def _router_gate_reduce_topk_gluon(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _router_gate_gemv(
     hidden_states_ptr,
     router_weight_ptr,
     logits_ptr,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
     N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -120,12 +167,12 @@ def _router_gate_gemv(
     tl.store(logits_ptr + row * N + expert, logits)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _router_gate_gemm(
     hidden_states_ptr,
     router_weight_ptr,
     partial_logits_ptr,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
     N: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -176,18 +223,24 @@ def _router_gate_gemm(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "image_sentinel_lo"])
 def _router_gate_reduce_topk(
     partial_logits_ptr,
     correction_bias_ptr,
+    bias_vl_ptr,
+    input_ids_ptr,
+    is_padding_ptr,
     topk_weights_ptr,
     topk_ids_ptr,
     routed_scaling_factor,
-    M: tl.constexpr,
+    image_sentinel_lo,
+    M,
     N: tl.constexpr,
     SPLIT_K: tl.constexpr,
     TOPK: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_BIAS_VL: tl.constexpr,
+    HAS_PADDING: tl.constexpr,
     RENORMALIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_S: tl.constexpr,
@@ -205,7 +258,16 @@ def _router_gate_reduce_topk(
     scores = _router_gate_softplus_sqrt(logits)
     ranked = scores
     if HAS_BIAS:
-        ranked += tl.load(correction_bias_ptr + experts, mask=experts < N, other=0.0)
+        bias = tl.load(correction_bias_ptr + experts, mask=experts < N, other=0.0)
+    else:
+        bias = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    if HAS_BIAS_VL:
+        # Image sentinel tokens (five consecutive ids from image_sentinel_lo)
+        # rank experts with bias_vl instead of the text correction bias.
+        token = tl.load(input_ids_ptr + row).to(tl.int64)
+        if (token >= image_sentinel_lo) & (token < image_sentinel_lo + 5):
+            bias = tl.load(bias_vl_ptr + experts, mask=experts < N, other=0.0)
+    ranked += bias
     ranked = tl.where(experts < N, ranked, -float("inf"))
     ranked = tl.where(ranked == 0.0, 0.0, ranked)
 
@@ -225,9 +287,17 @@ def _router_gate_reduce_topk(
     if RENORMALIZE:
         weight_sum = tl.sum(selected_weights, axis=0)
         scale = scale / tl.where(weight_sum > 0.0, weight_sum, 1.0)
+    selected_weights = selected_weights * scale
+    # A constexpr guard: merging it into the load's condition would trace a
+    # load from the absent padding pointer.
+    if HAS_PADDING:  # noqa: SIM102
+        # Padding rows get expert -1, which the fused MoE skips.
+        if tl.load(is_padding_ptr + row):
+            selected_ids = tl.full(selected_ids.shape, -1, tl.int32)
+            selected_weights = tl.zeros(selected_weights.shape, tl.float32)
     tl.store(
         topk_weights_ptr + row * TOPK + slots,
-        selected_weights * scale,
+        selected_weights,
         mask=slots < TOPK,
     )
     tl.store(topk_ids_ptr + row * TOPK + slots, selected_ids, mask=slots < TOPK)
@@ -238,13 +308,37 @@ def can_use_rocm_fused_router_gate(
     router_weight: torch.Tensor,
     correction_bias: torch.Tensor | None,
     topk: int,
+    bias_vl: torch.Tensor | None = None,
+    input_ids: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> bool:
     """Return whether the tensors match the tuned gfx950 fused gate."""
     try:
-        _validate_inputs(hidden_states, router_weight, correction_bias, topk)
+        _validate_inputs(
+            hidden_states,
+            router_weight,
+            correction_bias,
+            topk,
+            bias_vl,
+            input_ids,
+            is_padding,
+        )
     except (RuntimeError, ValueError):
         return False
     return True
+
+
+def _validate_vector(
+    name: str, t: torch.Tensor, length: int, dtypes, device: torch.device
+) -> None:
+    if t.device != device:
+        raise ValueError(f"{name} must be on the same device as hidden_states")
+    if not t.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+    if t.dtype not in dtypes:
+        raise ValueError(f"{name} must have dtype in {dtypes}")
+    if t.dim() != 1 or t.shape[0] < length:
+        raise ValueError(f"{name} must be 1D with at least {length} entries")
 
 
 def _validate_inputs(
@@ -252,6 +346,9 @@ def _validate_inputs(
     router_weight: torch.Tensor,
     correction_bias: torch.Tensor | None,
     topk: int,
+    bias_vl: torch.Tensor | None = None,
+    input_ids: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
     if not current_platform.is_rocm() or not on_gfx950():
         raise RuntimeError("rocm_fused_router_gate requires ROCm gfx950")
@@ -270,22 +367,29 @@ def _validate_inputs(
         shape not in ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES
         or router_weight.shape[1] != shape[0]
     ):
-        raise ValueError("supported (hidden_size, num_experts) pairs are (7168, 384)")
+        raise ValueError(
+            "supported (hidden_size, num_experts) pairs are "
+            f"{sorted(ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES)}"
+        )
     if not 0 <= hidden_states.shape[0] <= _MAX_TOKENS:
         raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")
     if not 0 < topk <= router_weight.shape[0]:
         raise ValueError("topk must be in (0, num_experts]")
-    if correction_bias is not None:
-        if correction_bias.device != hidden_states.device:
-            raise ValueError(
-                "correction_bias must be on the same device as hidden_states"
-            )
-        if not correction_bias.is_contiguous():
-            raise ValueError("correction_bias must be contiguous")
-        if correction_bias.dtype != torch.float32:
-            raise ValueError("correction_bias must have dtype float32")
-        if correction_bias.shape != (router_weight.shape[0],):
-            raise ValueError("correction_bias must have shape (num_experts,)")
+    num_tokens, num_experts = hidden_states.shape[0], router_weight.shape[0]
+    device = hidden_states.device
+    for name, bias in (("correction_bias", correction_bias), ("bias_vl", bias_vl)):
+        if bias is not None:
+            _validate_vector(name, bias, num_experts, (torch.float32,), device)
+            if bias.shape != (num_experts,):
+                raise ValueError(f"{name} must have shape (num_experts,)")
+    if bias_vl is not None:
+        if input_ids is None:
+            raise ValueError("bias_vl routing requires input_ids")
+        _validate_vector(
+            "input_ids", input_ids, num_tokens, (torch.int32, torch.int64), device
+        )
+    if is_padding is not None:
+        _validate_vector("is_padding", is_padding, num_tokens, (torch.bool,), device)
 
 
 def rocm_fused_router_gate(
@@ -296,6 +400,10 @@ def rocm_fused_router_gate(
     renormalize: bool,
     routed_scaling_factor: float = 1.0,
     indices_dtype: torch.dtype = torch.int32,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
+    input_ids: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Score ``hidden_states @ router_weight.T`` and select the top experts.
 
@@ -307,12 +415,26 @@ def rocm_fused_router_gate(
         renormalize: Whether to normalize the selected weights to sum to one.
         routed_scaling_factor: Scale applied to the selected weights.
         indices_dtype: Dtype of the returned expert ids.
+        bias_vl: Selection bias for image sentinel tokens, or None.
+        image_sentinel_lo: First of the five image sentinel token ids.
+        input_ids: Token ids, required with ``bias_vl``.
+        is_padding: Per-token padding mask; padding rows get expert ``-1``.
 
     Returns:
         The routing weights and expert ids, both shaped ``(num_tokens, topk)``.
 
     """
-    _validate_inputs(hidden_states, router_weight, correction_bias, topk)
+    if image_sentinel_lo <= 0:
+        bias_vl = None
+    _validate_inputs(
+        hidden_states,
+        router_weight,
+        correction_bias,
+        topk,
+        bias_vl,
+        input_ids,
+        is_padding,
+    )
     if indices_dtype not in (torch.int32, torch.int64):
         raise ValueError("indices_dtype must be int32 or int64")
     num_tokens = hidden_states.shape[0]
@@ -386,14 +508,20 @@ def rocm_fused_router_gate(
     select_kernel[(num_tokens,)](
         partial_logits,
         correction_bias,
+        bias_vl,
+        input_ids,
+        is_padding,
         topk_weights,
         topk_ids,
         routed_scaling_factor,
-        M=num_tokens,
+        image_sentinel_lo,
+        num_tokens,
         N=num_experts,
         SPLIT_K=split_k,
         TOPK=topk,
         HAS_BIAS=correction_bias is not None,
+        HAS_BIAS_VL=bias_vl is not None,
+        HAS_PADDING=is_padding is not None,
         RENORMALIZE=renormalize,
         BLOCK_N=triton.next_power_of_2(num_experts),
         BLOCK_S=triton.next_power_of_2(split_k),

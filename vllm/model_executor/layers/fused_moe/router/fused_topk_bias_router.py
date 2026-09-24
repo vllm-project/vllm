@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
+from vllm.platforms import current_platform
 
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
@@ -382,6 +383,8 @@ class FusedTopKBiasRouter(BaseRouter):
         # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
         self.num_fused_shared_experts = num_fused_shared_experts
         self.shared_expert_weight = shared_expert_weight
+        # Gate whose GEMM the fused ROCm router gate absorbs, see bind_gate.
+        self._fused_gate: torch.nn.Module | None = None
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -419,7 +422,11 @@ class FusedTopKBiasRouter(BaseRouter):
             bias_vl=self.bias_vl.data if self.bias_vl is not None else None,
             image_sentinel_lo=self.image_sentinel_lo,
         )
+        return self._append_fused_shared_experts(topk_weights, topk_ids)
 
+    def _append_fused_shared_experts(
+        self, topk_weights: torch.Tensor, topk_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.num_fused_shared_experts > 0:
             m = topk_ids.shape[0]
             n = self.num_fused_shared_experts
@@ -439,4 +446,94 @@ class FusedTopKBiasRouter(BaseRouter):
             topk_ids = torch.cat([topk_ids, shared_ids], dim=-1)
             topk_weights = torch.cat([topk_weights, shared_w], dim=-1)
 
+        return topk_weights, topk_ids
+
+    def bind_gate(self, gate: torch.nn.Module) -> None:
+        """Absorb the gate GEMM into routing with the gfx950 fused router gate.
+
+        Only sqrtsoftplus routing without a hash table qualifies, which is
+        DeepSeek-V4/V4.1's non-hash MoE layers; others keep the gate GEMM.
+        """
+        if not current_platform.is_rocm():
+            return
+        from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (  # noqa: E501
+            ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES,
+        )
+        from vllm.platforms.rocm import on_gfx950
+
+        weight = getattr(gate, "weight", None)
+        if (
+            on_gfx950()
+            and self.scoring_func == "sqrtsoftplus"
+            and self._hash_indices_table is None
+            and weight is not None
+            and getattr(gate, "bias", None) is None
+            and tuple(weight.shape[::-1]) in ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES
+        ):
+            self._fused_gate = gate
+
+    def _fused_gate_args(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+    ) -> dict:
+        assert self._fused_gate is not None
+        bias_vl = self.bias_vl if self.image_sentinel_lo > 0 else None
+        return dict(
+            hidden_states=hidden_states,
+            router_weight=self._fused_gate.weight,
+            correction_bias=self.e_score_correction_bias.data
+            if self.e_score_correction_bias is not None
+            else None,
+            topk=self.top_k,
+            bias_vl=bias_vl.data if bias_vl is not None else None,
+            input_ids=input_ids if bias_vl is not None else None,
+            is_padding=_get_padding_mask(hidden_states.shape[0]),
+        )
+
+    def can_select_from_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> bool:
+        if self._fused_gate is None or topk_indices_dtype not in (
+            None,
+            torch.int32,
+            torch.int64,
+        ):
+            return False
+        from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (  # noqa: E501
+            can_use_rocm_fused_router_gate,
+        )
+
+        return can_use_rocm_fused_router_gate(
+            **self._fused_gate_args(hidden_states, input_ids)
+        )
+
+    def select_experts_from_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (  # noqa: E501
+            rocm_fused_router_gate,
+        )
+
+        self._validate_eplb_state()
+        topk_weights, topk_ids = rocm_fused_router_gate(
+            **self._fused_gate_args(hidden_states, input_ids),
+            renormalize=self.renormalize,
+            routed_scaling_factor=self.routed_scaling_factor,
+            indices_dtype=topk_indices_dtype or torch.int32,
+            image_sentinel_lo=self.image_sentinel_lo,
+        )
+        topk_weights, topk_ids = self._append_fused_shared_experts(
+            topk_weights, topk_ids
+        )
+        topk_weights, topk_ids = self._finish_routing(
+            topk_weights, topk_ids, topk_indices_dtype
+        )
+        self._record_routing(topk_ids)
         return topk_weights, topk_ids

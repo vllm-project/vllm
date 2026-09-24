@@ -99,12 +99,21 @@ def main():
     parser.add_argument(
         "--multipliers", type=int, nargs="+", default=[1, 2, 3, 4, 5, 6]
     )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        choices=[5120, 7168],
+        default=7168,
+        help="5120: DeepSeek-V4.1-Flash, 7168: DeepSeek-V4-Pro",
+    )
     parser.add_argument("--topk", type=int, nargs="+", default=[6, 8])
     parser.add_argument("--cache", choices=["warm", "cold", "both"], default="both")
     parser.add_argument("--samples", type=int, default=15)
     parser.add_argument("--cold-sets", type=int, default=128)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    global K
+    K = args.hidden_size
     if args.cold_sets * K * N * 2 <= 256 * 1024**2:
         parser.error("cold input sets must exceed the MI355X 256 MiB LLC")
     torch.manual_seed(0)

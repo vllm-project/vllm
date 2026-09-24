@@ -974,3 +974,75 @@ def test_eplb_map_num_unpadded_tokens(
 
     exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
     torch.testing.assert_close(load, exp_load)
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize("num_tokens", [1, 192])
+@pytest.mark.parametrize("num_fused_shared_experts", [0, 1])
+def test_fused_topk_bias_router_routes_from_hidden_states(
+    num_tokens: int, num_fused_shared_experts: int
+) -> None:
+    """With the gate bound, routing from hidden states matches gate + select."""
+    torch.manual_seed(0)
+    hidden_size, num_experts, top_k = 5120, 384, 6
+    gate = torch.nn.Linear(
+        hidden_size, num_experts, bias=False, dtype=torch.bfloat16, device="cuda"
+    )
+    router = FusedTopKBiasRouter(
+        top_k=top_k,
+        global_num_experts=num_experts,
+        e_score_correction_bias=torch.randn(num_experts, device="cuda"),
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        scoring_func="sqrtsoftplus",
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
+    router.bind_gate(gate)
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+
+    assert router.can_select_from_hidden_states(hidden_states, torch.int32)
+    weights, ids = router.select_experts_from_hidden_states(hidden_states, torch.int32)
+    ref_weights, ref_ids = router.select_experts(
+        hidden_states,
+        hidden_states.float() @ gate.weight.float().t(),
+        torch.int32,
+    )
+
+    assert ids.shape == (num_tokens, top_k + num_fused_shared_experts)
+    torch.testing.assert_close(ids, ref_ids, atol=0, rtol=0)
+    torch.testing.assert_close(weights, ref_weights, atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize("variant", ["sigmoid", "hash"])
+def test_fused_topk_bias_router_keeps_gate_gemm_when_unsupported(variant: str) -> None:
+    """Only sqrtsoftplus routing without a hash table may absorb the gate."""
+    hidden_size, num_experts = 5120, 384
+    gate = torch.nn.Linear(
+        hidden_size, num_experts, bias=False, dtype=torch.bfloat16, device="cuda"
+    )
+    router = FusedTopKBiasRouter(
+        top_k=6,
+        global_num_experts=num_experts,
+        e_score_correction_bias=torch.zeros(num_experts, device="cuda"),
+        scoring_func="sigmoid" if variant == "sigmoid" else "sqrtsoftplus",
+        hash_indices_table=(
+            torch.zeros(16, 6, dtype=torch.int32, device="cuda")
+            if variant == "hash"
+            else None
+        ),
+    )
+    router.bind_gate(gate)
+
+    hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16, device="cuda")
+    assert not router.can_select_from_hidden_states(hidden_states, torch.int32)

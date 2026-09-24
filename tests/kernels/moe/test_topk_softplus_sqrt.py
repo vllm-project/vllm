@@ -642,12 +642,15 @@ def _on_gfx950() -> bool:
         (8, True, True, torch.int64),
     ],
 )
+# 5120: DeepSeek-V4.1-Flash, 7168: DeepSeek-V4-Pro.
+@pytest.mark.parametrize("hidden_size", [5120, 7168])
 def test_rocm_fused_router_gate_matches_gate_gemm_plus_selection(
     num_tokens: int,
     topk: int,
     renormalize: bool,
     has_bias: bool,
     indices_dtype: torch.dtype,
+    hidden_size: int,
 ) -> None:
     """Tiled gate GEMM and selection must preserve routing across token masks."""
     from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
@@ -655,7 +658,7 @@ def test_rocm_fused_router_gate_matches_gate_gemm_plus_selection(
     )
 
     torch.manual_seed(0)
-    hidden_size, num_experts = 7168, 384
+    num_experts = 384
     hidden_states = torch.randn(
         num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
     )
@@ -740,6 +743,62 @@ def test_rocm_fused_router_gate_preserves_ties_and_small_scores(
 
     torch.testing.assert_close(topk_ids_ref, topk_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights_ref, topk_weights, atol=1e-9, rtol=2e-5)
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize("num_tokens", [17, 256])
+def test_rocm_fused_router_gate_image_bias_and_padding(num_tokens: int) -> None:
+    """Image sentinel rows rank with bias_vl; padding rows get expert -1.
+
+    Mirrors ``topk_hash_softplus_sqrt``, which the fused gate replaces in the
+    DeepSeek-V4.1 MoE runner.
+    """
+    from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
+        rocm_fused_router_gate,
+    )
+
+    torch.manual_seed(0)
+    hidden_size, num_experts, topk, sentinel_lo = 5120, 384, 6, 1000
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    router_weight = (
+        torch.randn(num_experts, hidden_size, device="cuda") * hidden_size**-0.5
+    ).to(torch.bfloat16)
+    bias = torch.randn(num_experts, device="cuda")
+    bias_vl = torch.randn(num_experts, device="cuda")
+    # Every third row is an image sentinel; sentinel_lo + 5 is a regular token.
+    input_ids = torch.full((num_tokens,), sentinel_lo + 5, device="cuda")
+    input_ids[::3] = sentinel_lo + torch.arange(0, num_tokens, 3, device="cuda") % 5
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[-3:] = True
+
+    logits = hidden_states.float() @ router_weight.float().t()
+    image = (input_ids >= sentinel_lo) & (input_ids < sentinel_lo + 5)
+    ref_weights = torch.empty(num_tokens, topk, device="cuda")
+    ref_ids = torch.empty(num_tokens, topk, dtype=torch.int32, device="cuda")
+    for mask, row_bias in ((image, bias_vl), (~image, bias)):
+        w, i = _torch_topk_softplus_sqrt(
+            logits[mask], topk, True, 1.5, e_score_correction_bias=row_bias
+        )
+        ref_weights[mask], ref_ids[mask] = w, i.to(torch.int32)
+    ref_weights[is_padding], ref_ids[is_padding] = 0.0, -1
+
+    topk_weights, topk_ids = rocm_fused_router_gate(
+        hidden_states,
+        router_weight,
+        bias,
+        topk,
+        True,
+        routed_scaling_factor=1.5,
+        bias_vl=bias_vl,
+        image_sentinel_lo=sentinel_lo,
+        input_ids=input_ids,
+        is_padding=is_padding,
+    )
+
+    torch.testing.assert_close(ref_ids, topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(ref_weights, topk_weights, atol=2e-5, rtol=2e-5)
 
 
 @pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
