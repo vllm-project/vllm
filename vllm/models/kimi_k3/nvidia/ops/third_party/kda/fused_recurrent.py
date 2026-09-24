@@ -483,9 +483,7 @@ def fused_recurrent_kda(
     )
 
 
-@triton.jit(
-    do_not_specialize=["stride_beta_token", "stride_state_indices"]
-)
+@triton.jit(do_not_specialize=["stride_beta_token", "stride_state_indices"])
 def fused_recurrent_kda_packed_decode_kernel(
     mixed_qkv,
     raw_g,
@@ -591,6 +589,7 @@ def fused_recurrent_kda_packed_decode(
     initial_state: torch.Tensor,
     state_indices: torch.Tensor,
     scale: float | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run one-token KDA decode directly from packed post-conv QKV."""
     if mixed_qkv.ndim != 2 or mixed_qkv.stride(-1) != 1:
@@ -639,7 +638,8 @@ def fused_recurrent_kda_packed_decode(
     if scale is None:
         scale = K**-0.5
 
-    out = torch.empty((1, B, H, V), dtype=mixed_qkv.dtype, device=device)
+    if out is None:
+        out = torch.empty((1, B, H, V), dtype=mixed_qkv.dtype, device=device)
     grid = (cdiv(V, BV), B * H)
     fused_recurrent_kda_packed_decode_kernel[grid](
         mixed_qkv=mixed_qkv,

@@ -33,15 +33,24 @@ TOOL_CALL_START = "<seed:tool_call>"
 TOOL_CALL_END = "</seed:tool_call>"
 THINK_START = "<seed:think>"
 THINK_END = "</seed:think>"
+TURN_START = "<seed:bos>"
+TURN_END = "<seed:eos>"
 
+_THINK_START_ID = 50
 _THINK_END_ID = 51
-_TOOL_CALL_ID = 60
+_TOOL_CALL_START_ID = 60
+_TOOL_CALL_END_ID = 61
+_SEED_BOS_ID = 70
+_SEED_EOS_ID = 71
+_TEXT_ID = 100
 
 _SEED_OSS_VOCAB = {
-    THINK_START: 50,
+    THINK_START: _THINK_START_ID,
     THINK_END: _THINK_END_ID,
-    TOOL_CALL_START: _TOOL_CALL_ID,
-    TOOL_CALL_END: 61,
+    TOOL_CALL_START: _TOOL_CALL_START_ID,
+    TOOL_CALL_END: _TOOL_CALL_END_ID,
+    TURN_START: _SEED_BOS_ID,
+    TURN_END: _SEED_EOS_ID,
 }
 
 
@@ -66,6 +75,43 @@ def test_token_overrides_wired(parser):
     assert parser.parser_engine_config.name == "seed_oss"
     assert parser.reasoning_start_str == THINK_START
     assert parser.reasoning_end_str == THINK_END
+    assert parser.parser_engine_config.turn_boundary_tokens == frozenset(
+        (TURN_START, TURN_END)
+    )
+
+
+class TestSeedTurnBoundaries:
+    """The Seed-OSS chat template wraps every message in ``<seed:bos>role`` /
+    ``<seed:eos>`` and replays prior-turn ``reasoning_content`` inside
+    ``<seed:think>...</seed:think>``, so a stale ``</seed:think>`` in history
+    is the normal multi-turn case. The backward walk must stop at the Seed
+    boundary tokens; the inherited ChatML tokens are absent from the Seed
+    vocab and would disable the scoping entirely.
+    """
+
+    def test_replayed_reasoning_in_history_not_end(self, parser):
+        assert not parser.is_reasoning_end(
+            [
+                _SEED_BOS_ID,
+                _THINK_START_ID,
+                _TEXT_ID,
+                _THINK_END_ID,
+                _TEXT_ID,
+                _SEED_EOS_ID,
+                _SEED_BOS_ID,
+            ]
+        )
+
+    def test_think_end_in_current_turn_is_end(self, parser):
+        assert parser.is_reasoning_end(
+            [_SEED_BOS_ID, _TEXT_ID, _SEED_EOS_ID, _SEED_BOS_ID, _THINK_END_ID]
+        )
+
+    def test_boundary_with_thinking_disabled_is_end(self, mock_tokenizer):
+        parser = SeedOssParser(
+            mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+        )
+        assert parser.is_reasoning_end([_SEED_BOS_ID, _TEXT_ID])
 
 
 def test_single_tool_call(tool_parser, mock_request):
@@ -133,7 +179,7 @@ def test_streaming_think_end_and_tool_call_same_delta(parser):
             f"{THINK_END}{TOOL_CALL_START}",
             "<function=read>",
         ],
-        [(1,), (_THINK_END_ID, _TOOL_CALL_ID), (2,)],
+        [(1,), (_THINK_END_ID, _TOOL_CALL_START_ID), (2,)],
     )
     assert reasoning == "Let me list the directory."
     assert THINK_END not in reasoning

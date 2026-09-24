@@ -41,6 +41,7 @@ steps:
       pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py'
 
 - label: Engine (1 GPU)
+  key: engine-1-gpu
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
@@ -65,6 +66,7 @@ steps:
       VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s test_config.py'
 
 - label: V1 e2e (2 GPUs)
+  key: v1-e2e-2-gpus
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
