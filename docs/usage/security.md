@@ -206,7 +206,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+- `/abort_requests` - Abort in-flight requests (also available wherever `/inference/v1/generate` is served: `--enable-scale-out` or `--tokens-only`)
 
 **Utility endpoints:**
 
