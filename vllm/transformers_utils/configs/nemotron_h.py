@@ -18,13 +18,13 @@
 """NemotronH model configuration."""
 
 import regex as re
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
 
-class NemotronHConfig(PretrainedConfig):
+class NemotronHConfig(PreTrainedConfig):
     r"""This is the configuration class to store the configuration of a
     [`NemotronHModel`]. It is used to instantiate a NemotronH model according
     to the specified arguments, defining the model architecture. Instantiating
