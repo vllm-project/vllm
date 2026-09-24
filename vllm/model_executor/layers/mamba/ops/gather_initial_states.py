@@ -42,6 +42,17 @@ def _gather_initial_states_kernel(
     tl.store(output_ptr + batch_idx * row_size + offsets, values, mask=mask)
 
 
+def _gather_initial_states_cpu(
+    state: torch.Tensor,
+    indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+) -> torch.Tensor:
+    """CPU fallback with the same contract as the Triton kernel."""
+    output = state[indices.long()].clone()
+    output[~has_initial_state] = 0
+    return output
+
+
 def gather_initial_states(
     state: torch.Tensor,
     indices: torch.Tensor,
@@ -49,13 +60,15 @@ def gather_initial_states(
 ) -> torch.Tensor:
     """Gather dense state rows, replacing uninitialized rows with zeros."""
     assert state.ndim >= 2
-    assert state.is_cuda or state.is_xpu
     assert indices.ndim == 1 and has_initial_state.ndim == 1
     assert indices.shape == has_initial_state.shape
     assert indices.device == state.device
     assert has_initial_state.device == state.device
     assert indices.dtype in (torch.int32, torch.int64)
     assert has_initial_state.dtype == torch.bool
+
+    if not (state.is_cuda or state.is_xpu):
+        return _gather_initial_states_cpu(state, indices, has_initial_state)
 
     row_size = state[0].numel()
     # Mamba pages may pad stride(0), but each state row remains dense.

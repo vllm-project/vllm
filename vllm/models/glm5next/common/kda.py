@@ -44,6 +44,14 @@ if current_platform.is_rocm():
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
+elif current_platform.is_cpu():
+    # Reference (pure-torch, recurrent-form) implementations — correctness
+    # over speed, same philosophy as the CPU MLA reference backend. See
+    # glm5next/cpu/ops/kda.py for the exact kernel semantics mirrored.
+    from vllm.models.glm5next.cpu.ops.kda import (
+        chunk_kda_with_fused_gate,
+        fused_recurrent_kda,
+    )
 else:
     from vllm.models.glm5next.nvidia.ops.third_party.kda import (
         chunk_kda_with_fused_gate,

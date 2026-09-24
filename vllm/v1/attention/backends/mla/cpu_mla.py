@@ -217,4 +217,5 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_pe_sq = k_pe_sq[valid_mask]
         target_dtype = flat.dtype
         flat[slots, :kv_lora_rank] = kv_c_normed.to(target_dtype)
-        flat[slots, kv_lora_rank:] = k_pe_sq.view(-1, pe_dim).to(target_dtype)
+        if pe_dim > 0:
+            flat[slots, kv_lora_rank:] = k_pe_sq.view(-1, pe_dim).to(target_dtype)
