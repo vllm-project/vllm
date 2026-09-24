@@ -16,13 +16,12 @@ from typing import Annotated, Literal, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import (
-    AudioDummyOptions,
-    BaseDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -239,7 +238,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_mm_config().video_pruning_rate
 
     @property
-    def sound_config(self) -> PretrainedConfig | None:
+    def sound_config(self) -> PreTrainedConfig | None:
         return getattr(self.get_hf_config(), "sound_config", None)
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -839,22 +838,19 @@ class NanoNemotronVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         (target_width, target_height), _ = (
             self.info.get_dummy_image_size_and_max_tokens(mm_counts)
         )
         processor = self.info.get_hf_processor()
 
-        image_overrides = mm_options.get("image")
-
         dummy_image = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -889,9 +885,6 @@ class NanoNemotronVLDummyInputsBuilder(
                 target_num_frames = num_frames
             num_videos = mm_counts.get("video", 0)
             video_overrides = mm_options.get("video")
-            assert video_overrides is None or isinstance(
-                video_overrides, VideoDummyOptions
-            )
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=video_width,
@@ -907,9 +900,6 @@ class NanoNemotronVLDummyInputsBuilder(
         if sound_config := self.info.sound_config:
             num_audios = mm_counts.get("audio", 0)
             audio_overrides = mm_options.get("audio") if mm_options else None
-            assert audio_overrides is None or isinstance(
-                audio_overrides, AudioDummyOptions
-            )
             tokens_per_audio = max(1, seq_len // max(num_audios, 1))
             max_audio_num_samples = MAX_AUDIO_LEN_S * sound_config.sampling_rate
             calculated_max_audio_num_samples = ParakeetExtractor.audio_length(

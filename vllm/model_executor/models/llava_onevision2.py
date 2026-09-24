@@ -54,7 +54,7 @@ from vllm.compilation.decorators import (
     support_torch_compile,
 )
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import ModalityData, MultiModalDataDict
@@ -1307,7 +1307,6 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         # ``_merge_mm_kwargs`` restricts caller ``mm_processor_kwargs`` to known
         # processor args and wraps values as hashable for the lru_cache.
         merged = _merge_mm_kwargs(model_config, AutoProcessor, **kwargs)
-        merged.setdefault("use_fast", True)
         return _load_ov2_processor(
             model_config.model,
             model_config.revision,
@@ -1471,7 +1470,7 @@ class LlavaOnevision2DummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
         n_img = mm_counts.get("image", 0)
         n_vid = mm_counts.get("video", 0)

@@ -17,12 +17,12 @@ from einops import rearrange
 from transformers import (
     BartConfig,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -388,7 +388,7 @@ class NemotronParseDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -440,7 +440,7 @@ class RadioWithNeck(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -480,7 +480,7 @@ class RadioWithNeck(nn.Module):
 
     def get_vit_model_from_radio_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> RadioModel:
         hf_config_vision = hf_config.encoder

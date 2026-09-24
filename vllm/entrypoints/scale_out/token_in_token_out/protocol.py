@@ -11,7 +11,11 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions, validate_cache_salt
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StreamOptions,
+    validate_cache_salt,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -149,14 +153,6 @@ class GenerateRequest(BaseModel):
     )
     token_ids: list[int] = Field(min_length=1)
     """The token ids to generate text from."""
-
-    assistant_tokens_mask: list[int] | None = None
-    """Per-token mask (1 = assistant-generated, 0 = not).
-
-    Only populated when the render request sets ``return_assistant_tokens_mask=True``
-    and the chat template supports ``{% generation %}``.
-    ``None`` when the mask was not requested or could not be computed.
-    """
 
     @field_validator("token_ids")
     @classmethod
@@ -368,6 +364,7 @@ class GenerateStreamResponse(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -386,6 +383,7 @@ class GenerateResponse(BaseModel):
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
@@ -604,6 +602,7 @@ class DerenderChatStreamRequest(BaseModel):
     the client carried ``stream_state``.
     """
 
+    # --8<-- [start:derender-chat-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -631,6 +630,7 @@ class DerenderChatStreamRequest(BaseModel):
 
     chat_request: ChatCompletionRequest | None = None
     """The original (post adjust_request) ChatCompletionRequest from /render."""
+    # --8<-- [end:derender-chat-stream-request]
 
 
 class DerenderCompletionStreamRequest(BaseModel):
@@ -641,6 +641,7 @@ class DerenderCompletionStreamRequest(BaseModel):
     returns the derendered chunk plus updated state.
     """
 
+    # --8<-- [start:derender-completion-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -655,6 +656,7 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
+    # --8<-- [end:derender-completion-stream-request]
 
 
 class DerenderChatStreamResponse(BaseModel):
