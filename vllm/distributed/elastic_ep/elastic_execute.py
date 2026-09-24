@@ -54,6 +54,7 @@ from vllm.platforms import current_platform
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
@@ -433,10 +434,14 @@ class ElasticEPScalingExecutor:
 
     def _release_cuda_graphs(self) -> None:
         manager = getattr(self.worker.model_runner, "cudagraph_manager", None)
+        speculator = getattr(self.worker.model_runner, "speculator", None)
         if manager is not None:
             # MRV2 captures through CudaGraphManager instead of wrapping the
             # model, so neither wrapper branch below ever fires.
             manager.release_graphs()
+            for attr in vars(speculator).values() if speculator else ():
+                if isinstance(attr, CudaGraphManager):
+                    attr.release_graphs()
 
         elif isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model
@@ -448,6 +453,8 @@ class ElasticEPScalingExecutor:
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
+            if speculator is not None:
+                reset_compile_wrapper(speculator.model)
 
         gc.collect()
         torch.accelerator.synchronize()
