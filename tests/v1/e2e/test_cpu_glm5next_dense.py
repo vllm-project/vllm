@@ -3,17 +3,19 @@
 """GLM-5.3-Flash runs dense on CPU (reference implementation).
 
 Builds a tiny GLM-5.3-Flash checkpoint (KDA + dense-MLA layers, v3.2 sparse
-config) with dummy weights and drives a prefill through the CPU engine:
+config) with dummy weights and drives prefill + decode through the CPU
+engine:
 
 * the sparse indexer is CUDA-only, so the model-config hook must fall a
   v3.2 ``index_topk`` config back to the dense MLA path on CPU;
 * the KDA layers execute through the pure-torch reference ops;
-* the MLA layers execute through the reference CPU_MLA backend.
+* the MLA layers execute through the reference CPU_MLA backend (SDPA
+  prefill; decode uses the compiled kernel for DeepSeek-style shapes and
+  a plain-SDPA fallback otherwise).
 
 The tiny random weights make generation quality meaningless; the test
-asserts the engine produces finite logits and sane token ids. Prefill is
-the focus (``max_tokens=1``): the CPU decode kernels need a CPU build of
-``mla_decode_kvcache``, which CI provides via the CPU wheel.
+asserts the engine produces finite logits and sane token ids across
+several decode steps.
 """
 
 import os
@@ -82,7 +84,7 @@ def _make_model_dir(tmp_path) -> str:
     return model_dir
 
 
-def test_glm5next_dense_prefill_on_cpu(tmp_path):
+def test_glm5next_dense_generate_on_cpu(tmp_path):
     model_dir = _make_model_dir(tmp_path)
     llm = LLM(
         model=model_dir,
@@ -95,13 +97,13 @@ def test_glm5next_dense_prefill_on_cpu(tmp_path):
     )
     outputs = llm.generate(
         [{"prompt_token_ids": PROMPT_TOKEN_IDS} for _ in range(2)],
-        SamplingParams(max_tokens=1, temperature=0.0, logprobs=5),
+        SamplingParams(max_tokens=8, temperature=0.0, logprobs=5),
     )
     assert len(outputs) == 2
     for out in outputs:
         ids = out.outputs[0].token_ids
-        assert len(ids) == 1
-        assert 0 <= ids[0] < VOCAB_SIZE
+        assert len(ids) == 8
+        assert all(0 <= t < VOCAB_SIZE for t in ids)
         # dummy weights still produce a full distribution over the vocab
         logprobs = out.outputs[0].logprobs[0]
         assert len(logprobs) == 5

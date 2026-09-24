@@ -168,23 +168,51 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q = torch.cat(q, dim=-1)
         q = q.contiguous()
 
-        bs, num_heads, _ = q.shape
+        bs, num_heads, head_dim = q.shape
         out = torch.zeros(
             bs, num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
 
-        # The CPU kernel is templated on int32 block_tables / seq_lens.
-        block_table = attn_metadata.decode.block_table.to(torch.int32)
-        seq_lens = attn_metadata.decode.seq_lens.to(torch.int32)
-
-        ops.mla_decode_kvcache_cpu(
-            out,
-            q,
-            kv_c_and_k_pe_cache,
-            self.scale,
-            block_table,
-            seq_lens,
+        # The compiled kernel is only templated for DeepSeek-style shapes
+        # (head_dim 576 == kv_lora_rank 512 + rope 64, block_size 16); other
+        # MLA layouts (e.g. GLM-5.3-Flash's nope-only 512/512) fall back to
+        # this plain-SDPA formulation, which computes the same absorbed MQA.
+        block_size = kv_c_and_k_pe_cache.shape[1]
+        compiled_kernel_usable = (
+            hasattr(ops, "mla_decode_kvcache_cpu")
+            and head_dim == 576
+            and self.kv_lora_rank == 512
+            and block_size == 16
         )
+        if compiled_kernel_usable:
+            # The CPU kernel is templated on int32 block_tables / seq_lens.
+            block_table = attn_metadata.decode.block_table.to(torch.int32)
+            seq_lens = attn_metadata.decode.seq_lens.to(torch.int32)
+
+            ops.mla_decode_kvcache_cpu(
+                out,
+                q,
+                kv_c_and_k_pe_cache,
+                self.scale,
+                block_table,
+                seq_lens,
+            )
+            return out, None
+
+        block_table = attn_metadata.decode.block_table
+        seq_lens = attn_metadata.decode.seq_lens
+        for b in range(bs):
+            length = int(seq_lens[b])
+            if length == 0:
+                continue
+            blocks = block_table[b, : (length + block_size - 1) // block_size]
+            rows = kv_c_and_k_pe_cache[blocks.long()].reshape(-1, head_dim)
+            rows = rows[:length].float()
+            scores = torch.einsum("hd,ld->hl", q[b].float(), rows) * self.scale
+            probs = torch.softmax(scores, dim=-1)
+            out[b] = torch.einsum("hl,ld->hd", probs, rows[:, : self.kv_lora_rank]).to(
+                out.dtype
+            )
         # The parent only consumes the LSE when DCP is active, which we
         # disable, so returning None here is safe.
         return out, None
