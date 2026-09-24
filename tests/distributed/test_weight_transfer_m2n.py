@@ -265,6 +265,63 @@ class TestWireTypes:
 
         engine._reshard.assert_not_called()
 
+    def test_fallback_tensors_share_one_load_weights_invocation(self, monkeypatch):
+        class CoupledModel:
+            def __init__(self):
+                self.calls = 0
+                self.loaded = []
+
+            def load_weights(self, weights):
+                self.calls += 1
+                received = list(weights)
+                if [name for name, _ in received] == ["pair.weight", "pair.scale"]:
+                    self.loaded = [
+                        (name, tensor.clone()) for name, tensor in received
+                    ]
+
+        model = CoupledModel()
+        direct = torch.zeros(1)
+        engine = object.__new__(M2NWeightTransferEngine)
+        engine._handle = object()
+        engine.model_update_group = object()
+        engine.device = torch.device("cpu")
+        engine.model = model
+        engine._index = {"pair.weight": 0, "direct": 1, "pair.scale": 2}
+        engine._metas = [
+            M2NParamMeta(name, torch.float32, (1,), REPLICATED)
+            for name in engine._index
+        ]
+        engine._parameter_destinations = [
+            M2NDestination("pair.weight", REPLICATED, None),
+            M2NDestination("direct", REPLICATED, direct),
+            M2NDestination("pair.scale", REPLICATED, None),
+        ]
+        reshard_order = []
+
+        def reshard(comm, stream, meta, placements, buffer):
+            reshard_order.append(meta.name)
+            buffer.fill_(len(reshard_order))
+
+        engine._reshard = reshard
+        stream = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.comm_ptr", lambda group: 0
+        )
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+
+        engine.receive_weights(
+            M2NWeightTransferUpdateInfo(
+                names=["pair.weight", "direct", "pair.scale"]
+            )
+        )
+
+        assert model.calls == 1
+        assert [name for name, _ in model.loaded] == ["pair.weight", "pair.scale"]
+        assert [tensor.item() for _, tensor in model.loaded] == [1, 3]
+        assert direct.item() == 2
+        assert reshard_order == ["pair.weight", "direct", "pair.scale"]
+        assert stream.synchronize.call_count == 2
+
     def test_trainer_rank_must_be_a_trainer_rank(self):
         """A trainer rank must fall within the trainer portion of the group."""
         with pytest.raises(ValueError, match="num_trainer_ranks"):

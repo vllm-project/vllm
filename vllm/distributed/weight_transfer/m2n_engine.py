@@ -20,6 +20,7 @@ inside `receive_weights` while the trainer is sending. Driving that from the
 trainer is the trainer engine's job.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -370,7 +371,11 @@ class M2NWeightTransferEngine(
 
         comm = comm_ptr(self.model_update_group)
         stream = torch.cuda.current_stream()
-        with disable_mtp_completeness_check():
+
+        # Reshard lazily so one `load_weights` invocation sees the complete
+        # fallback sequence without staging every full tensor at once. Direct
+        # destinations still execute in request order as the iterator advances.
+        def reshard_requested_weights() -> Iterator[tuple[str, torch.Tensor]]:
             for name, index in requested:
                 meta = self._metas[index]
                 destination = self._parameter_destinations[index]
@@ -386,8 +391,23 @@ class M2NWeightTransferEngine(
                     # `load_weights` reads on the host stream, so the transfer
                     # has to have landed before it runs.
                     stream.synchronize()
-                    self.model.load_weights([(name, buffer)])
-                    del buffer
+                    yield name, buffer
+
+        has_fallback = any(
+            self._parameter_destinations[index].tensor is None
+            for _, index in requested
+        )
+        with disable_mtp_completeness_check():
+            received_weights = reshard_requested_weights()
+            if has_fallback:
+                # Some model loaders keep invocation-local state to combine
+                # related checkpoint tensors, so preserve one iterable scope.
+                self.model.load_weights(received_weights)
+            else:
+                # The iterator performs the reshards. With nothing to yield to
+                # `load_weights`, exhaust it here to execute direct transfers.
+                for _ in received_weights:
+                    pass
 
     def _reshard(
         self,
