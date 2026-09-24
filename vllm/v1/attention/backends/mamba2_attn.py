@@ -23,8 +23,7 @@ def compute_varlen_chunk_metadata(
     query_start_loc: torch.Tensor,
     chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Build chunk-aligned, variable-length metadata used by Mamba2 SSD kernels.
+    """Build chunk-aligned, variable-length metadata used by Mamba2 SSD kernels.
 
     Given per-sequence cumulative token starts `query_start_loc` of shape [B+1]
     and a physical `chunk_size`, returns three tensors on the same device:
@@ -141,6 +140,7 @@ class Mamba2AttentionMetadataBuilder(
             common_attn_metadata,
             num_accepted_tokens=kwargs.get("num_accepted_tokens"),
             prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
+            num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
         )
 
         seq_idx_p = None

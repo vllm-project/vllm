@@ -18,6 +18,11 @@ from vllm.envs import (
 from vllm.exceptions import VLLMValidationError
 
 
+def test_object_storage_shm_default_name():
+    """The generated name must fit macOS's shared-memory name limit."""
+    assert len(envs._generate_shm_name()) <= 30
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None
@@ -35,6 +40,12 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "10.0.0.15")
 
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
+
+
+def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_API_KEY", "sk-super-secret")
+
+    assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):

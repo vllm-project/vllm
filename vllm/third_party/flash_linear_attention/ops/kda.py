@@ -529,6 +529,22 @@ class FusedRMSNormGated(CustomOp):
             residual_in_fp32=residual_in_fp32,
         )
 
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+    ) -> torch.Tensor:
+        return self.forward_cuda(
+            x,
+            g,
+            residual=residual,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+        )
+
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
@@ -1332,6 +1348,7 @@ def fused_kda_gate_chunk_cumsum(
         USE_LOWER_BOUND=lower_bound is not None,
     )
     return y
+
 
 def _chunk_kda_fwd_with_cumulative_g(
     q: torch.Tensor,

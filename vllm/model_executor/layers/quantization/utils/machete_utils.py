@@ -17,8 +17,7 @@ def query_machete_supported_quant_types(zero_points: bool) -> list[ScalarType]:
 
 
 def query_machete_supported_group_sizes(act_type: torch.dtype) -> list[int]:
-    """
-    Queries the supported group sizes for Machete based on the activation type.
+    """Queries the supported group sizes for Machete based on the activation type.
 
     Args:
         act_type: The activation data type (torch.float16, torch.bfloat16).
@@ -27,6 +26,7 @@ def query_machete_supported_group_sizes(act_type: torch.dtype) -> list[int]:
         A list of supported group sizes. The group size must
         be divisible by `TileShapeK = 128 * 8 // num_bits(act_type)`.
         -1 indicates per-channel quantization.
+
     """
     if act_type in [torch.float16, torch.bfloat16]:
         return [-1, 64, 128]

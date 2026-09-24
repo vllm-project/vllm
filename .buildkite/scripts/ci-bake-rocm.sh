@@ -15,7 +15,7 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
@@ -23,7 +23,7 @@ DEFAULT_CI_BASE_METADATA_VERSION="3"
 # local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/install_protoc.sh build_rust.sh"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/build_rust.sh"
 DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
@@ -199,11 +199,13 @@ get_buildkite_target_repo_url() {
 
 git_fetch_with_timeout() {
     local timeout_secs="${ROCM_CACHE_GIT_FETCH_TIMEOUT:-60}"
+    local -a fetch_command=(git fetch --no-auto-maintenance)
 
+    # Detached maintenance can race a later shallow fetch on .git/shallow.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" git fetch "$@"
+        timeout "${timeout_secs}s" "${fetch_command[@]}" "$@"
     else
-        git fetch "$@"
+        "${fetch_command[@]}" "$@"
     fi
 }
 
@@ -416,7 +418,7 @@ validate_ci_build_context_source() {
 
 describe_ci_revision() {
     git -C "$1" describe --tags --long --abbrev=10 \
-        --match '*[0-9]*' "$2" 2>/dev/null
+        --match 'v[0-9]*' "$2" 2>/dev/null
 }
 
 write_ci_git_archival_metadata() {
@@ -538,6 +540,26 @@ prepare_ci_build_context() {
     echo "Using canonical CI Docker context: ${ROCM_BUILD_CONTEXT_ROOT}"
 }
 
+configure_custom_rocm_stages() {
+    using_custom_rocm_dockerfiles || return 0
+    local context_root="${ROCM_BUILD_CONTEXT_ROOT:-.}"
+    local dockerfile="${context_root}/${CI_BASE_DOCKERFILE}"
+    local stages=""
+
+    (cd "${context_root}" && \
+        validate_rocm_dockerfile "${CI_BASE_DOCKERFILE}" \
+            ci_base test export_vllm export_test_smoke csrc-build rust-build) \
+        || return $?
+    # Hash all stages for custom layouts, including additional helper stages.
+    stages=$(rocm_dockerfile_stages "${dockerfile}" | paste -sd ' ')
+    CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${stages}}"
+    ROCM_CSRC_DOCKERFILE_STAGES="${ROCM_CSRC_DOCKERFILE_STAGES:-${stages}}"
+    ROCM_RUST_DOCKERFILE_STAGES="${ROCM_RUST_DOCKERFILE_STAGES:-${stages}}"
+    if [[ " ${stages} " != *" build_rocshmem "* ]]; then
+        unset ROCSHMEM_BRANCH ROCSHMEM_CACHE_KEY DEEPEP_CACHE_KEY
+    fi
+}
+
 compose_dependency_cache_key() {
     local prefix="$1"
     local material="$2"
@@ -567,11 +589,11 @@ hash_dockerfile_stages() {
             }
             emit = 0
         }
-        $1 == "FROM" {
+        toupper($1) == "FROM" {
             stage = ""
             for (idx = 1; idx <= NF; idx++) {
                 if (tolower($idx) == "as" && idx < NF) {
-                    stage = $(idx + 1)
+                    stage = tolower($(idx + 1))
                 }
             }
             emit = (stage in wanted)
@@ -611,11 +633,11 @@ discover_dockerfile_stage_args() {
         }
         {
             line = $0
-            if ($1 == "FROM") {
+            if (toupper($1) == "FROM") {
                 stage = ""
                 for (idx = 1; idx <= NF; idx++) {
                     if (tolower($idx) == "as" && idx < NF) {
-                        stage = $(idx + 1)
+                        stage = tolower($(idx + 1))
                     }
                 }
                 emit = (stage in wanted)
@@ -628,7 +650,7 @@ discover_dockerfile_stage_args() {
             for (idx = 1; idx <= line_count; idx++) {
                 line = lines[idx]
                 arg_name = line
-                sub(/^[[:space:]]*ARG[[:space:]]+/, "", arg_name)
+                sub(/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+/, "", arg_name)
                 if (arg_name != line) {
                     sub(/[=[:space:]].*/, "", arg_name)
                     if (arg_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
@@ -714,7 +736,7 @@ extract_dockerfile_arg_default() {
     if [[ -n "${ROCM_BUILD_CONTEXT_ROOT:-}" && "${dockerfile}" != /* ]]; then
         physical_dockerfile="${ROCM_BUILD_CONTEXT_ROOT}/${dockerfile}"
     fi
-    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
         "${physical_dockerfile}" | head -1
 }
 
@@ -838,6 +860,29 @@ should_upload_wheel_artifacts() {
     [[ "${TARGET}" == *"with-wheel"* \
         || "${TARGET}" == *"export-wheel"* \
         || "${TARGET}" == *"artifact"* ]]
+}
+
+should_export_rocm_smoke() {
+    [[ "${TARGET}" == "test-rocm-ci-with-wheel" \
+        || "${TARGET}" == "smoke-test-rocm-ci" ]]
+}
+
+verify_rocm_smoke_export() {
+    local marker="./build/rocm-smoke-export/vllm-smoke-ok"
+    local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
+    local actual_smoke_id=""
+
+    should_export_rocm_smoke || return 0
+    if [[ ! -f "${marker}" ]]; then
+        echo "ROCm BuildKit smoke marker is missing: ${marker}" >&2
+        return 1
+    fi
+    actual_smoke_id="$(< "${marker}")"
+    if [[ "${actual_smoke_id}" != "${expected_smoke_id}" ]]; then
+        echo "ROCm BuildKit smoke marker belongs to ${actual_smoke_id}, not ${expected_smoke_id}" \
+            >&2
+        return 1
+    fi
 }
 
 get_remote_image_label() {
@@ -975,7 +1020,21 @@ create_and_bootstrap_builder() {
 }
 
 init_config() {
+    # shellcheck source=.buildkite/scripts/rocm/build-config.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/rocm/build-config.sh"
+    configure_rocm_build
+
     TARGET="${1:-test-ci}"
+    if using_custom_rocm_dockerfiles; then
+        if [[ -z "${BASE_IMAGE:-}" ]]; then
+            echo "Custom ROCm builds require BASE_IMAGE from the selected base handoff" >&2
+            return 1
+        fi
+        if ! is_ci_base_target && [[ -z "${CI_BASE_IMAGE:-}" ]]; then
+            echo "Custom ROCm builds require CI_BASE_IMAGE from the selected ci_base handoff" >&2
+            return 1
+        fi
+    fi
     BAKE_TARGETS=("${TARGET}")
     DEPENDENCY_CACHE_TARGETS=()
     CI_HCL_SOURCE="${CI_HCL_SOURCE:-${CI_HCL_FILE:-${DEFAULT_CI_HCL_SOURCE}}}"
@@ -985,10 +1044,12 @@ init_config() {
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950}"
     CI_BASE_CONTENT_FILES="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
     CI_BASE_DOCKERFILE="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
-    CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    if ! using_custom_rocm_dockerfiles; then
+        CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    fi
     CI_BASE_METADATA_VERSION="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
     CI_BASE_IMAGE_TAG="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
-    export PYTORCH_ROCM_ARCH
+    export PYTORCH_ROCM_ARCH CI_BASE_DOCKERFILE
 
     SCRIPT_TMP_DIR=$(mktemp -d -t ci-bake-rocm.XXXXXX)
     CI_HCL_PATH="${SCRIPT_TMP_DIR}/ci.hcl"
@@ -1017,6 +1078,11 @@ print_header() {
 }
 
 validate_inputs() {
+    if using_custom_rocm_dockerfiles; then
+        validate_rocm_dockerfile "${ROCM_BASE_DOCKERFILE}" || return $?
+        validate_rocm_dockerfile "${CI_BASE_DOCKERFILE}" \
+            ci_base test export_vllm export_test_smoke csrc-build rust-build || return $?
+    fi
     if [[ ! -f "${VLLM_BAKE_FILE}" ]]; then
         echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE}"
         echo "Make sure you're running from the vLLM repository root"
@@ -1044,6 +1110,11 @@ load_ci_hcl() {
 
 init_bake_files() {
     BAKE_FILES=(-f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}")
+    if using_custom_rocm_dockerfiles; then
+        # Custom stacks reuse local cache without replacing the
+        # standard ROCm registry caches for the same commit or branch.
+        BAKE_FILES+=(--set '*.cache-to=')
+    fi
 }
 
 compute_ci_base_hash_if_needed() {
@@ -1384,8 +1455,9 @@ maybe_skip_existing_image() {
         echo "FORCE_BUILD=1 set; skipping existing-image check"
         return 0
     fi
-    if ! is_ci_base_target && should_upload_wheel_artifacts; then
-        echo "Artifact-producing targets always run for the current build"
+    if ! is_ci_base_target \
+        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
+        echo "Local-output targets always run for the current build"
         return 0
     fi
 
@@ -1739,7 +1811,12 @@ EOF
 
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
-        csrc-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+        csrc-rocm-ci \
+            | test-rocm-ci \
+            | test-rocm-ci-with-wheel \
+            | test-rocm-ci-with-artifacts \
+            | export-wheel-rocm \
+            | smoke-test-rocm-ci)
             return 0
             ;;
         *)
@@ -1750,7 +1827,12 @@ uses_rocm_csrc_cache() {
 
 uses_rocm_rust_cache() {
     case "${TARGET}" in
-        rust-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+        rust-rocm-ci \
+            | test-rocm-ci \
+            | test-rocm-ci-with-wheel \
+            | test-rocm-ci-with-artifacts \
+            | export-wheel-rocm \
+            | smoke-test-rocm-ci)
             return 0
             ;;
         *)
@@ -1768,7 +1850,7 @@ compute_rocm_csrc_content_hash() {
     local -a content_args=()
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     read -r -a content_paths <<< "${content_files}"
     mapfile -t content_args < <(
         get_content_arg_names "${dockerfile_rocm}" "${stages}" "${ROCM_CSRC_CONTENT_ARGS:-}"
@@ -1817,7 +1899,7 @@ compute_rocm_rust_content_hash() {
     local -a content_args=()
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     read -r -a content_paths <<< "${content_files}"
     mapfile -t content_args < <(
         get_content_arg_names \
@@ -1907,7 +1989,7 @@ write_rocm_build_arg_override() {
     local arg_value=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     mapfile -t arg_names < <(
         {
             get_content_arg_names \
@@ -2138,7 +2220,7 @@ write_rocm_cache_override() {
     # exporter unless it is requested explicitly.
     if ((${#rust_cache_to[@]} > 0)); then
         case "${TARGET}" in
-            test-rocm-ci|export-wheel-rocm)
+            test-rocm-ci|export-wheel-rocm|smoke-test-rocm-ci)
                 BAKE_TARGETS=("rust-rocm-ci" "${BAKE_TARGETS[@]}")
                 ;;
         esac
@@ -2188,6 +2270,15 @@ EOF
         cat <<EOF
 }
 
+target "smoke-test-rocm-ci" {
+  cache-from = concat(
+    get_cache_from_rocm(),
+EOF
+        write_hcl_string_list "    " "${combined_content_cache_from[@]}"
+        cat <<EOF
+  )
+}
+
 target "export-wheel-rocm" {
   cache-from = concat(
     get_cache_from_rocm(),
@@ -2214,7 +2305,7 @@ extract_dependency_pins() {
     local val=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     physical_dockerfile="${dockerfile_rocm}"
     if [[ -n "${ROCM_BUILD_CONTEXT_ROOT:-}" && "${dockerfile_rocm}" != /* ]]; then
         physical_dockerfile="${ROCM_BUILD_CONTEXT_ROOT}/${dockerfile_rocm}"
@@ -2230,12 +2321,12 @@ extract_dependency_pins() {
         fi
 
         val=$(
-            sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${var}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+            sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${var}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
                 "${physical_dockerfile}" | head -1
         )
         if [[ -n "${val}" ]]; then
             export "${var}=${val}"
-            echo "Extracted ${var}=${val} from Dockerfile.rocm"
+            echo "Extracted ${var}=${val} from ${dockerfile_rocm}"
         fi
     done
 }
@@ -2252,7 +2343,7 @@ compute_dependency_cache_keys() {
     local deepep_material=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     nixl_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "NIXL_BRANCH")
     ucx_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "UCX_BRANCH")
     rocshmem_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "ROCSHMEM_BRANCH")
@@ -2642,6 +2733,7 @@ main() {
     init_bake_files
     if is_ci_base_target; then
         prepare_ci_build_context
+        configure_custom_rocm_stages
     fi
     compute_ci_base_hash_if_needed
     configure_ci_base_image_refs
@@ -2652,6 +2744,7 @@ main() {
     # version metadata only after that lookup sees the available tag history.
     if ! is_ci_base_target; then
         prepare_ci_build_context
+        configure_custom_rocm_stages
     fi
     extract_dependency_pins
     write_rocm_build_arg_override
@@ -2673,8 +2766,14 @@ main() {
         # clean prevents a failed/retried export from packaging a stale wheel.
         rm -rf ./wheel-export
     fi
+    if should_export_rocm_smoke; then
+        # The marker is a build output, not a cache. Never accept stale output
+        # from an earlier build or retry.
+        rm -rf ./build/rocm-smoke-export
+    fi
     seed_dependency_caches_if_needed
     run_bake
+    verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present

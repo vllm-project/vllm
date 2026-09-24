@@ -35,12 +35,10 @@ from vllm.sequence import IntermediateTensors
 
 
 class _Tokenizer:
-    def encode(self, text, add_special_tokens=False):
-        del add_special_tokens
+    def encode(self, text, **kwargs):
         return [ord(char) for char in text]
 
     def decode(self, token_ids, **kwargs):
-        del kwargs
         return "".join(chr(token_id) for token_id in token_ids)
 
     def batch_decode(self, batch_token_ids, **kwargs):
@@ -170,7 +168,6 @@ def _build_moss_audio_processor(cache=None):
         MossAudioMultiModalProcessor(
             info,
             MossAudioDummyInputsBuilder(info),
-            cache=cache,
         ),
         ctx,
     )
@@ -261,21 +258,24 @@ def test_moss_audio_multimodal_processor_handles_token_and_cache_paths():
     )
 
     cache = MultiModalProcessorOnlyCache(ctx.model_config)
-    cached_processor, _ = _build_moss_audio_processor(cache=cache)
+    cached_processor, _ = _build_moss_audio_processor()
     cached_text_miss = cached_processor(
         prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
+        cache=cache,
     )
     cached_text_hit = cached_processor(
         prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
+        cache=cache,
     )
     cached_token_hit = cached_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
+        cache=cache,
     )
 
     expected_audio_tokens = MossAudioEncoder.compute_num_audio_tokens(raw_mel_len)

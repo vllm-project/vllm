@@ -60,6 +60,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.supports_multimodal_inputs = False
     vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.is_diffusion = False
     vllm_config.model_config.max_model_len = 1024
@@ -372,8 +373,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
     def test_streaming_e2e_lifecycle(self):
-        """
-        Comprehensive integration test covering complete streaming request lifecycle
+        """Comprehensive integration test covering complete streaming request lifecycle
         including scheduler state management and aliasing bug prevention.
 
         FULL LIFECYCLE:

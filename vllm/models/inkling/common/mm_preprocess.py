@@ -13,9 +13,7 @@ import torch
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config.multimodal import (
-    AudioDummyOptions,
-    BaseDummyOptions,
-    ImageDummyOptions,
+    MultiModalDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
@@ -135,8 +133,8 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
         # Use spellings the renderer would emit; tokenization is bypassed in
-        # _call_hf_processor (we build input_ids directly), so the exact text
-        # only needs to be a stable per-item marker.
+        # _apply_hf_processor_main (we build input_ids directly), so the exact
+        # text only needs to be a stable per-item marker.
         return ("<|content_image|>" * num_images) + (
             "<|content_audio_input|>" * num_audios
         )
@@ -145,7 +143,7 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         config = self.info.get_hf_config()
         num_images = mm_counts.get("image", 0)
@@ -156,12 +154,11 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
             patch_size = getattr(config.vision_config, "patch_size", 40)
             # A square image ~4 patches wide so the dummy emits several patches.
             side = patch_size * 4
-            image_overrides = mm_options.get("image")
             mm_data["image"] = self._get_dummy_images(
                 width=side,
                 height=side,
                 num_images=num_images,
-                overrides=cast(ImageDummyOptions | None, image_overrides),
+                overrides=mm_options.get("image"),
             )
         if num_audios:
             # Size the dummy at the maximum allowed audio so memory/encoder
@@ -169,48 +166,38 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
             params = self.info.get_hf_processor().audio_feature_extractor.params
             hop = int(round(params.audio_token_duration_s * params.sample_rate))
             audio_len = MAX_AUDIO_TOKENS * hop
-            audio_overrides = mm_options.get("audio")
             mm_data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=cast(AudioDummyOptions | None, audio_overrides),
+                overrides=mm_options.get("audio"),
             )
         return mm_data
 
 
 class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo]):
-    def _hf_processor_applies_updates(
+    def _apply_hf_processor_main(
         self,
-        prompt_text: str,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Inkling is not a standard HF processor (no fused text+mm call), so we run
-        # the vendored extractors ourselves and tokenize the text separately.
-        # The MM placeholders in `prompt` are expanded later by the prompt
-        # updates, so here we emit ONE placeholder id per media item.
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = self.info.get_tokenizer()
 
         images = mm_data.get("images") or []
-        audios = mm_data.get("audios") or []
+        audios = mm_data.get("audio") or []
         if not isinstance(images, list):
             images = list(cast(Iterable[Any], images))
         if not isinstance(audios, list):
             audios = list(cast(Iterable[Any], audios))
 
         prompt_ids = self._tokenize_with_placeholders(
-            prompt, tokenizer, len(images), len(audios)
+            prompt_text, tokenizer, len(images), len(audios)
         )
 
         data: dict[str, Any] = {"input_ids": [prompt_ids]}
@@ -242,7 +229,10 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
             data["input_audio_features"] = input_audio_features
             data["num_audio_tokens"] = torch.tensor(num_audio_tokens, dtype=torch.int64)
 
-        return BatchFeature(data=data, tensor_type=None)
+        processed_data = BatchFeature(data=data, tensor_type=None)
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _tokenize_with_placeholders(
         self,
@@ -275,10 +265,8 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
                 ids.extend(tokenizer.encode(chunk, add_special_tokens=False))
 
         # Reconcile against the declared media counts only when media is
-        # present. With no media items -- e.g. the base text-only tokenization
-        # probe (``_apply_hf_processor_text_only``), which calls this via
-        # ``_call_hf_processor`` with empty ``mm_data`` -- emit the markers
-        # verbatim; the marker<->item correspondence is enforced later by
+        # present. With no media items, emit the markers verbatim; the
+        # marker<->item correspondence is enforced later by
         # ``_get_prompt_updates`` once the media features are available.
         if num_images or num_audios:
             # Fail clearly on a placeholder/media-count mismatch instead of
@@ -307,12 +295,12 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
         return dict(
             # Ragged per-image patches, grouped by num_patches.
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             # Ragged per-audio frames, grouped by num_audio_tokens.
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
                 "audio", num_audio_tokens
             ),
-            num_audio_tokens=MultiModalFieldConfig.batched("audio"),
+            num_audio_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
