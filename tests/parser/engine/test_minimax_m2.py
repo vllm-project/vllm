@@ -262,3 +262,17 @@ class TestReasoning:
 
     def test_extract_content_ids_after_end_token(self, parser):
         assert parser.extract_content_ids([1, 99, 2, 3]) == [2, 3]
+
+class TestThinkEndInContent:
+    def test_closing_think_end_in_content_is_preserved(self, parser, mock_request):
+        result = parser.extract_tool_calls(
+            '<think>thoughts</think>answer</think>'
+            '<minimax:tool_call><invoke name="add">'
+            '<parameter name="a">3</parameter>'
+            '</invoke></minimax:tool_call>',
+            mock_request,
+        )
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "add"
+        assert result.content == "answer</think>"
+
