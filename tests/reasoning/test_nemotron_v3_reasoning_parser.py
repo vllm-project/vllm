@@ -9,8 +9,8 @@ import regex as re
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.engine.registered_adapters import NemotronV3ParserReasoningAdapter
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.reasoning.nemotron_v3_reasoning_parser import NemotronV3ReasoningParser
 
 parser_name = "nemotron_v3"
 
@@ -27,6 +27,7 @@ class FakeNemotronTokenizer:
             "<think>": 1,
             "</think>": 2,
         }
+        self._inv_vocab = {v: k for k, v in self._vocab.items()}
         self._pattern = re.compile(r"(<think>|</think>)")
 
     def get_vocab(self) -> dict[str, int]:
@@ -41,6 +42,9 @@ class FakeNemotronTokenizer:
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         return "".join(tokens)
+
+    def decode(self, token_ids: list[int]) -> str:
+        return "".join(self._inv_vocab.get(tid, f"<unk:{tid}>") for tid in token_ids)
 
 
 @pytest.fixture
@@ -210,7 +214,7 @@ def _token_id(token: str) -> int:
 
 def _make_reasoning_parser(tokenizer):
     class _NemotronParser(DelegatingParser):
-        reasoning_parser_cls = NemotronV3ReasoningParser
+        reasoning_parser_cls = NemotronV3ParserReasoningAdapter
         tool_parser_cls = None
 
     return _NemotronParser(tokenizer)

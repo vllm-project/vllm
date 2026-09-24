@@ -1,24 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+mod abort_requests;
 mod cache;
 mod collective_rpc;
 mod health;
 mod inference;
+mod kv_event_sources;
 mod load;
 mod lora;
 mod metrics;
 pub(crate) mod openai;
 mod pause;
+mod profile;
+pub(super) mod render;
 mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod weight_transfer;
+mod world_size;
 
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
+use tracing::{info, warn};
 
+use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
 use crate::state::AppState;
 
@@ -37,10 +49,12 @@ fn runtime_lora_updating_enabled() -> bool {
 
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let scale_out_endpoints_enabled = state.api_server_options.enable_scale_out;
     build_router_with_options(
         state,
         server_dev_mode_enabled(),
         runtime_lora_updating_enabled(),
+        scale_out_endpoints_enabled,
     )
 }
 
@@ -55,13 +69,22 @@ fn build_router_with_dev_mode_and_lora(
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
 ) -> Router {
-    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled)
+    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled, true)
+}
+
+#[cfg(test)]
+fn build_router_with_scale_out_endpoints(
+    state: Arc<AppState>,
+    scale_out_endpoints_enabled: bool,
+) -> Router {
+    build_router_with_options(state, false, false, scale_out_endpoints_enabled)
 }
 
 fn build_router_with_options(
     state: Arc<AppState>,
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
+    scale_out_endpoints_enabled: bool,
 ) -> Router {
     let mut router = Router::new()
         // Health & monitoring
@@ -69,14 +92,20 @@ fn build_router_with_options(
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
+        .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
-        .route("/detokenize", post(tokenize::detokenize))
-        .route("/inference/v1/generate", post(inference::generate));
+        .route("/detokenize", post(tokenize::detokenize));
+
+    if scale_out_endpoints_enabled {
+        router = router.route("/inference/v1/generate", post(inference::generate));
+    } else {
+        info!("scale-out endpoints are disabled; pass --enable-scale-out to enable them");
+    }
 
     if runtime_lora_updating_enabled {
         router = router
@@ -91,24 +120,67 @@ fn build_router_with_options(
             .route("/reset_mm_cache", post(cache::reset_mm_cache))
             .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
             .route("/collective_rpc", post(collective_rpc::collective_rpc))
+            .route(
+                "/init_weight_transfer_engine",
+                post(weight_transfer::init_weight_transfer_engine),
+            )
+            .route(
+                "/start_weight_update",
+                post(weight_transfer::start_weight_update),
+            )
+            .route(
+                "/start_draft_weight_update",
+                post(weight_transfer::start_draft_weight_update),
+            )
+            .route("/update_weights", post(weight_transfer::update_weights))
+            .route(
+                "/finish_weight_update",
+                post(weight_transfer::finish_weight_update),
+            )
+            .route(
+                "/update_weight_version",
+                post(weight_transfer::update_weight_version),
+            )
+            .route("/weight_info", get(weight_transfer::weight_info))
+            .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
+            .route(
+                "/release_kv_cache_memory",
+                post(sleep::release_kv_cache_memory),
+            )
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
             .route("/pause", post(pause::pause))
             .route("/resume", post(pause::resume))
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
+            .route("/get_world_size", get(world_size::get_world_size))
+    }
+
+    if let Some(profiler) = &state.profiler {
+        warn!(
+            mode = profiler,
+            "profiler is enabled in the API server; \
+             this should only be used for local development",
+        );
+        router = router
+            .route("/start_profile", post(profile::start_profile))
+            .route("/stop_profile", post(profile::stop_profile));
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
+        .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::track_server_load,
         ))
-        .layer(from_fn(middleware::track_http_metrics));
+        .layer(from_fn(middleware::track_http_metrics))
+        .layer(middleware::cors_layer(&state.cors))
+        .layer(from_fn(middleware::strip_cors_on_no_origin));
 
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(

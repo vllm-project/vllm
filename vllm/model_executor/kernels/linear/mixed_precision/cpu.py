@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -144,9 +144,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
 
-        if (not self.config.has_g_idx) and (self.w_gidx_name is not None):
-            setattr(layer, self.w_gidx_name, None)
-
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format
         assert weights.input_dim == weights.packed_dim
@@ -168,14 +165,15 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             if zp.output_dim == 0:
                 zp.data = zp.t().contiguous()
 
+        supports_amx = torch.cpu._is_amx_tile_supported()
+        supports_riscv = current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
         layer.use_w4a8 = (
             envs.VLLM_CPU_INT4_W4A8
-            and not self.config.has_g_idx
             and self.config.act_type == torch.bfloat16
-            and torch.cpu._is_amx_tile_supported()
+            and (supports_amx or supports_riscv)
         )
         # layer.use_w4a8 = False
-        # AWQ format will be converted to GPTQ format in `AWQMarlinLinearMethod`
+        # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`
         if layer.use_w4a8:
             self._process_gptq_weights_w4a8(layer)
         else:
@@ -187,7 +185,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         if layer.use_w4a8:
             x = ops.int4_scaled_mm_cpu(
                 x=x,
@@ -202,7 +200,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 q_weight=w_q,
                 scales=w_s,
                 zeros=w_zp,
-                g_idx=w_gidx,
                 bias=bias,
                 pack_factor=8,  # 32 // 4
                 isa_hint=layer.isa_hint,
@@ -214,5 +211,7 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
     supports_amx = torch.cpu._is_amx_tile_supported()
     if supports_amx and dtype in (torch.bfloat16,):
         return "amx"
+    elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+        return "rvv"
     else:
         return "vec"

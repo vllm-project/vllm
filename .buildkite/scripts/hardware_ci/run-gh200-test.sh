@@ -5,7 +5,7 @@
 set -ex
 
 # Skip the new torch installation during build since we are using the specified version for arm64 in the Dockerfile
-python3 use_existing_torch.py
+python3 tools/use_existing_torch.py
 
 # Try building the docker image
 DOCKER_BUILDKIT=1 docker build . \
@@ -15,7 +15,7 @@ DOCKER_BUILDKIT=1 docker build . \
   -t gh200-test \
   --build-arg max_jobs=66 \
   --build-arg nvcc_threads=2 \
-  --build-arg RUN_WHEEL_CHECK=false \
+  --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-b8b5f17a7d9ccfc25bbc5cf17b3fcea12964a042 \
   --build-arg torch_cuda_arch_list="9.0+PTX"
 
 # Setup cleanup

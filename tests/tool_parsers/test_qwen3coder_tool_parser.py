@@ -9,17 +9,17 @@ import pytest
 from openai.types.responses.function_tool import FunctionTool
 from xgrammar import StructuralTag
 
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -423,7 +423,7 @@ def test_extract_tool_calls(
 def test_extract_tool_calls_fallback_no_tags(
     qwen3_tool_parser,
 ):
-    """Test fallback parsing when XML tags are missing"""
+    """Test fallback parsing when XML tags are missing."""
     model_output = """<function=get_current_weather>
 <parameter=city>
 Dallas
@@ -444,7 +444,7 @@ TX
 
 
 def test_extract_tool_calls_type_conversion(qwen3_tokenizer):
-    """Test parameter type conversion based on tool schema"""
+    """Test parameter type conversion based on tool schema."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -862,7 +862,7 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test incremental streaming behavior including typed parameters."""
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
@@ -932,7 +932,7 @@ def test_extract_tool_calls_streaming(
 def test_extract_tool_calls_missing_closing_parameter_tag(
     qwen3_tool_parser,
 ):
-    """Test handling of missing closing </parameter> tag"""
+    """Test handling of missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -974,7 +974,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_missing_closing_tag(
     qwen3_tool_parser, qwen3_tokenizer
 ):
-    """Test streaming with missing closing </parameter> tag"""
+    """Test streaming with missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -1046,7 +1046,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser, qwen3_tokenizer):
-    """Test that streaming is truly incremental"""
+    """Test that streaming is truly incremental."""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
 <parameter=city>
@@ -1106,7 +1106,7 @@ TX
 def test_extract_tool_calls_streaming_missing_opening_tag(
     qwen3_tool_parser, qwen3_tokenizer
 ):
-    """Test streaming with missing opening <tool_call> tag
+    """Test streaming with missing opening <tool_call> tag.
 
     This tests that the streaming parser correctly handles
     tool calls that start directly with <function=...>
@@ -1300,6 +1300,73 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
     assert args["unit"] == "fahrenheit"
 
 
+def test_streaming_complete_tool_call_single_delta(qwen3_tool_parser):
+    """Regression: one delta may contain a complete tool call."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        [
+            (
+                "<tool_call>\n"
+                "<function=get_current_weather>\n"
+                "<parameter=city>\nDallas\n</parameter>\n"
+                "<parameter=state>\nTX\n</parameter>\n"
+                "</function>\n"
+                "</tool_call>"
+            )
+        ],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_current_weather"
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args == {"city": "Dallas", "state": "TX"}
+
+
+def test_streaming_next_tool_call_starts_in_close_delta(qwen3_tool_parser):
+    """Regression: a close delta may also contain the next tool call."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        [
+            "<tool_call>\n",
+            "<function=get_current_weather>\n",
+            "<parameter=city>\nDallas\n</parameter>\n",
+            "<parameter=state>\nTX\n</parameter>\n",
+            "</function>",
+            (
+                "\n</tool_call>\n"
+                "<tool_call>\n"
+                "<function=get_current_weather>\n"
+                "<parameter=city>\nOrlando\n</parameter>\n"
+                "<parameter=state>\nFL\n</parameter>\n"
+                "</function>\n"
+                "</tool_call>"
+            ),
+        ],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2
+    first_args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    second_args = json.loads(reconstructor.tool_calls[1].function.arguments)
+    assert first_args == {"city": "Dallas", "state": "TX"}
+    assert second_args == {"city": "Orlando", "state": "FL"}
+
+
 def test_no_double_serialization_string_args(qwen3_tool_parser):
     """Regression: string arguments must not be double-serialized (PR #35615)."""
     tools = [
@@ -1415,3 +1482,58 @@ def test_adjust_request_required_prefers_structural_tag(
     out = TestParser(MagicMock(), tools=sample_tools).adjust_request(req)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
+
+
+WRITE_FILE_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "write_file",
+            "parameters": {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+            },
+        },
+    )
+]
+
+WRITE_FILE_OUTPUT = (
+    "<tool_call>\n<function=write_file>\n"
+    "<parameter=content>\n"
+    "    def foo():\n        return 1\n\n"
+    "</parameter>\n</function>\n</tool_call>"
+)
+
+EXPECTED_CONTENT = "    def foo():\n        return 1\n"
+
+
+class TestParameterWhitespace:
+    """Wrapping newlines are markup; the rest of the value is preserved."""
+
+    def test_whitespace_preserved(self, qwen3_tokenizer):
+        parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=WRITE_FILE_TOOLS)
+        request = ChatCompletionRequest(
+            model=MODEL, messages=[], tools=WRITE_FILE_TOOLS
+        )
+
+        extracted = parser.extract_tool_calls(WRITE_FILE_OUTPUT, request=request)
+
+        args = json.loads(extracted.tool_calls[0].function.arguments)
+        assert args["content"] == EXPECTED_CONTENT
+
+    def test_whitespace_preserved_streaming(self, qwen3_tokenizer):
+        """The partial path must not strip the value either."""
+        parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=WRITE_FILE_TOOLS)
+        request = ChatCompletionRequest(
+            model=MODEL, messages=[], tools=WRITE_FILE_TOOLS
+        )
+
+        streamed = ""
+        for delta_message in stream_delta_message_generator(
+            parser, qwen3_tokenizer, WRITE_FILE_OUTPUT, request
+        ):
+            for tool_call in delta_message.tool_calls or []:
+                if tool_call.function and tool_call.function.arguments:
+                    streamed += tool_call.function.arguments
+
+        assert json.loads(streamed)["content"] == EXPECTED_CONTENT

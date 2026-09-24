@@ -28,11 +28,13 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402, F401
 
 
 class QuickReduceRegime(Enum):
+    # Keep integer ids aligned with csrc/quickreduce/quick_reduce.h
     FP = 0
     INT8 = 1
     INT6 = 2
     INT4 = 3
-    NONE = 4
+    INT3 = 4
+    NONE = 5
 
 
 KB = 1024
@@ -43,24 +45,31 @@ class QuickAllReduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
-    # In this order [FP, INT8, INT6, INT4].
+    # In this order [FP, INT8, INT6, INT4, INT3].
     _QR_MIN_SIZE = {
-        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB],
-        (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB],
-        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB],
-        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB],
-        (torch.bfloat16, 4): [8 * MB, 64 * MB, 64 * MB, 16 * MB],
-        (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
+        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB, 1 * MB],
+        (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB, 2 * MB],
+        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB, 2 * MB],
+        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB, 8 * MB],
+        (torch.bfloat16, 4): [8 * MB, 64 * MB, 64 * MB, 16 * MB, 16 * MB],
+        (torch.bfloat16, 8): [
+            16 * MB,
+            2048 * MB,
+            2048 * MB,
+            2048 * MB,
+            2048 * MB,
+        ],
     }
 
     def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
-        """
-        Custom allreduce provides non-destructive acceleration and is
+        """Custom allreduce provides non-destructive acceleration and is
         available for CUDA and ROCm MI300 series.
 
         Custom quick allreduce leverages quantization for further
-        acceleration on ROCm. It currently supports Q8, Q6, and Q4
-        quantization formats and FP(float16, bfloat16).
+        acceleration on ROCm. It currently supports Q8, Q6, Q4, and Q3
+        quantization formats and FP(float16, bfloat16). Q3 (INT3) is
+        restricted to TP2 (world_size == 2) due to poor performance on
+        larger world sizes.
 
         Quick allreduce is designed as a complement to custom allreduce.
         Its initialization requires even stricter conditions.
@@ -76,6 +85,7 @@ class QuickAllReduce:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
+
         """
         self.disabled = True
         if not self._rocm_arch_available():
@@ -129,12 +139,10 @@ class QuickAllReduce:
         assert isinstance(device, torch.device)
         self.device = device
 
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-        if cuda_visible_devices:
-            device_ids = list(map(int, cuda_visible_devices.split(",")))
-        else:
-            device_ids = list(range(current_platform.device_count()))
-        physical_device_id = device_ids[device.index]
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            device.index
+        )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu")
@@ -180,6 +188,23 @@ class QuickAllReduce:
             )
             return
         self.qr_quant_level = QuickReduceRegime[regime_str]
+
+        # INT3 is only enabled for TP2 (world_size == 2).
+        # Kernel benchmarks show INT3 all-reduce on TP4/TP8 has poor
+        # performance (the extra ranks make the 3-bit codec's pack/unpack
+        # overhead outweigh the reduced communication volume), so INT3 is
+        # restricted to 2-GPU tensor parallelism. For TP4/TP8 use a wider
+        # codec (e.g. INT4) or NONE instead.
+        if self.qr_quant_level == QuickReduceRegime.INT3 and self.world_size != 2:
+            logger.warning(
+                "Custom quick allreduce is disabled: INT3 quantization is "
+                "only supported for TP2 (world_size == 2), but world_size "
+                "is %d. INT3 on TP4/TP8 is disabled due to poor kernel "
+                "performance. Use INT4/NONE for this world size.",
+                self.world_size,
+            )
+            return
+
         self.qr_quantization_min_size = self._get_qr_quantization_min_size()
         vllm_config = get_current_vllm_config_or_none()
         if (
@@ -276,8 +301,7 @@ class QuickAllReduce:
             return False
 
     def create_shared_buffer(self):
-        """
-        Creates a shared buffer for quickreduce.
+        """Creates a shared buffer for quickreduce.
         Has to be called after init_custom_qr
         """
         handle = ops.qr_get_handle(self._ptr)
@@ -287,9 +311,7 @@ class QuickAllReduce:
         ops.qr_open_handles(self._ptr, handles)
 
     def should_quick_allreduce(self, inp: torch.Tensor):
-        """
-        Check if quickreduce is available
-        """
+        """Check if quickreduce is available."""
         if self.disabled:
             return False
         if inp.dtype not in self._SUPPORTED_DTYPES:

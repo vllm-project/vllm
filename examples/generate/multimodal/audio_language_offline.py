@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference
+"""This example shows how to use vLLM for running offline inference
 with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
@@ -83,44 +82,6 @@ def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
         model=model_name,
         limit_mm_per_prompt={"audio": audio_count},
         trust_remote_code=True,
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
-
-
-# MusicFlamingo
-def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
-    model_name = "nvidia/music-flamingo-2601-hf"
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"audio": audio_count},
-        enforce_eager=True,
-    )
-
-    # MusicFlamingo prompt placeholders use <sound>; vLLM's MusicFlamingo
-    # multimodal processor expands each one into <|sound_bos|> + audio tokens +
-    # <|sound_eos|> based on extracted audio feature lengths.
-    audio_placeholder = "<sound>" * audio_count
-    system_prompt = (
-        "You are Music Flamingo, a multimodal assistant for language and music. "
-        "On each turn you receive an audio clip which contains music and optional "
-        "text, you will receive at least one or both; use your world knowledge and "
-        "reasoning to help the user with any task. Interpret the entirety of the "
-        "content any input music--regardlenss of whether the user calls it audio, "
-        "music, or sound."
-    )
-
-    prompt = (
-        "<|im_start|>system\n"
-        f"{system_prompt}<|im_end|>\n"
-        "<|im_start|>user\n"
-        f"{audio_placeholder}{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"
     )
 
     return ModelRequestData(
@@ -324,8 +285,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
 
 # Phi-4-multimodal-instruct
 def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process audio inputs.
     """
     model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
@@ -463,16 +423,15 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
 # Voxtral
 # Make sure to install mistral-common[audio].
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
-    from mistral_common.audio import Audio
     from mistral_common.protocol.instruct.chunk import (
         AudioChunk,
-        RawAudio,
         TextChunk,
     )
     from mistral_common.protocol.instruct.messages import (
         UserMessage,
     )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.audio import Audio
     from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
     model_name = "mistralai/Voxtral-Mini-3B-2507"
@@ -495,9 +454,7 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         Audio.from_file(str(audio_assets[i].get_local_path()), strict=False)
         for i in range(audio_count)
     ]
-    audio_chunks = [
-        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
-    ]
+    audio_chunks = [AudioChunk.from_audio(audio) for audio in audios]
 
     messages = [UserMessage(content=[*audio_chunks, text_chunk])]
 
@@ -537,30 +494,9 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
-# FireRedLID
-def run_fireredlid(question: str, audio_count: int) -> ModelRequestData:
-    assert audio_count == 1, "FireRedLID only supports single audio input per prompt"
-    model_name = "PatchyTisa/FireRedLID-vllm"
-
-    prompt = "<sos>"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"audio": audio_count},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
-
-
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "cohere_asr": run_cohere_asr,
-    "fireredlid": run_fireredlid,
     "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
@@ -568,7 +504,6 @@ model_example_map = {
     "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
-    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,

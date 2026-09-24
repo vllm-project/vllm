@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import Enum
 from typing import TYPE_CHECKING
 
 import torch
@@ -15,24 +14,35 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FlashinferMoeBackend(Enum):
-    TENSORRT_LLM = "TensorRT-LLM"
-    CUTLASS = "CUTLASS"
-    CUTEDSL = "CUTEDSL"
-
-
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
 
 
+def has_flashinfer_situ_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "Situ")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
+
+    if activation == MoEActivation.SITU:
+        situ = getattr(ActivationType, "Situ", None)
+        if situ is None:
+            raise ValueError("The installed FlashInfer does not support SITU")
+        return situ
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
         MoEActivation.SILU_NO_MUL: ActivationType.Silu,
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
+        # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
+        MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
@@ -49,7 +59,7 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
-    """Shuffle weights for FI TRT-LLM Format"""
+    """Shuffle weights for FI TRT-LLM Format."""
     from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
 
     epilogue_tile_m = 128
@@ -94,25 +104,17 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
-    # TODO(shuw@nvidia): Update when new backends are added.
-    backends_supporting_global_sf = (
-        FlashinferMoeBackend.CUTLASS,
-        FlashinferMoeBackend.TENSORRT_LLM,
-        FlashinferMoeBackend.CUTEDSL,
-    )
-    return backend in backends_supporting_global_sf
-
-
 def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     cache_permute_indices: dict[torch.Size, torch.Tensor],
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    is_gated_act_gemm: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert expert weights to FlashInfer's block layout.
 
-    This reorders W13 and W2 into the expected epilogue-tiled block layout and
-    returns the shuffled weight tensors.
+    This reorders W13 and W2 in place into the expected epilogue-tiled block
+    layout and returns views of the shuffled weight tensors. Using one expert
+    as scratch space avoids allocating another full copy of both weights.
     """
     if w13_weight.dtype != torch.bfloat16 or w2_weight.dtype != torch.bfloat16:
         raise ValueError(
@@ -121,7 +123,6 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
-        convert_to_block_layout,
         get_w2_permute_indices_with_cache,
     )
 
@@ -131,52 +132,67 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     # Reorder rows of W13 and W2 for fused gated activation and convert to the
     # block layout expected by the FlashInfer kernel.
     num_experts = w13_weight.shape[0]
-    device_w13 = w13_weight.device
-    device_w2 = w2_weight.device
 
-    w13_weights_shuffled: list[torch.Tensor] = []
-    w2_weights_shuffled: list[torch.Tensor] = []
-
-    for i in range(num_experts):
-        permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            cache_permute_indices,
-            w13_weight[i].view(torch.uint8),
-            epilogue_tile_m,
-        )
-        tmp_weights1 = (
-            w13_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w13)]
-            .contiguous()
+    def _copy_permuted_expert_to_block_layout(
+        out: torch.Tensor,
+        expert_uint8: torch.Tensor,
+        source_indices: torch.Tensor,
+    ) -> None:
+        expert_blocks = expert_uint8.view(
+            expert_uint8.shape[0], out.shape[0], block_k
+        ).permute(1, 0, 2)
+        torch.index_select(
+            expert_blocks,
+            1,
+            source_indices.to(expert_uint8.device),
+            out=out,
         )
 
-        permute_indices = get_w2_permute_indices_with_cache(
-            cache_permute_indices,
-            w2_weight[i].view(torch.uint8),
-            epilogue_tile_m,
+    def _convert_weight_in_place(
+        weight: torch.Tensor,
+        is_w13: bool,
+    ) -> torch.Tensor:
+        rows, cols = weight[0].view(torch.uint8).shape
+        block_layout_shape = (num_experts, cols // block_k, rows, block_k)
+        expert_scratch = torch.empty(
+            block_layout_shape[1:],
+            dtype=torch.uint8,
+            device=weight.device,
         )
-        tmp_weights2 = (
-            w2_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w2)]
-            .contiguous()
-        )
 
-        tmp_weights1 = convert_to_block_layout(tmp_weights1.view(torch.uint8), block_k)
-        tmp_weights2 = convert_to_block_layout(tmp_weights2.view(torch.uint8), block_k)
+        for i in range(num_experts):
+            expert_uint8 = weight[i].view(torch.uint8)
+            if is_w13:
+                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+                    cache_permute_indices,
+                    expert_uint8,
+                    epilogue_tile_m,
+                    is_gated_act_gemm=is_gated_act_gemm,
+                )
+                if is_gated_act_gemm:
+                    permute_indices = (
+                        permute_indices + expert_uint8.shape[0] // 2
+                    ) % expert_uint8.shape[0]
+            else:
+                permute_indices = get_w2_permute_indices_with_cache(
+                    cache_permute_indices,
+                    expert_uint8,
+                    epilogue_tile_m,
+                )
 
-        w13_weights_shuffled.append(tmp_weights1.view(torch.bfloat16))
-        w2_weights_shuffled.append(tmp_weights2.view(torch.bfloat16))
+            _copy_permuted_expert_to_block_layout(
+                expert_scratch,
+                expert_uint8,
+                permute_indices,
+            )
+            expert_uint8.view(-1).copy_(expert_scratch.view(-1))
 
-    # Stack weights for all experts and return as BF16 tensors.
-    w13_weights_shuffled_tensor = (
-        torch.stack(w13_weights_shuffled).view(torch.bfloat16).contiguous()
+        return weight.view(torch.uint8).view(block_layout_shape).view(torch.bfloat16)
+
+    return (
+        _convert_weight_in_place(w13_weight, is_w13=True),
+        _convert_weight_in_place(w2_weight, is_w13=False),
     )
-    w2_weights_shuffled_tensor = (
-        torch.stack(w2_weights_shuffled).view(torch.bfloat16).contiguous()
-    )
-
-    return w13_weights_shuffled_tensor, w2_weights_shuffled_tensor
 
 
 def align_fp4_moe_weights_for_fi(
@@ -194,7 +210,6 @@ def align_fp4_moe_weights_for_fi(
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
     """
-
     # Current local intermediate size (per partition) is the K dimension of
     # the down projection.
     num_experts, hidden_size, intermediate = w2.shape
@@ -216,7 +231,16 @@ def align_fp4_moe_weights_for_fi(
 
     # Pad w13 and w2 along its intermediate dimension.
     padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size // 2))
-    padded_w13[:, : w13.shape[1], :] = w13
+    if is_act_and_mul:
+        # Keep the two logical projections independently aligned. Copying the
+        # fused [gate, up] tensor contiguously would move the up projection into
+        # the padded tail of gate when intermediate is rounded up.
+        padded_w13[:, :intermediate, :] = w13[:, :intermediate, :]
+        padded_w13[:, padded_intermediate : padded_intermediate + intermediate, :] = (
+            w13[:, intermediate:, :]
+        )
+    else:
+        padded_w13[:, : w13.shape[1], :] = w13
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate // 2))
     padded_w2[:, :, : w2.shape[2]] = w2
@@ -224,7 +248,13 @@ def align_fp4_moe_weights_for_fi(
     padded_w13_scale = w13_scale.new_zeros(
         (num_experts, padded_gate_up_dim, hidden_size // 16)
     )
-    padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
+    if is_act_and_mul:
+        padded_w13_scale[:, :intermediate, :] = w13_scale[:, :intermediate, :]
+        padded_w13_scale[
+            :, padded_intermediate : padded_intermediate + intermediate, :
+        ] = w13_scale[:, intermediate:, :]
+    else:
+        padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
 
     padded_w2_scale = w2_scale.new_zeros(
         (num_experts, hidden_size, padded_intermediate // 16)
@@ -275,17 +305,16 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_hidden_size
 
 
-def align_fp8_moe_weights_for_fi(
+def align_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool, min_alignment: int = 16
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
 
-    Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+    Some FlashInfer MoE kernels require the (gated) intermediate size
     used for GEMM to be divisible by a small alignment value. When this is
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
     """
-
     # Current local intermediate size (per partition) is the K dimension of
     # the down projection.
     num_experts, hidden_size, intermediate = w2.shape
@@ -306,7 +335,13 @@ def align_fp8_moe_weights_for_fi(
 
     # Pad w13 and w2 along its intermediate dimension.
     padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-    padded_w13[:, : w13.shape[1], :] = w13
+    if is_act_and_mul:
+        padded_w13[:, :intermediate, :] = w13[:, :intermediate, :]
+        padded_w13[:, padded_intermediate : padded_intermediate + intermediate, :] = (
+            w13[:, intermediate:, :]
+        )
+    else:
+        padded_w13[:, :intermediate, :] = w13
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
@@ -324,30 +359,27 @@ def _shuffle_deepseek_fp8_moe_weights(
     Returns 4D weight tensors in BlockMajorK layout
     (E, K/block_k, Mn, block_k)
     """
-    from flashinfer import shuffle_matrix_a
-    from flashinfer.fused_moe import convert_to_block_layout
+    from flashinfer.utils import get_shuffle_matrix_a_row_indices
 
     epilogue_tile_m = 64
     block_k = 128
-    num_experts = w13.shape[0]
 
-    M13, K13 = w13.shape[1], w13.shape[2]
-    M2, K2 = w2.shape[1], w2.shape[2]
-    w13_out = torch.empty(
-        num_experts, K13 // block_k, M13, block_k, dtype=torch.uint8, device=w13.device
-    )
-    w2_out = torch.empty(
-        num_experts, K2 // block_k, M2, block_k, dtype=torch.uint8, device=w2.device
-    )
+    def shuffle_to_block_major_k(w: torch.Tensor) -> torch.Tensor:
+        # shuffle_matrix_a's row permutation depends only on (M,
+        # epilogue_tile_m), so it is computed once and applied to every expert
+        # in a single gather instead of once per expert. Gathering through the
+        # BlockMajorK-permuted view also folds convert_to_block_layout into
+        # that same kernel. Per-expert loops here cost minutes for a MoE this
+        # wide (~24k tiny launches plus a host round-trip each).
+        num_experts, m, k = w.shape
+        rows = get_shuffle_matrix_a_row_indices(
+            w[0].view(torch.uint8), epilogue_tile_m
+        ).to(w.device)
+        blocked = w.view(torch.uint8).view(num_experts, m, k // block_k, block_k)
+        out = blocked.permute(0, 2, 1, 3)[:, :, rows, :].contiguous()
+        return out.view(torch.float8_e4m3fn)
 
-    for i in range(num_experts):
-        t13 = shuffle_matrix_a(w13[i].view(torch.uint8), epilogue_tile_m)
-        w13_out[i] = convert_to_block_layout(t13, block_k)
-
-        t2 = shuffle_matrix_a(w2[i].view(torch.uint8), epilogue_tile_m)
-        w2_out[i] = convert_to_block_layout(t2, block_k)
-
-    return w13_out.view(torch.float8_e4m3fn), w2_out.view(torch.float8_e4m3fn)
+    return shuffle_to_block_major_k(w13), shuffle_to_block_major_k(w2)
 
 
 def _shuffle_mxfp8_moe_weights(
@@ -359,70 +391,54 @@ def _shuffle_mxfp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Preprocess MXFP8 weights and scales for the FlashInfer TRT-LLM kernel.
 
-    Following flashinfer/tests/moe/test_trtllm_gen_fused_moe.py:
-      1. reorder_rows_for_gated_act_gemm  (interleave gate/up rows)
-      2. shuffle_matrix_a                 (weight data layout shuffle)
-      3. shuffle_matrix_sf_a              (scale factor layout shuffle)
+    All three transforms (gate/up row reorder, ``shuffle_matrix_a`` weight
+    shuffle, ``shuffle_matrix_sf_a`` scale shuffle) are fixed row/index
+    permutations that depend only on the per-expert matrix shape, so the
+    permutation is computed once and applied to every expert in a single
+    gather instead of once per expert. ``block_scale_interleave`` accepts a
+    batched ``(E, M, K)`` scale tensor directly. Output is bit-identical to
+    the per-expert loop but ~20x faster (a 288-expert MoE otherwise costs
+    seconds per layer at load).
     """
-    from flashinfer import (
-        reorder_rows_for_gated_act_gemm,
-        shuffle_matrix_a,
-        shuffle_matrix_sf_a,
+    from flashinfer.fused_moe.core import (
+        get_reorder_rows_for_gated_act_gemm_row_indices,
     )
+    from flashinfer.quantization.fp4_quantization import block_scale_interleave
+    from flashinfer.utils import get_shuffle_matrix_a_row_indices
 
     epilogue_tile_m = 128
-    num_experts = w13.shape[0]
-    intermediate_size = w13.shape[1] // 2
-    hidden_size = w13.shape[2]
 
-    w13_interleaved: list[torch.Tensor] = []
-    w13_scale_interleaved: list[torch.Tensor] = []
-    for i in range(num_experts):
-        if is_gated:
-            w13_interleaved.append(
-                reorder_rows_for_gated_act_gemm(
-                    w13[i].reshape(2 * intermediate_size, -1)
-                )
-            )
-            w13_scale_interleaved.append(
-                reorder_rows_for_gated_act_gemm(
-                    w13_scale[i].reshape(2 * intermediate_size, -1)
-                )
-            )
-        else:
-            w13_interleaved.append(w13[i])
-            w13_scale_interleaved.append(w13_scale[i])
+    w13_u = w13.view(torch.uint8)
+    w2_u = w2.view(torch.uint8)
 
-    w13_shuffled: list[torch.Tensor] = []
-    w2_shuffled: list[torch.Tensor] = []
-    w13_scale_shuffled: list[torch.Tensor] = []
-    w2_scale_shuffled: list[torch.Tensor] = []
-    for i in range(num_experts):
-        w13_shuffled.append(
-            shuffle_matrix_a(w13_interleaved[i].view(torch.uint8), epilogue_tile_m)
+    # 1. Interleave gate/up rows (gated activation GEMM layout).
+    if is_gated:
+        gate_idx = get_reorder_rows_for_gated_act_gemm_row_indices(
+            w13_u[0].reshape(w13_u.shape[1], -1)
         )
-        w2_shuffled.append(shuffle_matrix_a(w2[i].view(torch.uint8), epilogue_tile_m))
-        w13_scale_shuffled.append(
-            shuffle_matrix_sf_a(
-                w13_scale_interleaved[i]
-                .view(torch.uint8)
-                .reshape(2 * intermediate_size, -1),
-                epilogue_tile_m,
-            )
-        )
-        w2_scale_shuffled.append(
-            shuffle_matrix_sf_a(
-                w2_scale[i].view(torch.uint8).reshape(hidden_size, -1),
-                epilogue_tile_m,
-            )
-        )
+        w13_u = w13_u[:, gate_idx]
+        w13_scale = w13_scale[:, gate_idx]
 
-    w13_out = torch.stack(w13_shuffled).view(torch.float8_e4m3fn)
-    w2_out = torch.stack(w2_shuffled).view(torch.float8_e4m3fn)
-    w13_scale_out = torch.stack(w13_scale_shuffled).reshape(w13_scale.shape)
-    w2_scale_out = torch.stack(w2_scale_shuffled).reshape(w2_scale.shape)
+    def shuffle_weights(t: torch.Tensor) -> torch.Tensor:
+        # Row permutation depends only on (M, epilogue_tile_m).
+        idx = get_shuffle_matrix_a_row_indices(t[0], epilogue_tile_m).to(t.device)
+        return t[:, idx].view(torch.float8_e4m3fn)
 
-    return w13_out, w2_out, w13_scale_out, w2_scale_out
+    def shuffle_scales(s: torch.Tensor) -> torch.Tensor:
+        # shuffle_matrix_sf_a == row-gather (same indices as the weight shuffle)
+        # followed by the 128x4 block-scale interleave, which is batch-capable.
+        idx = get_shuffle_matrix_a_row_indices(
+            s[0].view(torch.uint8).reshape(s.shape[1], -1), epilogue_tile_m
+        ).to(s.device)
+        interleaved = block_scale_interleave(s[:, idx])
+        return interleaved.reshape(s.shape)
+
+    return (
+        shuffle_weights(w13_u),
+        shuffle_weights(w2_u),
+        shuffle_scales(w13_scale),
+        shuffle_scales(w2_scale),
+    )
 
 
 def prepare_fp8_moe_layer_for_fi(
@@ -435,8 +451,7 @@ def prepare_fp8_moe_layer_for_fi(
     w2_input_scale: torch.Tensor | None,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Convert Fp8 MoE weights to flashinfer kernel format
+    """Convert Fp8 MoE weights to flashinfer kernel format.
 
     Note that for trtllm we update the model state dict
     with the scale format needed for these kernels.
@@ -444,7 +459,6 @@ def prepare_fp8_moe_layer_for_fi(
     Note that for per-tensor, we update the layer's
     intermediate size if the weights needed padding.
     """
-
     assert hasattr(layer.moe_config, "is_act_and_mul")
     block_quant = (
         hasattr(layer, "weight_block_size") and layer.weight_block_size is not None
@@ -479,7 +493,7 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
-        w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
+        w13, w2, new_intermediate = align_moe_weights_for_fi(
             w13,
             w2,
             layer.moe_config.is_act_and_mul,

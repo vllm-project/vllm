@@ -6,12 +6,15 @@ from functools import partial
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
+
+logger = init_logger(__name__)
 
 # Default round-robin depth for the UVA buffer pools. Must be >= the number of
 # concurrent in-flight steps (engine batch_queue_size).
@@ -23,35 +26,44 @@ def set_default_max_concurrency(n: int) -> None:
     _DEFAULT_MAX_CONCURRENCY = max(2, n)
 
 
-def async_copy_to_gpu(
-    x: torch.Tensor | np.ndarray,
-    out: torch.Tensor | None = None,
-    device: torch.device | None = None,
-) -> torch.Tensor:
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x)
-    assert x.is_cpu
-
-    if out is None:
-        assert device is not None
-        out = torch.empty_like(x, device=device)
-
-    # Copy directly to GPU — explicit pin_memory() causes sporadic stalls
-    # under high concurrency due to CUDA driver contention. The driver
-    # handles the transfer efficiently without manual pinning.
-    return out.copy_(x, non_blocking=True)
-
-
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         if not is_uva_available():
             raise RuntimeError("UVA is not available")
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
-        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        self._uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        return self._uva[:n] if n is not None else self._uva
+
+
+class NonUvaBuffer:
+    """Explicit-copy fallback for platforms without pinned memory."""
+
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+        from vllm.platforms import current_platform
+
+        logger.warning_once(
+            "Pinned memory is not available on this platform; falling back "
+            "to device memory for UVA buffers."
+        )
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+        self.np = self.cpu.numpy()
+        self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        if n is None:
+            return self._uva.copy_(self.cpu)
+        return self._uva[:n].copy_(self.cpu[:n])
 
 
 class UvaBufferPool:
+    """Preallocate each slot at size, growing its first dimension as needed.
+
+    Callers must retire a slot's GPU readers before reuse, including growth.
+    """
+
     def __init__(
         self,
         size: int | Sequence[int],
@@ -65,7 +77,8 @@ class UvaBufferPool:
         self.max_concurrency = max_concurrency
 
         # UVA buffers for concurrency
-        self._uva_bufs = [UvaBuffer(size, dtype) for _ in range(max_concurrency)]
+        self._buffer_cls = UvaBuffer if is_uva_available() else NonUvaBuffer
+        self._uva_bufs = [self._buffer_cls(size, dtype) for _ in range(max_concurrency)]
         # Current buffer index
         self._curr = 0
 
@@ -73,11 +86,15 @@ class UvaBufferPool:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
+        n = len(x)
+        if n > buf.cpu.shape[0]:
+            capacity = 1 << (n - 1).bit_length()
+            buf = self._buffer_cls((capacity, *buf.cpu.shape[1:]), self.dtype)
+            self._uva_bufs[self._curr] = buf
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
-        n = len(x)
         dst[:n] = x
-        return buf.uva[:n]
+        return buf.uva(n)
 
     def copy_to_gpu(
         self,
@@ -133,6 +150,9 @@ class StagedWriteTensor:
         self.device = device
         self.max_concurrency = max_concurrency
 
+        # Without UVA, large-but-cold tensors live on the GPU directly.
+        uva_instead_of_gpu = uva_instead_of_gpu and is_uva_available()
+
         if not uva_instead_of_gpu:
             # Create a GPU tensor (default)
             self.gpu = torch.zeros(size, dtype=dtype, device=device)
@@ -140,7 +160,7 @@ class StagedWriteTensor:
             # For a large but not-frequently-accessed tensor, we can use UVA instead of
             # GPU to save GPU memory
             self._uva_buf = UvaBuffer(size, dtype)
-            self.gpu = self._uva_buf.uva
+            self.gpu = self._uva_buf.uva()
 
         self._staged_write_indices: list[int] = []
         self._staged_write_starts: list[int] = []
@@ -152,6 +172,7 @@ class StagedWriteTensor:
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_contents = new_buffer(1, dtype=dtype) if uva_instead_of_gpu else None
 
     def stage_write(
         self, index: int, start: int, x: Iterable[int] | Iterable[float]
@@ -181,10 +202,14 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        # Special handling for write_contents
-        write_contents = async_tensor_h2d(
-            self._staged_write_contents, self.dtype, self.device
-        )
+        if self.write_contents is None:
+            write_contents = async_tensor_h2d(
+                self._staged_write_contents, device=self.device, dtype=self.dtype
+            )
+        else:
+            write_contents = self.write_contents.copy_to_uva(
+                self._staged_write_contents
+            )
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
@@ -194,7 +219,9 @@ class StagedWriteTensor:
             starts_uva,
             write_contents,
             cu_lens_uva,
+            None,
             BLOCK_SIZE=1024,
+            MULTI_GROUP=False,
         )
         # Clear the staged writes
         self.clear_staged_writes()
@@ -206,15 +233,81 @@ class StagedWriteTensor:
         self._staged_write_cu_lens.clear()
 
 
+class FusedStagedWriter:
+    """Applies the staged writes of several `StagedWriteTensor`s at once."""
+
+    def __init__(
+        self, device: torch.device, max_writes: int, max_concurrency: int | None = None
+    ):
+        new_pool = partial(
+            UvaBufferPool, dtype=torch.int32, max_concurrency=max_concurrency
+        )
+        self.group_ids = new_pool(max_writes)
+        self.indices = new_pool(max_writes)
+        self.starts = new_pool(max_writes)
+        self.cu_lens = new_pool(max_writes)
+        self.device = device
+
+    def apply(
+        self,
+        tensors: Sequence[StagedWriteTensor],
+        output_ptrs: torch.Tensor,
+        output_strides: torch.Tensor,
+    ) -> None:
+        """Apply and clear the staged writes of `tensors` with one kernel."""
+        group_ids: list[int] = []
+        indices: list[int] = []
+        starts: list[int] = []
+        contents: list[int | float] = []
+        cu_lens: list[int] = []
+
+        for group_id, t in enumerate(tensors):
+            n = len(t._staged_write_indices)
+            if n == 0:
+                continue
+
+            group_ids.extend([group_id] * n)
+            indices.extend(t._staged_write_indices)
+            starts.extend(t._staged_write_starts)
+            content_base = len(contents)
+            contents.extend(t._staged_write_contents)
+            cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+
+        if not group_ids:
+            return
+
+        group_ids_uva = self.group_ids.copy_to_uva(group_ids)
+        indices_uva = self.indices.copy_to_uva(indices)
+        starts_uva = self.starts.copy_to_uva(starts)
+        cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
+        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+
+        _apply_write_kernel[(len(group_ids),)](
+            output_ptrs,
+            output_strides,
+            indices_uva,
+            starts_uva,
+            contents_gpu,
+            cu_lens_uva,
+            group_ids_uva,
+            BLOCK_SIZE=1024,
+            MULTI_GROUP=True,
+        )
+        for t in tensors:
+            t.clear_staged_writes()
+
+
 @triton.jit
 def _apply_write_kernel(
-    output_ptr,
-    output_stride,
+    output_ptr,  # MULTI_GROUP: ptr-to-ptrs [num_groups]; else: data ptr
+    output_stride,  # MULTI_GROUP: ptr-to-strides [num_groups]; else: row stride
     write_indices_ptr,
     write_starts_ptr,
     write_contents_ptr,
     write_cu_lens_ptr,
+    write_group_ids_ptr,  # [num_writes], used only when MULTI_GROUP
     BLOCK_SIZE: tl.constexpr,
+    MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
     row_idx = tl.load(write_indices_ptr + pid)
@@ -224,10 +317,26 @@ def _apply_write_kernel(
     cu_end = tl.load(write_cu_lens_ptr + pid)
     content_len = cu_end - cu_start
 
+    if MULTI_GROUP:
+        # Each write targets a different output tensor (KV cache group);
+        # resolve its base pointer and row stride per write.
+        group_id = tl.load(write_group_ids_ptr + pid)
+        row_ptr = _load_ptr(output_ptr + group_id, tl.int32)
+        row_stride = tl.load(output_stride + group_id)
+    else:
+        row_ptr = output_ptr
+        row_stride = output_stride
+    row_ptr += row_idx * row_stride + start_idx
+
     for i in range(0, content_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < content_len
         content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-        tl.store(
-            output_ptr + row_idx * output_stride + start_idx + block, content, mask=mask
-        )
+        tl.store(row_ptr + block, content, mask=mask)
+
+
+@triton.jit
+def _load_ptr(ptr_to_ptr, elem_dtype):
+    ptr = tl.load(ptr_to_ptr)
+    ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
+    return tl.multiple_of(ptr, 16)

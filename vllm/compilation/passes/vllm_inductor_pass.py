@@ -18,11 +18,14 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPri
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import is_func
 from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @dataclass
@@ -32,8 +35,7 @@ class InductorCompilationConfig:
 
 
 class VllmInductorPass(InductorPass):
-    """
-    An inductor pass with access to vLLM PassConfig.
+    """An inductor pass with access to vLLM PassConfig.
     It provides timing, logging, and dumping utilities.
     """
 
@@ -90,8 +92,7 @@ def get_match_table() -> dict[str, int]:
 
 
 class VllmPatternMatcherPass(VllmInductorPass):
-    """
-    A VllmInductorPass that uses the Inductor pattern matcher.
+    """A VllmInductorPass that uses the Inductor pattern matcher.
     Provides pattern registration with match counting, debug dumping, and logging.
     """
 
@@ -106,7 +107,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
     )
 
     def _replace_op_overloads(self, string: str) -> str:
-        """Replace <OpOverload(..., ...)> with nicer formulations"""
+        """Replace <OpOverload(..., ...)> with nicer formulations."""
         return str(
             self._OP_OVERLOAD_PATTERN.sub(
                 lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
@@ -120,8 +121,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
             logger.debug("fusion pass matches: %s", dict(cls.match_table))
 
     def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass) -> None:
-        """
-        If debug dumping is enabled, dump the Inductor pattern-matcher patterns
+        """If debug dumping is enabled, dump the Inductor pattern-matcher patterns
         into the debug_dump_path folder next to the dumped fx graphs.
 
         This method does its best to print something that looks like Python code
@@ -192,8 +192,7 @@ R = TypeVar("R")
 
 
 class VllmPatternReplacement(ABC, Generic[P, R]):
-    """
-    A pattern/replacement pair for FX graph fusion.
+    """A pattern/replacement pair for FX graph fusion.
 
     Implement the three abstract members below, then pass
     instances to VllmFusionPatternMatcherPass.register(). The pass will
@@ -213,8 +212,7 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     @property
     @abstractmethod
     def replacement(self) -> Callable[P, R]:
-        """
-        Returns a closure defining the FX subgraph to
+        """Returns a closure defining the FX subgraph to
         substitute in place of each match.
         """
         ...
@@ -227,23 +225,23 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     # Helpers for get_inputs: uninitialized tensors of common dtypes.
     @staticmethod
     def empty(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, device="cuda", **kwargs)
+        return torch.empty(*args, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_bf16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.bfloat16, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.bfloat16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.float16, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.float16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.float32, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.float32, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_i32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.int32, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.int32, device=DEVICE_TYPE, **kwargs)
 
 
 def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
@@ -279,6 +277,27 @@ def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
         gm.graph.erase_node(inp)
 
 
+def remove_noop_reshapes(gm: fx.GraphModule) -> None:
+    """Drop reshape ops whose output shape equals their input shape.
+
+    Companion to :func:`fold_consecutive_reshapes`. ``make_fx`` records a
+    reshape to the shape the input already has; the compiled graph has already
+    dropped it, so the pattern only matches once we drop it too.
+    """
+    aten_reshape = torch.ops.aten.reshape.default
+    for node in list(gm.graph.nodes):
+        if not is_func(node, aten_reshape):
+            continue
+        inp = node.args[0]
+        if not isinstance(inp, fx.Node):
+            continue
+        val, inp_val = node.meta.get("val"), inp.meta.get("val")
+        if val is None or inp_val is None or val.shape != inp_val.shape:
+            continue
+        node.replace_all_uses_with(inp)
+        gm.graph.erase_node(node)
+
+
 def _remove_noop_permutes(gm: fx.GraphModule) -> None:
     for node in gm.graph.nodes:
         if not is_func(node, torch.ops.aten.permute.default):
@@ -291,8 +310,7 @@ def _remove_noop_permutes(gm: fx.GraphModule) -> None:
 
 
 class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
-    """
-    A VllmPatternMatcherPass for passes that use VllmPatternReplacement objects.
+    """A VllmPatternMatcherPass for passes that use VllmPatternReplacement objects.
     Subclasses register patterns via self.register() in their own __init__.
     """
 
@@ -330,12 +348,3 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
     def __call__(self, graph: torch.fx.Graph) -> None:
         self.matched_count = self.pm_pass.apply(graph)
         VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
-
-
-class PrinterInductorPass(VllmInductorPass):
-    def __init__(self, name: str, config: VllmConfig) -> None:
-        super().__init__(config)
-        self.name = name
-
-    def __call__(self, graph: torch.fx.Graph) -> None:
-        self.dump_graph(graph, self.name)

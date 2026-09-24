@@ -1,10 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 pub mod hf;
 
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
+
+/// Select which sampling defaults to inherit from generation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
+pub enum GenerationConfigMode {
+    /// Inherit sampling defaults from the model's generation config.
+    #[default]
+    Auto,
+    /// Use vLLM's neutral sampling defaults.
+    Vllm,
+}
+
+impl GenerationConfigMode {
+    pub const AUTO_LITERAL: &str = "auto";
+    pub const VLLM_LITERAL: &str = "vllm";
+}
+
+impl FromStr for GenerationConfigMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+            Ok(Self::Auto)
+        } else if value.eq_ignore_ascii_case(Self::VLLM_LITERAL) {
+            Ok(Self::Vllm)
+        } else {
+            Err(format!(
+                "generation config source `{value}` is not implemented yet \
+                 (expected one of: auto, vllm)"
+            ))
+        }
+    }
+}
+
+impl fmt::Display for GenerationConfigMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str(Self::AUTO_LITERAL),
+            Self::Vllm => f.write_str(Self::VLLM_LITERAL),
+        }
+    }
+}
 
 /// Tokenizer/model-derived defaults used to enrich text-generation requests
 /// before they are lowered into engine-core.
@@ -30,9 +77,9 @@ pub struct SamplingLimits {
     /// `-1` means allowing requests up to the model vocabulary size.
     pub max_logprobs: i32,
 
-    /// Model vocabulary size from the model config, used to bound
-    /// `logit_bias` keys when available.
-    pub model_vocab_size: Option<usize>,
+    /// Model vocabulary size from the model config, used to bound generated
+    /// token IDs and logits-domain sampling controls.
+    pub model_vocab_size: usize,
     /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
     /// token-ID prompts.
     pub tokenizer_vocab_size: usize,
@@ -46,19 +93,9 @@ impl SamplingLimits {
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
 
-    /// Return the vocabulary size used to expand `logprobs=-1`.
-    pub fn logprobs_vocab_size(&self) -> usize {
-        self.model_vocab_size.unwrap_or(self.tokenizer_vocab_size)
-    }
-
-    /// Return the vocabulary size used to validate generated stop token IDs.
-    pub fn stop_token_vocab_size(&self) -> usize {
-        self.model_vocab_size.unwrap_or(self.tokenizer_vocab_size)
-    }
-
     /// Return the union bound used to validate token-ID prompts.
     pub fn prompt_token_vocab_size(&self) -> usize {
-        self.tokenizer_vocab_size.max(self.model_vocab_size.unwrap_or(0))
+        self.tokenizer_vocab_size.max(self.model_vocab_size)
     }
 }
 
@@ -81,10 +118,12 @@ pub trait TextBackend: Send + Sync {
         Ok(SamplingHints::default())
     }
 
-    /// Return the model vocabulary size from the model config, if known. Used to
-    /// range-check request token ids against the engine embedding table.
-    fn model_vocab_size(&self) -> Option<usize> {
-        None
+    /// Return the model vocabulary size from the model config.
+    ///
+    /// The permissive default exists for lightweight test backends. Production
+    /// backends should override it with the resolved model config value.
+    fn model_vocab_size(&self) -> usize {
+        usize::MAX
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).

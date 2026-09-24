@@ -18,9 +18,9 @@
 // clang-format on
 
 #include "cutlass_extensions/cute_utils.cuh"
-#include "cutlass_extensions/vllm_numeric_conversion.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "cutlass_extensions/torch_utils.hpp"
+#include "libtorch_stable/cutlass_extensions/vllm_numeric_conversion.cuh"
+#include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "libtorch_stable/cutlass_extensions/torch_utils.hpp"
 #include "machete_collective_builder.cuh"
 #include "machete_prepacked_layout.cuh"
 #include "machete_interleaving_utils.cuh"

@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
@@ -18,9 +18,8 @@ from .base import BaseLayerWithLoRA
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
-    """
-    LoRA wrapper for LogitsProcessor, with extra logic to handle the
-    application of the LoRA adapter and added LoRA vocabulary.
+    """LoRA wrapper for LogitsProcessor, with extra logic to handle the
+    application of the LoRA adapter.
 
     Args:
         base_layer: LogitsProcessor layer
@@ -30,6 +29,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         sharded_to_full_mapping: index mapping from sharded vocab to full vocab
             received from base_layer.get_sharded_to_full_mapping(). If None,
             no reindexing will be done.
+
     """
 
     def __init__(
@@ -85,7 +85,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
         if self.base_layer.vocab_size > 258048:
@@ -118,6 +118,18 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         else:
             self.sharded_to_full_mapping_gpu = None
 
+    def reset_sharded_to_full_mapping(self) -> None:
+        """Restore the TP logits mapping after its GPU memory is reused."""
+        mapping_gpu = self.sharded_to_full_mapping_gpu
+        if mapping_gpu is not None:
+            mapping_gpu.copy_(
+                torch.tensor(
+                    self.sharded_to_full_mapping,
+                    device=mapping_gpu.device,
+                    dtype=mapping_gpu.dtype,
+                )
+            )
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -143,15 +155,26 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        # The LoRA delta is accumulated into the full gathered logits, so the
+        # TP gather cannot be skipped here.
+        if skip_gather:
+            raise NotImplementedError(
+                "Skipping the logits TP gather is not supported with an lm_head LoRA."
+            )
         # Get the logits for the next tokens.
         if hasattr(lm_head, "base_layer"):
             actual_lm_head = lm_head.base_layer
         else:
             actual_lm_head = lm_head
-        logits = actual_lm_head.quant_method.apply(actual_lm_head, hidden_states)
-        if embedding_bias is not None:
-            logits += embedding_bias
+        # Run the base projection through the LogitsProcessor so head_dtype
+        # (e.g. an fp32 lm_head) is honored on the LoRA path too. The LoRA
+        # delta is accumulated into these logits by add_lora_logits below,
+        # whose internal buffer is already fp32.
+        logits = self.base_layer._apply_head(
+            actual_lm_head, hidden_states, embedding_bias
+        )
 
         # Gather logits for TP
         logits = self.base_layer._gather_logits(logits)
@@ -160,19 +183,19 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             return None
 
         if self.sharded_to_full_mapping_gpu is not None:
-            # Reindex full logits tensor to ensure 1:1 mapping between
-            # index and token_id
+            # Reindex the gathered logits so that index == token_id. Each TP
+            # shard is padded to `num_embeddings_per_partition`, so the gather
+            # interleaves the shards' padding with real vocab entries.
             # Example for:
-            #   org_vocab_size = 4
-            #   added_vocab_size = 2
+            #   org_vocab_size = 6
             #   pad_to_size = 8
             #   tp_size = 2
 
-            # indices:  [0, 1, 2,  3, 4, 5, 6,  7]
-            # token_id: [0, 1, 4, -1, 2, 3, 5, -1]
+            # indices:  [0, 1, 2,  3, 4, 5,  6,  7]
+            # token_id: [0, 1, 2, -1, 3, 4,  5, -1]
 
             # Therefore, the mapping is expected to be:
-            # [0, 1, 4, 6, 2, 3, 5, 7] so that when we reindex,
+            # [0, 1, 2, 4, 5, 6, 3, 7] so that when we reindex,
             # we get:
             # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
@@ -198,7 +221,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False

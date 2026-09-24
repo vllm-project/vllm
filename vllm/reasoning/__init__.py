@@ -29,8 +29,12 @@ _REASONING_PARSERS_TO_REGISTER = {
         "DeepSeekV3ReasoningParser",
     ),
     "deepseek_v4": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningParser",
+        "deepseek_v4_engine_reasoning_parser",
+        "DeepSeekV4ParserReasoningAdapter",
+    ),
+    "deepseek_v41": (
+        "deepseek_v41_engine_reasoning_parser",
+        "DeepSeekV41ParserReasoningAdapter",
     ),
     "poolside_v1": (
         "poolside_v1_reasoning_parser",
@@ -53,8 +57,16 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "glm47": (
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "ling3": (
+        "ling3_reasoning_parser",
+        "Ling3ParserReasoningAdapter",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
@@ -76,9 +88,21 @@ _REASONING_PARSERS_TO_REGISTER = {
         "hy_v3_reasoning_parser",
         "HYV3ReasoningParser",
     ),
+    "hy_v4": (
+        "hy_v4_reasoning_parser",
+        "HYV4ReasoningParser",
+    ),
     "kimi_k2": (
         "kimi_k2_reasoning_parser",
         "KimiK2ReasoningParser",
+    ),
+    "kimi_k3": (
+        "kimi_k3_reasoning_parser",
+        "KimiK3ReasoningParser",
+    ),
+    "k2_horizon": (
+        "k2_horizon_reasoning_parser",
+        "K2HorizonReasoningParser",
     ),
     "mimo": (
         "qwen3_engine_reasoning_parser",
@@ -98,23 +122,27 @@ _REASONING_PARSERS_TO_REGISTER = {
     ),
     "mistral": (
         "mistral_reasoning_parser",
-        "MistralReasoningParser",
+        "MistralParserReasoningAdapter",
     ),
     "nemotron_v3": (
-        "nemotron_v3_reasoning_parser",
-        "NemotronV3ReasoningParser",
+        "nemotron_v3_engine_reasoning_parser",
+        "NemotronV3ParserReasoningAdapter",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_reasoning_parser",
+        "MuseGlimmerReasoningParser",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
-        "seedoss_reasoning_parser",
-        "SeedOSSReasoningParser",
+        "seed_oss_engine_reasoning_parser",
+        "SeedOssParserReasoningAdapter",
     ),
     "step3": (
         "step3_reasoning_parser",
@@ -123,6 +151,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_reasoning_parser",
         "Step3p5ReasoningParser",
+    ),
+    "inkling": (
+        "inkling_reasoning_parser",
+        "InklingParserReasoningAdapter",
     ),
 }
 

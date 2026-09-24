@@ -9,6 +9,7 @@ from http import HTTPStatus
 from fastapi import Request
 
 from vllm.entrypoints.chat_utils import ConversationMessage
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionResponse,
@@ -16,11 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    RequestResponseMetadata,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -47,34 +44,34 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """Validate the model and preprocess a batched chat completion request.
 
         Performs engine-aware checks then delegates per-conversation
-        preprocessing to OpenAIServingRender, validating the chat template
+        preprocessing to OnlineRenderer, validating the chat template
         once for the whole batch.
 
         Returns:
             A tuple of (all_conversations, engine_prompts) on success — one
             entry per conversation — or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
-        render = self.openai_serving_render
+        renderer = self.online_renderer
 
-        if not render.use_harmony:
+        if not renderer.use_harmony:
             # Common case: validate the chat template once for the whole batch.
-            error_check_ret = render.validate_chat_template(
+            error_check_ret = renderer.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=render.trust_request_chat_template,
+                trust_request_chat_template=renderer.trust_request_chat_template,
             )
             if error_check_ret is not None:
                 return error_check_ret
 
-        parser = render.parser
+        parser = renderer.parser
         tool_dicts: list[dict] | None = None
 
         all_conversations: list[list[ConversationMessage]] = []
@@ -82,17 +79,17 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         for messages in request.messages:
             single_request = request.to_chat_completion_request(messages)
-            if render.use_harmony:
-                conversation, engine_prompts = render._make_request_with_harmony(
+            if renderer.use_harmony:
+                conversation, engine_prompts = renderer._make_request_with_harmony(
                     single_request, should_include_tools=tool_dicts is not None
                 )
             else:
-                conversation, engine_prompts = await render.preprocess_chat(
+                conversation, engine_prompts = await renderer.preprocess_chat(
                     single_request,
                     messages,
-                    default_template=render.chat_template,
-                    default_template_content_format=render.chat_template_content_format,
-                    default_template_kwargs=render.default_chat_template_kwargs,
+                    default_template=renderer.chat_template,
+                    default_template_content_format=renderer.chat_template_content_format,
+                    default_template_kwargs=renderer.default_chat_template_kwargs,
                     tool_dicts=tool_dicts,
                     parser=parser,
                 )
@@ -174,6 +171,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(single_request, raw_request)
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -181,8 +179,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority if hasattr(request, "priority") else 0,
+                    priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=None,
                 )
             )
@@ -251,14 +250,17 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
 
-                if request.logprobs and request.top_logprobs is not None:
+                if request.logprobs and (
+                    request.top_logprobs is not None or request.logprob_token_ids
+                ):
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(
                         token_ids=output.token_ids,
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         tokenizer=tokenizer,
-                        return_as_token_id=request.return_token_ids,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
@@ -267,6 +269,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     reasoning, content, _ = parser.parse(
                         output.text,
                         request=request,  # type: ignore[arg-type]
+                        model_output_token_ids=output.token_ids,
                     )
                     if not request.include_reasoning:
                         reasoning = None
@@ -285,7 +288,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if request.echo:
                     conversation = all_conversations[prompt_idx]
                     last_msg_content: str | list[dict[str, str]] = ""
-                    if conversation and "content" in conversation[-1]:
+                    if (
+                        conversation
+                        and "content" in conversation[-1]
+                        and conversation[-1].get("role") == role
+                    ):
                         last_msg_content = conversation[-1]["content"] or ""
                     if isinstance(last_msg_content, list):
                         last_msg_content = "\n".join(

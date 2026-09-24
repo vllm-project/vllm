@@ -17,7 +17,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -34,34 +34,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
-
-# Tokens the model generates that must not leak into response content.
-_GEMMA4_MODEL_DROP_TOKENS: set[str] = {
-    # Turn boundaries
-    "<|turn>",
-    "<turn|>",
-    # Channel / reasoning
-    "<|channel>",
-    "<channel|>",
-    # Tool protocol tokens
-    "<|tool>",
-    "<tool|>",
-    "<|tool_call>",
-    "<tool_call|>",
-    "<|tool_response>",
-    "<tool_response|>",
-    '<|"|>',
-    # Thinking
-    "<|think|>",
-    # Multi-modal (defensive — not expected during text completion)
-    "<|image>",
-    "<|image|>",
-    "<image|>",
-    "<|audio>",
-    "<|audio|>",
-    "<audio|>",
-    "<|video|>",
-}
 
 CHANNEL_START = "<|channel>"
 CHANNEL_END = "<channel|>"
@@ -111,6 +83,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             (e.g. partial boolean parsed as bare string).
 
     Returns a dict ready for ``json.dumps()``.
+
     """
     if not args_str or not args_str.strip():
         return {}
@@ -313,7 +286,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
 def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
     """Convert Gemma4 custom arg format to a JSON string."""
     text = raw_args.strip()
-    if text.endswith("}"):
+    if text.endswith("}") or text.endswith(")") and text.count("(") < text.count(")"):
         text = text[:-1]
 
     parsed = _parse_gemma4_args(text, partial=partial)
@@ -321,25 +294,23 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 @functools.cache
-def gemma4_config() -> ParserEngineConfig:
-    used_tokens = {
-        CHANNEL_START,
-        CHANNEL_END,
-        TOOL_CALL_START,
-        TOOL_CALL_END,
-        '<|"|>',
-    }
-
+def gemma4_config(thinking: bool = False) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="gemma4",
         initial_state=ParserState.CONTENT,
+        # Decides a silent tail: the E-series HF templates write no marker
+        # with thinking off, and no template does after a tool response.
+        wait_for_reasoning=thinking,
+        turn_boundary_tokens=frozenset({"<|turn>", "<|tool_response>"}),
         terminals={
             "THINK_START": CHANNEL_START,
             "THINK_END": CHANNEL_END,
             "TOOL_START": TOOL_CALL_START,
             "TOOL_END": TOOL_CALL_END,
             "CALL_PREFIX": "call:",
+            "COLON": ":",
             "OPEN_BRACE": "{",
+            "OPEN_PAREN": "(",
         },
         token_id_terminals={
             "THINK_START": CHANNEL_START,
@@ -352,6 +323,14 @@ def gemma4_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "THINK_START"): Transition(
                 ParserState.REASONING,
                 (EventType.REASONING_START,),
+            ),
+            # No-op: if we pre-initialised the engine to REASONING from the
+            # prompt (see ``adjust_initial_state_from_prompt``) but the model
+            # still emits its own ``<|channel>`` opener, swallow it instead
+            # of leaking it as TEXT_CHUNK.
+            (ParserState.REASONING, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (),
             ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
@@ -367,13 +346,32 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (),
+            ),
+            # Bare opener: some checkpoints emit "<|tool_call>:name{...}"
+            # without the "call" prefix.  Match the colon directly so the
+            # tool call is not silently dropped.
+            (ParserState.TOOL_PREAMBLE, "COLON"): Transition(
                 ParserState.TOOL_NAME,
                 (),
             ),
             (ParserState.TOOL_NAME, "OPEN_BRACE"): Transition(
                 ParserState.TOOL_ARGS,
                 (),
+            ),
+            (ParserState.TOOL_NAME, "OPEN_PAREN"): Transition(
+                ParserState.TOOL_ARGS,
+                (),
+            ),
+            (ParserState.TOOL_NAME, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.CONTENT,
@@ -400,7 +398,7 @@ def gemma4_config() -> ParserEngineConfig:
         arg_converter=_gemma4_arg_converter,
         tool_args_json=False,
         arg_structural_chars=frozenset(",:{}[]<"),
-        drop_tokens=frozenset(_GEMMA4_MODEL_DROP_TOKENS - used_tokens),
+        preserve_tokens=frozenset({STRING_DELIM}),
     )
 
 
@@ -424,11 +422,11 @@ class Gemma4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        thinking = chat_kwargs.get("enable_thinking", False)
         super().__init__(
             tokenizer,
             tools,
-            parser_engine_config=gemma4_config(),
+            parser_engine_config=gemma4_config(thinking=thinking),
             **kwargs,
         )
         vocab = self.vocab
@@ -438,21 +436,6 @@ class Gemma4Parser(ParserEngine):
         self._reasoning_text: str = ""
         self._prefix_stripped: bool = False
         self._is_first_feed: bool = True
-
-    def adjust_request(
-        self,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        """Skip ``skip_special_tokens=False`` when thinking is disabled.
-
-        When there are no reasoning channel tokens to preserve,
-        keeping the default prevents tool-call delimiter tokens
-        from leaking into content (e.g. with ``tool_choice="none"``).
-        """
-        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
-        if not chat_template_kwargs.get("enable_thinking", True):
-            return request
-        return super().adjust_request(request)
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
@@ -494,29 +477,53 @@ class Gemma4Parser(ParserEngine):
 
         return delta_text, delta_token_ids
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        end_id = self._reasoning_end_token_id
+    def _prompt_ends_in_open_reasoning(self, prompt_token_ids: Sequence[int]) -> bool:
+        """Whether the prompt tail is inside an open ``<|channel>`` block.
+
+        Scans backwards: a ``<|channel>`` start token seen before any
+        closing or turn-boundary token means the block is still open.
+        """
         start_id = self._reasoning_start_token_id
-        tool_call_id = self._tool_call_token_id
-        new_turn_id = self._new_turn_token_id
-        tool_response_id = self._tool_response_token_id
-
-        if end_id is not None and not input_ids:
-            return self.parser_engine_config.initial_state != ParserState.REASONING
-
-        for i in range(len(input_ids) - 1, -1, -1):
-            tid = input_ids[i]
-            if start_id is not None and tid == start_id:
+        if start_id is None:
+            return False
+        boundary_ids = {
+            tid
+            for tid in (
+                self._reasoning_end_token_id,
+                self._tool_call_token_id,
+                self._new_turn_token_id,
+                self._tool_response_token_id,
+            )
+            if tid is not None
+        }
+        for tid in reversed(prompt_token_ids):
+            if tid == start_id:
+                return True
+            if tid in boundary_ids:
                 return False
-            if tool_call_id is not None and tid == tool_call_id:
-                return True
-            if new_turn_id is not None and tid == new_turn_id:
-                return not self._thinking_enabled
-            if tool_response_id is not None and tid == tool_response_id:
-                return not self._thinking_enabled
-            if end_id is not None and tid == end_id:
-                return True
-        return True
+        return False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Pre-initialise the engine to ``REASONING`` when the prompt ends
+        inside an open ``<|channel>`` block.
+
+        This covers the post-tool-response continuation case where the chat
+        template leaves the prompt ending with ``<|channel>thought\n``
+        (issue #45834). A prompt that merely starts a new model turn must
+        not pre-initialise reasoning: the model may answer directly without
+        emitting any channel markers, and the non-streaming path classifies
+        such output as content (issue #48217). When the model does open its
+        own ``<|channel>``, the ``(CONTENT, THINK_START)`` transition
+        handles it, and the ``thought\n`` prefix in the first reasoning
+        chunk is stripped by ``_events_to_delta`` as in the default flow.
+        """
+        if not self._prompt_ends_in_open_reasoning(prompt_token_ids):
+            return
+        self._engine.reset(initial_state=ParserState.REASONING)
+        # Prevent a later default ``initialize_streaming()`` (e.g. from
+        # ``ParserEngineReasoningAdapter.extract_reasoning_streaming``) from
+        # clobbering this with ``CONTENT``.
+        self._streaming_initialized = True
 
     def _events_to_delta(
         self,

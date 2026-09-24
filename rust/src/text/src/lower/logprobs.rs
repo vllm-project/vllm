@@ -1,10 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Python-compatible validation for logprobs sampling params.
 //!
 //! `-1` is expanded only for bounds checks. The original request values are
 //! passed through to engine-core.
 
-use crate::backend::SamplingLimits;
 use thiserror::Error;
+
+use crate::backend::SamplingLimits;
 
 #[derive(Debug, Error)]
 pub enum LogprobsError {
@@ -40,7 +44,7 @@ pub(super) fn validate_logprobs(
     logprob_token_ids: Option<&[u32]>,
     sampling_limits: SamplingLimits,
 ) -> Result<(), LogprobsError> {
-    let vocab_size = sampling_limits.logprobs_vocab_size();
+    let vocab_size = sampling_limits.model_vocab_size;
     let max_logprobs =
         normalize_logprobs_count(sampling_limits.max_logprobs, vocab_size, "max_logprobs")?;
 

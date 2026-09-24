@@ -49,7 +49,7 @@ To run an AWQ model with vLLM, you can use [TheBloke/Llama-2-7b-Chat-AWQ](https:
 ```bash
 python examples/deployment/llm_engine_example.py \
     --model TheBloke/Llama-2-7b-Chat-AWQ \
-    --quantization awq
+    --quantization auto_awq
 ```
 
 AWQ models are also supported directly through the LLM entrypoint:
@@ -70,7 +70,7 @@ AWQ models are also supported directly through the LLM entrypoint:
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM.
-    llm = LLM(model="TheBloke/Llama-2-7b-Chat-AWQ", quantization="AWQ")
+    llm = LLM(model="TheBloke/Llama-2-7b-Chat-AWQ", quantization="auto_awq")
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)

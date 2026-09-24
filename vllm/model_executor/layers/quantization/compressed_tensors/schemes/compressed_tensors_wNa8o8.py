@@ -13,6 +13,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -113,7 +114,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
             act_type=params_dtype,  # activation quant applied externally (SRQ)
             group_size=self.group_size,
             zero_points=False,
-            has_g_idx=False,
         )
         self.kernel = choose_mp_linear_kernel(mp_config)(
             mp_config,
@@ -166,12 +166,14 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         # Scale: per-output-channel, or per group along the input dim under TP.
         group_size = self.group_size if self.group_size != -1 else input_size
         partitioned = not marlin_repeat_scales_on_all_ranks(
-            False, self.group_size, input_size != input_size_per_partition
+            self.group_size, input_size != input_size_per_partition
         )
         scales = (input_size_per_partition if partitioned else input_size) // group_size
         scale_data = torch.empty(out, scales, dtype=params_dtype)
         if partitioned:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(
+                input_size_per_partition, group_size, self.layer_name
+            )
             weight_scale = GroupQuantScaleParameter(
                 data=scale_data, output_dim=0, input_dim=1, weight_loader=weight_loader
             )

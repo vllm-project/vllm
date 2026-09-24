@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Streaming SSE event builders for the Responses API.
+"""Streaming SSE event builders for the Responses API.
 
 Pure functions that translate streaming state + delta data into
 OpenAI Response API SSE events. Used by the streaming event
@@ -58,21 +57,26 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai_harmony import Message as HarmonyMessage
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
 )
-from vllm.entrypoints.openai.responses.context import StreamingHarmonyContext
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     StreamingResponsesResponse,
 )
+from vllm.entrypoints.openai.responses.utils import (
+    build_responses_tool_call_name_map,
+    resolve_responses_tool_call_name,
+)
 from vllm.outputs import CompletionOutput
+from vllm.parser.harmony import Segment
 from vllm.utils import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
@@ -110,6 +114,7 @@ class StreamingState:
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
         self.current_output_index += 1
+        self.current_content_index = -1
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
@@ -119,8 +124,7 @@ def is_mcp_tool_by_namespace(
     recipient: str | None,
     allowed_function_tool_names: frozenset[str] | None = None,
 ) -> bool:
-    """
-    Determine if a tool call is an MCP tool based on recipient prefix.
+    """Determine if a tool call is an MCP tool based on recipient prefix.
 
     Inverse of :func:`is_function_recipient` — everything that is not
     a function call is an MCP tool.
@@ -558,20 +562,21 @@ def emit_mcp_completion_events(
 
 
 def emit_content_delta_events(
-    ctx: StreamingHarmonyContext,
+    segment: Segment,
     state: StreamingState,
+    function_tool_names: frozenset[str] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
     This is a Harmony-specific dispatcher that extracts values from the
-    Harmony context and delegates to shared leaf helpers.
+    latest append segment and delegates to shared leaf helpers.
     """
-    delta = ctx.last_content_delta
+    delta = segment.delta
     if not delta:
         return []
 
-    channel = ctx.parser.current_channel
-    recipient = ctx.parser.current_recipient
+    channel = segment.channel
+    recipient = segment.recipient
 
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
@@ -580,7 +585,7 @@ def emit_content_delta_events(
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
-        fn_names = ctx.function_tool_names
+        fn_names = function_tool_names
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)
             return emit_function_call_delta_events(delta, function_name, state)
@@ -604,6 +609,12 @@ def emit_previous_item_done_events(
     This is a Harmony-specific dispatcher that extracts values from the
     Harmony parser's message object and delegates to shared leaf helpers.
     """
+    if not state.sent_output_item_added and not state.is_first_function_call_delta:
+        # Suppress done events for items had no delta and thus had no
+        # added/in-progress lifecycle events. This is a bug.
+        # TODO: Ensure added/in-progress events are emitted for zero-delta items.
+        return []
+
     text = previous_item.content[0].text
     if previous_item.recipient is not None:
         # Deal with tool call
@@ -654,7 +665,7 @@ def emit_browser_tool_events(
         )
     elif function_name == "find":
         action = response_function_web_search.ActionFind(
-            type="find",
+            type="find_in_page",
             pattern=parsed_args["pattern"],
             # TODO: translate to url
             url=f"cursor:{parsed_args.get('cursor', '')}",
@@ -769,47 +780,22 @@ def emit_code_interpreter_completion_events(
 
 
 def emit_tool_action_events(
-    ctx: StreamingHarmonyContext,
+    previous_item: HarmonyMessage,
     state: StreamingState,
     tool_server: ToolServer | None,
 ) -> list[StreamingResponsesResponse]:
-    """Emit events for tool action turn."""
-    if not ctx.is_assistant_action_turn() or len(ctx.parser.messages) == 0:
-        return []
-
-    events: list[StreamingResponsesResponse] = []
-    previous_item = ctx.parser.messages[-1]
-
+    """Emit events for a completed assistant action turn."""
     # Handle browser tool
     if (
-        tool_server is not None
-        and tool_server.has_tool("browser")
+        previous_item.author.role == "assistant"
         and previous_item.recipient is not None
         and previous_item.recipient.startswith("browser.")
+        and tool_server is not None
+        and tool_server.has_tool("browser")
     ):
-        events.extend(emit_browser_tool_events(previous_item, state))
+        return emit_browser_tool_events(previous_item, state)
 
-    # Handle tool completion
-    if (
-        tool_server is not None
-        and previous_item.recipient is not None
-        and state.current_item_id is not None
-        and state.sent_output_item_added
-    ):
-        recipient = previous_item.recipient
-        fn_names = ctx.function_tool_names
-        if recipient == "python":
-            events.extend(emit_code_interpreter_completion_events(previous_item, state))
-        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(
-            recipient, fn_names
-        ):
-            events.extend(
-                emit_mcp_completion_events(
-                    recipient, previous_item.content[0].text, state
-                )
-            )
-
-    return events
+    return []
 
 
 # =====================================================================
@@ -832,6 +818,7 @@ class SimpleStreamingState:
     accumulated_text: str = ""
     tool_call_id: str = ""
     tool_call_name: str = ""
+    tool_call_namespace: str | None = None
     tool_call_index: int | None = None
     has_emitted_tool_call_delta: bool = False
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
@@ -1033,11 +1020,13 @@ def emit_simple_tool_call_open(
     state: SimpleStreamingState,
     name: str,
     index: int | None,
+    namespace: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
     state.current_item_id = random_uuid()
     state.tool_call_id = f"call_{random_uuid()}"
     state.tool_call_name = name
+    state.tool_call_namespace = namespace
     state.tool_call_index = index
     state.accumulated_text = ""
     state.has_emitted_tool_call_delta = False
@@ -1051,6 +1040,7 @@ def emit_simple_tool_call_open(
                 id=state.current_item_id,
                 call_id=state.tool_call_id,
                 name=name,
+                namespace=namespace,
                 arguments="",
                 status="in_progress",
             ),
@@ -1098,6 +1088,7 @@ def emit_simple_tool_call_done(
             item=ResponseFunctionToolCall(
                 type="function_call",
                 name=state.tool_call_name,
+                namespace=state.tool_call_namespace,
                 arguments=state.accumulated_text,
                 status="completed",
                 id=state.current_item_id,
@@ -1106,6 +1097,7 @@ def emit_simple_tool_call_done(
         ),
     )
     state.output_index += 1
+    state.tool_call_namespace = None
     state.current_state = _StateType.NONE
     return events
 
@@ -1151,8 +1143,7 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
 
 
 class SimpleStreamingEventProcessor:
-    """
-    State-machine processor for the simple (non-Harmony) streaming path.
+    """State-machine processor for the simple (non-Harmony) streaming path.
 
     Core flow:
       1. Resolve the target state from the delta_message
@@ -1183,14 +1174,18 @@ class SimpleStreamingEventProcessor:
         ),
     }
 
-    def __init__(self, state: SimpleStreamingState | None = None) -> None:
+    def __init__(
+        self,
+        state: SimpleStreamingState | None = None,
+        tools: list[Tool] | None = None,
+    ) -> None:
         self.state = state or SimpleStreamingState()
+        self.tool_call_name_map = build_responses_tool_call_name_map(tools)
 
     def resolve_target_state(
         self, delta_message: DeltaMessage
     ) -> tuple[_StateType, Any]:
-        """
-        Decide which state the next delta belongs to.
+        """Decide which state the next delta belongs to.
 
         Priority: TOOL_CALL > REASONING > CONTENT, fallback to NONE.
         For TOOL_CALL the first tool_call object is also returned so
@@ -1208,8 +1203,7 @@ class SimpleStreamingEventProcessor:
         return _StateType.NONE, None
 
     def needs_transition(self, target_state: _StateType, tool_call: Any) -> bool:
-        """
-        Return True when we must close the current state and open a new one.
+        """Return True when we must close the current state and open a new one.
 
         Two cases trigger a transition:
           1. The target state differs from the current state
@@ -1241,8 +1235,15 @@ class SimpleStreamingEventProcessor:
         handlers = self._STATE_HANDLERS[target_state]
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
+            call_name = resolve_responses_tool_call_name(
+                tool_call.function.name,
+                tool_call_name_map=self.tool_call_name_map,
+            )
             return handlers.open_fn(
-                self.state, tool_call.function.name, tool_call.index
+                self.state,
+                call_name.name,
+                tool_call.index,
+                call_name.namespace,
             )
         return handlers.open_fn(self.state)
 

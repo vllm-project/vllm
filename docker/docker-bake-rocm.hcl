@@ -33,6 +33,10 @@ variable "CI_BASE_CONTENT_HASH" {
   default = ""
 }
 
+variable "CI_BASE_DOCKERFILE" {
+  default = "docker/Dockerfile.rocm"
+}
+
 # REMOTE_VLLM=0: use local source via Docker build context (ONBUILD COPY ./ vllm/)
 # REMOTE_VLLM=1: clone from GitHub at VLLM_BRANCH (standalone builds without local source)
 variable "REMOTE_VLLM" {
@@ -53,7 +57,7 @@ variable "CI_BASE_IMAGE" {
 # Upstream dependency commit pins. Plain local bake builds use the Dockerfile
 # ARG defaults. ci-bake-rocm.sh resolves those defaults (plus any env
 # overrides) and writes a small HCL override before invoking CI targets.
-variable "RIXL_BRANCH" {
+variable "NIXL_BRANCH" {
   default = ""
 }
 
@@ -74,7 +78,7 @@ group "default" {
 }
 
 target "_common-rocm" {
-  dockerfile = "docker/Dockerfile.rocm"
+  dockerfile = CI_BASE_DOCKERFILE
   context    = "."
   args = {
     max_jobs                        = MAX_JOBS
@@ -106,7 +110,7 @@ target "test-rocm" {
   output   = ["type=docker"]
 }
 
-# CI base image target - builds only the ci_base stage (RIXL, DeepEP,
+# CI base image target - builds only the ci_base stage (NIXL, DeepEP,
 # torchcodec, requirements, etc.). Used by the weekly scheduled build and
 # the auto-rebuild trigger when requirements change in a PR.
 target "ci-base-rocm" {

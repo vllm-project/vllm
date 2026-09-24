@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TokenSpeed CuTe DSL backend for MLA prefill."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill.base import (
+    MLADimensions,
+    MLAPrefillBackend,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -19,7 +22,13 @@ if TYPE_CHECKING:
 class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
     """TokenSpeed CuTe DSL backend for MLA prefill."""
 
-    requires_r1_mla_dimensions = True
+    supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        MLADimensions(
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        ),
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -109,20 +118,26 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
 
+    def supports_out(self) -> bool:
+        # Output head dim is v_head_dim (unpadded); `out` supported since 0.1.8.
+        return True
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 
-        # `v` arrives as the second half of `kv_nope.split(...)` in
-        # mla_attention.forward_mha — a non-contiguous view of `kv_nope` along
-        # dim=-1. The kernel does `v.reshape(1, total_kv, h_k, 1, d_v)` which
-        # would silently copy on a non-contiguous tensor; force contiguity here
-        # so the copy (if any) happens once outside the kernel call.
+        # `v` arrives as the second half of `kv_nope.split(...)` — a
+        # non-contiguous view of `kv_nope` along dim=-1. The kernel wraps inputs
+        # via `from_dlpack`, which preserves strides, but the FMHA kernel reads
+        # `v` assuming contiguous storage and silently produces wrong output on
+        # a strided view (verified on tokenspeed-mla 0.1.8). Force contiguity.
         v = v.contiguous()
 
         ret = tokenspeed_mla_prefill(
@@ -137,44 +152,45 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             is_causal=True,
             return_lse=return_softmax_lse,
             enable_pdl=False,
+            out=out,
         )
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
-            return ret[0], ret[1].transpose(0, 1).contiguous()
+            return ret[0], ret[1].transpose(0, 1)
         return ret
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 
-        assert self._prefill_metadata.chunked_context is not None
-        chunked = self._prefill_metadata.chunked_context
-
         # See note in run_prefill_new_tokens — `v` is a split-view of `kv_nope`
-        # in `_compute_prefill_context` and arrives non-contiguous.
+        # in the generic `_compute_prefill_context` and arrives non-contiguous.
+        # (K3's fused fp8 K/V pack already hands over a contiguous `v`.)
         v = v.contiguous()
 
         attn_out, lse = tokenspeed_mla_prefill(
             query=q,
             key=k,
             value=v,
-            seq_lens=chunked.seq_lens[chunk_idx],
-            cum_seq_lens=chunked.cu_seq_lens[chunk_idx],
-            max_seq_len=chunked.max_seq_lens[chunk_idx],
-            batch_size=chunked.seq_lens[chunk_idx].shape[0],
+            seq_lens=chunk.seq_lens,
+            cum_seq_lens=chunk.cu_seq_lens,
+            max_seq_len=chunk.max_seq_len,
+            batch_size=chunk.num_requests,
             softmax_scale=self.scale,
             is_causal=False,
             return_lse=True,
-            cum_seq_lens_q=self._prefill_metadata.query_start_loc,
-            max_seq_len_q=self._prefill_metadata.max_query_len,
+            cum_seq_lens_q=chunk.query_start_loc,
+            max_seq_len_q=chunk.max_query_len,
             enable_pdl=False,
+            out=out,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
-        return attn_out, lse.transpose(0, 1).contiguous()
+        return attn_out, lse.transpose(0, 1)

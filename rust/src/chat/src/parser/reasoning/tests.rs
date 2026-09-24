@@ -1,31 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
-use vllm_tokenizer::Tokenizer;
+use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::{ReasoningParserFactory, names};
-
-struct FakeTokenizer;
-
-impl Tokenizer for FakeTokenizer {
-    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
-        Ok(text.chars().map(u32::from).collect())
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_tokenizer::Result<String> {
-        Ok(token_ids
-            .iter()
-            .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-            .collect())
-    }
-
-    fn token_to_id(&self, _token: &str) -> Option<u32> {
-        None
-    }
-}
 
 #[test]
 fn factory_contains_and_lists_registered_parsers() {
@@ -43,7 +23,7 @@ fn factory_contains_and_lists_registered_parsers() {
 }
 
 #[test]
-fn factory_resolves_deepseek_v4_to_qwen3_alias() {
+fn factory_resolves_deepseek_v4() {
     let factory = ReasoningParserFactory::new();
     assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4"),
@@ -52,6 +32,27 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
     assert_eq!(
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4.1-Flash"),
+        Some(names::DEEPSEEK_V41)
+    );
+}
+
+#[test]
+fn factory_distinguishes_qwen_model_families() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/QwQ-32B"),
+        Some(names::DEEPSEEK_R1)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-8B"),
+        Some(names::QWEN3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen2.5-0.5B-Instruct"),
+        None
     );
 }
 
@@ -105,11 +106,22 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
 
 #[test]
 fn factory_rejects_unknown_parser_names() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(TestTokenizer::new());
     let factory = ReasoningParserFactory::new();
     let error = match factory.create("missing", tokenizer) {
         Ok(_) => panic!("expected parser lookup to fail"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("choose from"));
+}
+
+#[test]
+fn factory_distinguishes_glm_reasoning_framing() {
+    let factory = ReasoningParserFactory::new();
+    for model in ["zai-org/GLM-4.5", "zai-org/GLM-4.6"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM45));
+    }
+    for model in ["zai-org/GLM-4.7-Flash", "zai-org/GLM-5.2-FP8"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM47));
+    }
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 // Route tests should use `Service::call` rather than `ServiceExt::oneshot`.
 // `oneshot` consumes the router and can drop `AppState` before a streaming
 // response body is fully drained, which closes the mock engine connection too
@@ -20,30 +23,42 @@ use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
-    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    NewChatOutputProcessorOptions,
+    ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
+use vllm_engine_core_client::mock_engine::default_ready_response;
+use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
-use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
-    decode_value,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
+    UtilityCallOutput,
 };
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
+};
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
-use vllm_text::{Prompt, TextBackend};
+use vllm_text::tokenizer::DynTokenizer;
+use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
-use crate::config::ApiServerOptions;
+use super::{
+    build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
+    build_router_with_scale_out_endpoints, render::build_router as build_render_router,
+};
+use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::lora::LoadLoraError;
+use crate::render::RenderState;
 use crate::state::AppState;
 
 fn request_output(
@@ -63,17 +78,9 @@ fn request_output_with_stop_reason(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -90,15 +97,9 @@ fn request_output_with_logprobs(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -110,21 +111,18 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     new_prompt_logprobs_tensors: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
         kv_transfer_params,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ec_transfer_params,
+        ..Default::default()
     }
 }
 
@@ -137,6 +135,20 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
         (vec![b'h' as u32], None),
         (vec![b'i' as u32], None),
         (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
+    ]
+}
+
+fn weather_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (
+            bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
+            None,
+        ),
+        (
+            bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
+            Some(EngineCoreFinishReason::Stop),
+        ),
     ]
 }
 
@@ -157,6 +169,22 @@ fn sse_json_payloads(text: &str) -> Vec<serde_json::Value> {
         .filter(|payload| *payload != "[DONE]")
         .map(|payload| serde_json::from_str(payload).expect("sse json payload"))
         .collect()
+}
+
+fn assert_shared_openai_stream_envelope(payloads: &[serde_json::Value], object: &str, model: &str) {
+    let first = payloads.first().expect("at least one SSE JSON payload");
+    assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(first["created"].is_u64());
+    assert_eq!(first["object"], object);
+    assert_eq!(first["model"], model);
+
+    for payload in payloads {
+        assert_eq!(payload["id"], first["id"]);
+        assert_eq!(payload["object"], first["object"]);
+        assert_eq!(payload["created"], first["created"]);
+        assert_eq!(payload["model"], first["model"]);
+        assert!(payload.get("envelope").is_none());
+    }
 }
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -227,19 +255,14 @@ fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        engine_index: 0,
+    RequestBatchOutputs {
         outputs: output_specs
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
-        scheduler_stats: None,
-        timestamp: 0.0,
-        utility_output: None,
-        finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
+    .into()
 }
 
 fn test_llm(client: EngineCoreClient) -> Llm {
@@ -385,14 +408,15 @@ fn utility_none_result() -> UtilityResultEnvelope {
 }
 
 fn utility_outputs(call_id: u64, result: UtilityResultEnvelope) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        utility_output: Some(UtilityOutput {
+    UtilityCallOutput {
+        output: UtilityOutput {
             call_id: call_id.into(),
             failure_message: None,
             result: Some(result),
-        }),
+        },
         ..Default::default()
     }
+    .into()
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
@@ -414,82 +438,20 @@ struct FakeChatBackend {
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
-const FAKE_BOS_TOKEN_ID: u32 = 1;
+const FAKE_BOS_TOKEN_ID: u32 = 256;
+const UNKNOWN_DECODE_TOKEN_ID: u32 = 10_000;
 
-#[derive(Debug)]
-struct FakeChatTokenizer;
-
-impl Tokenizer for FakeChatTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        let mut token_ids = Vec::new();
-        if add_special_tokens {
-            token_ids.push(FAKE_BOS_TOKEN_ID);
-        }
-        let mut rest = text;
-        while !rest.is_empty() {
-            if let Some(stripped) = rest.strip_prefix("<image>") {
-                token_ids.push(999);
-                rest = stripped;
-                continue;
-            }
-            if let Some(stripped) = rest.strip_prefix("<|image_pad|>") {
-                token_ids.push(151655);
-                rest = stripped;
-                continue;
-            }
-
-            let ch = rest.chars().next().expect("rest is not empty");
-            let mut buf = [0; 4];
-            token_ids.extend(ch.encode_utf8(&mut buf).bytes().map(u32::from));
-            rest = &rest[ch.len_utf8()..];
-        }
-        Ok(token_ids)
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        match token {
-            "<image>" => Some(999),
-            "<|image_pad|>" => Some(151655),
-            "<think>" => Some(0xF001),
-            "</think>" => Some(0xF002),
-            "<|START_THINKING|>" => Some(0xF003),
-            "<|END_THINKING|>" => Some(0xF004),
-            "◁think▷" => Some(0xF005),
-            "◁/think▷" => Some(0xF006),
-            _ => None,
-        }
-    }
-
-    fn id_to_token(&self, id: u32) -> Option<String> {
-        match id {
-            FAKE_BOS_TOKEN_ID => Some("<bos>".to_string()),
-            999 => Some("<image>".to_string()),
-            151655 => Some("<|image_pad|>".to_string()),
-            0xF001 => Some("<think>".to_string()),
-            0xF002 => Some("</think>".to_string()),
-            0xF003 => Some("<|START_THINKING|>".to_string()),
-            0xF004 => Some("<|END_THINKING|>".to_string()),
-            0xF005 => Some("◁think▷".to_string()),
-            0xF006 => Some("◁/think▷".to_string()),
-            id if id < 128 => char::from_u32(id).map(|ch| ch.to_string()),
-            _ => None,
-        }
-    }
+fn fake_chat_tokenizer() -> TestTokenizer {
+    TestTokenizer::new()
+        .with_bos_token("<bos>", FAKE_BOS_TOKEN_ID)
+        .with_regular_token("<image>", 999)
+        .with_regular_token("<|image_pad|>", 151655)
+        .with_regular_token("<think>", 0xF001)
+        .with_regular_token("</think>", 0xF002)
+        .with_regular_token("<|START_THINKING|>", 0xF003)
+        .with_regular_token("<|END_THINKING|>", 0xF004)
+        .with_regular_token("◁think▷", 0xF005)
+        .with_regular_token("◁/think▷", 0xF006)
 }
 
 impl FakeChatBackend {
@@ -527,7 +489,7 @@ impl fmt::Debug for FakeChatBackend {
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FakeChatTokenizer)
+        Arc::new(fake_chat_tokenizer())
     }
 
     fn model_id(&self) -> &str {
@@ -555,6 +517,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -564,7 +527,7 @@ impl ChatRenderer for FakeChatBackend {
         let placeholder = self
             .multimodal_model_info
             .as_ref()
-            .map(|info| info.placeholder_token())
+            .and_then(|info| info.placeholder_token(llm_multimodal::Modality::Image))
             .unwrap_or("<image>");
         let mut prompt = String::new();
         for message in &request.messages {
@@ -578,6 +541,8 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs: Default::default(),
         })
     }
 }
@@ -590,7 +555,8 @@ fn render_fake_message_content(
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
+        | ChatMessage::ToolResponse { content, .. }
+        | ChatMessage::Custom { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => message.text_content(),
     }
 }
@@ -603,7 +569,10 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => out.push_str(placeholder),
+                    ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::VideoUrl { .. }
+                    | ChatContentPart::InputAudio { .. }
+                    | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),
                 }
             }
             out
@@ -612,90 +581,35 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
 }
 
 fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    qwen_multimodal_model_info_with_limits(std::collections::HashMap::new())
+}
+
+fn qwen_multimodal_model_info_with_limits(
+    limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-server-qwen-config-{}.json",
         uuid::Uuid::new_v4()
     ));
     fs::write(
         &config_path,
-        r#"{"model_type":"qwen2_vl","vision_token_id":151655}"#,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
     )
     .expect("write qwen test config");
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
         "qwen2-vl-test".to_string(),
         Some("qwen2_vl".to_string()),
-        Some(&config_path),
-        None,
-        Arc::new(FakeChatTokenizer),
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            ..Default::default()
+        },
+        Arc::new(fake_chat_tokenizer()),
+        limit_mm_per_prompt,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
     info
-}
-
-#[derive(Clone, Debug)]
-struct FailingDecodeChatBackend;
-
-#[derive(Debug)]
-struct FailingDecodeTokenizer;
-
-impl Tokenizer for FailingDecodeTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        FakeChatTokenizer.encode(text, add_special_tokens)
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        if token_ids.contains(&(b'i' as u32)) {
-            return Err(vllm_text::tokenizer::TokenizerError(
-                "forced decode failure for streaming test".to_string(),
-            ));
-        }
-
-        FakeChatTokenizer.decode(token_ids, skip_special_tokens)
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        FakeChatTokenizer.token_to_id(token)
-    }
-}
-
-impl TextBackend for FailingDecodeChatBackend {
-    fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FailingDecodeTokenizer)
-    }
-
-    fn model_id(&self) -> &str {
-        "test-model"
-    }
-}
-
-impl ChatBackend for FailingDecodeChatBackend {
-    fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
-    }
-
-    fn new_chat_output_processor(
-        &self,
-        _request: &mut ChatRequest,
-        _options: NewChatOutputProcessorOptions<'_>,
-    ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::plain_text_only()))
-    }
-}
-
-impl ChatRenderer for FailingDecodeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
-        FakeChatBackend::new().render(request)
-    }
 }
 
 async fn test_models_with_engine_outputs_and_backend_inner(
@@ -772,6 +686,37 @@ async fn test_app() -> axum::Router {
     test_app_with_dev_mode(false).await
 }
 
+fn test_render_app() -> axum::Router {
+    test_render_app_with_parser_selections(ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with_parser_selections(
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
+    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+}
+
+fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
+    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with(
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
+    let backend = Arc::new(FakeChatBackend::new());
+    build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: vec!["render-model".to_string()],
+        max_model_len,
+        text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
+        chat: ChatRequestProcessor::render_only(backend)
+            .with_parser_selections(tool_call_parser, reasoning_parser),
+    }))
+}
+
 async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
@@ -786,6 +731,134 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
         )),
         dev_mode_enabled,
     )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_follows_api_server_options() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-api-server-options",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            enable_scale_out: true,
+            ..Default::default()
+        }),
+    );
+    let mut app = build_router(state);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_is_disabled_by_default() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-disabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        false,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_can_be_enabled() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-enabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// Build a dev-mode router backed by a mock engine using a custom ready
+/// response, returning the router and the engine task handle so the engine
+/// stays alive for the duration of the test.
+async fn test_dev_mode_app_with_ready(
+    ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
+) -> (axum::Router, MockEngineTask) {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-world-size".to_vec();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id,
+        ready_response,
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_dev_mode(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
+    (app, engine_task)
 }
 
 async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
@@ -817,6 +890,35 @@ async fn test_app_with_api_keys(api_keys: Vec<String>) -> (axum::Router, MockEng
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_keys(api_keys),
     ));
     (app, engine_task)
+}
+
+async fn test_app_with_cors_and_keys(
+    cors: CorsConfig,
+    api_keys: Vec<String>,
+) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-cors",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+            .with_cors(cors)
+            .with_api_keys(api_keys),
+    ));
+    (app, engine_task)
+}
+
+async fn test_app_with_cors(cors: CorsConfig) -> (axum::Router, MockEngineTask) {
+    test_app_with_cors_and_keys(cors, vec![]).await
+}
+
+fn header_value<'a>(response: &'a axum::response::Response, name: &str) -> Option<&'a str> {
+    response
+        .headers()
+        .get(name)
+        .map(|value| value.to_str().expect("header is valid utf-8"))
 }
 
 async fn test_health_app_with_engine_script<F>(
@@ -858,13 +960,41 @@ async fn test_admin_app_with_engine_script<F>(script: F) -> (axum::Router, MockE
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    test_admin_app_with_ready_and_engine_script(ready, script).await
+}
+
+async fn test_admin_app_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(ready, script).await;
+    (
+        build_router_with_dev_mode_and_lora(state, true, true),
+        engine_task,
+    )
+}
+
+async fn test_admin_state_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
+        ready,
         move |dealer, push| script(dealer, push),
     ));
 
@@ -881,16 +1011,146 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router_with_dev_mode_and_lora(
-            Arc::new(AppState::new(
-                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-                chat,
-            )),
-            true,
-            true,
-        ),
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
         engine_task,
     )
+}
+
+/// Engine script that answers one `add_lora` utility call with `loaded` and
+/// hands the decoded LoRA request tuple to `check`.
+fn add_lora_script(
+    loaded: bool,
+    check: impl FnOnce(&[Value]) + Send + 'static,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("add_lora"));
+            let args = array[3].as_array().expect("utility args");
+            check(args[0].as_array().expect("lora request tuple"));
+            send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_loads_and_lists_with_parent() {
+    // An absolute local path: the runtime endpoint would reject it without
+    // VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES, static config trusts it.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        ready,
+        add_lora_script(true, |lora| {
+            assert_eq!(lora[0], Value::from("alice"));
+            assert_eq!(lora[1], Value::from(1));
+            assert_eq!(lora[2], Value::from("/adapters/alice"));
+            assert_eq!(lora[3], Value::from("base-model"));
+        }),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        is_3d_lora_weight: false,
+    };
+    let request = state.load_static_lora(&module).await.expect("load static lora");
+    assert_eq!(request.lora_name, "alice");
+    assert_eq!(request.lora_int_id, 1);
+
+    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"][1]["id"], "alice");
+    assert_eq!(json["data"][1]["root"], "/adapters/alice");
+    assert_eq!(json["data"][1]["parent"], "base-model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_requires_lora_enabled_engine() {
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine has no lora");
+    assert!(matches!(error, LoadLoraError::Disabled(_)), "{error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_fails_when_engine_rejects_it() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(false, |_| {})).await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine rejected");
+    assert!(
+        matches!(error, LoadLoraError::NotLoaded { .. }),
+        "{error:?}"
+    );
+    assert!(state.served_lora_requests().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_rejects_empty_name_or_path() {
+    // The JSON form of `--lora-modules` is not validated at parse time; the
+    // manager rejects empty fields before any engine RPC.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, |_dealer, _push| {
+            boxed_test_future(async {})
+        })
+        .await;
+
+    for (name, path) in [("", "org/alice"), ("alice", "")] {
+        let module = LoraModulePath {
+            name: name.to_string(),
+            path: path.to_string(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let error = state.load_static_lora(&module).await.expect_err("empty field");
+        assert!(
+            matches!(error, LoadLoraError::InvalidAdapter { .. }),
+            "{error:?}"
+        );
+    }
 }
 
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
@@ -907,10 +1167,13 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router_with_scale_out_endpoints(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            true,
+        ),
         engine_task,
     )
 }
@@ -1065,6 +1328,211 @@ fn metric_delta(
         - metric_value(rendered_before, metric, labels).unwrap_or(0.0)
 }
 
+#[tokio::test]
+async fn render_chat_returns_generate_request_with_header_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .header("X-Request-Id", "header-req")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "cache_salt": "render-cache-salt",
+                        "priority": -3
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["request_id"], "chatcmpl-header-req");
+    assert_eq!(json["model"], "render-model");
+    assert_eq!(json["stream"], true);
+    assert_eq!(json["stream_options"]["include_usage"], true);
+    assert_eq!(json["cache_salt"], "render-cache-salt");
+    assert_eq!(json["priority"], -3);
+    assert_eq!(json["sampling_params"]["max_tokens"], 8);
+    assert!(!json["token_ids"].as_array().unwrap().is_empty());
+    assert!(json.get("prompt_token_ids").is_none());
+    assert!(json.get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_chat_uses_processor_owned_parser_selections() {
+    let mut app = test_render_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("definitely_missing_reasoning_parser".to_string()),
+    );
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("decode body");
+    assert!(
+        body.contains("reasoning parser `definitely_missing_reasoning_parser` is not registered")
+    );
+}
+
+#[tokio::test]
+async fn render_completion_returns_generate_request_with_body_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "prompt": "hello",
+                        "max_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json[0]["request_id"], "cmpl-body-req");
+    assert_eq!(json[0]["model"], "render-model");
+    assert_eq!(json[0]["stream"], false);
+    assert_eq!(json[0]["sampling_params"]["max_tokens"], 8);
+    assert!(!json[0]["token_ids"].as_array().unwrap().is_empty());
+    assert!(json[0].get("stream_options").is_none());
+    assert!(json[0].get("prompt_token_ids").is_none());
+    assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_list_models_reports_configured_max_model_len() {
+    for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
+        let mut app = test_render_app_with_max_model_len(configured);
+        let response = app
+            .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        let card = json["data"][0].as_object().expect("card object");
+        assert!(card.contains_key("max_model_len"));
+        assert_eq!(
+            card["max_model_len"], expected,
+            "configured: {configured:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
+    let mut render_app = test_render_app();
+    let render_response = render_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "round-trip",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "bad_words": ["blocked"],
+                        "vllm_xargs": {"custom": 1}
+                    })
+                    .to_string(),
+                ))
+                .expect("build render request"),
+        )
+        .await
+        .expect("call render app");
+
+    assert_eq!(render_response.status(), StatusCode::OK);
+    let render_body = to_bytes(render_response.into_body(), usize::MAX)
+        .await
+        .expect("read render response");
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render_body).expect("decode render response");
+    let token_ids: Vec<u32> = serde_json::from_value(render_json["token_ids"].clone())
+        .expect("decode rendered token IDs");
+
+    assert_eq!(
+        render_json["sampling_params"]["bad_words"],
+        json!(["blocked"])
+    );
+    assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-render-generate-round-trip",
+        default_stream_output_specs(),
+        Some(token_ids),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut generate_app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
+        true,
+    );
+    let generate_response = generate_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(render_body))
+                .expect("build generate request"),
+        )
+        .await
+        .expect("call generate app");
+
+    assert_eq!(generate_response.status(), StatusCode::OK);
+    let _ = to_bytes(generate_response.into_body(), usize::MAX)
+        .await
+        .expect("read generate response");
+    engine_task.finish().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn list_models_returns_configured_model() {
@@ -1078,6 +1546,93 @@ async fn list_models_returns_configured_model() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["data"][0]["id"], "Qwen/Qwen1.5-0.5B-Chat");
+    // No model path configured: `root` falls back to the served name.
+    assert_eq!(json["data"][0]["root"], "Qwen/Qwen1.5-0.5B-Chat");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn list_models_base_card_includes_metadata() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-models-meta",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    // `id` is the served alias; `root` is the underlying model path.
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["public-alias".to_string()], chat)
+            .with_model_path("org/backend-model".to_string()),
+    ));
+
+    let response = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let card = json["data"][0].as_object().expect("card object");
+    assert_eq!(card["id"], "public-alias");
+    assert_eq!(card["owned_by"], "vllm-frontend-rs");
+    assert_eq!(card["root"], "org/backend-model");
+    assert!(card["max_model_len"].as_u64().expect("max_model_len") > 0);
+    assert!(card["created"].as_i64().expect("created") > 0);
+    // `parent` must be emitted as null, not omitted.
+    assert!(card.contains_key("parent") && card["parent"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn list_models_lists_loras_in_load_order() {
+    // Load out of lexicographic order; the list must preserve load order, not sort.
+    let (mut app, _engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            for _ in 0..2 {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let call_id =
+                    payload.as_array().expect("utility array")[1].as_u64().expect("call id");
+                send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+            }
+        })
+    })
+    .await;
+
+    for name in ["zebra", "alpha"] {
+        let path = format!("org/{name}");
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/load_lora_adapter")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "lora_name": name, "lora_path": path }).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["data"][0]["id"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert_eq!(json["data"][1]["id"], "zebra");
+    assert_eq!(json["data"][2]["id"], "alpha");
+    // `max_model_len` must be emitted as null on LoRA cards, not omitted.
+    let lora_card = json["data"][1].as_object().expect("lora card object");
+    assert_eq!(lora_card["root"], "org/zebra");
+    assert_eq!(lora_card["parent"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert!(lora_card.contains_key("max_model_len") && lora_card["max_model_len"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1214,6 +1769,273 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn cors_default_simple_request_allows_any_origin() {
+    let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://example.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("*")
+    );
+    // Wildcard origins without credentials emit no `Vary` (Starlette parity).
+    assert_eq!(header_value(&response, "vary"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_default_preflight_returns_explicit_methods_and_max_age() {
+    let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // `*` methods expand to the explicit method list, matching Starlette
+    // (never the literal `*`).
+    assert_eq!(
+        header_value(&response, "access-control-allow-methods"),
+        Some("DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT")
+    );
+    assert_eq!(
+        header_value(&response, "access-control-max-age"),
+        Some("600")
+    );
+    // `*` headers mirror the requested headers.
+    assert_eq!(
+        header_value(&response, "access-control-allow-headers"),
+        Some("content-type")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_no_origin_request_has_no_cors_headers() {
+    let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+    assert_eq!(header_value(&response, "vary"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_origin_allowed_reflects_origin_with_vary() {
+    let cors = CorsConfig {
+        allow_origins: vec!["http://allowed.com".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://allowed.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("http://allowed.com")
+    );
+    assert_eq!(header_value(&response, "vary"), Some("origin"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_origin_disallowed_omits_allow_origin() {
+    let cors = CorsConfig {
+        allow_origins: vec!["http://allowed.com".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://evil.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_wildcard_with_credentials_reflects_origin_without_panic() {
+    let cors = CorsConfig {
+        allow_credentials: true,
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://example.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // `*` + credentials reflects the request origin instead of `*` (Starlette
+    // parity, and avoids tower-http's wildcard+credentials panic).
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("http://example.com")
+    );
+    assert_eq!(
+        header_value(&response, "access-control-allow-credentials"),
+        Some("true")
+    );
+    assert_eq!(header_value(&response, "vary"), Some("origin"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_unauthorized_response_has_no_cors_headers() {
+    let (mut app, _engine_task) =
+        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://example.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // Auth sits outside CORS, so a 401 carries no CORS headers.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_preflight_bypasses_auth_and_returns_cors_headers() {
+    let (mut app, _engine_task) =
+        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("*")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_methods_preflight_returns_that_list() {
+    let cors = CorsConfig {
+        allow_methods: vec!["GET".to_string(), "POST".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // Explicit methods are emitted verbatim, not expanded and not `*`.
+    assert_eq!(
+        header_value(&response, "access-control-allow-methods"),
+        Some("GET,POST")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_headers_union_safelisted_headers() {
+    let cors = CorsConfig {
+        allow_headers: vec!["X-Custom".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // Explicit headers are unioned with the safelisted set, lowercased + sorted.
+    assert_eq!(
+        header_value(&response, "access-control-allow-headers"),
+        Some("accept,accept-language,content-language,content-type,x-custom")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn version_returns_engine_vllm_version() {
     let mut app = test_app().await;
     let response = app
@@ -1228,7 +2050,57 @@ async fn version_returns_engine_vllm_version() {
         json,
         json!({
             "version": "test-vllm-version",
-            "rust_frontend_version": env!("CARGO_PKG_VERSION"),
+            "rust_frontend_version": vllm_build_info::VERSION,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_event_sources_reports_each_ready_engine() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        data_parallel_rank: 1,
+        kv_events_config: Some(
+            vllm_engine_core_client::protocol::handshake::KvEventsConfig {
+                enable_kv_cache_events: true,
+                publisher: "zmq".to_string(),
+                endpoint: "tcp://10.0.0.2:41233".to_string(),
+                replay_endpoint: None,
+                buffer_steps: 10_000,
+                hwm: 100_000,
+                max_queue_size: 100_000,
+                topic: "kv".to_string(),
+            },
+        ),
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_event_sources")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "1": {
+                "enable_kv_cache_events": true,
+                "publisher": "zmq",
+                "endpoint": "tcp://10.0.0.2:41233",
+                "replay_endpoint": null,
+                "buffer_steps": 10000,
+                "hwm": 100000,
+                "max_queue_size": 100000,
+                "topic": "kv",
+            }
         })
     );
 }
@@ -1814,6 +2686,42 @@ async fn invalid_request_returns_openai_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "allowed_token_ids": []
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message string")
+            .contains("allowed_token_ids should not be empty")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_returns_json_response() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
@@ -1856,6 +2764,71 @@ async fn non_stream_chat_returns_json_response() {
     assert_eq!(json["usage"]["prompt_tokens"], 22);
     assert_eq!(json["usage"]["completion_tokens"], 3);
     assert_eq!(json["usage"]["total_tokens"], 25);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses...
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    let message = choice["message"].as_object().expect("message object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "prompt_token_ids"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "token_ids"),
+        (message, "reasoning"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
+    // ...except `tool_calls`, which Python pops from the payload when empty.
+    assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for watermarking in [None, Some(true), Some(false)] {
+                let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                    Arc::new(FakeChatBackend::new()),
+                    move |request| {
+                        let params = request.sampling_params.as_ref().expect("sampling params");
+                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                    },
+                )
+                .await;
+
+                let mut body = json!({"stream": stream, "max_tokens": 2});
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                if let Some(watermarking) = watermarking {
+                    body["watermarking"] = json!(watermarking);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+                engine_task.await.expect("mock engine task");
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1871,7 +2844,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].modality, "image");
+            assert_eq!(features[0].modality.as_str(), "image");
             assert_eq!(features[0].identifier, "image-1");
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -1926,6 +2899,74 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() {
+    // The request is rejected by `--limit-mm-per-prompt` validation before
+    // ever reaching the engine, so the mock engine task is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-mm-limit",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                vllm_chat::multimodal::MmModality::Image,
+                vllm_chat::multimodal::MmLimitSpec::Count(1),
+            )])),
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        json["error"]["message"],
+        "At most 1 image(s) may be provided in one prompt."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -1943,8 +2984,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"hi"),
@@ -1953,13 +2993,9 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                             Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
                             Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2016,6 +3052,14 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
         json["choices"][0]["logprobs"]["content"][1]["token"],
         json!("i")
     );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
+        json!([])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"],
+        json!([])
+    );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert!(json["prompt_logprobs"][1].is_object());
 }
@@ -2056,6 +3100,11 @@ async fn happy_path_returns_sse_stream() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let after = METRICS.render().unwrap();
 
+    assert_shared_openai_stream_envelope(
+        &sse_json_payloads(&text),
+        "chat.completion.chunk",
+        "Qwen/Qwen1.5-0.5B-Chat",
+    );
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.starts_with("data: "), "{text}");
     assert_eq!(
@@ -2171,6 +3220,64 @@ async fn http_metrics_group_error_statuses() {
             Some("method=\"POST\",status=\"4xx\",handler=\"/v1/chat/completions\""),
         ),
         1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_collapse_unknown_methods() {
+    let mut app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    for (method, path) in [
+        ("XVULNCARD000001", "/tokenize"),
+        ("XVULNCARD000002", "/tokenize"),
+        ("XVULNCARD000003", "/detokenize"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    let after = METRICS.render().unwrap();
+    assert!(
+        !after.contains("XVULNCARD"),
+        "raw method tokens must not appear in metrics: {after}"
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/tokenize\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/detokenize\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"other\",handler=\"/tokenize\""),
+        ),
+        2.0
     );
 }
 
@@ -2293,8 +3400,8 @@ async fn load_endpoint_resets_when_stream_response_is_dropped() {
 #[serial]
 async fn stream_error_is_returned_as_openai_error_sse() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
-        Arc::new(FailingDecodeChatBackend),
-        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+        vec![(vec![UNKNOWN_DECODE_TOKEN_ID], None)],
     )
     .await;
     let response = app
@@ -2327,7 +3434,9 @@ async fn stream_error_is_returned_as_openai_error_sse() {
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.contains("\"type\":\"server_error\""), "{text}");
     assert!(
-        text.contains("forced decode failure for streaming test"),
+        text.contains(&format!(
+            "test tokenizer cannot decode unknown token id {UNKNOWN_DECODE_TOKEN_ID}"
+        )),
         "{text}"
     );
     assert!(!text.contains("\"usage\":"), "{text}");
@@ -2549,6 +3658,42 @@ async fn completions_invalid_request_returns_openai_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn completions_empty_allowed_token_ids_returns_openai_error() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "allowed_token_ids": []
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message string")
+            .contains("allowed_token_ids should not be empty")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_return_json_response() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
@@ -2588,6 +3733,25 @@ async fn non_stream_completions_return_json_response() {
     assert_eq!(json["choices"][0]["text"], "hi");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
     assert_eq!(json["usage"]["completion_tokens"], 3);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses.
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "prompt_logprobs"),
+        (choice, "token_ids"),
+        (choice, "prompt_token_ids"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2629,6 +3793,107 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_echo_decodes_token_id_prompt_text() {
+    let prompt_token_ids = bytes_to_token_ids(b"hello");
+    let expected_prompt_token_ids = prompt_token_ids.clone();
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(expected_prompt_token_ids.as_slice())
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": prompt_token_ids,
+                        "echo": true,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "hellohi");
+    assert_eq!(json["usage"]["prompt_tokens"], 5);
+    assert_eq!(json["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_token_id_echo_return_token_ids_keeps_prompt_ids_separate() {
+    let prompt_token_ids = bytes_to_token_ids(b"hello");
+    let expected_prompt_token_ids = prompt_token_ids.clone();
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(expected_prompt_token_ids.as_slice())
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": prompt_token_ids,
+                        "echo": true,
+                        "return_token_ids": true,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "hi");
+    assert_eq!(
+        json["choices"][0]["prompt_token_ids"],
+        json!(bytes_to_token_ids(b"hello"))
+    );
+    assert_eq!(
+        json["choices"][0]["token_ids"],
+        json!(bytes_to_token_ids(b"hi!"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_include_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -2644,8 +3909,7 @@ async fn non_stream_completions_include_logprobs() {
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -2664,13 +3928,10 @@ async fn non_stream_completions_include_logprobs() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2747,8 +4008,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             vec![b'h' as u32, b'i' as u32, b'!' as u32],
@@ -2769,13 +4029,9 @@ async fn non_stream_completions_include_prompt_logprobs() {
                             }),
                             Some(prompt_logprobs_for_hello()),
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2844,7 +4100,10 @@ async fn non_stream_completions_include_prompt_logprobs() {
     );
     assert_eq!(
         json["choices"][0]["prompt_logprobs"][1],
-        json!({"a": -0.5, "e": -0.3})
+        json!({
+            "97": {"logprob": -0.5, "rank": 1, "decoded_token": "a"},
+            "101": {"logprob": -0.3, "rank": 1, "decoded_token": "e"},
+        })
     );
 }
 
@@ -2908,6 +4167,46 @@ async fn non_stream_chat_completions_still_succeed() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_accepts_request_body_larger_than_axum_default() {
+    let (chat, engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-large-body",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let large_template_arg = "a".repeat(2 * 1024 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     engine_task.await.expect("mock engine task");
 }
 
@@ -3071,8 +4370,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3090,15 +4388,12 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 Some(sample_logprobs_for_token(44, 45)),
                                 None,
                                 Some(json!({"connector": "x"})),
+                                None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3116,10 +4411,13 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
 
     let response = app
         .call(
@@ -3191,8 +4489,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3211,13 +4508,9 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3235,10 +4528,13 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
 
     let response = app
         .call(
@@ -3492,6 +4788,75 @@ async fn raw_generate_rejects_empty_token_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn raw_generate_rejects_parallel_sampling() {
+    let mut app = test_app().await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "sampling_params": {"n": 4}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["param"], "n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_rejects_streaming_prompt_logprobs() {
+    let mut app = test_app().await;
+
+    for prompt_logprobs in [0, 1] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "token_ids": [11, 22],
+                            "stream": true,
+                            "sampling_params": {
+                                "prompt_logprobs": prompt_logprobs
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(json["error"]["param"], "sampling_params");
+        assert_eq!(
+            json["error"]["message"],
+            "`prompt_logprobs` are not available when `stream=true`."
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn raw_generate_rejects_wrong_model() {
     let mut app = test_app().await;
 
@@ -3552,6 +4917,11 @@ async fn completions_happy_path_returns_sse_stream() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
+    assert_shared_openai_stream_envelope(
+        &sse_json_payloads(&text),
+        "text_completion",
+        "Qwen/Qwen1.5-0.5B-Chat",
+    );
     let usage_index = payloads
         .iter()
         .position(|payload| payload.contains("\"usage\":"))
@@ -3689,6 +5059,71 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn completions_echo_stream_decodes_token_id_prompt_chunk() {
+    let prompt_token_ids = bytes_to_token_ids(b"hello");
+    let expected_prompt_token_ids = prompt_token_ids.clone();
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(expected_prompt_token_ids.as_slice())
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": prompt_token_ids,
+                        "echo": true,
+                        "stream": true,
+                        "stream_options": {"include_usage": true}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    let hello_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"text\":\"hello\""))
+        .expect("prompt echo chunk");
+    let h_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"text\":\"h\""))
+        .expect("first generation chunk");
+
+    assert!(hello_index < h_index, "{text}");
+
+    let usage_chunk: serde_json::Value = serde_json::from_str(
+        payloads
+            .iter()
+            .find(|payload| payload.contains("\"usage\":"))
+            .expect("usage chunk"),
+    )
+    .expect("usage chunk json");
+    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
@@ -3777,10 +5212,10 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
 }
@@ -3805,8 +5240,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3825,13 +5259,9 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3887,14 +5317,14 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
     let choice = json["choices"][0].as_object().expect("choice object");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
-    assert!(!choice.contains_key("logprobs"), "{text}");
-    assert!(!choice.contains_key("token_ids"), "{text}");
+    assert!(choice["logprobs"].is_null(), "{text}");
+    assert!(choice["token_ids"].is_null(), "{text}");
     assert!(json["prompt_token_ids"].is_array(), "{text}");
 }
 
@@ -3903,17 +5333,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
 async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
-        vec![
-            (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
-            (
-                bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
-                None,
-            ),
-            (
-                bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
-                Some(EngineCoreFinishReason::Stop),
-            ),
-        ],
+        weather_tool_call_output_specs(),
     )
     .await;
 
@@ -3964,6 +5384,63 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn named_tool_choice_uses_stop_finish_reason() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            weather_tool_call_output_specs(),
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "description": "Get weather",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {"city": {"type": "string"}}
+                                    }
+                                }
+                            }],
+                            "tool_choice": {
+                                "type": "function",
+                                "function": {"name": "get_weather"}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        assert!(text.contains("\"tool_calls\":"), "{text}");
+        assert!(text.contains("\"name\":\"get_weather\""), "{text}");
+        assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
+        assert!(!text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tool_call_sse_chunks_can_carry_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -3980,8 +5457,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"<think>Need tool.</think>"),
@@ -3992,19 +5468,14 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
@@ -4015,19 +5486,14 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(
@@ -4040,13 +5506,10 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -4180,7 +5643,10 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json body"),
+        json!({"success": true})
+    );
     engine_task.await.expect("mock engine task");
 }
 
@@ -4391,7 +5857,46 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn wake_up_route_without_tags_sends_none() {
+async fn release_kv_cache_memory_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("release_kv_cache_memory"));
+            assert_eq!(array[3], Value::Array(Vec::new()));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_without_tags_accepts_bool_result() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -4404,7 +5909,7 @@ async fn wake_up_route_without_tags_sends_none() {
             assert_eq!(array[2], Value::from("wake_up"));
             assert_eq!(array[3], Value::Array(vec![Value::Nil]));
 
-            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
         })
     })
     .await;
@@ -4415,6 +5920,51 @@ async fn wake_up_route_without_tags_sends_none() {
             Request::builder()
                 .method("POST")
                 .uri("/wake_up")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_accepts_repeated_tags() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("wake_up"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::Array(vec![
+                    Value::from("weights"),
+                    Value::from("kv_cache"),
+                ])])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/wake_up?tags=weights&tags%5B%5D=ignored&tags=kv_cache")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -4627,6 +6177,112 @@ async fn is_paused_route_returns_json_payload() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn abort_requests_route_returns_ok_for_well_formed_body() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_ids":["req-1","req-2"]}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn abort_requests_route_aborts_all_when_request_ids_missing() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    // Missing `request_ids` means "abort all in-flight requests"; with no
+    // in-flight requests this is a no-op that still succeeds.
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn abort_requests_route_rejects_malformed_json() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_ids": "#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn abort_requests_route_accepts_empty_id_list() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_ids":[]}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
     let app = build_router_with_dev_mode(
@@ -4640,14 +6296,23 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     for (method, uri) in [
         ("GET", "/is_sleeping"),
         ("POST", "/sleep"),
+        ("POST", "/release_kv_cache_memory"),
         ("POST", "/wake_up"),
         ("GET", "/is_paused"),
         ("POST", "/pause"),
         ("POST", "/resume"),
         ("POST", "/collective_rpc"),
+        ("POST", "/abort_requests"),
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
+        ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/start_weight_update"),
+        ("POST", "/start_draft_weight_update"),
+        ("POST", "/update_weights"),
+        ("POST", "/finish_weight_update"),
+        ("POST", "/update_weight_version"),
+        ("GET", "/weight_info"),
     ] {
         let response = app
             .clone()
@@ -4665,6 +6330,248 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_support_the_http_training_lifecycle() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let mut calls = Vec::new();
+            for _ in 0..10 {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]).expect("decode utility");
+                let array = payload.as_array().expect("utility array");
+                let call_id = array[1].as_u64().expect("call id");
+                let args: serde_json::Value =
+                    rmpv::ext::from_value(array[3].clone()).expect("decode args");
+                calls.push(format!("{} {args}", array[2].as_str().expect("method")));
+                let result = if array[2] == Value::from("get_weight_version") {
+                    utility_result_value("step-2")
+                } else if array[2] == Value::from("collective_rpc") {
+                    utility_result_value(vec![(), ()])
+                } else {
+                    utility_none_result()
+                };
+                send_outputs(push, utility_outputs(call_id, result)).await;
+            }
+            expect_test::expect![[r#"
+                [
+                    "collective_rpc [\"init_weight_transfer_engine\",null,[],{\"init_info\":{\"master_address\":\"127.0.0.1\",\"master_port\":29500,\"rank_offset\":1,\"world_size\":3}}]",
+                    "collective_rpc [\"start_weight_update\",null,[],{}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":{\"names\":[\"model.embed_tokens.weight\"],\"dtype_names\":[\"bfloat16\"],\"shapes\":[[32,16]],\"is_checkpoint_format\":true}}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":[{\"rank\":0,\"ipc_handles_pickled\":\"opaque-handle-0\"},{\"rank\":1,\"ipc_handles_pickled\":\"opaque-handle-1\"}]}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-1\"]",
+                    "collective_rpc [\"start_draft_weight_update\",null,[],{}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-2\"]",
+                    "get_weight_version []",
+                ]
+            "#]].assert_debug_eq(&calls);
+        })
+    })
+    .await;
+
+    let mut responses = Vec::new();
+    for (method, path, body) in [
+        (
+            "POST",
+            "/init_weight_transfer_engine",
+            Some(json!({
+                "init_info": {"master_address": "127.0.0.1", "master_port": 29500,
+                    "rank_offset": 1, "world_size": 3}
+            })),
+        ),
+        ("POST", "/start_weight_update", None),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": {"names": ["model.embed_tokens.weight"],
+                    "dtype_names": ["bfloat16"], "shapes": [[32, 16]],
+                    "is_checkpoint_format": true}
+            })),
+        ),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": [{"rank": 0, "ipc_handles_pickled": "opaque-handle-0"},
+                    {"rank": 1, "ipc_handles_pickled": "opaque-handle-1"}]
+            })),
+        ),
+        (
+            "POST",
+            "/finish_weight_update",
+            Some(json!({"weight_version": "step-1"})),
+        ),
+        ("POST", "/start_draft_weight_update", None),
+        ("POST", "/finish_weight_update", None),
+        (
+            "POST",
+            "/update_weight_version",
+            Some(json!({"new_version": "step-2"})),
+        ),
+        ("GET", "/weight_info", None),
+    ] {
+        let mut request = Request::builder().method(method).uri(path);
+        let body = match body {
+            Some(body) => {
+                request = request.header("content-type", "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response =
+            app.call(request.body(body).expect("build request")).await.expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        responses.push(
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .expect("decode json")
+                .to_string(),
+        );
+    }
+    engine_task.await.expect("mock engine task");
+    expect_test::expect![[r#"
+        [
+            "{\"message\":\"Weight transfer initialized\"}",
+            "{\"message\":\"Weight update started\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"message\":\"Draft weight update started\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"success\":true,\"new_version\":\"step-2\"}",
+            "{\"weight_version\":\"step-2\"}",
+        ]
+    "#]]
+    .assert_debug_eq(&responses);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("invalid payload reached engine: {message:?}");
+        })
+    })
+    .await;
+
+    for (path, body) in [
+        ("/init_weight_transfer_engine", "{"),
+        ("/init_weight_transfer_engine", "{}"),
+        ("/init_weight_transfer_engine", r#"{"init_info":null}"#),
+        ("/init_weight_transfer_engine", r#"{"init_info":[]}"#),
+        ("/update_weights", "{"),
+        ("/update_weights", "{}"),
+        ("/update_weights", r#"{"update_info":null}"#),
+        ("/update_weights", r#"{"update_info":1}"#),
+        ("/update_weights", r#"{"update_info":[{},null]}"#),
+        ("/finish_weight_update", "{"),
+        ("/finish_weight_update", r#"{"weight_version":1}"#),
+        ("/update_weight_version", "{}"),
+        ("/update_weight_version", r#"{"new_version":null}"#),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_do_not_commit_version_when_finish_fails() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("collective_rpc"));
+            assert_eq!(
+                array[3].as_array().expect("args")[0],
+                Value::from("finish_weight_update")
+            );
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: array[1].as_u64().expect("call id").into(),
+                        failure_message: Some("weight reload failed".to_string()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("get_weight_version"));
+            send_outputs(
+                push,
+                utility_outputs(
+                    array[1].as_u64().expect("call id"),
+                    utility_result_value("step-0"),
+                ),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"weight_version":"step-1"}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("weight reload failed")
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/weight_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({"weight_version": "step-0"})
+    );
+    engine_task.await.expect("mock engine task");
 }
 
 // ========================= Stop string tests =========================
@@ -5188,6 +7095,75 @@ async fn tokenize_chat_includes_generation_prompt_in_token_count() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_chat_with_tools_does_not_require_output_parser() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!json["tokens"].as_array().expect("tokens").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_allows_prompts_at_or_above_max_model_len() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        max_model_len: 4,
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+
+    let (completion_status, completion_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(completion_status, StatusCode::OK);
+    assert_eq!(completion_json["count"], 5);
+    assert_eq!(completion_json["max_model_len"], 4);
+
+    let (chat_status, chat_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "add_generation_prompt": false,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(chat_status, StatusCode::OK);
+    assert!(chat_json["count"].as_u64().expect("count") > 4);
+    assert_eq!(chat_json["max_model_len"], 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_chat_conflicting_generation_flags_returns_400() {
     let mut app = test_app().await;
 
@@ -5386,4 +7362,164 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
     let continue_len = continue_final["tokens"].as_array().unwrap().len();
     let new_len = new_assistant["tokens"].as_array().unwrap().len();
     assert!(new_len > continue_len);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn world_size_endpoint_is_dev_mode_only() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/get_world_size")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ========================= Profiler route tests =========================
+
+async fn test_profiling_app_with_engine_script<F>(script: F) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-profiler".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        move |dealer, push| script(dealer, push),
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    (
+        build_router(Arc::new(
+            AppState::new(vec!["test-model".to_string()], chat)
+                .with_profiler(Some("torch".to_string())),
+        )),
+        engine_task,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("profile"));
+            assert_eq!(array[3], Value::Array(vec![Value::from(true), Value::Nil]));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stop_profile_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("profile"));
+            assert_eq!(array[3], Value::Array(vec![Value::from(false), Value::Nil]));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/stop_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn profile_routes_are_hidden_when_profiling_is_disabled() {
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["test-model".to_string()],
+        chat,
+    )));
+
+    for (method, uri) in [("POST", "/start_profile"), ("POST", "/stop_profile")] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    engine_task.abort_and_join().await;
 }

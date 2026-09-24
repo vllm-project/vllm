@@ -7,6 +7,7 @@ import torch
 
 from vllm.model_executor.layers import utils
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 @pytest.fixture(scope="module")
@@ -66,3 +67,48 @@ def test_dispatch_cpu_unquantized_gemm_zen_remove_weight(monkeypatch):
     utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     assert layer.weight.numel() == 0
+
+
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
+def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+    expected_prepacked = bool(utils.envs.VLLM_ZENTORCH_WEIGHT_PREPACK) and hasattr(
+        torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        utils.logger, "debug_once", lambda *args: log_calls.append(args)
+    )
+
+    layer = torch.nn.Linear(16, 8, bias=True)
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+
+    assert log_calls == [
+        (
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
+            expected_prepacked,
+        )
+    ]
+
+
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_dispatch_cpu_unquantized_gemm_remove_weight_keeps_dtype(
+    monkeypatch, weight_dtype
+):
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+
+    layer = torch.nn.Linear(16, 8, bias=False, dtype=weight_dtype)
+    loading_dtype = (
+        torch.float32 if weight_dtype is not torch.float32 else torch.bfloat16
+    )
+    with set_default_torch_dtype(loading_dtype):
+        utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+    assert layer.weight.numel() == 0
+    assert layer.weight.dtype is weight_dtype
+
+    x = torch.randn(4, 16, dtype=weight_dtype)
+    output = layer.cpu_linear(x, layer.weight, None)
+    assert not output.isnan().any()

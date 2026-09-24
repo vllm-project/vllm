@@ -23,11 +23,15 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
     get_system_message,
     parse_chat_input_to_harmony_message,
     render_for_completion,
 )
-from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+from vllm.entrypoints.openai.responses.harmony import (
+    response_input_to_harmony,
+    response_previous_input_to_harmony,
+)
 
 # Use a fixed date so the system message is deterministic across both paths.
 _DATE = "2025-01-01"
@@ -395,6 +399,9 @@ class TestResponseInputToHarmonyRenderParity:
         reasoning trace. Reasoning traces in between commentary-channel tool
         calls must survive as analysis-channel messages in both paths.
         """
+        first_reasoning = "I need current weather first."
+        second_reasoning = "Now I need the weekly forecast."
+
         prev_call_1 = ResponseFunctionToolCall(
             id="fc_1",
             call_id="call_1",
@@ -420,7 +427,7 @@ class TestResponseInputToHarmonyRenderParity:
         chat_msgs += parse_chat_input_to_harmony_message(
             {
                 "role": "assistant",
-                "reasoning": "I need current weather first.",
+                "reasoning": first_reasoning,
                 "tool_calls": [
                     {
                         "id": "call_1",
@@ -440,7 +447,7 @@ class TestResponseInputToHarmonyRenderParity:
         chat_msgs += parse_chat_input_to_harmony_message(
             {
                 "role": "assistant",
-                "reasoning": "Now I need the weekly forecast.",
+                "reasoning": second_reasoning,
                 "tool_calls": [
                     {
                         "id": "call_2",
@@ -472,9 +479,7 @@ class TestResponseInputToHarmonyRenderParity:
             # First reasoning + tool call
             {
                 "type": "reasoning",
-                "content": [
-                    {"type": "reasoning_text", "text": "I need current weather first."}
-                ],
+                "content": [{"type": "reasoning_text", "text": first_reasoning}],
             },
             {
                 "type": "function_call",
@@ -492,7 +497,7 @@ class TestResponseInputToHarmonyRenderParity:
                 "content": [
                     {
                         "type": "reasoning_text",
-                        "text": "Now I need the weekly forecast.",
+                        "text": second_reasoning,
                     }
                 ],
             },
@@ -512,6 +517,95 @@ class TestResponseInputToHarmonyRenderParity:
             for item in resp_input
         ]
 
-        assert render_for_completion([_system()] + chat_msgs) == render_for_completion(
-            [_system()] + resp_msgs
+        chat_completion_tokens = render_for_completion([_system()] + chat_msgs)
+        responses_tokens = render_for_completion([_system()] + resp_msgs)
+
+        assert chat_completion_tokens == responses_tokens
+
+        rendered_prompt = get_encoding().decode(chat_completion_tokens)
+        assert first_reasoning in rendered_prompt
+        assert second_reasoning in rendered_prompt
+
+    def test_completed_turns_drop_reasoning(self):
+        """Validates that reasoning from completed turns is dropped, while
+        reasoning from the current in-progress tool-call turn is preserved
+        in both chat completions and responses previous_input_messages."""
+        first_turn_reasoning = "FIRST_TURN_REASONING"
+        second_turn_reasoning = "SECOND_TURN_REASONING"
+
+        chat_completion_msgs = []
+        for chat_message in [
+            {"role": "user", "content": "What is 2+2?"},
+            {
+                "role": "assistant",
+                "reasoning": first_turn_reasoning,
+                "content": "The answer is 4.",
+            },
+            {"role": "user", "content": "Now what is 3+3?"},
+            {
+                "role": "assistant",
+                "reasoning": second_turn_reasoning,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "calc",
+                            "arguments": '{"a":3,"b":3}',
+                        },
+                    }
+                ],
+            },
+        ]:
+            chat_completion_msgs.extend(
+                parse_chat_input_to_harmony_message(chat_message)
+            )
+
+        responses_prev_input_msgs = []
+        for responses_message in [
+            {
+                "author": {"role": "user"},
+                "content": [{"type": "text", "text": "What is 2+2?"}],
+            },
+            {
+                "author": {"role": "assistant"},
+                "channel": "analysis",
+                "content": [{"type": "text", "text": first_turn_reasoning}],
+            },
+            {
+                "author": {"role": "assistant"},
+                "channel": "final",
+                "content": [{"type": "text", "text": "The answer is 4."}],
+            },
+            {
+                "author": {"role": "user"},
+                "content": [{"type": "text", "text": "Now what is 3+3?"}],
+            },
+            {
+                "author": {"role": "assistant"},
+                "channel": "analysis",
+                "content": [{"type": "text", "text": second_turn_reasoning}],
+            },
+            {
+                "author": {"role": "assistant"},
+                "channel": "commentary",
+                "recipient": "functions.calc",
+                "content_type": "json",
+                "content": [{"type": "text", "text": '{"a":3,"b":3}'}],
+            },
+        ]:
+            responses_prev_input_msgs.extend(
+                response_previous_input_to_harmony(responses_message)
+            )
+
+        chat_completion_tokens = render_for_completion(
+            [_system()] + chat_completion_msgs
         )
+        responses_tokens = render_for_completion(
+            [_system()] + responses_prev_input_msgs
+        )
+
+        assert chat_completion_tokens == responses_tokens
+
+        rendered_prompt = get_encoding().decode(responses_tokens)
+        assert first_turn_reasoning not in rendered_prompt
+        assert second_turn_reasoning in rendered_prompt

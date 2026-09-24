@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -8,7 +11,7 @@ use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs}
 
 use crate::FinishReason;
 use crate::error::{Error, Result};
-use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
+use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent, ChatTokenUsage};
 
 /// Final structured assistant message plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,10 +21,13 @@ pub struct CollectedAssistantMessage {
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
-    pub usage: vllm_llm::TokenUsage,
+    pub usage: ChatTokenUsage,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
 }
 
 /// Per-request stream of chat events.
@@ -77,6 +83,7 @@ impl ChatEventStream {
                     usage,
                     finish_reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
@@ -89,6 +96,7 @@ impl ChatEventStream {
                         usage,
                         finish_reason,
                         kv_transfer_params,
+                        ec_transfer_params,
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -132,7 +140,7 @@ mod tests {
 
     use super::{ChatEventStream, CollectedAssistantMessage};
     use crate::error::Error;
-    use crate::event::ChatEvent;
+    use crate::event::{ChatEvent, ChatTokenUsage};
 
     #[tokio::test]
     async fn collect_message_requires_terminal_done_event() {
@@ -187,13 +195,14 @@ mod tests {
                 }),
                 Ok(ChatEvent::Done {
                     message: Default::default(),
-                    usage: vllm_llm::TokenUsage {
+                    usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
                         cached_token_count: 0,
-                    },
+                    }),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             ]),
         );
@@ -227,13 +236,14 @@ mod tests {
                     }],
                 }),
                 token_ids: vec![],
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 2,
                     output_token_count: 1,
                     cached_token_count: 0,
-                },
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }
         );
     }

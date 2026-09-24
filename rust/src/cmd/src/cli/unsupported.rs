@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 #![allow(clippy::doc_lazy_continuation)]
 
 use std::fmt::Display;
@@ -232,24 +235,23 @@ pub struct EngineUnsupportedArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub hf_token: Option<Unsupported>,
 
-    /// If a dictionary, contains arguments to be forwarded to the Hugging Face
-    /// config. If a callable, it is called to update the HuggingFace config.
+    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    /// used with `--generation-config auto`, the override parameters will be
+    /// merged with the default config from the model. If used with
+    /// `--generation-config vllm`, only the override parameters are used.
     #[arg(long)]
-    pub hf_overrides: Option<Unsupported>,
-
-    /// The folder path to the generation config. Defaults to `"auto"`, the
-    /// generation config will be loaded from model path. If set to `"vllm"`, no
-    /// generation config is loaded, vLLM defaults will be used. If set to a
-    /// folder path, the generation config will be loaded from the specified
-    /// folder path. If `max_new_tokens` is specified in generation config,
-    /// then it sets a server-wide limit on the number of output tokens for
-    /// all requests.
-    #[arg(long)]
-    pub generation_config: Option<Unsupported>,
+    pub override_generation_config: Option<Unsupported>,
 
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
     pub io_processor_plugin: Option<Unsupported>,
+
+    /// Number of worker threads in the renderer thread pool. The pool is
+    /// consumed by the async renderer path to parallelize tokenization, chat
+    /// template rendering, and multimodal preprocessing across concurrent
+    /// requests.
+    #[arg(long)]
+    pub renderer_num_workers: Option<Noop>,
 
     /// Path to a dynamically reasoning parser plugin that can be dynamically
     /// loaded and registered.
@@ -286,6 +288,16 @@ pub struct EngineUnsupportedArgs {
     )]
     pub data_parallel_external_lb: Option<Unsupported>,
 
+    /// Enable fault tolerance for detailed error recovery, such as scaling
+    /// down fault DPEngineCore.
+    #[arg(
+        long,
+        visible_alias = "no-enable-fault-tolerance",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_fault_tolerance: Option<Unsupported>,
+
     /// This feature is work in progress and no prefill optimization takes place
     /// with this flag enabled currently.
     #[arg(
@@ -295,11 +307,6 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
-
-    /// The maximum number of input items and options allowed per
-    /// prompt for each modality.
-    #[arg(long)]
-    pub limit_mm_per_prompt: Option<Unsupported>,
 
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
@@ -318,6 +325,28 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_processor_cache_type: Option<Unsupported>,
 
+    /// Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
+    /// `"sha512"` for FIPS-compliant deployments.
+    #[arg(long)]
+    pub mm_hasher_algorithm: Option<Unsupported>,
+
+    /// IPC (inter-process communication) method for multimodal tensors.
+    /// - "direct_rpc": Use msgspec serialization via RPC
+    /// - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    #[arg(long)]
+    pub mm_tensor_ipc: Option<Unsupported>,
+
+    /// Device the HF multi-modal processor runs the image/video transform on.
+    /// Convenience for `--mm-processor-kwargs '{"device": ...}'`.
+    #[arg(long)]
+    pub mm_processor_device: Option<Unsupported>,
+
+    /// Amount of GPU memory (in GiB) sequestered on the engine's device for
+    /// GPU-side multimodal work in the API-server (frontend) process, such as
+    /// hardware video decoding.
+    #[arg(long)]
+    pub mm_ipc_gpu_memory_gb: Option<Unsupported>,
+
     /// Dictionary mapping specific modalities to LoRA model paths.
     #[arg(long)]
     pub default_mm_loras: Option<Unsupported>,
@@ -333,6 +362,17 @@ pub struct EngineUnsupportedArgs {
     /// The interval (or buffer size) for streaming in terms of token length.
     #[arg(long)]
     pub stream_interval: Option<Unsupported>,
+
+    /// Maximum number of requests that can be in-flight (waiting or running)
+    /// at the same time. When the limit is reached, new requests are rejected
+    /// with HTTP 503 so the client can retry on another instance.
+    #[arg(long)]
+    pub max_num_queued_reqs: Option<Unsupported>,
+
+    /// Maximum total prompt tokens of requests currently in the prefill phase.
+    /// When the limit is reached, new requests are rejected with HTTP 503.
+    #[arg(long)]
+    pub max_num_queued_tokens: Option<Unsupported>,
 
     /// Structured outputs configuration.
     #[arg(long)]
@@ -358,13 +398,6 @@ pub struct EngineUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
-    /// LoRA modules configurations in either 'name=path' format or JSON format
-    /// or JSON list format. Example (old format): `'name=path'` Example (new
-    /// format): `{"name": "name", "path": "lora_path",
-    /// "base_model_name": "id"}`
-    #[arg(long)]
-    pub lora_modules: Option<Unsupported>,
-
     /// Whether to trust the chat template provided in the request. If False,
     /// the server will always use the chat template specified by
     /// `--chat-template` or the ones from tokenizer.
@@ -436,6 +469,15 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
 
+    /// If set to True, include per-request timing metrics in API responses.
+    #[arg(
+        long,
+        visible_alias = "no-enable-per-request-metrics",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_per_request_metrics: Option<Unsupported>,
+
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -456,13 +498,17 @@ pub struct ServerUnsupportedArgs {
 
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
+    ///
+    /// Accepted as a no-op: the Rust frontend serves `/tokenize` and
+    /// `/detokenize`, but does not implement `/tokenizer_info` yet.
     #[arg(
         long,
         visible_alias = "no-enable-tokenizer-info-endpoint",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_tokenizer_info_endpoint: Option<Unsupported>,
+    pub enable_tokenizer_info_endpoint: Option<Noop>,
 
     /// If set to True, log model outputs (generations).
     /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
@@ -505,6 +551,15 @@ pub struct ServerUnsupportedArgs {
     )]
     pub tokens_only: Option<Unsupported>,
 
+    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
+    /// `custom`, or `none`.
+    #[arg(long)]
+    pub fingerprint_mode: Option<Unsupported>,
+
+    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
+    #[arg(long)]
+    pub fingerprint_value: Option<Unsupported>,
+
     /// Log level for uvicorn.
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
@@ -526,39 +581,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
 
-    /// Allow credentials.
-    #[arg(
-        long,
-        visible_alias = "no-allow-credentials",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub allow_credentials: Option<Unsupported>,
-
-    /// Allowed origins.
-    #[arg(long)]
-    pub allowed_origins: Option<Unsupported>,
-
-    /// Allowed methods.
-    #[arg(long)]
-    pub allowed_methods: Option<Unsupported>,
-
-    /// Allowed headers.
-    #[arg(long)]
-    pub allowed_headers: Option<Unsupported>,
-
-    /// The file path to the SSL key file.
-    #[arg(long)]
-    pub ssl_keyfile: Option<Unsupported>,
-
-    /// The file path to the SSL cert file.
-    #[arg(long)]
-    pub ssl_certfile: Option<Unsupported>,
-
-    /// The CA certificates file.
-    #[arg(long)]
-    pub ssl_ca_certs: Option<Unsupported>,
-
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
@@ -567,15 +589,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
-
-    /// Whether client certificate is required (see stdlib ssl module's).
-    #[arg(long)]
-    pub ssl_cert_reqs: Option<Unsupported>,
-
-    /// SSL cipher suites for HTTPS (TLS 1.2 and below only).
-    /// Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'
-    #[arg(long)]
-    pub ssl_ciphers: Option<Unsupported>,
 
     /// FastAPI root_path when app is behind a path based routing proxy.
     #[arg(long)]
@@ -617,4 +630,14 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_offline_docs: Option<Unsupported>,
+
+    /// If set, run pooling score MaxSim on GPU in the API server process.
+    /// Can significantly improve late-interaction scoring performance.
+    #[arg(
+        long,
+        visible_alias = "no-enable-flash-late-interaction",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_flash_late_interaction: Option<Noop>,
 }

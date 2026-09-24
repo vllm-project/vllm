@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import math
 import os
 import random
 import shutil
@@ -30,7 +31,7 @@ import ssl
 import time
 import uuid
 import warnings
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -50,12 +51,18 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    redact_sensitive_namespace,
+    write_to_json,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+_SENSITIVE_ARG_FIELDS = ("header",)
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -129,6 +136,7 @@ async def _align_prompts_to_server_tokenizer(
         )
 
         async def _fix_one(req: SampleRequest) -> SampleRequest:
+            assert isinstance(req.prompt, str)
             tokens = await _tokenize(req.prompt)
             if len(tokens) <= req.prompt_len:
                 return req
@@ -355,12 +363,14 @@ class EmbedBenchmarkMetrics:
     completed: int
     failed: int
     total_input: int
+    total_input_sequences: int
     request_throughput: float
+    input_sequence_throughput: float
     total_token_throughput: float
     mean_e2el_ms: float
     std_e2el_ms: float
     median_e2el_ms: float
-    percentiles_e2el_ms: float
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 def _get_current_request_rate(
@@ -397,13 +407,15 @@ async def get_request(
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """
-    Asynchronously generates requests at a specified rate
+    """Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
             A list of input requests, each represented as a SampleRequest.
+        self_timed:
+            If True, the requests carry their own arrival timing and no
+            request rate, burstiness or ramp-up is applied.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -421,6 +433,7 @@ async def get_request(
             The starting request rate for ramp-up.
         ramp_up_end_rps (optional):
             The ending request rate for ramp-up.
+
     """
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}."
@@ -433,8 +446,8 @@ async def get_request(
     assert total_requests > 0, "No requests provided."
 
     # Precompute delays among requests to minimize request send laggings
-    request_rates = []
-    delay_ts = []
+    request_rates: list[float] = []
+    delay_ts: list[float] = []
 
     # if the traces have timing info then:
     if not self_timed:
@@ -484,7 +497,10 @@ async def get_request(
     else:
         for request_index, request in enumerate(input_requests):
             # this is cumulative running ts, from which sleep is calculated later
-            delay_ts.append(request.timestamp)
+            if request.timestamp is not None:
+                delay_ts.append(request.timestamp)
+            else:
+                delay_ts.append(0.0)
             # TODO: there is no notion of RPS here, may be we can calculate
             # from the trace.
             request_rates.append(0.0)
@@ -513,8 +529,10 @@ def calculate_metrics_for_embeddings(
 
     Returns:
         The calculated benchmark metrics.
+
     """
     total_input = 0
+    total_input_sequences = 0
     completed = 0
     failed = 0
     e2els: list[float] = []
@@ -523,6 +541,7 @@ def calculate_metrics_for_embeddings(
             e2els.append(outputs[i].latency)
             completed += 1
             total_input += outputs[i].prompt_len
+            total_input_sequences += outputs[i].num_input_sequences
         else:
             failed += 1
 
@@ -536,7 +555,9 @@ def calculate_metrics_for_embeddings(
         completed=completed,
         failed=failed,
         total_input=total_input,
+        total_input_sequences=total_input_sequences,
         request_throughput=completed / dur_s,
+        input_sequence_throughput=total_input_sequences / dur_s,
         total_token_throughput=total_input / dur_s,
         mean_e2el_ms=np.mean(e2els or 0) * 1000,
         std_e2el_ms=np.std(e2els or 0) * 1000,
@@ -552,7 +573,7 @@ def calculate_metrics(
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
@@ -568,6 +589,7 @@ def calculate_metrics(
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
+
     """
     actual_output_lens: list[int] = []
     total_input = 0
@@ -599,7 +621,7 @@ def calculate_metrics(
                     )
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
-            tpot = 0
+            tpot = 0.0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
                 tpot = latency_minus_ttft / (output_len - 1)
@@ -767,7 +789,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     model_name: str,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     input_requests: list[SampleRequest],
     logprobs: int | None,
     request_rate: float,
@@ -790,6 +812,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    probe_request_rate: float = 0.0,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -894,11 +917,12 @@ async def benchmark(
 
     print("Starting main benchmark run...")
 
+    lora_modules_iter: Iterator[str] | None = None
     if lora_modules:
         lora_modules_list = list(lora_modules)
         if lora_assignment == "round-robin":
             # Deterministic round-robin assignment across requests.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [
                     lora_modules_list[i % len(lora_modules_list)]
                     for i in range(len(input_requests))
@@ -906,7 +930,7 @@ async def benchmark(
             )
         else:
             # For each input request, choose a LoRA module at random.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [random.choice(lora_modules_list) for _ in range(len(input_requests))]
             )
 
@@ -959,11 +983,41 @@ async def benchmark(
         else contextlib.nullcontext()
     )
 
-    async def limited_request_func(request_func_input, session, pbar):
+    async def limited_request_func(
+        request_func_input, session, pbar, request_arrival_time
+    ):
         async with semaphore:
-            return await request_func(
+            output = await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
+        # Preserve start_time as the time the request was sent. It is used by
+        # throughput calculations; record client-side semaphore delay separately.
+        output.client_queue_time = output.start_time - request_arrival_time
+        return output
+
+    probe_outputs: list[RequestFuncOutput] = []
+    probe_stop = asyncio.Event()
+
+    async def probe_loop():
+        probe_input = replace(
+            test_input,
+            prompt="Hi",
+            prompt_len=1,
+            output_len=1,
+            multi_modal_content=None,
+            chat_messages=None,
+        )
+        interval = 1 / probe_request_rate
+        while not probe_stop.is_set():
+            probe_outputs.append(
+                await request_func(request_func_input=probe_input, session=session)
+            )
+            await asyncio.sleep(interval)
+
+    probe_task: asyncio.Task | None = None
+    if probe_request_rate > 0:
+        print(f"Probe request rate: {probe_request_rate} req/s")
+        probe_task = asyncio.create_task(probe_loop())
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -1004,9 +1058,13 @@ async def benchmark(
         )
         per_request_extra_body = _merge_overrides(extra_body, request.request_overrides)
         req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
-            req_lora_module = next(lora_modules)
+        if lora_modules_iter:
+            req_lora_module = next(lora_modules_iter)
             req_model_id, req_model_name = req_lora_module, req_lora_module
+
+        mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
+        if isinstance(mm_content, (dict, list)):
+            mm_content_typed = mm_content
 
         request_func_input = RequestFuncInput(
             model=req_model_id,
@@ -1014,23 +1072,28 @@ async def benchmark(
             prompt=prompt,
             api_url=api_url,
             prompt_len=prompt_len,
-            output_len=output_len,
+            output_len=output_len or 0,
             logprobs=logprobs,
-            multi_modal_content=mm_content,
+            multi_modal_content=mm_content_typed,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
             extra_body=per_request_extra_body,
             request_id=request_id,
             chat_messages=request.chat_messages,
         )
+        request_arrival_time = time.perf_counter()
         tasks.append(
             asyncio.create_task(
                 limited_request_func(
-                    request_func_input=request_func_input, session=session, pbar=pbar
+                    request_func_input, session, pbar, request_arrival_time
                 )
             )
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     if pbar is not None:
         pbar.close()
@@ -1107,6 +1170,8 @@ async def benchmark(
                 "committed_per_step": delta_committed / denoising_steps,
             }
 
+    metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
+    actual_output_lens: list[int] | int
     if task_type == TaskType.GENERATION:
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
@@ -1140,7 +1205,13 @@ async def benchmark(
             "Request throughput (req/s):", metrics.request_throughput
         )
     )
-    if goodput_config_dict:
+    if isinstance(metrics, EmbedBenchmarkMetrics):
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Input throughput (inputs/s):", metrics.input_sequence_throughput
+            )
+        )
+    if goodput_config_dict and isinstance(metrics, BenchmarkMetrics):
         print(
             "{:<40} {:<10.2f}".format(
                 "Request goodput (req/s):", metrics.request_goodput
@@ -1177,6 +1248,45 @@ async def benchmark(
             )
         )
 
+    probe_stats: dict[str, Any] | None = None
+    if probe_task is not None:
+        probe_lats = [o.latency for o in probe_outputs if o.success]
+        if probe_lats:
+            probe_stats = {
+                "probe_completed": len(probe_lats),
+                "probe_failed": len(probe_outputs) - len(probe_lats),
+                "probe_median_e2el_ms": float(np.median(probe_lats)) * 1000,
+                "probe_p99_e2el_ms": float(np.percentile(probe_lats, 99)) * 1000,
+                "probe_max_e2el_ms": float(max(probe_lats)) * 1000,
+            }
+            print("{s:{c}^{n}}".format(s="Probe Requests", n=50, c="-"))
+            print(
+                "{:<40} {:<10}".format(
+                    "Probe requests completed:", probe_stats["probe_completed"]
+                )
+            )
+            print(
+                "{:<40} {:<10}".format(
+                    "Probe requests failed:", probe_stats["probe_failed"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Median probe E2EL (ms):", probe_stats["probe_median_e2el_ms"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "P99 probe E2EL (ms):", probe_stats["probe_p99_e2el_ms"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Max probe E2EL (ms):", probe_stats["probe_max_e2el_ms"]
+                )
+            )
+
+    result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
@@ -1192,7 +1302,9 @@ async def benchmark(
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
             "itls": [output.itl for output in outputs],
+            "latencies": [output.latency for output in outputs],
             "start_times": [output.start_time for output in outputs],
+            "queue_times": [output.client_queue_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
@@ -1204,11 +1316,29 @@ async def benchmark(
             "duration": benchmark_duration,
             "completed": metrics.completed,
             "total_input_tokens": metrics.total_input,
+            "total_input_sequences": metrics.total_input_sequences,
             "request_throughput": metrics.request_throughput,
+            "input_sequence_throughput": metrics.input_sequence_throughput,
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
+            "latencies": [output.latency for output in outputs],
+            "queue_times": [output.client_queue_time for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    queue_times: list[float] | None = None
+    e2els_including_queue: list[float] | None = None
+    if max_concurrency is not None:
+        queue_times = [output.client_queue_time for output in outputs if output.success]
+        if not math.isinf(request_rate):
+            e2els_including_queue = [
+                output.latency + output.client_queue_time
+                for output in outputs
+                if output.success
+            ]
+
+    if probe_stats is not None:
+        result.update(probe_stats)
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
@@ -1242,34 +1372,31 @@ async def benchmark(
         metric_name: str,
         # E.g., "Time to First Token"
         metric_header: str,
+        values: list[float] | None = None,
     ):
         # This function prints and adds statistics of the specified
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
+        if values is None:
+            mean = getattr(metrics, f"mean_{metric_attribute_name}_ms")
+            median = getattr(metrics, f"median_{metric_attribute_name}_ms")
+            std = getattr(metrics, f"std_{metric_attribute_name}_ms")
+            percentiles = getattr(metrics, f"percentiles_{metric_attribute_name}_ms")
+        else:
+            mean = np.mean(values or 0) * 1000
+            median = np.median(values or 0) * 1000
+            std = np.std(values or 0) * 1000
+            percentiles = [
+                (p, np.percentile(values or 0, p) * 1000) for p in selected_percentiles
+            ]
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
-        print(
-            "{:<40} {:<10.2f}".format(
-                f"Mean {metric_name} (ms):",
-                getattr(metrics, f"mean_{metric_attribute_name}_ms"),
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                f"Median {metric_name} (ms):",
-                getattr(metrics, f"median_{metric_attribute_name}_ms"),
-            )
-        )
-        result[f"mean_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"mean_{metric_attribute_name}_ms"
-        )
-        result[f"median_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"median_{metric_attribute_name}_ms"
-        )
-        result[f"std_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"std_{metric_attribute_name}_ms"
-        )
-        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
+        print("{:<40} {:<10.2f}".format(f"Mean {metric_name} (ms):", mean))
+        print("{:<40} {:<10.2f}".format(f"Median {metric_name} (ms):", median))
+        result[f"mean_{metric_attribute_name}_ms"] = mean
+        result[f"median_{metric_attribute_name}_ms"] = median
+        result[f"std_{metric_attribute_name}_ms"] = std
+        for p, value in percentiles:
             p_word = str(int(p)) if int(p) == p else str(p)
             print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
@@ -1279,6 +1406,20 @@ async def benchmark(
         process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+    if queue_times is not None:
+        process_one_metric(
+            "client_queue_time",
+            "Client Queue Time",
+            "Client-side Queueing",
+            queue_times,
+        )
+    if e2els_including_queue is not None:
+        process_one_metric(
+            "e2el_including_client_queue",
+            "E2EL incl. Client Queue",
+            "Queue-inclusive End-to-end Latency",
+            e2els_including_queue,
+        )
 
     if diffusion_stats is not None:
         print("{s:{c}^{n}}".format(s="Diffusion Decoding", n=50, c="-"))
@@ -1405,7 +1546,7 @@ def save_to_pytorch_benchmark_format(
     # later if needed
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
     pt_records = convert_to_pytorch_benchmark_format(
-        args=args,
+        args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
         extra_info={
             k: results[k]
@@ -1435,6 +1576,7 @@ def compute_result_filename(
 
     Returns:
         The computed filename path or None if no result saving is requested
+
     """
     if not (args.plot_timeline or args.save_result or args.append_result):
         return None
@@ -1462,7 +1604,7 @@ def compute_result_filename(
     return file_name
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
         "--label",
@@ -1553,7 +1695,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         - "auto" will use the tokenizer from `mistral_common` for Mistral models
         if available, otherwise it will use the "hf" tokenizer.\n
         - "hf" will use the fast tokenizer if available.\n
-        - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
         - Other custom values can be supported via plugins.""",
@@ -1591,6 +1732,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "A lower burstiness value (0 < burstiness < 1) results in more "
         "bursty requests. A higher burstiness value (burstiness > 1) "
         "results in a more uniform arrival of requests.",
+    )
+    parser.add_argument(
+        "--probe-request-rate",
+        type=float,
+        default=0.0,
+        help="If positive, send single-token text-only probe requests at "
+        "this rate (req/s) alongside the main workload, bypassing "
+        "--max-concurrency, and report their latency separately. Useful "
+        "for measuring how the main workload stalls unrelated requests.",
     )
     parser.add_argument(
         "--disable-tqdm",
@@ -1670,7 +1820,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el", '
+        '"client_queue_time", "e2el_including_client_queue". '
         'If not specified, defaults to "ttft,tpot,itl" for generative models '
         'and "e2el" for pooling models.',
     )
@@ -1872,7 +2023,10 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
-    print(args)
+    print(redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS))
+    if args.max_concurrency is not None and args.max_concurrency <= 0:
+        raise ValueError("--max-concurrency must be greater than 0")
+
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -2005,6 +2159,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.ignore_eos = True
 
     if args.dataset_name == "timed_trace":
+        if args.backend not in ("vllm", "openai"):
+            raise ValueError(
+                "timed_trace dataset passes pre-tokenized prompts (list[int])"
+                " and requires a completions backend ('vllm' or 'openai')."
+            )
         # timed_trace carries per-request timestamps;
         # ignore EOS so generation runs to the trace's specified output length,
         # and default to using those timestamps for scheduling unless the user
@@ -2108,6 +2267,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        probe_request_rate=args.probe_request_rate,
     )
 
     # Save config and results to json
@@ -2154,6 +2314,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate timeline plot if requested
     if args.plot_timeline:
+        assert file_name is not None, (
+            "file_name must be set when plot_timeline is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_timeline_plot
 
@@ -2200,6 +2363,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate dataset statistics plot if requested
     if args.plot_dataset_stats:
+        assert file_name is not None, (
+            "file_name must be set when plot_dataset_stats is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_dataset_stats_plot
 
@@ -2249,6 +2415,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Save to file
     if args.save_result or args.append_result:
+        assert file_name is not None, (
+            "file_name must be set when save_result or append_result is enabled"
+        )
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
         ) as outfile:

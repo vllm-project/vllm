@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Convert a plain-text file (local path or URL) into a JSONL dataset
+"""Convert a plain-text file (local path or URL) into a JSONL dataset
 compatible with ``CustomDataset`` (``--dataset-name custom``), by 
 randomly slicing the tokenized text into prompts.
 
@@ -30,7 +29,6 @@ The resulting JSONL file can then be used with the serving benchmark::
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import random
@@ -40,6 +38,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from vllm.benchmarks.datasets.utils import RangeRatio, get_sampling_params
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,6 @@ def create_txt_slices_jsonl(
 ) -> None:
     """Read *input_path*, slice it into prompts, and write JSONL to
     *output_path*."""
-
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name, trust_remote_code=trust_remote_code
     )
@@ -121,7 +119,7 @@ def create_txt_slices_jsonl(
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Convert a plain-text file into a JSONL dataset "
         "for CustomDataset (--dataset-name custom).",
     )

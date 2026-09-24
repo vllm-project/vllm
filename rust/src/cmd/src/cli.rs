@@ -1,9 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! CLI argument definitions for the `vllm-rs` binary.
 //!
 //! Python vLLM references:
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod ssl;
 mod unsupported;
 
 use std::collections::HashMap;
@@ -13,27 +17,34 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::GenerationConfigMode;
+use vllm_chat::ToolStrictLevel;
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode,
-    ParserSelection, RendererSelection,
+    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
+    RendererSelection,
 };
+use vllm_text::backend::hf::HfOverrides;
 
+use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
 /// Top-level parser for the `vllm-rs` binary.
 #[derive(Debug, Parser)]
 #[command(
     name = "vllm-rs",
-    about = "Rust frontend and managed-engine CLI for vLLM."
+    about = "Rust frontend and managed-engine CLI for vLLM.",
+    version = vllm_build_info::VERSION
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -75,16 +86,121 @@ impl Cli {
 }
 
 /// Supported top-level CLI commands.
-#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the Rust OpenAI frontend as a Python-supervised worker.
     Frontend(FrontendArgs),
     /// Launch a managed Python headless engine, then run the Rust OpenAI
     /// frontend.
     Serve(ServeArgs),
+    /// Run vLLM benchmarks.
+    #[command(subcommand)]
+    Bench(BenchCommand),
+    /// Run engine-free request rendering and preprocessing.
+    Render(RenderArgs),
 }
 
-/// Runtime arguments shared by the external-engine and managed-engine paths.
+/// Supported benchmark commands.
+#[derive(Debug, Subcommand)]
+pub enum BenchCommand {
+    /// Benchmark online serving throughput.
+    Serve(vllm_bench::BenchServeArgs),
+}
+
+/// Arguments for the engine-free text renderer.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct RenderArgs {
+    /// Model identifier or local model directory containing tokenizer files.
+    model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    revision: Option<String>,
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    hf_overrides: HfOverrides,
+    /// HTTP bind host.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// HTTP bind port.
+    #[arg(long, default_value_t = 8000)]
+    port: u16,
+    /// Public model names accepted by the API.
+    #[arg(long, num_args = 0..)]
+    served_model_name: Vec<String>,
+    /// Select the tool-call parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    tool_call_parser: ParserSelection,
+    /// Select the reasoning parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling: `auto`,
+    /// `function`, or `parameter`.
+    #[arg(long, default_value_t)]
+    tool_strict_level: ToolStrictLevel,
+    /// Select the native chat renderer implementation.
+    #[arg(long = "tokenizer-mode", default_value_t)]
+    renderer: RendererSelection,
+    /// Override the model chat template with a file path or inline template.
+    #[arg(long)]
+    chat_template: Option<String>,
+    /// Default JSON keyword arguments merged into every chat-template render.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
+    default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// How message content is exposed to the chat template.
+    #[arg(long, default_value_t)]
+    chat_template_content_format: ChatTemplateContentFormatOption,
+    /// Maximum model context length used for request validation. When not set,
+    /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
+    #[arg(long)]
+    max_model_len: Option<u32>,
+    /// Maximum accepted logprobs count; -1 disables the cap.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
+    max_logprobs: Option<i32>,
+    /// TLS options for HTTPS/mTLS.
+    #[command(flatten)]
+    ssl: SslArgs,
+}
+
+impl RenderArgs {
+    pub(super) fn into_config(self) -> RenderConfig {
+        let tls = self.ssl.tls_config();
+
+        RenderConfig {
+            model: self.model,
+            revision: self.revision,
+            hf_overrides: self.hf_overrides,
+            served_model_name: self.served_model_name,
+            host: self.host,
+            port: self.port,
+            tool_call_parser: self.tool_call_parser,
+            reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
+            renderer: self.renderer,
+            chat_template: self.chat_template,
+            default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            chat_template_content_format: self.chat_template_content_format,
+            max_model_len: self.max_model_len,
+            max_logprobs: self.max_logprobs,
+            tls,
+        }
+    }
+}
+
+/// A JSON-encoded list of strings, matching Python's `json.loads` CLI type for
+/// the CORS list arguments (e.g. `--allowed-origins '["*"]'`). Parsing the whole
+/// value as one item keeps clap from treating the field as a repeated flag.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct JsonStringList(pub Vec<String>);
+
+/// Runtime arguments shared by both paths of the Rust frontend:
+///
+/// - External-engine mode: Python-supervised bootstrap, `vllm serve` -> `vllm-rs frontend`.
+///   Arguments are deserialized from a single JSON object and defaults follow `serde` attrs.
+/// - Managed-engine mode: Rust-managed Python engine, `vllm-rs serve`.
+///   Arguments are parsed from CLI flags and defaults follow `clap` attrs.
 #[serde_as]
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
@@ -93,6 +209,23 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    #[serde(default)]
+    pub revision: Option<String>,
+
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    /// Objects merge recursively and arrays/scalars replace existing values.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub hf_overrides: HfOverrides,
+
+    /// The source of generation-config sampling defaults. `"auto"` loads the
+    /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub generation_config: GenerationConfigMode,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -107,13 +240,21 @@ pub struct SharedRuntimeArgs {
     /// Select the tool call parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
-    #[serde(default)]
+    #[serde(default = "default_py_bootstrap_parser_selection")]
     pub tool_call_parser: ParserSelection,
     /// Select the reasoning parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
-    #[serde(default)]
+    #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling, applied on
+    /// top of the per-tool `strict` field: `auto` follows the request's
+    /// tool choice and per-tool strictness,
+    /// `function` constrains the tool-call envelope for every request with
+    /// tools, `parameter` additionally pins argument schemas.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub tool_strict_level: ToolStrictLevel,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -122,17 +263,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub language_model_only: bool,
-    /// Override the maximum model context length. When set, the frontend uses
-    /// this value instead of the model's `max_position_embeddings` from
-    /// `config.json`.
-    #[arg(long)]
-    pub max_model_len: Option<u32>,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Generate service. When not set, no gRPC server is
+    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
     /// started.
     #[arg(long)]
     #[serde(default)]
@@ -141,6 +277,11 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub shutdown_timeout: u64,
+    /// Maximum idle time (seconds) on a keep-alive HTTP connection before the
+    /// server closes it (default 5).
+    #[arg(long = "http-timeout-keep-alive", env = "VLLM_HTTP_TIMEOUT_KEEP_ALIVE")]
+    #[serde(default)]
+    pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
     /// for the specified model.
@@ -159,6 +300,24 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
+    /// profiling options are forwarded to the engine untouched.
+    /// Unspecified modalities are unlimited.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// LoRA adapters to load before serving, each as `name=path` or a JSON
+    /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
+    /// Requires `--enable-lora`; startup fails if any adapter cannot be loaded.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    #[serde(default)]
+    pub lora_modules: Vec<LoraModulePath>,
 
     /// The format to render message content within a chat template.
     ///
@@ -195,6 +354,23 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// Register the scale-out `/inference/v1/generate` endpoint.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_scale_out: bool,
+
+    /// Send an SSE keep-alive comment line every this many seconds when a
+    /// streaming response is idle (queued, prefill, or between tokens), to
+    /// prevent reverse proxies/tunnels with read timeouts from closing the
+    /// connection. Defaults to 0, which disables keep-alive comments entirely.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub sse_keep_alive_interval: u64,
+
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
@@ -220,6 +396,44 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub served_model_name: Vec<String>,
 
+    /// CORS allowed origins as a JSON list. `["*"]` allows any origin.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_origins: JsonStringList,
+
+    /// CORS allowed methods as a JSON list. `["*"]` allows the standard set.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_methods: JsonStringList,
+
+    /// CORS allowed request headers as a JSON list. `["*"]` mirrors the request.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_headers: JsonStringList,
+
+    /// Allow CORS credentials (cookies, authorization headers).
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub allow_credentials: bool,
+
+    /// TLS options for HTTPS/mTLS.
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub ssl: SslArgs,
+
+    /// Profiler configuration forwarded by the Python supervisor.
+    ///
+    /// When set with a non-null `profiler` type, the Rust frontend registers
+    /// the `/start_profile` and `/stop_profile` routes and forwards calls to
+    /// the engine via the `"profile"` utility RPC.
+    #[arg(long, value_parser = parse_json::<ProfilerConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub profiler_config: Option<ProfilerConfig>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -238,6 +452,39 @@ impl SharedRuntimeArgs {
     /// Maximum time to wait for active requests to drain during shutdown.
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_secs(self.shutdown_timeout)
+    }
+
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it.
+    pub fn keep_alive_timeout(&self) -> Duration {
+        self.http_timeout_keep_alive
+            .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
+    }
+
+    /// Return the configured profiler mode, when profiling is enabled.
+    pub fn profiler(&self) -> Option<String> {
+        self.profiler_config.as_ref().and_then(|c| c.profiler.clone())
+    }
+
+    /// Return the profiler config JSON for managed Python engine forwarding.
+    pub fn profiler_config_json(&self) -> Option<String> {
+        self.profiler_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .expect("profiler config serialization should not fail")
+    }
+
+    /// Return the per-modality limits as JSON for managed Python engine
+    /// forwarding, or `None` when nothing is configured.
+    ///
+    /// Round-tripping the parsed map rather than the raw argument keeps the
+    /// engine's own profiling options (`num_frames`, `width`, ...) intact.
+    pub fn limit_mm_per_prompt_json(&self) -> Option<String> {
+        (!self.limit_mm_per_prompt.is_empty()).then(|| {
+            serde_json::to_string(&self.limit_mm_per_prompt)
+                .expect("limit-mm-per-prompt serialization should not fail")
+        })
     }
 
     /// Apply fallback logic for API key configuration from env variables.
@@ -259,17 +506,25 @@ impl SharedRuntimeArgs {
         input_address: String,
         output_address: String,
         coordinator_address: Option<String>,
+        engine_start_index: u32,
         engine_count: usize,
+        data_parallel_size: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
+        let cors = self.cors_config();
+        let tls = self.ssl.tls_config();
+        let profiler = self.profiler();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
                 input_address,
                 output_address,
+                engine_start_index,
                 engine_count,
+                data_parallel_size,
                 ready_timeout,
             },
             coordinator_mode: match coordinator_address {
@@ -277,21 +532,31 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            revision: self.revision,
+            hf_overrides: self.hf_overrides,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
+            cors,
+            tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            keep_alive_timeout,
+            profiler,
         }
     }
 
@@ -308,7 +573,11 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
+        let cors = self.cors_config();
+        let tls = self.ssl.tls_config();
+        let profiler = self.profiler();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -321,21 +590,31 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            revision: self.revision,
+            hf_overrides: self.hf_overrides,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
+            cors,
+            tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            keep_alive_timeout,
+            profiler,
         }
     }
 
@@ -344,12 +623,49 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
+            enable_scale_out: self.enable_scale_out,
+            sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
+                .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
+        }
+    }
+
+    fn cors_config(&self) -> CorsConfig {
+        CorsConfig {
+            allow_origins: self.allowed_origins.0.clone(),
+            allow_methods: self.allowed_methods.0.clone(),
+            allow_headers: self.allowed_headers.0.clone(),
+            allow_credentials: self.allow_credentials,
         }
     }
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_cors_wildcard() -> JsonStringList {
+    JsonStringList(vec!["*".to_string()])
+}
+
+fn default_py_bootstrap_parser_selection() -> ParserSelection {
+    ParserSelection::None
+}
+
+/// Minimal profiler configuration parsed from `--profiler-config`.
+///
+/// Only the `profiler` field is inspected by the Rust frontend to decide
+/// whether to register the `/start_profile` and `/stop_profile` routes.
+/// All other fields are accepted but ignored — they are consumed by the
+/// Python engine layer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProfilerConfig {
+    /// Profiler backend type (e.g. `"torch"`, `"cuda"`). When `null` or
+    /// absent, profiling is disabled.
+    #[serde(default)]
+    pub profiler: Option<String>,
+    /// Additional Python profiler config fields consumed by the engine layer.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
@@ -387,9 +703,16 @@ pub struct FrontendArgs {
     /// `stats_update_address`.
     #[arg(long)]
     pub coordinator_address: Option<String>,
+    /// First data-parallel engine rank expected to register with this
+    /// bootstrapped frontend.
+    #[arg(long, default_value_t = 0)]
+    pub engine_start_index: u32,
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
+    /// Deployment-wide configured data-parallel size. Defaults to engine count.
+    #[arg(long)]
+    pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
     #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
@@ -399,12 +722,15 @@ pub struct FrontendArgs {
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
     pub fn into_config(self) -> Config {
+        let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.input_address,
             self.output_address,
             self.coordinator_address,
+            self.engine_start_index,
             self.engine_count,
+            data_parallel_size,
         )
     }
 }
@@ -471,16 +797,31 @@ impl ServeArgs {
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
     pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+        let reasoning_parser =
+            effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
+        let profiler_config = self.runtime.profiler_config_json();
+        let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
+            serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
+        });
+
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
-            self.runtime.max_model_len,
+            self.runtime.revision.clone(),
             self.runtime.max_logprobs,
+            profiler_config,
+            reasoning_parser.as_deref(),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,
             handshake_port,
+            self.runtime.limit_mm_per_prompt_json(),
+            hf_overrides,
         )
     }
+}
+
+fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
+    selection.resolve_reasoning_name(model).map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

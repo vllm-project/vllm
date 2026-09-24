@@ -50,7 +50,7 @@ def test_oot_registration_embedding(
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
         prompts = ["Hello, my name is", "The text does not matter"]
         llm = LLM(
-            model=dummy_gemma2_embedding_path, load_format="dummy", max_model_len=2048
+            model=dummy_gemma2_embedding_path, load_format="dummy", max_model_len=512
         )
         outputs = llm.embed(prompts)
 

@@ -6,20 +6,16 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
-logger = init_logger(__name__)
-
 
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
-    """
-    Reasoning parser for Ernie45 thinking model.
+    """Reasoning parser for Ernie45 thinking model.
     The Ernie45 thinking model output format is
         abc\n</think>\n\n<response>\ndef\n</response>\n
     or  abc\n</think>\ndef
@@ -63,8 +59,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message.
+        """Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         The Ernie45 thinking model output format is
@@ -117,7 +112,8 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                     content = content[:response_end_idx]
             elif self.response_end_token_id in delta_token_ids:
                 response_end_idx = content.rfind(self.response_end_token)
-                content = content[:response_end_idx]
+                if response_end_idx != -1:
+                    content = content[:response_end_idx]
             # remove \n after </think>  or </response>
             if previous_token_ids[-1] in self.parser_token_ids and (
                 len(delta_token_ids) > 0 and delta_token_ids[0] == self.newline_token_id
@@ -140,8 +136,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from the model output.
+        """Extract reasoning content from the model output.
         The Ernie45 thinking model output format is
             abc\n</think>\n\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef

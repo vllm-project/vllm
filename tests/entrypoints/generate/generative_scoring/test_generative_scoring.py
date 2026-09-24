@@ -24,9 +24,9 @@ from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringResponse,
     ServingGenerativeScoring,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
@@ -60,7 +60,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     vocab_size = 151936
 
     def get_diff_sampling_param(self):
@@ -78,7 +81,6 @@ def _create_mock_engine():
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
 
-    # renderer is accessed by OpenAIServing.__init__ and serving.py
     mock_renderer = MagicMock()
     mock_renderer.tokenizer = get_tokenizer(MODEL_NAME)
     mock_engine.renderer = mock_renderer
@@ -286,7 +288,7 @@ class TestPromptBuilding:
         )
 
         for i, exp in enumerate(expected):
-            assert engine_inputs[i]["prompt_token_ids"] == exp
+            assert engine_inputs[i]["prompt_token_ids"] == exp  # type: ignore[typeddict-item]
 
 
 class TestGeneration:
