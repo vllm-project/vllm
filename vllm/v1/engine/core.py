@@ -292,14 +292,8 @@ class EngineCore:
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
-        # A KV connector registers each committed segment for RDMA, which
-        # cannot span physical chunks: the commit granule keeps segment bounds
-        # aligned below.
-        commit_granule: int | None = None
         if vllm_config.cache_config.enable_extensible_kv_cache:
-            commit_granule = self.model_executor.resolve_extensible_kv_cache(
-                kv_cache_specs
-            )
+            self.model_executor.resolve_extensible_kv_cache(kv_cache_specs)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
@@ -364,9 +358,11 @@ class EngineCore:
         # With an extensible KV cache, `num_blocks` is the reserved capacity
         # until the post-warmup measurement below.
         extensible = vllm_config.cache_config.enable_extensible_kv_cache
-        if not (extensible and kv_cache_groups and vllm_config.kv_transfer_config):
-            commit_granule = None
-        if commit_granule is not None:
+        # A KV connector registers each committed segment for RDMA, which
+        # cannot span physical chunks: keep segment bounds granule-aligned.
+        commit_granule: int | None = None
+        if extensible and kv_cache_groups and vllm_config.kv_transfer_config:
+            commit_granule = max(self.collective_rpc("kv_cache_commit_granule"))
             align_extensible_kv_cache_capacity(
                 vllm_config, kv_cache_configs, scheduler_kv_cache_config, commit_granule
             )

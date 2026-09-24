@@ -417,6 +417,9 @@ def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
     )
+    # The rank's committable count is both used for warmup and returned for
+    # the engine to agree on.
     assert Worker.initialize_from_config(worker, kv_cache_config) == 42
+    assert runner.extensible_kv_cache.warmup_committable_blocks == 42
     assert log == ["adjust_dcp:8", "initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config

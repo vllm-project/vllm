@@ -36,15 +36,6 @@ logger = init_logger(__name__)
 _R = TypeVar("_R")
 
 
-class ExtensibleKVCacheProbe(NamedTuple):
-    """A worker's answer to whether it can back an extensible KV cache."""
-
-    unsupported_reason: str | None
-    """Why not, or None when it can."""
-    commit_granule: int | None = None
-    """Bytes one physical commit is rounded to on its device, when it can."""
-
-
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
@@ -128,10 +119,6 @@ class WorkerBase:
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
-        With an extensible KV cache the engine passes the block count warmup
-        may commit, agreed across ranks from what `initialize_from_config`
-        returned.
-
         Returns:
             Compilation times (language_model, encoder) in seconds, and the
             measured KV cache size for an extensible KV cache.
@@ -139,11 +126,9 @@ class WorkerBase:
         """
         raise NotImplementedError
 
-    def probe_extensible_kv_cache(self) -> ExtensibleKVCacheProbe:
-        """Whether this worker can back an extensible KV cache, and its granule."""
-        return ExtensibleKVCacheProbe(
-            f"{type(self).__name__} does not support the extensible KV cache"
-        )
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        """Why this worker cannot back an extensible KV cache, or None."""
+        return f"{type(self).__name__} does not support the extensible KV cache"
 
     def disable_extensible_kv_cache(self) -> None:
         self.vllm_config.cache_config.enable_extensible_kv_cache = False
@@ -363,7 +348,6 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> int | None:
-        """Returns the blocks warmup may commit to an extensible KV cache."""
         kv_cache_config = kv_cache_configs[self.global_rank]
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):

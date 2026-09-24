@@ -285,8 +285,8 @@ def _fake_executor(vllm_config, collective_rpc):
     from vllm.v1.executor.abstract import Executor
 
     fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
-    fake._probe_extensible_kv_cache = MethodType(
-        Executor._probe_extensible_kv_cache, fake
+    fake._extensible_kv_cache_unsupported_reason = MethodType(
+        Executor._extensible_kv_cache_unsupported_reason, fake
     )
     return fake
 
@@ -294,17 +294,13 @@ def _fake_executor(vllm_config, collective_rpc):
 @requires_cuda
 def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     from vllm.v1.executor.abstract import Executor
-    from vllm.v1.worker.worker_base import ExtensibleKVCacheProbe
 
     calls: list[str] = []
 
     def collective_rpc(method: str):
         calls.append(method)
-        if method == "probe_extensible_kv_cache":
-            return [
-                ExtensibleKVCacheProbe(None, 2 << 20),
-                ExtensibleKVCacheProbe("no VMM support"),
-            ]
+        if method == "extensible_kv_cache_unsupported_reason":
+            return [None, "no VMM support"]
         return [None, None]
 
     engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
@@ -313,65 +309,22 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 1.0
     specs = [{"layer": object()}]
     fake = _fake_executor(vllm_config, collective_rpc)
-    assert Executor.resolve_extensible_kv_cache(fake, specs) is None
+    Executor.resolve_extensible_kv_cache(fake, specs)
     assert not vllm_config.cache_config.enable_extensible_kv_cache
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 0.92
-    assert calls == ["probe_extensible_kv_cache", "disable_extensible_kv_cache"]
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
 
-    # Supported everywhere: stays on and reports the largest commit granule.
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    fake = _fake_executor(
-        vllm_config,
-        lambda method: [
-            ExtensibleKVCacheProbe(None, 2 << 20),
-            ExtensibleKVCacheProbe(None, 4 << 20),
-        ],
-    )
-    assert Executor.resolve_extensible_kv_cache(fake, specs) == 4 << 20
+    fake = _fake_executor(vllm_config, lambda method: [None, None])
+    Executor.resolve_extensible_kv_cache(fake, specs)
     assert vllm_config.cache_config.enable_extensible_kv_cache
 
     # No KV cache at all: nothing to size, so the feature is turned off.
-    assert Executor.resolve_extensible_kv_cache(fake, [{}]) is None
+    Executor.resolve_extensible_kv_cache(fake, [{}])
     assert not vllm_config.cache_config.enable_extensible_kv_cache
-
-
-def test_executor_agrees_committable_blocks_across_workers():
-    """Workers report what warmup may commit from `initialize_from_config`;
-    the executor hands the minimum to `compile_or_warm_up_model`, and workers
-    without an extensible cache (None) neither cap nor receive an argument."""
-    from types import SimpleNamespace
-
-    from vllm.v1.executor.abstract import Executor
-
-    calls: list[tuple[str, tuple]] = []
-
-    def collective_rpc(method: str, args=()):
-        calls.append((method, args))
-        if method == "initialize_from_config":
-            return [120, 96, None]
-        return []
-
-    fake = SimpleNamespace(collective_rpc=collective_rpc)
-    assert Executor.initialize_from_config(fake, ["cfg"]) == 96
-    Executor.compile_or_warm_up_model(fake, 96)
-    assert calls == [
-        ("initialize_from_config", (["cfg"],)),
-        ("compile_or_warm_up_model", (96,)),
-    ]
-
-    calls.clear()
-
-    def collective_rpc_plain(method: str, args=()):
-        calls.append((method, args))
-        return [None] if method == "initialize_from_config" else []
-
-    fake.collective_rpc = collective_rpc_plain
-    assert Executor.initialize_from_config(fake, ["cfg"]) is None
-    Executor.compile_or_warm_up_model(fake)
-    assert calls == [
-        ("initialize_from_config", (["cfg"],)),
-        ("compile_or_warm_up_model", ()),
-    ]
 
 
 @requires_cuda
@@ -388,13 +341,11 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
             self.vllm_config = vllm_config
             self.collective_rpc = collective_rpc
 
-    from vllm.v1.worker.worker_base import ExtensibleKVCacheProbe
-
     calls: list[str] = []
 
     def collective_rpc(method: str):
         calls.append(method)
-        return [ExtensibleKVCacheProbe(None, 2 << 20)]
+        return [None]
 
     reduced: list[tuple[int, object]] = []
 
@@ -407,13 +358,46 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
     )
     engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    granule = FakeExecutor(vllm_config, collective_rpc).resolve_extensible_kv_cache(
+    FakeExecutor(vllm_config, collective_rpc).resolve_extensible_kv_cache(
         [{"layer": object()}]
     )
-    assert granule is None
     assert reduced == [(0, dist.ReduceOp.MAX)]
     assert not vllm_config.cache_config.enable_extensible_kv_cache
-    assert calls == ["probe_extensible_kv_cache", "disable_extensible_kv_cache"]
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
+
+
+def test_executor_agrees_committable_blocks_across_workers():
+    """Workers report what warmup may commit from `initialize_from_config`;
+    the executor passes the minimum to `compile_or_warm_up_model`. Workers
+    without an extensible cache report None and get no argument."""
+    from types import SimpleNamespace
+
+    from vllm.v1.executor.abstract import Executor
+
+    calls: list[tuple[str, tuple]] = []
+    reported: list[int | None] = [120, 96]
+
+    def collective_rpc(method: str, args=()):
+        calls.append((method, args))
+        return reported if method == "initialize_from_config" else []
+
+    fake = SimpleNamespace(collective_rpc=collective_rpc)
+    Executor.compile_or_warm_up_model(
+        fake, Executor.initialize_from_config(fake, ["cfg"])
+    )
+    reported = [None, None]
+    Executor.compile_or_warm_up_model(
+        fake, Executor.initialize_from_config(fake, ["cfg"])
+    )
+    assert calls == [
+        ("initialize_from_config", (["cfg"],)),
+        ("compile_or_warm_up_model", (96,)),
+        ("initialize_from_config", (["cfg"],)),
+        ("compile_or_warm_up_model", ()),
+    ]
 
 
 @requires_cuda
