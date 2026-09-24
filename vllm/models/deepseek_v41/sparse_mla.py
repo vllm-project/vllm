@@ -86,7 +86,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
     @staticmethod
@@ -195,6 +195,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
         if self.compress_ratio > 1:
             slot_mapping = get_compressed_slot_mapping(
                 cm.num_actual_tokens,
+                cm.slot_mapping,
                 cm.query_start_loc,
                 cm.seq_lens,
                 cm.block_table_tensor.clamp_(min=0),
@@ -254,7 +255,7 @@ class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
         return "FLASHMLA_MEGA_ATTN_DSV41"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod

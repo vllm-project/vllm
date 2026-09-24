@@ -11,10 +11,10 @@ from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig, Siglip2VisionConfig
+from transformers import BatchFeature, PreTrainedConfig, Siglip2VisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -126,15 +126,14 @@ class Phi4SiglipDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         size = self.info.get_image_size_with_most_features()
         return {
             "image": self._get_dummy_images(
                 width=size.width,
                 height=size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
         }
@@ -236,7 +235,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
 

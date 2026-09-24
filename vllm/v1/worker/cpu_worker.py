@@ -7,7 +7,6 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import Any
 
 import psutil
 import torch
@@ -16,7 +15,6 @@ from vllm import envs
 from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
@@ -105,18 +103,6 @@ class CPUWorker(Worker):
         )
 
         self.parallel_config.disable_custom_all_reduce = True
-
-        # Torch profiler. Enabled and configured through profiler_config.
-        self.profiler: Any | None = None
-        profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU"],
-            )
 
     def init_device(self):
         self.device = torch.device("cpu")
@@ -287,11 +273,3 @@ class CPUWorker(Worker):
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
-
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        if is_start:
-            self.profiler.start()
-        else:
-            self.profiler.stop()
