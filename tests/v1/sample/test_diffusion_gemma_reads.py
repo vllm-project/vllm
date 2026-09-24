@@ -321,8 +321,8 @@ def test_read_emits_at_convergence_while_generation_waits_for_commit(width, step
 
 
 def test_masked_logits_keep_a_finite_entropy():
-    """top_k/top_p mask logits to -inf. A row with one live column has zero
-    entropy, so the slot must come out confident, not NaN and never confident."""
+    """top_k/top_p mask logits to -inf, which made the entropy NaN, so the slot
+    never came out confident. A row with one live column has zero entropy."""
     states = _states()
     states.add_request(0)
     logits = torch.full((CL, VOCAB), float("-inf"), device="cuda")
