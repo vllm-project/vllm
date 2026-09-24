@@ -6,7 +6,13 @@ for the buffer-trim fix in rocm_aiter_moe.py / prepare_finalize/mori.py.
 Drives MoriPrepareAndFinalize.prepare()/.finalize() and AiterExperts.apply()
 directly, bypassing FusedMoEFactory (see test_moe_layer_multinode.py).
 
-Launch (one torchrun per host, same rendezvous, one host as rank 0):
+Launch, single node (world_size == GPU_PER_NODE, no real multi-host needed):
+
+    torchrun --nnodes 1 --nproc-per-node 8 \\
+      -m pytest -v -s kernels/moe/test_rocm_mori_moe_ep.py
+
+Launch, genuine multi-node (one torchrun per host, same rendezvous, one host
+as rank 0):
 
     MASTER_ADDR=<node0-ip> MASTER_PORT=29525 \\
     torchrun --nnodes 4 --nproc-per-node 8 --node-rank <0..3> \\
@@ -33,7 +39,7 @@ INTER = 1024
 TOPK = 8
 EXPERTS_PER_RANK = 8
 MAX_TOK = 128
-NUM_BIG_SMALL_ROUNDS = 3
+NUM_BIG_SMALL_ROUNDS = 20
 
 
 def _make_topk_ids(num_tokens, num_experts, topk):
@@ -49,11 +55,10 @@ def test_mori_dispatch_aiter_combine_trim_regression():
             "must be launched under torchrun (WORLD_SIZE unset) -- see "
             "this file's module docstring"
         )
-    if world_size // GPU_PER_NODE < 2:
+    if world_size < GPU_PER_NODE:
         pytest.skip(
-            f"world_size={world_size} implies <2 nodes -- this test needs "
-            "genuine multi-node MoRI InterNodeV1 traffic (validated at "
-            "EP32/4 nodes) to reproduce the bug"
+            f"world_size={world_size} < {GPU_PER_NODE} -- need at least one "
+            "full 8-GPU node"
         )
 
     import mori
@@ -86,6 +91,10 @@ def test_mori_dispatch_aiter_combine_trim_regression():
     _assert_aiter_supported()
 
     num_experts = EXPERTS_PER_RANK * world_size
+    # Single real node: split it into 2 logical MoRI "nodes" so InterNodeV1
+    # traffic (and the bug it can trigger) still occurs; genuine multi-node
+    # already has real nodes, so use the real per-node count.
+    gpu_per_node = GPU_PER_NODE // 2 if world_size == GPU_PER_NODE else GPU_PER_NODE
     mori_config = mori.ops.EpDispatchCombineConfig(
         data_type=torch.bfloat16,
         rank=rank,
@@ -101,7 +110,7 @@ def test_mori_dispatch_aiter_combine_trim_regression():
         block_num=32,
         rdma_block_num=16,
         kernel_type=mori.ops.EpDispatchCombineKernelType.InterNodeV1,
-        gpu_per_node=GPU_PER_NODE,
+        gpu_per_node=gpu_per_node,
     )
     op = mori.ops.EpDispatchCombineOp(mori_config)
     pf = MoriPrepareAndFinalize(
