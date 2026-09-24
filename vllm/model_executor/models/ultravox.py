@@ -114,6 +114,12 @@ UltravoxAudioInputs: TypeAlias = (
 )
 
 
+class UltravoxMultiModalDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "audio": {"audio_embeds": "values", "audio_num_tokens": "metadata"},
+    }
+
+
 class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         config = self.ctx.model_config.hf_config
@@ -145,10 +151,11 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
 
-        return MultiModalDataParser(
+        return UltravoxMultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.get_target_channels(),
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_target_channels(self) -> int:
@@ -247,6 +254,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             # num_chunks can convert audio_chunked to audio batch dimension
             audio_num_chunks=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
+            audio_num_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -273,6 +281,8 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         )
 
         def get_replacement_ultravox(item_idx: int):
+            if "audio_num_tokens" in out_mm_data:
+                return [replacement_id] * int(out_mm_data["audio_num_tokens"][item_idx])
             start = chunks_start_idx[item_idx]
             end = chunks_start_idx[item_idx + 1]
             audio_token_len = out_mm_data["audio_token_len"][start:end].sum()

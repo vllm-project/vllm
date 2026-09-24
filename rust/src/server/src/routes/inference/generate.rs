@@ -14,7 +14,7 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
@@ -40,7 +40,7 @@ use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::resolve_request_context;
+use crate::utils::{resolve_request_context, sse_response};
 
 /// Validate one token-in/token-out request and proxy it into the shared
 /// `vllm-text` stack.
@@ -53,7 +53,12 @@ pub async fn generate(
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mm_features = if let Some(parts) = body.content_parts.take() {
-        match state.chat.prepare_media(parts, &mut body.token_ids).await {
+        match state
+            .chat
+            .prepare_media(parts, &mut body.token_ids)
+            .instrument(vllm_chat::mm_request_span(&request_context.request_id))
+            .await
+        {
             Ok(features) => features,
             Err(e) => {
                 return ApiError::invalid_request(
@@ -109,7 +114,7 @@ pub async fn generate(
         );
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
 
-        return Sse::new(sse_stream).into_response();
+        return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
 
     let collected = match raw_stream.collect_output().instrument(request_span.clone()).await {
