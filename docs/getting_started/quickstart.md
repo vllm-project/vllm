@@ -146,6 +146,9 @@ llm = LLM(model="facebook/opt-125m")
 ```
 
 !!! note
+    On Apple Silicon, `vllm-metal` runs models through MLX via `mlx_lm`, which requires model weights in the `.safetensors` format. If you get a `FileNotFoundError` about safetensors when loading `facebook/opt-125m`, use a model repository that ships safetensors weights instead (for example, `Qwen/Qwen2.5-0.5B`).
+
+!!! note
     By default, vLLM downloads models from [Hugging Face](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
 
     ```shell
