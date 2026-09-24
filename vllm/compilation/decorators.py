@@ -536,7 +536,7 @@ def _support_torch_compile(
             """
             from .caching import aot_compile_hash_factors
 
-            factors: list[str] = aot_compile_hash_factors(self.vllm_config)
+            factors: list[str] = list(aot_compile_hash_factors(self.vllm_config).hashes)
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
