@@ -112,8 +112,22 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
         kv_transfer_config=SimpleNamespace(
             kv_connector_extra_config=extra,
         ),
-        cache_config=SimpleNamespace(block_size=16),
-        model_config=SimpleNamespace(model="test-model", revision="r1"),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+        ),
+        model_config=SimpleNamespace(
+            model="test-model",
+            revision="r1",
+            max_model_len=128,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=64,
+            num_lookahead_slots=0,
+        ),
+        speculative_config=None,
+        max_in_flight_tokens=64,
         parallel_config=SimpleNamespace(**parallel),
     )
 
@@ -419,7 +433,9 @@ class _SchedulerHandle:
 
     def lookup(self, keys):
         self.queries.append(list(keys))
-        return self.hits
+        if isinstance(self.hits, dict):
+            return [self.hits.get(key, False) for key in keys]
+        return self.hits or [False] * len(keys)
 
     def close(self):
         pass
@@ -725,11 +741,12 @@ def test_lazy_store_event_releases_refs_after_partial_rank_failure():
     assert not scheduler.has_pending_push_work()
 
 
-def test_lazy_store_reselects_block_after_event_completion():
+def test_lazy_store_resident_block_satisfies_free_queue_watermark():
+    handle = _SchedulerHandle([])
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({"mode": "embedded", "lazy_offload": True}),
         _kv_cache_config(),
-        _SchedulerHandle([]),
+        handle,
         BlockIdentityCodec(UMBPNamespace("lazy-reselect")),
     )
     block = SimpleNamespace(
@@ -739,13 +756,12 @@ def test_lazy_store_reselects_block_after_event_completion():
         ref_cnt=0,
     )
 
-    def iter_blocks_after(cursor):
-        return iter((block,)) if cursor is None else iter(())
-
     scheduler.bind_gpu_block_pool(
         SimpleNamespace(
             blocks=[None, None, None, None, block],
-            free_block_queue=SimpleNamespace(iter_blocks_after=iter_blocks_after),
+            free_block_queue=SimpleNamespace(
+                iter_blocks_after=lambda cursor: iter((block,))
+            ),
             touch=lambda blocks: None,
             free_blocks=lambda blocks: None,
         )
@@ -767,10 +783,222 @@ def test_lazy_store_reselects_block_after_event_completion():
             )
         )
     )
+    handle.hits = [True]
     scheduler.request_finished(SimpleNamespace(request_id="second"), ([],))
     second = scheduler.build_connector_meta(output)
 
-    assert first.store_plans[0].key == second.store_plans[0].key
+    assert len(first.store_plans) == 1
+    assert second.store_plans == []
+    assert handle.queries == [
+        [first.store_plans[0].key],
+        [first.store_plans[0].key],
+    ]
+
+
+def test_lazy_store_skips_block_already_published_to_runtime():
+    handle = _SchedulerHandle([])
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "lazy_offload": True}),
+        _kv_cache_config(),
+        handle,
+        BlockIdentityCodec(UMBPNamespace("lazy-resident")),
+    )
+    block = SimpleNamespace(
+        block_id=4,
+        block_hash=make_block_hash_with_group_id(b"a", 0),
+        is_null=False,
+        ref_cnt=0,
+    )
+    scheduler.bind_gpu_block_pool(
+        SimpleNamespace(
+            blocks=[None, None, None, None, block],
+            free_block_queue=SimpleNamespace(
+                iter_blocks_after=lambda cursor: iter((block,))
+            ),
+            touch=lambda blocks: None,
+            free_blocks=lambda blocks: None,
+        )
+    )
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+    )
+
+    first = scheduler.build_connector_meta(output)
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                completed_store_events={first.store_event: 1}
+            )
+        )
+    )
+    handle.hits = [True]
+    second = scheduler.build_connector_meta(output)
+
+    assert len(first.store_plans) == 1
+    assert second.store_plans == []
+    assert handle.queries == [
+        [first.store_plans[0].key],
+        [first.store_plans[0].key],
+    ]
+
+
+def test_lazy_target_matches_cache_group_geometry():
+    assert (
+        UMBPStoreConnectorScheduler._estimate_lazy_target_blocks(
+            _hybrid_kv_cache_config(),
+            max_num_batched_tokens=64,
+            dcp_size=1,
+        )
+        == 12
+    )
+
+
+def test_hybrid_lookup_uses_latest_mamba_checkpoint():
+    codec = BlockIdentityCodec(UMBPNamespace("hybrid-hit-window"))
+    block_hashes = [b"a", b"b"]
+    hits = {
+        codec.key(block_hashes[0], 0): True,
+        codec.key(block_hashes[1], 0): True,
+        codec.key(block_hashes[1], 1): True,
+    }
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "lazy_offload": True}),
+        _hybrid_kv_cache_config(),
+        _SchedulerHandle(hits),
+        codec,
+    )
+    request = SimpleNamespace(
+        request_id="hybrid-lookup",
+        block_hashes=block_hashes,
+        num_tokens=33,
+    )
+
+    matched, is_async = scheduler.get_num_new_matched_tokens(request, 0)
+
+    assert (matched, is_async) == (32, True)
+    spec = scheduler._load_specs[request.request_id]
+    assert spec.block_hashes_by_group == (
+        (block_hashes[0], block_hashes[1]),
+        (None, block_hashes[1]),
+    )
+
+    tracker = RequestTracker(request_id=request.request_id, generation=7)
+    tracker.load_spec = spec
+    plans = scheduler._load_plans_for_external_tokens(
+        request,
+        tracker,
+        ([10, 11], [NULL_BLOCK_ID, 12]),
+        matched,
+    )
+    assert [(plan.group_id, plan.block_id, plan.key) for plan in plans] == [
+        (0, 10, codec.key(block_hashes[0], 0)),
+        (0, 11, codec.key(block_hashes[1], 0)),
+        (1, 12, codec.key(block_hashes[1], 1)),
+    ]
+
+
+def test_lazy_store_publishes_secondary_block_hashes():
+    handle = _SchedulerHandle([])
+    codec = BlockIdentityCodec(UMBPNamespace("lazy-secondary"))
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "lazy_offload": True}),
+        _kv_cache_config(),
+        handle,
+        codec,
+    )
+    primary = make_block_hash_with_group_id(b"a", 0)
+    secondary = make_block_hash_with_group_id(b"b", 0)
+    block = SimpleNamespace(
+        block_id=4,
+        block_hash=primary,
+        is_null=False,
+        ref_cnt=0,
+    )
+    scheduler.bind_gpu_block_pool(
+        SimpleNamespace(
+            blocks=[None, None, None, None, block],
+            cached_block_hashes_by_block={block.block_id: {secondary}},
+            free_block_queue=SimpleNamespace(
+                iter_blocks_after=lambda cursor: iter((block,))
+            ),
+            touch=lambda blocks: None,
+            free_blocks=lambda blocks: None,
+        )
+    )
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert {(plan.block_id, plan.key) for plan in metadata.store_plans} == {
+        (block.block_id, codec.key(b"a", 0)),
+        (block.block_id, codec.key(b"b", 0)),
+    }
+
+
+def test_lazy_store_closes_full_attention_prefix_from_at_risk_tail():
+    handle = _SchedulerHandle([])
+    codec = BlockIdentityCodec(UMBPNamespace("lazy-prefix-closure"))
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "lazy_offload": True}),
+        _kv_cache_config(),
+        handle,
+        codec,
+    )
+    head = SimpleNamespace(
+        block_id=3,
+        block_hash=make_block_hash_with_group_id(b"a", 0),
+        is_null=False,
+        ref_cnt=0,
+    )
+    tail = SimpleNamespace(
+        block_id=4,
+        block_hash=make_block_hash_with_group_id(b"b", 0),
+        is_null=False,
+        ref_cnt=0,
+    )
+    scheduler.bind_gpu_block_pool(
+        SimpleNamespace(
+            blocks=[None, None, None, head, tail],
+            cached_block_hashes_by_block={},
+            free_block_queue=SimpleNamespace(
+                iter_blocks_after=lambda cursor: iter((tail,))
+            ),
+            touch=lambda blocks: None,
+            free_blocks=lambda blocks: None,
+        )
+    )
+    request = SimpleNamespace(
+        request_id="lazy-prefix-closure",
+        num_tokens=33,
+        num_prompt_tokens=33,
+        num_computed_tokens=33,
+        block_hashes=[b"a", b"b"],
+    )
+    scheduler.request_finished(request, ([head.block_id, tail.block_id],))
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert [(plan.block_id, plan.key) for plan in metadata.store_plans] == [
+        (tail.block_id, codec.key(b"b", 0)),
+        (head.block_id, codec.key(b"a", 0)),
+    ]
 
 
 def test_scheduler_resumed_request_replaces_stale_block_table():
