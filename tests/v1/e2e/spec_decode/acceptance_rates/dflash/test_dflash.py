@@ -22,6 +22,7 @@ class DFlashCorrectnessConfig:
     num_speculative_tokens: int = 16
     max_model_len: int = 4096
     max_num_seqs: int = 128
+    gpu_memory_utilization: float = 0.85
     num_questions: int = 1319
     use_chat_completions: bool = False
     enforce_eager: bool = False
@@ -44,6 +45,7 @@ QWEN3_8_DFLASH2_NVFP4 = DFlashCorrectnessConfig(
     expected_acceptance_len=6.14 * 0.95,
     num_speculative_tokens=7,
     max_num_seqs=32,
+    gpu_memory_utilization=0.95,
     use_chat_completions=True,
     language_model_only=True,
     chat_template_kwargs={"enable_thinking": False},
@@ -148,7 +150,7 @@ def test_dflash_correctness(
         },
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=config.gpu_memory_utilization,
         enforce_eager=config.enforce_eager,
         disable_log_stats=False,
         enable_chunked_prefill=None,
