@@ -12,7 +12,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
     build_layer_to_spec,
     get_representative_spec,
     get_representative_spec_type,
-    group_takes_part_in_transfer,
     is_attention_spec,
     is_mla_spec,
     is_ssm_spec,
@@ -218,15 +217,3 @@ def test_build_layer_to_spec_unwraps_groups():
         "full_1": full_spec,
         "sw_0": sw_spec,
     }
-
-
-@pytest.mark.parametrize("enable_kv_transfer", [True, False])
-def test_group_takes_part_in_transfer(enable_kv_transfer: bool):
-    """Participation follows the framework flag the group carries."""
-    group = KVCacheGroupSpec(
-        layer_names=["layer_0"],
-        kv_cache_spec=FullAttentionSpec(**ATTENTION_KWARGS),
-        enable_kv_transfer=enable_kv_transfer,
-    )
-
-    assert group_takes_part_in_transfer(group) is enable_kv_transfer

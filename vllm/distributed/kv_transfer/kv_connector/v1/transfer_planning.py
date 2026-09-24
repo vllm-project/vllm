@@ -8,7 +8,6 @@ from enum import Enum
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
@@ -152,8 +151,3 @@ def build_layer_to_spec(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec
                 {layer_name: group_spec for layer_name in group.layer_names}
             )
     return layer_to_spec
-
-
-def group_takes_part_in_transfer(group: KVCacheGroupSpec) -> bool:
-    """Whether a cache group is part of the externally transferable KV state."""
-    return group.enable_kv_transfer
