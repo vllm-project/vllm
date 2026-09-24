@@ -358,10 +358,15 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.register_buffer("inv_freq_w", inv_freq_w, persistent=False)
 
         # Vision analog of the text model's cos_sin_cache: per-axis cos/sin
-        # tables indexed by position, gathered in _get_3d_rope_embed.
-        cos_t, sin_t = self._build_rope_table(_ROPE_TABLE_T, inv_freq_t)
-        cos_h, sin_h = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_h)
-        cos_w, sin_w = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_w)
+        # tables indexed by position. Each row is padded to half_rot_dim with
+        # the axis's values at its mrope section columns, so assembling the
+        # kernel's (3, N, half_rot_dim) t/h/w planes is one gather per plane.
+        half_t, half_h = self.t_dim // 2, self.h_dim // 2
+        self.half_rot_dim = half_t + half_h + self.w_dim // 2
+        self._rope_section_start = {"t": 0, "h": half_t, "w": half_t + half_h}
+        cos_t, sin_t = self._build_rope_table(_ROPE_TABLE_T, inv_freq_t, "t")
+        cos_h, sin_h = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_h, "h")
+        cos_w, sin_w = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_w, "w")
         self.register_buffer("rope_cos_t", cos_t, persistent=False)
         self.register_buffer("rope_sin_t", sin_t, persistent=False)
         self.register_buffer("rope_cos_h", cos_h, persistent=False)
@@ -395,14 +400,19 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
     # ── RoPE helpers ─────────────────────────────────────────────────────
 
-    @staticmethod
     def _build_rope_table(
-        n: int, inv_freq: torch.Tensor
+        self, n: int, inv_freq: torch.Tensor, axis: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
         freqs = torch.outer(
             torch.arange(n, device=inv_freq.device, dtype=inv_freq.dtype), inv_freq
         )
-        return freqs.cos(), freqs.sin()
+        half = inv_freq.numel()
+        col0 = self._rope_section_start[axis]
+        cos = freqs.new_zeros(n, self.half_rot_dim)
+        sin = freqs.new_zeros(n, self.half_rot_dim)
+        cos[:, col0 : col0 + half] = freqs.cos()
+        sin[:, col0 : col0 + half] = freqs.sin()
+        return cos, sin
 
     def _grow_rope_table(
         self, axis: str, inv_freq: torch.Tensor, min_positions: int
@@ -410,20 +420,14 @@ class MiniMaxVLVisionTransformer(nn.Module):
         n = getattr(self, f"rope_cos_{axis}").shape[0]
         if min_positions <= n:
             return
-        cos, sin = self._build_rope_table(max(min_positions, 2 * n), inv_freq)
+        cos, sin = self._build_rope_table(max(min_positions, 2 * n), inv_freq, axis)
         setattr(self, f"rope_cos_{axis}", cos)
         setattr(self, f"rope_sin_{axis}", sin)
 
-    def _get_3d_rope_embed(
+    def _get_3d_pos_ids(
         self, grid_t: int, grid_h: int, grid_w: int, spatial_merge_size: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute 3D RoPE cos/sin for a single (T, H, W) grid.
-
-        Returns (3, T*H*W, half_rot_dim) t/h/w cos and sin planes for
-        triton_mrope, gathered from the cached per-axis tables: each axis's
-        values sit at their section columns of their own plane (the kernel's
-        per-axis masks read only those columns).
-        """
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """t/h/w position ids for a single (T, H, W) grid, each (T*H*W,)."""
         tokens_per_frame = grid_h * grid_w
 
         tpos_ids = (
@@ -463,31 +467,36 @@ class MiniMaxVLVisionTransformer(nn.Module):
             .expand(grid_t, -1, -1, -1, -1)
             .flatten()
         )
-
-        self._grow_rope_table("t", self.inv_freq_t, grid_t)
-        self._grow_rope_table("h", self.inv_freq_h, grid_h)
-        self._grow_rope_table("w", self.inv_freq_w, grid_w)
-
-        half_t, half_h, half_w = self.t_dim // 2, self.h_dim // 2, self.w_dim // 2
-        n = tpos_ids.numel()
-        cos = self.rope_cos_t.new_zeros(3, n, half_t + half_h + half_w)
-        sin = self.rope_sin_t.new_zeros(3, n, half_t + half_h + half_w)
-        cos[0, :, :half_t] = self.rope_cos_t[tpos_ids]
-        cos[1, :, half_t : half_t + half_h] = self.rope_cos_h[hpos_ids]
-        cos[2, :, half_t + half_h :] = self.rope_cos_w[wpos_ids]
-        sin[0, :, :half_t] = self.rope_sin_t[tpos_ids]
-        sin[1, :, half_t : half_t + half_h] = self.rope_sin_h[hpos_ids]
-        sin[2, :, half_t + half_h :] = self.rope_sin_w[wpos_ids]
-        return cos, sin
+        return tpos_ids, hpos_ids, wpos_ids
 
     def _get_rope_embed_3d(
         self, grid_thw: list[list[int]], spatial_merge_size: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        embeds = [
-            self._get_3d_rope_embed(t, h, w, spatial_merge_size) for t, h, w in grid_thw
+        """(3, total_N, half_rot_dim) fp32 cos/sin t/h/w planes for
+        triton_mrope, gathered from the cached padded tables: each axis's
+        values sit at their section columns of their own plane (the kernel's
+        per-axis masks read only those columns)."""
+        self._grow_rope_table("t", self.inv_freq_t, max(t for t, _, _ in grid_thw))
+        self._grow_rope_table("h", self.inv_freq_h, max(h for _, h, _ in grid_thw))
+        self._grow_rope_table("w", self.inv_freq_w, max(w for _, _, w in grid_thw))
+
+        ids = [
+            self._get_3d_pos_ids(t, h, w, spatial_merge_size) for t, h, w in grid_thw
         ]
-        cos, sin = zip(*embeds, strict=True)
-        return torch.cat(cos, dim=1), torch.cat(sin, dim=1)
+        tpos_ids = torch.cat([i[0] for i in ids])
+        hpos_ids = torch.cat([i[1] for i in ids])
+        wpos_ids = torch.cat([i[2] for i in ids])
+
+        n = tpos_ids.numel()
+        cos = self.rope_cos_t.new_empty(3, n, self.half_rot_dim)
+        sin = self.rope_sin_t.new_empty(3, n, self.half_rot_dim)
+        cos[0] = self.rope_cos_t[tpos_ids]
+        cos[1] = self.rope_cos_h[hpos_ids]
+        cos[2] = self.rope_cos_w[wpos_ids]
+        sin[0] = self.rope_sin_t[tpos_ids]
+        sin[1] = self.rope_sin_h[hpos_ids]
+        sin[2] = self.rope_sin_w[wpos_ids]
+        return cos, sin
 
     # ── Frame-limit helper (mirrors the reference) ───────────────────────
 
