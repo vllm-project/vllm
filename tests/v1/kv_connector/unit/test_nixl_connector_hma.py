@@ -4,6 +4,7 @@
 
 import gc
 import queue
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -54,7 +55,8 @@ def region_pull_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker._engine_last_active = {}
-    worker._replaced_remote_engines = set()
+    worker._handshake_lock = threading.RLock()
+    worker._handshake_futures = {}
     worker._transfer_layer_group_ids = ()
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
@@ -94,6 +96,7 @@ def region_pull_worker():
     worker.dst_num_blocks = {"P": 100, "D": 100}
     worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
     worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
+    worker._engine_by_address = {("localhost", 1): "P"}
     worker._read_blocks_mixed = MagicMock()
     worker.nixl_wrapper = MagicMock()
     return worker

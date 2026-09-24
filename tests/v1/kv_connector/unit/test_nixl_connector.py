@@ -7,6 +7,7 @@ import os
 import queue
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -2011,7 +2012,10 @@ def recv_worker():
     worker._recving_transfers = defaultdict(list)
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
-    worker._replaced_remote_engines = set()
+    worker._handshake_lock = threading.RLock()
+    worker._handshake_futures = {}
+    worker._remote_agents = {}
+    worker._engine_by_address = {}
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2674,9 +2678,9 @@ class TestPeerReplacement:
         self.transport.release_dlist_handle.assert_called_once_with(old_handle)
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert set(self.worker._remote_agents) == {"new", "healthy"}
-        assert self.worker._remote_engine_addresses == {
-            "new": ("localhost", 1234),
-            "healthy": ("other-host", 1234),
+        assert self.worker._engine_by_address == {
+            ("localhost", 1234): "new",
+            ("other-host", 1234): "healthy",
         }
         with pytest.raises(KeyError):
             self.worker.transfer_topo.get_engine_info("old")
@@ -2699,7 +2703,7 @@ class TestPeerReplacement:
         )
         assert self.worker.get_transfer_results().failed_recving == {"new-req"}
         assert "old" in self.worker._remote_agents
-        assert "new" not in self.worker._remote_engine_addresses
+        assert self.worker._engine_by_address == {("localhost", 1234): "old"}
         self.transport.remove_remote_agent.assert_not_called()
 
     @pytest.mark.parametrize(

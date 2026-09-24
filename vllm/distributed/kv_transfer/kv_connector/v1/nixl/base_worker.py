@@ -838,8 +838,7 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
-        self._remote_engine_addresses: dict[EngineId, tuple[str, int]] = {}
-        self._replaced_remote_engines: set[EngineId] = set()
+        self._engine_by_address: dict[tuple[str, int], EngineId] = {}
 
         self.model_config = vllm_config.model_config
 
@@ -3477,35 +3476,30 @@ class NixlBaseConnectorWorker:
     def _track_remote_engine_replacement(
         self, engine_id: EngineId, host: str, port: int
     ) -> None:
-        """Record a confirmed pull peer and mark replaced peers for cleanup."""
+        """Record the engine currently serving a pull peer address."""
+        # TODO: Also handle push mode, which handshakes in both directions.
         if self._TRANSFER_MODE != "pull":
             return
-        self._replaced_remote_engines.update(
-            old_eid
-            for old_eid, address in self._remote_engine_addresses.items()
-            if address == (host, port) and old_eid != engine_id
-        )
-        self._remote_engine_addresses[engine_id] = (host, port)
+        self._engine_by_address[(host, port)] = engine_id
 
     def _cleanup_replaced_remote_engines(self) -> None:
         """Release replaced pull peers once requests and handshakes have drained."""
-        if len(self._replaced_remote_engines) == 0:
+        if self._TRANSFER_MODE != "pull":
             return
+        busy = {
+            meta.remote.engine_id
+            for meta in self._recving_metadata.values()
+            if meta.remote is not None
+        }
         with self._handshake_lock:
             if len(self._handshake_futures) > 0:
                 return
-            busy = {
-                meta.remote.engine_id
-                for meta in self._recving_metadata.values()
-                if meta.remote is not None
-            }
-            for engine_id in self._replaced_remote_engines - busy:
-                if engine_id in self._remote_agents:
-                    self._cleanup_remote_engine(engine_id, log_eviction=False)
-                    logger.info(
-                        "Released NIXL state for replaced remote engine %s.", engine_id
-                    )
-                self._replaced_remote_engines.discard(engine_id)
+            current = set(self._engine_by_address.values())
+            keep = current | busy
+            replaced = self._remote_agents.keys() - keep
+        for engine_id in replaced:
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
 
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
@@ -3513,8 +3507,8 @@ class NixlBaseConnectorWorker:
         """Remove all state for a single remote engine.
 
         Releases NIXL resources (dlist handles, remote agents) and clears
-        all per-engine data structures. Used by both TTL eviction and
-        shutdown.
+        all per-engine data structures. Used by TTL eviction, replaced peer
+        cleanup and shutdown.
         """
         assert engine_id in self._remote_agents
 
@@ -3524,6 +3518,9 @@ class NixlBaseConnectorWorker:
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
+            for address, eid in list(self._engine_by_address.items()):
+                if eid == engine_id:
+                    del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
@@ -3539,8 +3536,6 @@ class NixlBaseConnectorWorker:
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
-        self._remote_engine_addresses.pop(engine_id, None)
-        self._replaced_remote_engines.discard(engine_id)
         # A just-completed handshake may not have recorded activity yet, so
         # tolerate a missing entry.
         last_active = self._engine_last_active.pop(engine_id, None)
