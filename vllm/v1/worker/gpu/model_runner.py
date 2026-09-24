@@ -55,6 +55,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -439,14 +440,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config, self.req_states, self.is_pooling_model, config_processors
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
-            from vllm.v1.sample.ops.topk_topp_sampler import (
-                register_top_k_top_p_warmups,
-            )
-
             # V2 bypasses TopKTopPSampler, which registers native warmups.
-            # CUDA also needs these for its FlashInfer fallback paths.
-            with self.jit_warmup_registry.activate():
-                register_top_k_top_p_warmups()
+            # ROCm only: on CUDA these warmups add ~2 min to every engine start.
+            if current_platform.is_rocm():
+                from vllm.v1.sample.ops.topk_topp_sampler import (
+                    register_top_k_top_p_warmups,
+                )
+
+                with self.jit_warmup_registry.activate():
+                    register_top_k_top_p_warmups()
 
             sampler_kwargs: dict[str, Any] = {
                 "vllm_config": self.vllm_config,
@@ -860,7 +862,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
-            assert hidden_states is not None
             self.step_timing.drafter_start()
             mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
@@ -876,8 +877,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                if pre_hc_hidden_states is not None:
-                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),
@@ -1108,44 +1108,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
-
-    def warmup_pp_decode_update(self) -> None:
-        """JIT-compile the kernel behind ``update_pp_decode_requests``.
-
-        That path only runs on real steps, so the warmup steps never reach it
-        on non-last PP ranks. Its first triton compile must not happen
-        mid-serving: the in-flight sampled-token broadcast keeps a NCCL kernel
-        spinning on this device, which blocks the CUDA module load and
-        deadlocks the pipeline. An all -1 idx_mapping makes this a no-op.
-        The freshly allocated int32 tensors are 16-byte aligned, matching the
-        padded views `PPHandler` produces at serving time (triton specializes
-        on pointer alignment).
-        """
-        assert self.pp_handler is not None
-        num_spec = self.pp_handler.max_sample_len - 1
-        broadcast_drafts = (
-            torch.zeros((1, num_spec), dtype=torch.int64, device=self.device)
-            if num_spec > 0
-            else None
-        )
-        post_update(
-            torch.full((1,), -1, dtype=torch.int64, device=self.device),
-            self.req_states.num_computed_tokens.gpu,
-            self.req_states.last_sampled_tokens,
-            None,
-            torch.zeros(
-                (1, self.pp_handler.max_sample_len),
-                dtype=torch.int64,
-                device=self.device,
-            ),
-            torch.zeros(1, dtype=torch.int32, device=self.device),
-            torch.zeros(1, dtype=torch.int32, device=self.device),
-            None,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.total_len.gpu,
-            broadcast_drafts,
-            self.req_states.draft_tokens if broadcast_drafts is not None else None,
-        )
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1628,7 +1590,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
-        broadcast_drafts: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
         output_bin_counts = None
@@ -1646,8 +1607,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
-            broadcast_drafts,
-            self.req_states.draft_tokens if broadcast_drafts is not None else None,
         )
 
         self.model_state.postprocess_state(
@@ -2170,10 +2129,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = draft_hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                if pre_hc_hidden_states is not None:
-                    spec_hidden_states = pre_hc_hidden_states[
-                        : draft_hidden_states.size(0)
-                    ]
+                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),
@@ -2196,18 +2152,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dp_sync=dp_sync,
                     mm_inputs=mm_inputs,
                 )
-            if draft_tokens is not None:
-                if num_spec_tokens < self.num_speculative_steps:
-                    draft_tokens[:, num_spec_tokens:] = -1
-                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-                if self.pp_handler is not None:
-                    # Earlier stages never run the speculator; ship the
-                    # drafts so their next verification step embeds the real
-                    # draft tokens instead of stale buffer contents.
-                    self.pp_handler.broadcast_drafts(
-                        self.req_states.draft_tokens, input_batch
-                    )
-            if draft_tokens is not None and self.adaptive_verification is not None:
+            if num_spec_tokens < self.num_speculative_steps:
+                draft_tokens[:, num_spec_tokens:] = -1
+            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
@@ -2219,11 +2167,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
             )
-            if self.pp_handler is not None and self.speculator is None:
-                # When a speculator ran, the propose() path above already
-                # broadcast the fresh drafts. Broadcasting here as well would
-                # double-post on the pp_broadcast group and misalign the
-                # recv FIFO on earlier stages, hanging the pipeline.
+            if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch
                 )
