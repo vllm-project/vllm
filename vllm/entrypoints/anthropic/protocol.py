@@ -118,11 +118,15 @@ class AnthropicOutputConfig(BaseModel):
     format: AnthropicJsonOutputFormat | None = None
 
 
+AnthropicDisabledThinkingEffort = Literal[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max"
+]
+
+
 class AnthropicThinkingConfig(BaseModel):
     """Extended-thinking configuration.
 
-    ``display`` controls visibility only: reasoning still runs and is still
-    billed under every setting.
+    ``display`` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["enabled", "disabled", "adaptive"] = "enabled"

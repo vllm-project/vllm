@@ -22,6 +22,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicCountTokensResponse,
     AnthropicDelta,
+    AnthropicDisabledThinkingEffort,
     AnthropicError,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
@@ -117,6 +118,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
     ):
         super().__init__(
             engine_client=engine_client,
@@ -140,6 +142,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             "tool_calls": "tool_use",
         }
         self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        self._disabled_thinking_effort = disabled_thinking_effort
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
@@ -197,6 +200,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         *,
         merge_inline_system: bool = False,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format"""
         openai_messages: list[dict[str, Any]] = []
@@ -214,7 +218,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
-        cls._handle_thinking(req, anthropic_request)
+        cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
         return req
@@ -499,8 +503,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls,
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
     ) -> None:
-        """Handle extended-thinking configuration"""
+        """Handle extended-thinking configuration.
+
+        ``display`` is intentionally ignored: suppressing reasoning would mark
+        it ended for structured outputs and drop it from multi-turn history.
+        """
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
@@ -508,15 +517,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             return
 
         if thinking.type == "disabled":
-            # "none" is what clears enable_thinking for templates that honor it.
-            req.reasoning_effort = "none"
+            # "none" clears enable_thinking for templates that honor it; models
+            # that cannot disable thinking are configured with a low effort.
+            req.reasoning_effort = disabled_thinking_effort
         elif thinking.type == "enabled" and thinking.budget_tokens is not None:
             req.thinking_token_budget = thinking.budget_tokens
         # "adaptive" pins nothing: the model chooses depth beneath the ceiling
         # already set from output_config.effort.
-
-        if thinking.display == "omitted":
-            req.include_reasoning = False
 
     @classmethod
     def _handle_output_config(
@@ -630,6 +637,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         chat_req = self._convert_anthropic_to_openai_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=self._disabled_thinking_effort,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
@@ -1033,6 +1041,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         chat_req = self._convert_anthropic_to_openai_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=self._disabled_thinking_effort,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

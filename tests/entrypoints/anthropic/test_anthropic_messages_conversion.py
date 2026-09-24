@@ -1625,22 +1625,24 @@ class TestThinkingConfig:
         assert result.reasoning_effort == "low"
         assert result.thinking_token_budget is None
 
-    def test_display_omitted_suppresses_reasoning_in_response(self):
-        """`display` controls visibility only -- it must not touch depth."""
+    def test_disabled_uses_configured_effort(self):
+        """Models that always think (GLM-5.3) or reject "none" (Harmony) are
+        served with a low effort instead."""
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
-            thinking={"type": "adaptive", "display": "omitted"},
+            thinking={"type": "disabled"},
         )
 
-        result = _convert(request)
-        assert result.include_reasoning is False
-        assert result.reasoning_effort is None
-        assert result.thinking_token_budget is None
+        result = _convert(request, disabled_thinking_effort="low")
+        assert result.reasoning_effort == "low"
 
-    def test_display_summarized_keeps_reasoning_included(self):
+    @pytest.mark.parametrize("display", ["omitted", "summarized"])
+    def test_display_keeps_reasoning_included(self, display):
+        """Suppressing reasoning would mark it ended for structured outputs and
+        drop it from multi-turn history, so `display` is ignored."""
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
-            thinking={"type": "adaptive", "display": "summarized"},
+            thinking={"type": "adaptive", "display": display},
         )
 
         result = _convert(request)
@@ -1657,5 +1659,5 @@ class TestThinkingConfig:
 
         result = _convert(request)
         assert result.reasoning_effort == "high"
-        assert result.include_reasoning is False
+        assert result.include_reasoning is True
         assert result.thinking_token_budget is None
