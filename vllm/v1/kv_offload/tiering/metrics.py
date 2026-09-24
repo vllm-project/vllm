@@ -127,7 +127,7 @@ class TieringMetricsTracker:
         self, job_metadata: _JobMetadataLike, result: JobResult
     ) -> None:
         self._observe_finished_job_stats(job_metadata, result)
-        self._observe_promotion_latency(job_metadata, result)
+        self._observe_promotion_latency(job_metadata)
         self._decrement_tier_state(job_metadata)
 
     def on_promotion_allocation_failure(self) -> None:
@@ -242,18 +242,15 @@ class TieringMetricsTracker:
                 time_metric, completed_job.transfer_time, labelvalues
             )
 
-    def _observe_promotion_latency(
-        self, job_metadata: _JobMetadataLike, result: JobResult
-    ) -> None:
+    def _observe_promotion_latency(self, job_metadata: _JobMetadataLike) -> None:
         """Record promotion time from job registration to reported completion.
 
         This is broader than the tier-reported `JobResult.transfer_time`, which
         covers only the active data movement, and so includes tier queueing.
-        Only fully successful promotions are observed; failures are reported
-        through PROMOTION_JOB_FAILURES instead.
+        Failed promotions are observed too; PROMOTION_JOB_FAILURES counts them.
         """
         start_time = self._job_start_times.pop(job_metadata.transfer_job.job_id, None)
-        if start_time is None or not result.success:
+        if start_time is None:
             return
         self._stats.observe_histogram(
             TieringOffloadingMetrics.PROMOTION_LATENCY,
