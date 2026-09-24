@@ -330,8 +330,8 @@ def _load_marlin_checkpoint_format_weights(layer):
     )
 
 
-def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
-    """Marlin must reuse the workspace storage captured by CUDA graphs."""
+def test_marlin_post_load_does_not_own_workspace(monkeypatch, dist_init):
+    """Weight reload must not create layer-owned Marlin lock storage."""
     _stub_marlin_ops(monkeypatch)
     kernel = _make_marlin_kernel()
 
@@ -339,19 +339,17 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
     _load_marlin_checkpoint_format_weights(layer)
     kernel.process_weights_after_loading(layer)
 
-    workspace_ptr = kernel.workspace.data_ptr()
+    assert not hasattr(kernel, "workspace")
 
     _load_marlin_checkpoint_format_weights(layer)
     kernel.process_weights_after_loading(layer)
 
-    assert kernel.workspace.data_ptr() == workspace_ptr
-    assert torch.all(kernel.workspace == 0)
+    assert not hasattr(kernel, "workspace")
 
 
 @pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
-def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
-    """The Marlin fallback prepare_* functions rerun on weight reload and must
-    reuse the workspace storage whose address captured CUDA graphs hold."""
+def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
+    """Weight preparation must not attach runtime workspace to model layers."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils import (
         marlin_utils,
@@ -417,34 +415,57 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
 
     load_checkpoint_format_weights()
     prepare(layer)
-    workspace_ptr = layer.workspace.data_ptr()
+    assert not hasattr(layer, "workspace")
 
     # Reload: fresh checkpoint-format tensors, prepare runs again
     load_checkpoint_format_weights()
     prepare(layer)
 
-    assert layer.workspace.data_ptr() == workspace_ptr
-    assert torch.all(layer.workspace == 0)
+    assert not hasattr(layer, "workspace")
 
 
-def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
-    """An incompatible existing workspace means the address captured by CUDA
-    graphs is already unusable; allocating a replacement would hide that."""
+def test_marlin_workspace_uses_persistent_workspace_manager(monkeypatch):
+    """Calls reuse initialized locks; independent streams get separate storage."""
     from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.utils import torch_utils
+    from vllm.v1.worker import workspace as workspace_module
 
     monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
     device = torch.device("cpu")
+    manager = workspace_module.WorkspaceManager(device)
+    monkeypatch.setattr(workspace_module, "_manager", manager)
+    stream = "main"
+    monkeypatch.setattr(torch_utils, "current_stream", lambda: stream)
 
-    workspace = marlin_utils.marlin_make_workspace_new(device)
-    reused = marlin_utils.marlin_make_workspace_new(device, existing=workspace)
-    assert reused is workspace
+    workspace = marlin_utils.get_marlin_workspace(device)
+    assert workspace.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert workspace.dtype == torch.int32
+    assert torch.count_nonzero(workspace) == 0
 
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(device, 4, existing=workspace)
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(
-            device, existing=workspace.to(torch.int64)
-        )
+    workspace.fill_(1)
+    assert marlin_utils.get_marlin_workspace(device) is workspace
+    assert torch.all(workspace == 1)
+
+    stream = "aux"
+    aux_workspace = marlin_utils.get_marlin_workspace(device)
+    assert aux_workspace.data_ptr() != workspace.data_ptr()
+    assert torch.count_nonzero(aux_workspace) == 0
+
+    manager.lock()
+    assert marlin_utils.get_marlin_workspace(device) is aux_workspace
+
+
+def test_marlin_workspace_without_manager(monkeypatch):
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.v1.worker import workspace as workspace_module
+
+    monkeypatch.setattr(workspace_module, "_manager", None)
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    first = marlin_utils.get_marlin_workspace(torch.device("cpu"))
+    second = marlin_utils.get_marlin_workspace(torch.device("cpu"))
+    assert first.data_ptr() != second.data_ptr()
+    assert first.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert torch.count_nonzero(first) == 0
 
 
 def test_model_cleanup(dist_init, default_vllm_config):

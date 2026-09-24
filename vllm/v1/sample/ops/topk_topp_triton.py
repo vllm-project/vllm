@@ -914,7 +914,8 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
         normal_cdf_to_sigma_table=TritonWarmupTensor(torch.float32),
         k=TritonWarmupTensor(torch.int32) if topk_enabled else None,
         p=TritonWarmupTensor(torch.float32) if topp_enabled else None,
-        # Only Model Runner V2 scales on load, and it registers no sampling warmups.
+        # Only Model Runner V2 scales on load, and only on ROCm does it register
+        # these warmups; that variant compiles on first use instead.
         temperatures=None,
         mask_value=float("-inf"),
         num_sm=num_compute_units(),
