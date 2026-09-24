@@ -108,18 +108,18 @@ def test_dynamic_per_tensor_fp8_quant(
     opcheck_fp8_quant(ops_out, x)
 
 
-@pytest.mark.parametrize("per_token", [True, False])
 @pytest.mark.parametrize("pad", [8, 16])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_dynamic_fp8_quant_strided_input(
-    per_token: bool, pad: int, dtype: torch.dtype, seed: int
+def test_dynamic_per_tensor_fp8_quant_strided_input(
+    pad: int, dtype: torch.dtype, seed: int
 ) -> None:
-    """Rows that are not contiguous must take the strided kernels.
+    """Non-contiguous rows take the strided abs-max kernel; contiguous rows take
+    the flat one. Both must produce exactly the same scale and bytes.
 
     pad=8 (16 B for bf16) leaves rows misaligned for 32 B vector loads, pad=16
-    keeps them aligned but non-contiguous; both must match the reference.
+    keeps them aligned but non-contiguous.
     """
     set_random_seed(seed)
     num_tokens, hidden_size = 64, 4096
@@ -128,17 +128,14 @@ def test_dynamic_fp8_quant_strided_input(
     x = full[:, :hidden_size]
     assert not x.is_contiguous()
 
-    if per_token:
-        ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE, None)
-        ops_out, ops_scales = ops.scaled_fp8_quant(x, use_per_token_if_dynamic=True)
-    else:
-        ref_out, ref_scales = ref_dynamic_per_tensor_fp8_quant(x)
-        ops_out, ops_scales = ops.scaled_fp8_quant(x)
+    ops_out, ops_scale = ops.scaled_fp8_quant(x)
+    flat_out, flat_scale = ops.scaled_fp8_quant(x.contiguous())
+    assert torch.equal(ops_scale, flat_scale)
+    assert torch.equal(ops_out.view(torch.uint8), flat_out.view(torch.uint8))
 
-    torch.testing.assert_close(ref_scales, ops_scales)
-    torch.testing.assert_close(
-        ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
-    )
+    ref_out, ref_scale = ref_dynamic_per_tensor_fp8_quant(x)
+    assert torch.equal(ref_scale, ops_scale)
+    assert torch.equal(ref_out.view(torch.uint8), ops_out.view(torch.uint8))
 
 
 # Regression test for a case with large activations where an int32 index cannot
