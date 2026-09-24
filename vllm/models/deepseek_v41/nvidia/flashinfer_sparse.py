@@ -114,9 +114,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # The FlashInfer sparse-MLA kernels page the cache at 128 tokens on
-        # SM100 and at 64 tokens on SM120.
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(120) else 128]
 
     @staticmethod
@@ -563,6 +561,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[:num_decode_tokens],
+                sparse_indices_are_storage_offsets=True,
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=decode_topk_lens,
                 seq_lens=decode_seq_lens,
@@ -588,6 +587,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[num_decode_tokens:num_tokens],
+                sparse_indices_are_storage_offsets=True,
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=sparse_topk_lens[num_decode_tokens:num_tokens],
                 seq_lens=seq_lens[num_decodes:num_reqs],
@@ -642,16 +642,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
-        # The SM120 sparse-MLA kernels page the KV cache at 64 tokens, so the
-        # storage block size has to be a multiple of that. Fail here rather
-        # than at the DeepGEMM paged-MQA assert.
-        cache_config = vllm_config.cache_config
-        if cache_config is not None and cache_config.block_size % 64 != 0:
-            raise ValueError(
-                "DeepSeek V4.1 sparse MLA pages the KV cache at 64 tokens on "
-                "SM120, so --block-size must be a multiple of 64 (got "
-                f"{cache_config.block_size})."
-            )
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
 
         required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)

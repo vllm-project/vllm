@@ -171,12 +171,7 @@ def _resolve_dsv4_kv_cache_dtype(
 
 
 def _swa_cache_block_size() -> int:
-    """Page size for the V4.1 sliding-window cache.
-
-    FlashInfer's SM120 sparse-MLA decode kernels only ship 64-token pages
-    (``_DECODE_DSV4_PAGE_BLOCK_SIZE``), while the other sparse decode paths
-    accept any multiple of 32.
-    """
+    """Page size for the V4.1 sliding-window cache."""
     return 64 if current_platform.is_device_capability_family(120) else 32
 
 
