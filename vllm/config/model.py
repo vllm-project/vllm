@@ -26,7 +26,7 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -2414,6 +2414,12 @@ def _get_and_verify_dtype(
                 config_dtype,
                 is_pooling_model=is_pooling_model,
             )
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                and torch_dtype in (torch.float16, torch.float32)
+            ):
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
