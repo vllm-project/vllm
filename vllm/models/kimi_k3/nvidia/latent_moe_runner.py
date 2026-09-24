@@ -12,8 +12,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    finalize_moe_output,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -115,10 +118,13 @@ class LatentMoERunner(MoERunner):
             experts_cls = getattr(self._quant_method, "experts_cls", None)
             # The kernel instance is built after weight loading, while the tail
             # must register its CuTeDSL warmup units during runner construction.
-            self.moe_config.defer_moe_finalize = (
+            # The tail reads the routing weights in the activation dtype, as the
+            # monolithic kernels return them.
+            if (
                 experts_cls is TrtLlmMxfp4ExpertsMonolithic
                 or experts_cls is TrtLlmNvFp4ExpertsMonolithic
-            ) and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded
+            ) and self.supports_deferred_moe_finalize():
+                self.enable_deferred_moe_finalize()
             from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
                 KimiK3LatentMoETailOp,
             )
@@ -127,29 +133,19 @@ class LatentMoERunner(MoERunner):
                 hidden_size=transform.up_proj.weight.shape[0],
                 latent_size=norm.weight.shape[0],
                 experts_per_token=(
-                    self.moe_config.experts_per_token
-                    if self.moe_config.use_deferred_moe_finalize
-                    else 0
+                    self.moe_config.experts_per_token if self.defer_moe_finalize else 0
                 ),
                 dtype=norm.weight.dtype,
                 device=current_platform.current_device(),
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op
-            self.moe_config.defer_moe_finalize_max_num_tokens = (
-                op.contract.max_num_tokens
-                if self.moe_config.use_deferred_moe_finalize
-                else -1
-            )
-            if self.moe_config.use_deferred_moe_finalize:
+            if self.defer_moe_finalize:
                 logger.info_once(
-                    "K3 latent-MoE tail fusion with deferred top-k finalization "
-                    "is enabled for up to %d tokens.",
+                    "K3 latent-MoE tail fusion takes the deferred top-k "
+                    "finalization for up to %d tokens.",
                     op.contract.max_num_tokens,
                 )
-        else:
-            self.moe_config.defer_moe_finalize = False
-            self.moe_config.defer_moe_finalize_max_num_tokens = -1
 
     def _get_zero_residual(
         self,
@@ -337,37 +333,35 @@ class LatentMoERunner(MoERunner):
             )
         )
 
-        if (
-            og_hidden_dim_pre_xform is None
-            and self.moe_config.should_defer_moe_finalize(hidden_states.shape[0])
-        ):
-            unfinalized = self._forward_impl(
+        if self.defer_moe_finalize:
+            moe_output = self.forward_unfinalized(
+                hidden_states, router_logits, input_ids, shared_experts_input
+            )
+            routed = moe_output.routed
+            shared_output = moe_output.shared_output
+            assert isinstance(routed, UnfinalizedMoEOutput)
+            assert shared_output is not None
+            num_tokens = hidden_states.shape[0]
+            if 0 < num_tokens <= self._k3_latent_moe_tail_op.contract.max_num_tokens:
+                result = self._small_batch_tail(routed, shared_output, None)
+                return self._maybe_add_zero_expert_output(result)
+            fused_output = finalize_moe_output(routed)
+        else:
+            result = self._forward_entry(
                 hidden_states,
                 router_logits,
                 shared_experts_input,
                 input_ids,
+                self._encode_layer_name(),
+                self.moe_config.hidden_dim_unpadded
+                if self._quant_method.has_unpadded_output
+                else 0,
             )
-            shared_output, fused_output = _unpack(unfinalized)
-            assert shared_output is not None
-            assert isinstance(fused_output, UnfinalizedMoEOutput)
-            result = self._small_batch_tail(fused_output, shared_output, None)
-            return self._maybe_add_zero_expert_output(result)
-
-        result = self._forward_entry(
-            hidden_states,
-            router_logits,
-            shared_experts_input,
-            input_ids,
-            self._encode_layer_name(),
-            self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
-            else 0,
-        )
-
-        shared_output, fused_output = cast(tuple[torch.Tensor, torch.Tensor], result)
-
-        if og_hidden_dim_pre_xform is not None:
-            fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+            shared_output, fused_output = cast(
+                tuple[torch.Tensor, torch.Tensor], result
+            )
+            if og_hidden_dim_pre_xform is not None:
+                fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
         tier = self._select_tail_tier(fused_output, shared_output)
         if tier is LatentTailTier.TAIL_FUSION:

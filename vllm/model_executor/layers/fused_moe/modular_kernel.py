@@ -461,6 +461,9 @@ class FusedMoEExperts(ABC):
     # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
     # the active experts kernel.
     consumes_expert_mask: bool = False
+    # Stop after GEMM2 on every call and return an UnfinalizedMoEOutput. Set
+    # once, through FusedMoEKernel.enable_deferred_moe_finalize.
+    defer_moe_finalize: bool = False
 
     def __init__(
         self,
@@ -734,6 +737,13 @@ class FusedMoEExperts(ABC):
 
         LoRA-aware experts should mix in LoRAExpertsMixin, which flips this
         to True and provides the per-forward LoRA state plumbing.
+        """
+        return False
+
+    @staticmethod
+    def supports_deferred_moe_finalize() -> bool:
+        """Whether this impl can stop after GEMM2 and leave the top-k
+        reduction to the caller, on every call it gets.
         """
         return False
 
@@ -1681,7 +1691,20 @@ class FusedMoEKernel:
         return self.prepare_finalize.output_is_reduced()
 
     def supports_deferred_moe_finalize(self) -> bool:
-        return self.prepare_finalize.supports_deferred_moe_finalize()
+        return (
+            self.prepare_finalize.supports_deferred_moe_finalize()
+            and self.fused_experts.supports_deferred_moe_finalize()
+        )
+
+    def enable_deferred_moe_finalize(self) -> None:
+        """Return an UnfinalizedMoEOutput from every call from now on."""
+        if not self.supports_deferred_moe_finalize():
+            raise ValueError(
+                f"{type(self.fused_experts).__name__} with "
+                f"{type(self.prepare_finalize).__name__} cannot defer the MoE "
+                "finalize."
+            )
+        self.fused_experts.defer_moe_finalize = True
 
     def apply_monolithic(
         self,

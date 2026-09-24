@@ -8,8 +8,6 @@ and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
 intermediate_size 704) that exercises the non-256-aligned padding path.
 """
 
-from dataclasses import replace
-
 import pytest
 import torch
 
@@ -349,7 +347,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
     monkeypatch: pytest.MonkeyPatch,
     workspace_init,
 ):
-    """TRTLLM-Gen NvFP4 modular experts can leave the top-k finalize open."""
+    """TRTLLM-Gen NvFP4 modular experts can leave the top-k finalize to the caller."""
     e, topk, n, k = 128, 8, 1024, 1024
     dtype = torch.bfloat16
     if chunk_size is not None:
@@ -368,19 +366,16 @@ def test_trtllm_fp4_moe_deferred_finalize(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
-        # One rank of a TP group: the only topology that defers.
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size=2 * n,
+            intermediate_size=n,
             num_local_experts=e,
             num_logical_experts=e,
             activation=MoEActivation.SILU,
             device="cuda",
-            moe_parallel_config=replace(
-                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
-            ),
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=dtype,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
@@ -388,7 +383,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
         kernel = _make_trtllm_fp4_moe_kernel(moe_config, quant_config)
 
         check_deferred_moe_finalize(
-            moe_config,
+            kernel,
             lambda: kernel.apply(
                 hidden_states=a,
                 w1=w1_q,
@@ -400,7 +395,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
                 expert_map=None,
                 apply_router_weight_on_input=False,
             ),
-            topk_weights,
+            router_weights=topk_weights,
             chunked=chunk_size is not None,
         )
 

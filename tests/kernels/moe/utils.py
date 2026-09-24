@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
+import pytest
 import torch
 
 import vllm._custom_ops as ops
@@ -29,7 +30,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    finalize_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
     BatchedPrepareAndFinalize,
 )
@@ -710,36 +714,34 @@ def check_accuracy(a, b, atol, rtol, percent):
 
 
 def check_deferred_moe_finalize(
-    moe_config: FusedMoEConfig,
+    kernel: FusedMoEKernel,
     run: Callable[[], torch.Tensor | UnfinalizedMoEOutput],
-    topk_weights: torch.Tensor,
+    router_weights: torch.Tensor | None = None,
     chunked: bool = False,
 ) -> None:
-    """Check that a deferred MoE run leaves open exactly the finalize it skips.
+    """Check a kernel that defers its finalize against the finalize it skips.
 
-    ``run`` executes the MoE, first with ``moe_config``'s deferral off and then
-    on. Reducing the deferred GEMM2 rows with the router's weights must give the
-    kernel's own finalized output. Each launch permutes into its own buffer, so
-    a run chunked into several launches finalizes instead.
+    ``run`` calls ``kernel`` on fixed inputs, first as built and then with the
+    finalize deferred. ``finalize_moe_output`` on the deferred output must give
+    the kernel's own finalized output bit for bit, and modular experts must hand
+    the router's weights back as-is. Each launch permutes into its own buffer,
+    so a deferring kernel refuses a run it would have to chunk.
     """
-    moe_config.defer_moe_finalize = False
     finalized = run()
-    moe_config.defer_moe_finalize = True
-    deferred = run()
     assert isinstance(finalized, torch.Tensor)
+    kernel.enable_deferred_moe_finalize()
     if chunked:
-        assert isinstance(deferred, torch.Tensor)
-        torch.testing.assert_close(deferred, finalized, atol=0, rtol=0)
+        with pytest.raises(ValueError, match="one kernel launch"):
+            run()
         return
 
+    deferred = run()
     assert isinstance(deferred, UnfinalizedMoEOutput)
-    # Modular experts get the router's weights, and hand them back as-is.
-    torch.testing.assert_close(deferred.expert_weights, topk_weights, atol=0, rtol=0)
-    permuted_idx = deferred.expanded_idx_to_permuted_idx
-    assert permuted_idx.shape == topk_weights.shape and (permuted_idx >= 0).all()
-    rows = deferred.gemm2_permuted[permuted_idx.long()].float()
-    reference = (rows * topk_weights[..., None]).sum(dim=1).to(finalized.dtype)
-    torch.testing.assert_close(reference, finalized)
+    if router_weights is not None:
+        torch.testing.assert_close(
+            deferred.expert_weights, router_weights, atol=0, rtol=0
+        )
+    torch.testing.assert_close(finalize_moe_output(deferred), finalized, atol=0, rtol=0)
 
 
 def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):

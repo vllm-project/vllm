@@ -124,6 +124,30 @@ def convert_flashinfer_moe_output(
     )
 
 
+def finalize_moe_output(routed: UnfinalizedMoEOutput) -> torch.Tensor:
+    """Run the top-k reduction a deferring MoE layer left open.
+
+    For the calls a fused consumer can't take. This is the TRT-LLM finalize as
+    a standalone kernel, so it reduces the same way the experts would have.
+    A deferring layer has every expert local (``ep_size == 1``), so the permute
+    map has no -1 entries.
+    """
+    from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+        moe_unpermute,
+    )
+
+    gemm2_permuted = routed.gemm2_permuted
+    num_tokens = routed.expanded_idx_to_permuted_idx.shape[0]
+    output = gemm2_permuted.new_empty(num_tokens, gemm2_permuted.shape[1])
+    moe_unpermute(
+        output,
+        gemm2_permuted,
+        routed.expert_weights.float(),
+        routed.expanded_idx_to_permuted_idx,
+    )
+    return output
+
+
 @dataclass
 class MoEOutput:
     """A MoE layer's output with its final reduction still open.
@@ -136,10 +160,9 @@ class MoEOutput:
     unfinalized, the top-k reduction is open too and can fold into the same
     kernel.
 
-    Producers only leave the routed output unfinalized when a fused consumer can
-    actually take that form -- the token ceiling and topology support are theirs
-    to check -- so an ``UnfinalizedMoEOutput`` here means the fused path applies,
-    and a consumer need not re-derive that.
+    A layer that defers its finalize leaves the routed output unfinalized on
+    every call. Calls its fused consumer can't take go through
+    ``finalize_moe_output`` first.
     """
 
     # Un-reduced routed output, either finalized or not.

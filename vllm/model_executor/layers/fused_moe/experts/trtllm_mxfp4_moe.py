@@ -127,6 +127,10 @@ class TrtLlmMxfp4ExpertsBase:
         return False
 
     @staticmethod
+    def supports_deferred_moe_finalize() -> bool:
+        return True
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -226,7 +230,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             x_quant = hidden_states
             x_scale = None
         num_tokens = hidden_states.shape[0]
-        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        defer = self.defer_moe_finalize
         finalized_output = None
         if not defer:
             finalized_output = torch.empty(
@@ -439,17 +443,20 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        # Chunk tokens so the batched-GEMM grid stays within CUDA limits. Each
-        # launch permutes into its own buffer, so only a run that fits in one
-        # launch can leave the top-k reduction to a deferring consumer.
+        # Chunk tokens so the batched-GEMM grid stays within CUDA limits.
         M = x_quant.size(0)
         chunk_size = self._max_supported_tokens(topk, global_num_experts)
-        defer = chunk_size >= M and self.moe_config.should_defer_moe_finalize(M)
+        if self.defer_moe_finalize and chunk_size < M:
+            # Each launch permutes into its own buffer.
+            raise ValueError(
+                f"Deferring the MoE finalize needs one kernel launch, but {M} "
+                f"tokens take {-(-M // chunk_size)}."
+            )
         unfinalized: UnfinalizedMoEOutput | None = None
         for start in range(0, M, chunk_size):
             end = min(start + chunk_size, M)
             unfinalized = self._invoke_kernel(
-                None if defer else output[start:end],
+                None if self.defer_moe_finalize else output[start:end],
                 x_quant[start:end],
                 None if x_scale is None else x_scale[start:end],
                 topk_ids[start:end],

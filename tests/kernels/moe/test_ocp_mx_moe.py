@@ -663,18 +663,22 @@ def test_trtllm_gen_mxfp4_fused_moe(
     check_accuracy(ref_result, tg_result, atol=0, rtol=0.3, percent=0.8)
 
 
-@pytest.mark.parametrize("num_tokens,chunk_size", [(1, None), (16, None), (16, 5)])
+@pytest.mark.parametrize(
+    "monolithic,num_tokens,chunk_size",
+    [(False, 1, None), (False, 16, None), (False, 16, 5), (True, 16, None)],
+)
 @pytest.mark.skipif(
     not TRTLLM_GEN_MXFP4_AVAILABLE,
     reason="nvidia gpu and compute capability sm100 is required for this test",
 )
-def test_trtllm_mxfp4_modular_deferred_finalize(
+def test_trtllm_mxfp4_deferred_finalize(
+    monolithic: bool,
     num_tokens: int,
     chunk_size: int | None,
     monkeypatch: pytest.MonkeyPatch,
     workspace_init,
 ):
-    """TRTLLM-Gen MXFP4 modular experts can leave the top-k finalize open."""
+    """TRTLLM-Gen MXFP4 experts can leave the top-k finalize to the caller."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
@@ -683,6 +687,7 @@ def test_trtllm_mxfp4_modular_deferred_finalize(
     )
     from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
         TrtLlmMxfp4ExpertsModular,
+        TrtLlmMxfp4ExpertsMonolithic,
     )
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
@@ -742,38 +747,51 @@ def test_trtllm_mxfp4_modular_deferred_finalize(
         w2_scale,
         _cache_permute_indices={},
     )
-    # One rank of a TP group: the only topology that defers.
     moe_config = FusedMoEConfig(
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=hidden_size,
-        intermediate_size=2 * intermediate_size,
+        intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         activation=MoEActivation.SILU,
         device=device,
-        routing_method=RoutingMethodType.TopK,
-        moe_parallel_config=replace(
-            FusedMoEParallelConfig.make_no_parallel(), tp_size=2
-        ),
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=torch.bfloat16,
     )
     kernel = make_mxfp4_moe_kernel(
         make_mxfp4_moe_quant_config(backend, w1_scale=w13_scale, w2_scale=w2_scale),
         moe_config,
-        TrtLlmMxfp4ExpertsModular,
+        TrtLlmMxfp4ExpertsMonolithic if monolithic else TrtLlmMxfp4ExpertsModular,
         backend,
     )
 
     hidden_states = torch.randn(
         num_tokens, hidden_size, device=device, dtype=torch.bfloat16
     )
+    if monolithic:
+        router_logits = torch.randn(num_tokens, num_experts, device=device)
+        check_deferred_moe_finalize(
+            kernel,
+            lambda: kernel.apply_monolithic(
+                hidden_states,
+                w13,
+                w2,
+                router_logits,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ),
+        )
+        return
+
     topk_ids = torch.rand(num_tokens, num_experts, device=device).argsort(dim=-1)
     topk_ids = topk_ids[:, :topk].to(torch.int32)
     topk_weights = torch.rand(num_tokens, topk, device=device).softmax(dim=-1)
-
     check_deferred_moe_finalize(
-        moe_config,
+        kernel,
         lambda: kernel.apply(
             hidden_states=hidden_states,
             w1=w13,
@@ -785,11 +803,12 @@ def test_trtllm_mxfp4_modular_deferred_finalize(
             expert_map=None,
             apply_router_weight_on_input=False,
         ),
-        topk_weights,
+        router_weights=topk_weights,
         chunked=chunk_size is not None,
     )
 
 
+@pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
 @pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])

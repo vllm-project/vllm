@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -785,7 +785,8 @@ def test_trtllm_fp8_swiglu_clamp_support(
     reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
 )
 def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
-    """TRTLLM-Gen block-FP8 modular experts can leave the top-k finalize open."""
+    """TRTLLM-Gen block-FP8 modular experts can leave the top-k finalize to the
+    caller."""
     e, topk, n, k = 32, 4, 1024, 1024
     block_shape = [128, 128]
     set_random_seed(7)
@@ -812,19 +813,16 @@ def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
         quant_config = fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape
         )
-        # One rank of a TP group: the only topology that defers.
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size=2 * n,
+            intermediate_size=n,
             num_local_experts=e,
             num_logical_experts=e,
             activation=MoEActivation.SILU,
             device="cuda",
-            moe_parallel_config=replace(
-                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
-            ),
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=torch.bfloat16,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
@@ -840,7 +838,7 @@ def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
         check_deferred_moe_finalize(
-            moe_config,
+            kernel,
             lambda: kernel.apply(
                 hidden_states=a,
                 w1=w1,
@@ -852,5 +850,5 @@ def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
                 expert_map=None,
                 apply_router_weight_on_input=False,
             ),
-            topk_weights,
+            router_weights=topk_weights,
         )

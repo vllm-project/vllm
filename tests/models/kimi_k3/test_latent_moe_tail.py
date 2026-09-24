@@ -43,12 +43,6 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         hidden_dim = LATENT_SIZE
         hidden_dim_unpadded = LATENT_SIZE
         experts_per_token = 16
-        defer_moe_finalize = False
-        defer_moe_finalize_max_num_tokens = -1
-
-        @property
-        def use_deferred_moe_finalize(self) -> bool:
-            return self.defer_moe_finalize
 
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
@@ -65,6 +59,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     def fake_runner_init(runner, *args, **kwargs) -> None:
         runner.moe_config = moe_config
+        runner.router = object()
         runner.routed_experts = SimpleNamespace(quant_method=quant_method)
         runner._shared_experts = object()
         runner.routed_output_transform = transform
@@ -97,10 +92,9 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
     )
     monkeypatch.setattr(KimiK3LatentMoETailOp, "initialize", fake_tail_initialize)
 
-    latent_moe_runner.LatentMoERunner()
+    runner = latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.defer_moe_finalize
-    assert moe_config.defer_moe_finalize_max_num_tokens == 128
+    assert runner.defer_moe_finalize
     assert initialized_with["experts_per_token"] == 16
 
 
