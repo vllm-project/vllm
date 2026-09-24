@@ -42,6 +42,15 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_DIRECT_WEIGHT_LOADING_BLOCKLIST = {
+    "vllm.model_executor.models.gpt2.GPT2Model",
+}
+
+
+def _module_type_name(module: torch.nn.Module) -> str:
+    cls = type(module)
+    return f"{cls.__module__}.{cls.__name__}"
+
 
 def _destination_placements(shard_dim: int) -> Placements:
     """Place one tensor shard on the configured destination mesh axis."""
@@ -169,9 +178,17 @@ def resolve_parameter_destinations(
     shards. `allow_direct=False` forces every parameter onto the fallback path;
     the engine sets it for pipeline-parallel or quantized deployments, where a
     parameter's local shape is not simply the checkpoint shape split across the
-    shard axis.
+    shard axis. Parameters below a model type with known model-level checkpoint
+    preprocessing also fall back, since bypassing `load_weights` would skip the
+    transformation.
     """
     params = dict(model.named_parameters()) if allow_direct else {}
+    blocked_param_ids = {
+        id(param)
+        for module in model.modules()
+        if _module_type_name(module) in _DIRECT_WEIGHT_LOADING_BLOCKLIST
+        for param in module.parameters()
+    }
 
     destinations: list[M2NDestination] = []
     for name, dtype, shape in zip(names, dtypes, shapes):
@@ -179,6 +196,7 @@ def resolve_parameter_destinations(
         dim = None
         if (
             param is not None
+            and id(param) not in blocked_param_ids
             and param.dtype == dtype
             and param.data.is_contiguous()
             and num_workers % shard_axis_size == 0

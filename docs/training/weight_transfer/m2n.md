@@ -93,6 +93,8 @@ See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable
 - dtypes: int8/uint8, fp8 e4m3/e5m2, fp16, bf16, int32/uint32, fp32, int64/uint64, fp64. No fp4.
 - The trainer's device mesh must cover a contiguous rank interval starting at 0, and be 1-D or 2-D.
 - `Partial` placements are not supported.
+- Models with known model-level checkpoint preprocessing use the full-tensor
+  fallback for the affected module.
 - A reshard cannot be issued from inside a CUDA graph capture (weight updates run outside capture, so this only matters for custom callers).
 - The reshard plan is capped per *shard*, not per mesh: at most 16 source shards may feed one destination shard, and one source shard may feed at most 64 destination shards (`MAX_SOURCES` / `MAX_TARGETS` in the m2n build; raising either needs a rebuild).
 - A directly-resharded parameter spreads over `tp_size` destination shards, so each one is fed by fewer source shards. A parameter on the fallback path is replicated, i.e. a single destination shard fed by every source shard, so a trainer that **sharded** its parameters is still limited to 16 ranks whenever any parameter falls back — which fused parameters always do. A replicated trainer is unaffected.

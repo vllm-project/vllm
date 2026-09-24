@@ -703,6 +703,26 @@ class TestDestinationResolution:
         )
         assert destination.tensor.data_ptr() == model.column.data_ptr()
 
+    def test_known_transforming_model_submodule_falls_back(self):
+        class GPT2Model(_Model):
+            pass
+
+        GPT2Model.__module__ = "vllm.model_executor.models.gpt2"
+        model = torch.nn.Module()
+        model.transforming = GPT2Model()
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["transforming.row"],
+            [torch.float32],
+            [(16, 16)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+
+        assert not destination.direct
+        assert destination.placements is REPLICATED
+
     def test_unknown_name_falls_back(self):
         """Fused parameters reach the worker under checkpoint names that do not
         exist in the model; those must take the full-tensor path."""
