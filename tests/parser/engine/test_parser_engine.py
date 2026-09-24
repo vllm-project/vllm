@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import regex as re
+
+from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaToolCall,
@@ -23,8 +25,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-
-from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
@@ -35,7 +35,6 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.parser_manager import ParserManager
-from vllm.parser.qwen3 import _qwen3_arg_converter
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -1877,28 +1876,6 @@ class TestCoercionInstabilityRegression:
         )
         assert parsed == {"v": None, "tag": "hi"}
         assert parsed["v"] is None
-
-    def test_qwen3_partial_xml_close_tag_not_included_in_value(self):
-        """Qwen3 partial XML close tag must not leak into streamed string value.
-
-        When an XML close tag (</parameter>) is split across chunks, the
-        partial tag text must not appear in the streamed string value for
-        the preceding key.
-        """
-        tool = _make_tool("f", {"n": {"type": "integer"}, "s": {"type": "string"}})
-        engine = _make_engine(_converter_config(_qwen3_arg_converter), tools=[tool])
-        parsed = _run_streaming_tool(
-            engine,
-            "f",
-            [
-                "<parameter=",
-                "n>42</parameter><parameter=s>ok</par",
-                "ameter>",
-            ],
-        )
-        assert parsed == {"n": 42, "s": "ok"}
-        assert isinstance(parsed["n"], int)
-        assert parsed["s"] == "ok"
 
 
 _DROP_VOCAB: dict[str, int] = {

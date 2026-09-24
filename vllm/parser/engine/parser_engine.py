@@ -296,7 +296,11 @@ class ParserEngine(Parser):
         return args, changed
 
     @staticmethod
-    def _safe_arg_prefix(json_str: str, string_keys: set[str] | None = None) -> str:
+    def _safe_arg_prefix(
+        json_str: str,
+        string_keys: set[str] | None = None,
+        clip_middle: bool = True,
+    ) -> str:
         """Return the prefix of *json_str* up to the last top-level value.
 
         The trailing value is excluded for non-string keys because type
@@ -308,7 +312,8 @@ class ParserEngine(Parser):
         Middle (comma-terminated) values for non-string keys are also excluded
         for the same coercion reason: the prefix is clipped at the start of the
         first non-string-typed value so that ``_fix_arg_types`` at flush time
-        never rewrites anything already sent to the client.
+        never rewrites anything already sent to the client. Pass
+        ``clip_middle=False`` when *json_str* already carries coerced values.
         """
         last_colon = -1
         last_comma = -1
@@ -364,7 +369,7 @@ class ParserEngine(Parser):
 
         # Clip only after a top-level comma proves this is a middle value.
         # A trailing non-string value must still be withheld with its key.
-        if non_string_clip >= 0 and last_comma >= non_string_clip:
+        if clip_middle and non_string_clip >= 0 and last_comma >= non_string_clip:
             return json_str[:non_string_clip]
 
         end = last_colon + 1
@@ -1080,8 +1085,19 @@ class ParserEngine(Parser):
         if slot.name:
             current_json = self._fix_arg_types(current_json, slot.name)
 
+        # _fix_arg_types coerces middle values only when this tick's JSON
+        # parses. Otherwise the flush may still rewrite them, so withhold them.
+        clip_middle = False
+        if slot.string_keys is not None:
+            try:
+                json.loads(current_json)
+            except (json.JSONDecodeError, ValueError):
+                clip_middle = True
+
         prev = slot.streamed_json
-        safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
+        safe_json = self._safe_arg_prefix(
+            current_json, slot.string_keys, clip_middle=clip_middle
+        )
 
         if not safe_json or safe_json == prev:
             return None
