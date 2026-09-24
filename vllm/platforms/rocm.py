@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 _KV_CACHE_DTYPE_REASON = "kv_cache_dtype not supported"
 _TURBOQUANT_LAYOUT_REASON = "no KV cache layout in common with TURBOQUANT"
+_ULTRAQUANT_LAYOUT_REASON = "no KV cache layout in common with ULTRAQUANT"
 
 try:
     from amdsmi import (
@@ -505,6 +506,7 @@ def _get_backend_priorities(
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
+    backends.append(AttentionBackendEnum.ULTRAQUANT)
 
     return backends
 
@@ -514,6 +516,14 @@ def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and str(cache_config.cache_dtype).startswith(
         "turboquant_"
+    )
+
+
+def _uses_ultraquant(vllm_config: "VllmConfig | None") -> bool:
+    """Whether the run's KV cache dtype is the UltraQuant 4-bit format."""
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return (
+        cache_config is not None and str(cache_config.cache_dtype) == "ultraquant_4bit"
     )
 
 
@@ -554,6 +564,35 @@ def _get_invalid_reasons(
     ):
         invalid_reasons = [_TURBOQUANT_LAYOUT_REASON]
     return invalid_reasons
+
+
+def _get_ultraquant_invalid_reasons(
+    backend_class: type["AttentionBackend"],
+    device_capability: DeviceCapability,
+    attn_selector_config: "AttentionSelectorConfig",
+) -> list[str]:
+    """Why this backend cannot serve the layer of an ultraquant_4bit run.
+
+    An ultraquant_4bit run keeps its boundary layers at the native dtype, so
+    those layers pick a backend of their own while every other layer picks
+    ULTRAQUANT. One layout has to serve the whole worker, so a backend that
+    reads no layout in common with ULTRAQUANT cannot serve the layer.
+    """
+    invalid_reasons = backend_class.validate_configuration(
+        device_capability=device_capability,
+        **attn_selector_config._asdict(),
+    )
+    if invalid_reasons:
+        return invalid_reasons
+    layouts = backend_class.supported_kv_cache_layouts()
+    ultraquant_layouts = (
+        AttentionBackendEnum.ULTRAQUANT.get_class().supported_kv_cache_layouts()
+    )
+    if layouts is None or ultraquant_layouts is None:
+        return []
+    if set(layouts).isdisjoint(ultraquant_layouts):
+        return [_ULTRAQUANT_LAYOUT_REASON]
+    return []
 
 
 class RocmPlatform(Platform):
@@ -683,12 +722,55 @@ class RocmPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "AttentionBackendEnum",
+        selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
+
+        # An ultraquant_4bit run keeps its boundary layers at the native dtype,
+        # so no single --attention-backend can serve every layer. Resolve that
+        # here and leave the turboquant path below untouched.
+        if selected_backend is not None:
+            # Keep lazy: vllm.config imports current_platform during initialization.
+            from vllm.config import get_current_vllm_config_or_none
+
+            if _uses_ultraquant(get_current_vllm_config_or_none()):
+                try:
+                    uq_invalid_reasons = _get_ultraquant_invalid_reasons(
+                        selected_backend.get_class(),
+                        device_capability,
+                        attn_selector_config,
+                    )
+                except ImportError:
+                    uq_invalid_reasons = ["ImportError"]
+                if not uq_invalid_reasons:
+                    logger.info_once(
+                        "Using %s backend (selected via --attention-backend).",
+                        selected_backend.name,
+                    )
+                    return selected_backend.get_path()
+                if uq_invalid_reasons not in (
+                    [_KV_CACHE_DTYPE_REASON],
+                    [_ULTRAQUANT_LAYOUT_REASON],
+                ):
+                    raise ValueError(
+                        f"Selected backend {selected_backend} is not valid for "
+                        f"this configuration. Reason: {uq_invalid_reasons}"
+                    )
+                # NOTE: pass a str (not the list) -- info_once hashes its args.
+                logger.info_once(
+                    "Selected backend %s is incompatible with this layer (%s, "
+                    "kv_cache_dtype=%s) of the ultraquant run; using the "
+                    "auto-selected per-layer backend. Reason: %s",
+                    selected_backend.name,
+                    attn_selector_config.attn_type,
+                    str(attn_selector_config.kv_cache_dtype),
+                    str(uq_invalid_reasons),
+                )
+                # Defer to the per-layer auto-selection below.
+                selected_backend = None
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
