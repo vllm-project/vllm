@@ -37,7 +37,7 @@ DFLASH_CONFIG = SpeculatorTestConfig(
     acceptance_len_rtol=0.15,
     expected_per_pos_acceptance_rates=(0.795, 0.611, 0.429, 0.282),
     per_pos_rtol=0.15,
-    quantization="fp8",
+    quantization="fp8_per_tensor",
 )
 
 PEAGLE_CONFIG = SpeculatorTestConfig(
