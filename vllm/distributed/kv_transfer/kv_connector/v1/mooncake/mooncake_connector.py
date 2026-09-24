@@ -2031,27 +2031,38 @@ class MooncakeConnectorWorker:
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                data: dict = response.json()
-                for _, dp_entry in data.items():
-                    remote_engine_id = dp_entry["engine_id"]
-                    self._remote_agents[remote_engine_id] = {
-                        int(tp_rank): {
-                            int(pp_rank): worker_addr
-                            for pp_rank, worker_addr in tp_entry.items()
+        timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_QUERY_TIMEOUT
+        max_retries = 3
+        backoff = 2.0
+
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    data: dict = response.json()
+                    for _, dp_entry in data.items():
+                        remote_engine_id = dp_entry["engine_id"]
+                        self._remote_agents[remote_engine_id] = {
+                            int(tp_rank): {
+                                int(pp_rank): worker_addr
+                                for pp_rank, worker_addr in tp_entry.items()
+                            }
+                            for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                         }
-                        for tp_rank, tp_entry in dp_entry["worker_addr"].items()
-                    }
-                    self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
-        except Exception as e:
-            logger.error(
-                "Failed to connect to bootstrap server %s: %s",
-                remote_bootstrap_addr,
-                e,
-            )
+                        self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
+                # Break on success
+                break
+            except Exception as e:
+                logger.error(
+                    "Failed to connect to bootstrap server %s (attempt %d/%d): %s",
+                    remote_bootstrap_addr,
+                    attempt + 1,
+                    max_retries,
+                    e,
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(backoff)
 
         # Always notify others regardless of connection success or failure.
         self._pending_bootstrap_queries[remote_bootstrap_addr].set()
