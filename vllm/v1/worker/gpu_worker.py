@@ -270,7 +270,7 @@ class Worker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def trimtab_release_kv(self) -> dict:
-        """trimtab warm reinit, worker side. Free the KV pool and drop the
+        """Trimtab warm reinit, worker side. Free the KV pool and drop the
         captured CUDA graphs. Weights stay on the GPU.
 
         The KV cache is allocated inside CuMemAllocator.use_memory_pool(
@@ -314,13 +314,22 @@ class Worker(WorkerBase):
         # MemPool while the allocator is still strongly held avoids the
         # finalize-order crash (pytorch/pytorch#145168). Manual per-block frees
         # instead race the destructor and double-free (MMU fault).
-        # The KV cache only lives in a CuMem pool when the allocator is enabled, which is the sleep-mode path.
-        # With it disabled the tensors are ordinary caching-allocator memory, so there is no pool to pop and the
-        # pages come back through empty_cache() instead. Asserting here would turn a supported configuration into
+        # The KV cache only lives in a CuMem pool when the allocator is enabled, which
+        # is the sleep-mode path.
+        # With it disabled the tensors are ordinary caching-allocator memory, so there
+        # is no pool to pop and the
+        # pages come back through empty_cache() instead. Asserting here would turn a
+        # supported configuration into
         # a crash.
-        pooled = not isinstance(self._maybe_get_memory_pool_context("kv_cache"), nullcontext)
+        pooled = not isinstance(
+            self._maybe_get_memory_pool_context("kv_cache"), nullcontext
+        )
         allocator = CuMemAllocator.get_instance() if pooled else None
-        data = allocator.allocator_and_pools.pop("kv_cache", None) if allocator is not None else None
+        data = (
+            allocator.allocator_and_pools.pop("kv_cache", None)
+            if allocator is not None
+            else None
+        )
         released = 0
         if data is None:
             torch.cuda.empty_cache()
@@ -330,9 +339,9 @@ class Worker(WorkerBase):
                 if allocation["allocated_size"] == 0:
                     released += allocation.get("total_size", 0)
             del data
-            del mem_pool          # phase 1: ~MemPool runs, allocator still alive
+            del mem_pool  # phase 1: ~MemPool runs, allocator still alive
             gc.collect()
-            del pool_alloc        # phase 2: drop the pluggable allocator
+            del pool_alloc  # phase 2: drop the pluggable allocator
             gc.collect()
         torch.cuda.synchronize()
 
@@ -345,8 +354,10 @@ class Worker(WorkerBase):
         # profiler measures non_kv_cache_memory as consumption relative to it,
         # which must include the weights. Refreshing it post-weights would drop
         # the weights from that accounting and oversize the new pool.
-        return {"released_gib": round(released / 2**30, 2),
-                "free_gib": round((torch.cuda.mem_get_info()[0] - free0) / 2**30, 2)}
+        return {
+            "released_gib": round(released / 2**30, 2),
+            "free_gib": round((torch.cuda.mem_get_info()[0] - free0) / 2**30, 2),
+        }
 
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()

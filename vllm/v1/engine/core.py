@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-import os
 import math
+import os
 import queue
 import signal
 import threading
@@ -112,20 +112,31 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 def _trimtab_validate_reinit(fields: dict) -> dict:
     """Reject values that would produce a live engine nobody can use.
 
-    A zero or negative capacity leaves the scheduler unable to admit or to budget tokens, and a memory fraction
-    outside (0, 1] cannot be profiled, so both are refused before the current KV cache is released.
+    A zero or negative capacity leaves the scheduler unable to admit or to budget
+    tokens, and a memory fraction
+    outside (0, 1] cannot be profiled, so both are refused before the current KV
+    cache is released.
     """
     rejected: dict[str, str] = {}
     for key in ("max_num_seqs", "max_num_batched_tokens"):
         if key not in fields:
             continue
         value = fields[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) != value or int(value) < 1:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or int(value) != value
+            or int(value) < 1
+        ):
             rejected[key] = "must be a positive integer"
     if "gpu_memory_utilization" in fields:
         value = fields["gpu_memory_utilization"]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) \
-                or not 0.0 < float(value) <= 1.0:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0.0 < float(value) <= 1.0
+        ):
             rejected["gpu_memory_utilization"] = "must be a finite fraction in (0, 1]"
     return rejected
 
@@ -1651,7 +1662,7 @@ class EngineCoreProc(EngineCore):
             )
 
     def trimtab_reinit(self, fields: dict) -> dict:  # noqa: D401
-        """trimtab warm reinit. Rebuild the KV cache, attention groups, CUDA
+        """Trimtab warm reinit. Rebuild the KV cache, attention groups, CUDA
         graphs and the scheduler at a new size. Weights never leave the GPU.
 
         Accepts gpu_memory_utilization, max_num_seqs, max_num_batched_tokens.
@@ -1665,18 +1676,27 @@ class EngineCoreProc(EngineCore):
         if bad:
             return {"ok": False, "error": f"not warm-reinitable: {bad}"}
         if not self.vllm_config.model_config.enable_sleep_mode:
-            return {"ok": False, "error": "warm reinit needs the server launched with --enable-sleep-mode"}
+            return {
+                "ok": False,
+                "error": (
+                    "warm reinit needs the server launched with --enable-sleep-mode"
+                ),
+            }
         if self.scheduler.has_requests():
             return {"ok": False, "error": "engine busy, drain before a warm reinit"}
         invalid = _trimtab_validate_reinit(fields)
         if invalid:
-            # validation happens before the release below, because a bad value that is only caught during the
+            # validation happens before the release below, because a bad value that is
+            # only caught during the
             # rebuild would leave the engine with no KV cache at all
             return {"ok": False, "error": "invalid values", "rejected": invalid}
 
         cc, sc = self.vllm_config.cache_config, self.vllm_config.scheduler_config
-        previous = {"gpu_memory_utilization": cc.gpu_memory_utilization,
-                    "max_num_seqs": sc.max_num_seqs, "max_num_batched_tokens": sc.max_num_batched_tokens}
+        previous = {
+            "gpu_memory_utilization": cc.gpu_memory_utilization,
+            "max_num_seqs": sc.max_num_seqs,
+            "max_num_batched_tokens": sc.max_num_batched_tokens,
+        }
         released = self.collective_rpc("trimtab_release_kv")
         logger.info("trimtab release result %s", released)
         freed_at = _time.perf_counter()
@@ -1690,7 +1710,9 @@ class EngineCoreProc(EngineCore):
                 sc.max_num_batched_tokens = int(values["max_num_batched_tokens"])
             cc.num_gpu_blocks = None
             kv_cache_config = self._initialize_kv_caches(self.vllm_config)
-            block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, self.vllm_config)
+            block_size, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, self.vllm_config
+            )
             old = self.scheduler
             replacement = type(old)(
                 vllm_config=self.vllm_config,
@@ -1701,8 +1723,10 @@ class EngineCoreProc(EngineCore):
                 block_size=block_size,
                 hash_block_size=hash_block_size,
             )
-            # the scheduler being replaced owns a KV event publisher and any configured connectors, so it is shut
-            # down rather than dropped; build the replacement first so a failure above leaves the old one serving
+            # the scheduler being replaced owns a KV event publisher and any configured
+            # connectors, so it is shut
+            # down rather than dropped; build the replacement first so a failure above
+            # leaves the old one serving
             try:
                 old.shutdown()
             except Exception:
@@ -1713,28 +1737,37 @@ class EngineCoreProc(EngineCore):
         try:
             kv_cache_config = _rebuild(fields)
         except Exception as e:
-            logger.warning("trimtab reinit with %s failed (%s), restoring previous sizing", fields, e)
+            logger.warning(
+                "trimtab reinit with %s failed (%s), restoring previous sizing",
+                fields,
+                e,
+            )
             self.collective_rpc("trimtab_release_kv")
             kv_cache_config = _rebuild(previous)
             fields = {"error": str(e), "restored": previous}
 
         sched = self.scheduler
-        sched._trimtab_ceilings = {"max_num_seqs": sched.max_num_running_reqs,
-                                   "max_num_batched_tokens": sched.max_num_scheduled_tokens}
+        sched._trimtab_ceilings = {
+            "max_num_seqs": sched.max_num_running_reqs,
+            "max_num_batched_tokens": sched.max_num_scheduled_tokens,
+        }
         done = _time.perf_counter()
         info = {
-            "ok": "error" not in fields, "fields": fields,
+            "ok": "error" not in fields,
+            "fields": fields,
             "num_gpu_blocks": kv_cache_config.num_blocks,
             "max_num_seqs": sched.max_num_running_reqs,
             "freed_gib": [r.get("released_gib") for r in released],
-            "free_s": round(freed_at - t0, 3), "rebuild_s": round(done - freed_at, 3), "total_s": round(done - t0, 3),
+            "free_s": round(freed_at - t0, 3),
+            "rebuild_s": round(done - freed_at, 3),
+            "total_s": round(done - t0, 3),
         }
         self._trimtab_last_reinit = info
         logger.info("trimtab warm reinit %s", info)
         return info
 
     def trimtab_set_knobs(self, knobs: dict) -> dict:
-        """trimtab (github.com/numinous-technology/trimtab) hot scheduler knobs.
+        """Trimtab (github.com/numinous-technology/trimtab) hot scheduler knobs.
 
         Applies validated values to the live scheduler, which reads them on
         the next step. Ceilings are the values allocated at boot.
@@ -1788,10 +1821,14 @@ class EngineCoreProc(EngineCore):
         sched = self.scheduler
         pending = getattr(sched, "_trimtab_pending_max_num_seqs", None)
         return {
-            "max_num_seqs": pending if pending is not None else sched.max_num_running_reqs,
+            "max_num_seqs": pending
+            if pending is not None
+            else sched.max_num_running_reqs,
             "max_num_seqs_effective": sched.max_num_running_reqs,
             "max_num_batched_tokens": sched.max_num_scheduled_tokens,
-            "long_prefill_token_threshold": sched.scheduler_config.long_prefill_token_threshold,
+            "long_prefill_token_threshold": (
+                sched.scheduler_config.long_prefill_token_threshold
+            ),
             "log_level": getattr(sched, "_trimtab_log_level", None),
             "running": len(sched.running),
             "ceilings": getattr(sched, "_trimtab_ceilings", {}),
@@ -2666,12 +2703,15 @@ class EngineCoreActorMixin:
         # To bypass 2, we need to also set
         # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES, but vLLM workers created
         # thereafter would have CUDA_VISIBLE_DEVICES set, which is sticky:
-        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456 # noqa: E501
+        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75
+        # c9/python/ray/_private/worker.py#L456 # noqa: E501
         # This is problematic because when the vLLM worker (a Ray actor)
         # executes a task, it indexes into the sticky CUDA_VISIBLE_DEVICES
         # rather than directly using the GPU ID, potentially resulting in
         # index out of bounds error. See:
-        # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa: E501
+        # https://github.com/ray-project/ray/pull/40461/files#diff-
+        # 31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa:
+        # E501
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
         self._set_visible_devices(vllm_config, local_dp_rank)

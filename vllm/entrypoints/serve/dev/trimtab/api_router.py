@@ -27,7 +27,9 @@ async def trimtab_reinit(raw_request: Request):
 
 @router.get("/trimtab/knobs")
 async def trimtab_get_knobs(raw_request: Request):
-    return JSONResponse(content=await _core(raw_request).call_utility_async("trimtab_get_knobs"))
+    return JSONResponse(
+        content=await _core(raw_request).call_utility_async("trimtab_get_knobs")
+    )
 
 
 def attach_router(app: FastAPI):
