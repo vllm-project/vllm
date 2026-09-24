@@ -36,10 +36,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.amd.indexer_cp import (
-    exchange_candidates,
-    minimax_m3_indexer_cp_enabled,
-)
+from vllm.models.minimax_m3.amd.indexer_cp import exchange_candidates
 from vllm.models.minimax_m3.amd.ops.sparse_pa import ASM_PAGE_SIZE
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
@@ -254,7 +251,21 @@ def _emit_sparse_block_table_row(
     tl.store(sctx_ptr, bt_ctx)
 
 
-@triton.jit
+# Runtime rather than constexpr across the three chain kernels, and excluded
+# from Triton's own int specialization: each is a stride or a bound derived
+# from ``max_seq_len`` or the decode width, so their cardinality over a serving
+# run is unbounded, and a constexpr is a compile cache key. Captured steps pay
+# that once, but a step carrying a prefill chunk runs eager, and there a cold
+# combination stalls the host mid-chain for as long as the compile takes.
+_SCORE_SHAPE_ARGS = ("TABLE_STRIDE", "TOKENS", "LOCAL_BLOCKS", "GLOBAL_BLOCKS")
+_TOPK_SHAPE_ARGS = ("TOKENS", "LOCAL_BLOCKS", "GLOBAL_BLOCKS")
+_MERGE_SHAPE_ARGS = ("TABLE_STRIDE", "TOKENS", "SRC_STRIDE", "HEAD_STRIDE")
+
+
+@triton.jit(
+    do_not_specialize=_SCORE_SHAPE_ARGS,
+    do_not_specialize_on_alignment=_SCORE_SHAPE_ARGS,
+)
 def _context_score(
     Q,
     Cache,
@@ -263,12 +274,12 @@ def _context_score(
     Scores,
     Q_TOKEN_STRIDE: tl.constexpr,
     Q_HEAD_STRIDE: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr,
-    TOKENS: tl.constexpr,
+    TABLE_STRIDE,
+    TOKENS,
     HEADS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
-    LOCAL_BLOCKS: tl.constexpr,
-    GLOBAL_BLOCKS: tl.constexpr,
+    LOCAL_BLOCKS,
+    GLOBAL_BLOCKS,
     RANK: tl.constexpr,
     WORLD: tl.constexpr,
     CHUNK: tl.constexpr,
@@ -326,16 +337,19 @@ def _context_score(
         )
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=_TOPK_SHAPE_ARGS,
+    do_not_specialize_on_alignment=_TOPK_SHAPE_ARGS,
+)
 def _local_topk(
     Scores,
     Keys,
     Lengths,
-    TOKENS: tl.constexpr,
+    TOKENS,
     HEADS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
-    LOCAL_BLOCKS: tl.constexpr,
-    GLOBAL_BLOCKS: tl.constexpr,
+    LOCAL_BLOCKS,
+    GLOBAL_BLOCKS,
     RANK: tl.constexpr,
     WORLD: tl.constexpr,
     TOPK: tl.constexpr,
@@ -387,7 +401,10 @@ def _local_topk(
     tl.store(Keys + (head * TOKENS + row) * TOPK + off_t, winners, mask=off_t < TOPK)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=_MERGE_SHAPE_ARGS,
+    do_not_specialize_on_alignment=_MERGE_SHAPE_ARGS,
+)
 def _merge_topk(
     Keys,
     Indices,
@@ -395,9 +412,9 @@ def _merge_topk(
     Table,
     SparseBt,
     SparseCtx,
-    TABLE_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
     SBT_STRIDE: tl.constexpr,
-    TOKENS: tl.constexpr,
+    TOKENS,
     QUERY_LEN: tl.constexpr,
     TOPK: tl.constexpr,
     INIT_BLOCKS: tl.constexpr,
@@ -405,8 +422,8 @@ def _merge_topk(
     NUM_KV_HEADS: tl.constexpr,
     PAGES_PER_BLOCK: tl.constexpr,
     KEYS_PER_SHARD: tl.constexpr,
-    SRC_STRIDE: tl.constexpr,
-    HEAD_STRIDE: tl.constexpr,
+    SRC_STRIDE,
+    HEAD_STRIDE,
     ROW_STRIDE: tl.constexpr,
     REAL_CANDIDATES: tl.constexpr,
     CANDIDATES: tl.constexpr,
@@ -480,21 +497,26 @@ def shard_scores(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     *,
-    max_seq_len: int,
+    global_blocks: int,
     rank: int,
     world: int,
     query_len: int,
     scale: float,
 ) -> torch.Tensor:
-    """[heads, tokens, ceil(blocks/world)] scores over this rank's blocks."""
+    """[heads, tokens, ceil(global_blocks/world)] scores over this rank's blocks.
+
+    Takes the block count rather than a length on purpose. The top-k bounds
+    its causal reach against the same total, and the two kernels agree only if
+    it is the same number; derived here off a block size it would be a second
+    one that merely happens to match.
+    """
     tokens, heads, _ = index_query.shape
     # Handed straight to the dot in whatever dtype the fused QK-norm emitted,
     # which is fp8 whenever the index cache is e4m3. The kernel indexes the
     # head dim directly, so only that stride has to be unit -- which is what
     # lets a CP rank score the replicated projection without compacting it.
     assert index_query.stride(2) == 1, "the index query's head dim must be contiguous"
-    blocks = cdiv(max_seq_len, MSA_SPARSE_BLOCK_SIZE)
-    local = cdiv(blocks, world)
+    local = cdiv(global_blocks, world)
     batch = seq_lens.numel()
     scores = torch.empty(
         (heads, tokens, local), dtype=torch.float32, device=index_query.device
@@ -502,6 +524,13 @@ def shard_scores(
     if tokens == 0:
         return scores
     chunks = min(local, _decode_score_chunks(batch, local))
+    # Rounded to a power of two rather than made runtime like the strides
+    # above, because CHUNK bounds the score loop and the pipelining this
+    # kernel is built around reads that bound. Rounding up never drops a
+    # block: a wider chunk over correspondingly fewer programs still spans
+    # everything this rank owns.
+    chunk = next_power_of_2(cdiv(local, chunks))
+    chunks = cdiv(local, chunk)
     _context_score[(batch, chunks)](
         index_query,
         index_cache,
@@ -515,10 +544,10 @@ def shard_scores(
         HEADS=heads,
         QUERY_LEN=query_len,
         LOCAL_BLOCKS=local,
-        GLOBAL_BLOCKS=blocks,
+        GLOBAL_BLOCKS=global_blocks,
         RANK=rank,
         WORLD=world,
-        CHUNK=cdiv(local, chunks),
+        CHUNK=chunk,
         N=max(16, next_power_of_2(heads * query_len)),
         SCALE=scale * 1.4426950409,
         num_stages=3,
@@ -592,6 +621,11 @@ def merge_and_emit(
     candidates = shards * per_shard
     assert keys.stride(3) == 1, "the candidate axis must be contiguous"
     assert topk_idx.shape[:2] == (heads, tokens)
+    # assert the number of index heads is equal to the number of kv heads
+    assert heads == num_kv_heads, (
+        f"this rank owns {heads} index head(s) but {num_kv_heads} kv head(s); "
+        "the merge's emitted page table needs them 1:1"
+    )
     if tokens == 0:
         return
     _merge_topk[(tokens, heads)](
@@ -676,16 +710,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             max_tokens, dtype=torch.int32, device=device
         )
         self.kv_lens_buffer = torch.empty(max_tokens, dtype=torch.int32, device=device)
-
-        # Indexer CP. Resolved here rather than handed down because the
-        # builder is constructed by the backend machinery, not by the model --
-        # but off the same config inputs, all of them fixed for the process.
-        self.indexer_cp = minimax_m3_indexer_cp_enabled(vllm_config)
-        self.cp_world = 1
-        self.cp_rank = 0
-        if self.indexer_cp:
-            self.cp_world = get_tensor_model_parallel_world_size()
-            self.cp_rank = get_tensor_model_parallel_rank()
 
     def build(
         self,
@@ -777,9 +801,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 decode_query_len=decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
             )
-            # Indexer CP needs no metadata of its own: the score kernel takes
-            # the whole block table plus (rank, world) and strides it itself,
-            # which is also what keeps the causal bound in global numbering.
 
         return MiniMaxM3IndexerMSAMetadata(
             seq_lens=seq_lens,
@@ -888,12 +909,18 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         full top-k, exchange the keys, merge them into the global selection.
         """
         if self.indexer_cp:
+            # Derived once for the whole chain: the score pass sizes this
+            # rank's shard off it and the top-k bounds its causal reach
+            # against it, and the two are only consistent if it is the same
+            # number rather than two that agree because the gate pins the
+            # block size.
+            global_blocks = cdiv(d.max_seq_len, self.block_size)
             scores = shard_scores(
                 index_query,
                 kv,
                 d.block_table,
                 d.seq_lens,
-                max_seq_len=d.max_seq_len,
+                global_blocks=global_blocks,
                 rank=self.cp_rank,
                 world=self.cp_world,
                 query_len=d.decode_query_len,
@@ -906,7 +933,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 rank=self.cp_rank,
                 world=self.cp_world,
                 query_len=d.decode_query_len,
-                global_blocks=cdiv(d.max_seq_len, self.block_size),
+                global_blocks=global_blocks,
                 init_blocks=self.init_blocks,
                 local_blocks=self.local_blocks,
             )
@@ -1215,8 +1242,16 @@ def msa_indexer_unsupported_reason(
             f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
             f"got index_head_dim={index_head_dim}"
         )
-    # The selection packs a 1-based block id into the low 16 bits of its key.
+
     max_blocks = math.ceil(max_model_len / sparse_block_size)
+    if max_blocks > MAX_SUPPORTED_BLOCKS:
+        return (
+            f"max_model_len={max_model_len} needs {max_blocks} blocks per row, "
+            f"more than the {MAX_SUPPORTED_BLOCKS} the top-k is compiled for"
+        )
+    # The CP selector packs a 1-based block id into the low 16 bits of its key.
+    # Looser than the slot cap, so unreachable while that one holds; kept
+    # because it belongs to a different kernel and the two move independently.
     if max_blocks >= 0xFFFF:
         return (
             f"max_model_len={max_model_len} needs {max_blocks} blocks per row, "
