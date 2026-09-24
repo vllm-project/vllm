@@ -55,6 +55,7 @@ class WNA16MoEBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     HUMMING = "HUMMING"
     CPU = "CPU"
+    CPU_VEC = "CPU_VEC"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     TRITON = "TRITON"
     XPU = "XPU"
@@ -98,6 +99,12 @@ def backend_to_kernel_cls(
         )
 
         return [CPUExpertsInt4]
+    elif backend == WNA16MoEBackend.CPU_VEC:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsInt4Vec,
+        )
+
+        return [CPUExpertsInt4Vec]
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
             Int4EmulationTritonExperts,
@@ -117,7 +124,7 @@ def backend_to_kernel_cls(
 def _get_priority_backends() -> list[WNA16MoEBackend]:
     """Get available backends in priority order based on platform and config."""
     if current_platform.is_cpu():
-        return [WNA16MoEBackend.CPU]
+        return [WNA16MoEBackend.CPU, WNA16MoEBackend.CPU_VEC]
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
@@ -159,6 +166,43 @@ def _backend_incompatibility_reason(
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
     from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
+    if backend == WNA16MoEBackend.CPU_VEC:
+        if not isinstance(quant_config, AutoGPTQConfig):
+            return "only AutoGPTQ checkpoints are supported"
+        if may_have_zp:
+            return "zero points are not supported"
+        if quant_config.weight_bits != 4 or not quant_config.is_sym:
+            return "only symmetric GPTQ INT4 weights are supported"
+        if quant_config.desc_act:
+            return "GPTQ activation ordering is not supported"
+        if quant_config.group_size != -1 and quant_config.group_size <= 0:
+            return "group size must be positive or -1"
+        if quant_config.group_size == -1:
+            group_sizes = (
+                moe_config.hidden_dim,
+                moe_config.intermediate_size_per_partition,
+            )
+        else:
+            group_sizes = (quant_config.group_size,)
+            if any(
+                size % quant_config.group_size
+                for size in (
+                    moe_config.hidden_dim,
+                    moe_config.intermediate_size_per_partition,
+                )
+            ):
+                return "group size must divide both expert input dimensions"
+        if any(size % 2 for size in group_sizes):
+            return "group size must be even"
+        if any(
+            size % 32
+            for size in (
+                moe_config.hidden_dim,
+                moe_config.intermediate_size_per_partition,
+            )
+        ):
+            return "expert dimensions must be divisible by 32"
 
     if backend == WNA16MoEBackend.TRITON:
         if may_have_bias:
@@ -393,6 +437,7 @@ def make_wna16_moe_kernel(
     )
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
+        CPUExpertsInt4Vec,
     )
     from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
         Int4EmulationTritonExperts,
@@ -414,6 +459,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
+        CPUExpertsInt4Vec,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
     )
@@ -1013,6 +1059,44 @@ def _process_weights_cpu(
     )
 
 
+def _process_weights_cpu_vec(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    None,
+    None,
+    None,
+    None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        prepare_int4_moe_layer_for_cpu_vec,
+    )
+
+    packed_w13, packed_w2 = prepare_int4_moe_layer_for_cpu_vec(w13, w2)
+    return (
+        packed_w13,
+        packed_w2,
+        w13_scale.contiguous(),
+        w2_scale.contiguous(),
+        None,
+        None,
+        None,
+        None,
+        w13_bias,
+        w2_bias,
+    )
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -1562,6 +1646,15 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_qzeros,
             w2_qzeros,
+            w13_bias,
+            w2_bias,
+        )
+    elif backend == WNA16MoEBackend.CPU_VEC:
+        return _process_weights_cpu_vec(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
             w13_bias,
             w2_bias,
         )

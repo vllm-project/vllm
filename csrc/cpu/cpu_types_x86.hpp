@@ -695,6 +695,23 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   explicit FP32Vec16(__m256 low, __m256 high) : reg_low(low), reg_high(high) {}
 
+  // Unpack sixteen INT4 values and look them up in the signed/unsigned LUT.
+  explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
+    const auto bits = static_cast<uint64_t>(value);
+    const __m256i low_idx = _mm256_setr_epi32(
+        (bits >> 0) & 0xf, (bits >> 4) & 0xf, (bits >> 8) & 0xf,
+        (bits >> 12) & 0xf, (bits >> 16) & 0xf, (bits >> 20) & 0xf,
+        (bits >> 24) & 0xf, (bits >> 28) & 0xf);
+    const __m256i high_idx = _mm256_setr_epi32(
+        (bits >> 32) & 0xf, (bits >> 36) & 0xf, (bits >> 40) & 0xf,
+        (bits >> 44) & 0xf, (bits >> 48) & 0xf, (bits >> 52) & 0xf,
+        (bits >> 56) & 0xf, (bits >> 60) & 0xf);
+    alignas(64) float table[16];
+    lut.save(table);
+    reg_low = _mm256_i32gather_ps(table, low_idx, 4);
+    reg_high = _mm256_i32gather_ps(table, high_idx, 4);
+  }
+
   explicit FP32Vec16(const FP32Vec4& data)
       : reg_low((__m256)_mm256_inserti128_si256(
             _mm256_castsi128_si256((__m128i)data.reg), (__m128i)data.reg, 1)),

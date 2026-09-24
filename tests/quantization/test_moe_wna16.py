@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     _convert_moe_wna16_humming_tensors,
     convert_to_wna16_moe_kernel_format,
     map_wna16_backend,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.quantization import moe_wna16
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -26,10 +27,78 @@ from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Method,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 
 
 def test_map_wna16_backend_supports_triton():
     assert map_wna16_backend("triton") == WNA16MoEBackend.TRITON
+
+
+def test_cpu_wna16_selects_vector_fallback_without_amx(monkeypatch):
+    if not current_platform.is_cpu():
+        pytest.skip("CPU-only backend selection")
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUExpertsInt4,
+        CPUExpertsInt4Vec,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        QuantKey,
+        kInt4StaticGroupScale,
+    )
+
+    monkeypatch.setattr(CPUExpertsInt4, "_supports_current_device", lambda: False)
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=128,
+    )
+    moe_config.routing_method = RoutingMethodType.Renormalize
+    backend, experts_cls = select_wna16_moe_backend(
+        moe_config,
+        QuantKey(scalar_types.uint4b8, kInt4StaticGroupScale),
+        AutoGPTQConfig(4, 128, False, True, False, {}, {}),
+        may_have_zp=False,
+        may_have_bias=True,
+        allow_tile_padding=True,
+    )
+    assert backend == WNA16MoEBackend.CPU_VEC
+    assert experts_cls is CPUExpertsInt4Vec
+
+
+@pytest.mark.parametrize(
+    ("group_size", "may_have_zp", "reason"),
+    [
+        (128, True, "zero points are not supported"),
+        (96, False, "group size must divide both expert input dimensions"),
+    ],
+)
+def test_cpu_wna16_vector_rejects_unsupported_gptq(
+    group_size: int,
+    may_have_zp: bool,
+    reason: str,
+):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=128,
+    )
+    quant_config = AutoGPTQConfig(4, group_size, False, True, False, {}, {})
+    actual_reason = _backend_incompatibility_reason(
+        WNA16MoEBackend.CPU_VEC,
+        moe_config,
+        quant_config,
+        may_have_zp=may_have_zp,
+        may_have_bias=True,
+        allow_tile_padding=True,
+    )
+    assert actual_reason == reason
 
 
 @pytest.mark.parametrize(
