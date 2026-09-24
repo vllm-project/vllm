@@ -26,7 +26,7 @@ def enabled_conv3d():
         pytest.param((1, 3, 4, 28, 28), (2, 14, 14), 32, True, id="multiple_patches"),
     ],
 )
-def test_conv3d_patch_embedding_matches_torch(
+def test_conv3d_patch_embedding_correctness(
     enabled_conv3d, input_shape, kernel_size, out_channels, bias
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -52,7 +52,7 @@ def test_conv3d_patch_embedding_matches_torch(
     torch.testing.assert_close(layer.forward_native(x), expected, atol=atol, rtol=rtol)
 
 
-def test_conv3d_overlapping_grouped_convolution_matches_torch(enabled_conv3d):
+def test_conv3d_overlapping_grouped_convolution_correctness(enabled_conv3d):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     reference = nn.Conv3d(
         4, 8, (2, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1), groups=2
