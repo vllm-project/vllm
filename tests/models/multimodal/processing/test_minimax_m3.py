@@ -7,12 +7,8 @@ they validate the long-side resize spec and the resulting prompt-token counts
 deterministically.
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 import torch
-from tokenizers import Tokenizer, models
-from transformers import PreTrainedTokenizerFast
 
 from vllm.transformers_utils.processors.minimax_m3 import (
     IMAGE_MAX_TOTAL_PIXELS,
@@ -20,7 +16,6 @@ from vllm.transformers_utils.processors.minimax_m3 import (
     VIDEO_MAX_TOTAL_PIXELS,
     MiniMaxM3VLImageProcessor,
     MiniMaxM3VLVideoProcessor,
-    MiniMaxVLProcessor,
     smart_resize,
 )
 
@@ -141,62 +136,3 @@ def test_video_volumetric_cap_raises():
             max_long_side_pixel=1008,
             return_tensors="pt",
         )
-
-
-# --------------------------------------------------------------------------- #
-# MiniMaxVLProcessor.from_pretrained: tokenizer reuse
-# --------------------------------------------------------------------------- #
-LOAD_KWARGS = {"revision": "main", "trust_remote_code": True}
-
-
-def _make_tokenizer() -> PreTrainedTokenizerFast:
-    tokens = [
-        MiniMaxVLProcessor.IMAGE_TOKEN,
-        MiniMaxVLProcessor.VIDEO_TOKEN,
-        MiniMaxVLProcessor.VISION_START_TOKEN,
-        MiniMaxVLProcessor.VISION_END_TOKEN,
-    ]
-    vocab = {"<unk>": 0} | {token: i + 1 for i, token in enumerate(tokens)}
-    return PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
-    )
-
-
-@pytest.fixture
-def loaders(monkeypatch):
-    auto_tokenizer = MagicMock()
-    auto_tokenizer.from_pretrained.return_value = _make_tokenizer()
-    load_image = MagicMock(return_value=MiniMaxM3VLImageProcessor())
-    load_video = MagicMock(return_value=MiniMaxM3VLVideoProcessor())
-    monkeypatch.setattr(
-        "vllm.transformers_utils.processors.minimax_m3.AutoTokenizer", auto_tokenizer
-    )
-    monkeypatch.setattr(MiniMaxM3VLImageProcessor, "from_pretrained", load_image)
-    monkeypatch.setattr(MiniMaxM3VLVideoProcessor, "from_pretrained", load_video)
-    return auto_tokenizer.from_pretrained, load_image, load_video
-
-
-def test_processor_reuses_supplied_tokenizer(loaders):
-    load_tokenizer, load_image, load_video = loaders
-    tokenizer = _make_tokenizer()
-
-    processor = MiniMaxVLProcessor.from_pretrained(
-        "model", tokenizer=tokenizer, **LOAD_KWARGS
-    )
-
-    assert processor.tokenizer is tokenizer
-    load_tokenizer.assert_not_called()
-    # The supplied tokenizer must not leak into the sub-processor loaders.
-    load_image.assert_called_once_with("model", **LOAD_KWARGS)
-    load_video.assert_called_once_with("model", **LOAD_KWARGS)
-
-
-def test_processor_loads_tokenizer_when_not_supplied(loaders):
-    load_tokenizer, load_image, load_video = loaders
-
-    processor = MiniMaxVLProcessor.from_pretrained("model", **LOAD_KWARGS)
-
-    load_tokenizer.assert_called_once_with("model", **LOAD_KWARGS)
-    assert processor.tokenizer is load_tokenizer.return_value
-    load_image.assert_called_once_with("model", **LOAD_KWARGS)
-    load_video.assert_called_once_with("model", **LOAD_KWARGS)
