@@ -58,12 +58,17 @@ def _row_stats_kernel(
 
         block_max = tl.max(x, 0)
         new_m = tl.maximum(m, block_max)
-        # Rescale the running sums to the new max. Before the first block m is
-        # -inf and z is 0, and (m - new_m) * inv * z is NaN, so the shift is
-        # zeroed.
-        alpha = tl.exp((m - new_m) * inv)
-        shift = tl.where(z > 0, (m - new_m) * inv * z, 0.0)
-        d = (x - new_m) * inv
+        # Until a block holds a finite logit the running max stays -inf, and
+        # top_k/top_p leave whole blocks masked. x - new_m would then be
+        # -inf - -inf = NaN and poison z for the rest of the row, so subtract
+        # 0 instead: every d is still -inf and every e 0.
+        safe_m = tl.where(new_m > float("-inf"), new_m, 0.0)
+        # Rescale the running sums to the new max. While m is -inf, z and s
+        # are 0, so alpha and the shift are zeroed rather than computed from
+        # -inf - -inf.
+        alpha = tl.where(m > float("-inf"), tl.exp((m - safe_m) * inv), 0.0)
+        shift = tl.where(z > 0, (m - safe_m) * inv * z, 0.0)
+        d = (x - safe_m) * inv
         e = tl.exp(d)
         z = z * alpha + tl.sum(e, 0)
         # A -inf logit (top_k/top_p, or the row's padding) has d = -inf and

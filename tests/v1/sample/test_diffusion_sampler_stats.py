@@ -103,3 +103,27 @@ def test_masked_logits_keep_a_finite_entropy():
     assert probs[0, 3].item() == 1.0 and probs[0].sum().item() == 1.0
     _, _, ref_entropy, _ = sample_row_stats_reference(logits, temps, 1, None)
     assert torch.isfinite(ref_entropy).all()
+
+
+def test_leading_masked_block_keeps_a_finite_entropy():
+    """top_k leaves most of the vocabulary -inf, so whole leading blocks can be
+    masked before the first live logit. The running max was -inf through
+    them, and -inf - -inf poisoned the row with NaN."""
+    logits = torch.full((3, 9001), float("-inf"), device="cuda")
+    logits[:, 8500] = 0.0  # the only live column, past the first block
+    logits[1, 8600] = 0.0  # two live columns: entropy log 2
+    logits[2, 4] = -1.0  # a live column in the first block as well
+    temps = torch.tensor([1.0, 1.0, 0.7], device="cuda")
+    argmax, sample, entropy, probs = sample_row_stats(
+        logits, temps, 1, 5, torch.float32
+    )
+    _, _, ref_entropy, ref_probs = sample_row_stats_reference(
+        logits, temps, 1, torch.float32
+    )
+    assert torch.isfinite(entropy).all() and torch.isfinite(probs).all()
+    assert entropy[0].item() < 1e-6
+    assert abs(entropy[1].item() - math.log(2.0)) < 1e-4
+    torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(probs, ref_probs, atol=1e-5, rtol=1e-4)
+    assert argmax.tolist() == [8500, 8500, 8500]
+    assert sample[0].item() == 8500
