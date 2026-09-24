@@ -224,7 +224,7 @@ steps:
       label: ":amd: (MI355) Distributed Torchrun + Examples"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:

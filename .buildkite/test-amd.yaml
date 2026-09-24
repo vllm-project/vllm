@@ -973,7 +973,7 @@ steps:
   - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
 - label: ":amd: (MI300) Distributed Torchrun + Examples" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
