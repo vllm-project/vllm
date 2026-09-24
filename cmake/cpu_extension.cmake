@@ -637,14 +637,14 @@ if (ENABLE_X86_ISA)
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
     if (AMX_FP8_SUPPORTED)
-    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXFP8")
-    message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXFP8")
+        message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
     endif()
 
     # For the sgl-kernels AVX10.2 fp8 quantize paths
     if (AVX10_2_SUPPORTED)
-    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AVX10_2")
-    message(STATUS "AVX10.2 enabled")
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AVX10_2")
+        message(STATUS "AVX10.2 enabled")
     endif()
 
     # AVX512F 
