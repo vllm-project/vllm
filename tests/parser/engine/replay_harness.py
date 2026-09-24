@@ -13,10 +13,10 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
 
 @dataclass
@@ -183,6 +183,7 @@ def replay_streaming(
 
     Returns:
         List of ``DeltaMessage`` results from each ``parse_delta()`` call.
+
     """
     if chunk_size is None:
         chunk_size = len(tokens)

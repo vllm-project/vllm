@@ -68,8 +68,7 @@ try:
         rpc_rank: int
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-            """
-            Adjust the rpc_rank based on the given mapping.
+            """Adjust the rpc_rank based on the given mapping.
             It is only used during the initialization of the executor,
             to adjust the rpc_rank of workers after we create all workers.
             """
@@ -176,9 +175,6 @@ try:
                     output = output.get_output()
             return output
 
-        def override_env_vars(self, vars: dict[str, str]):
-            os.environ.update(vars)
-
         def _is_intermediate_tensors(self, output) -> bool:
             return isinstance(output, IntermediateTensors)
 
@@ -237,14 +233,10 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
                 token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
             )
 
-    if output.routed_experts is not None:
-        routing_data, slot_mapping = output.routed_experts
-        routing_data_c = _copy_if_readonly(routing_data)
-        slot_mapping_c = _copy_if_readonly(slot_mapping)
-        if routing_data_c is not routing_data or slot_mapping_c is not slot_mapping:
-            output.routed_experts = type(output.routed_experts)(
-                routing_data_c, slot_mapping_c
-            )
+    aux_output = output.aux_output_connector_output
+    if aux_output is not None:
+        for request_output in aux_output.values():
+            request_output.rows = _copy_if_readonly(request_output.rows)
 
 
 class FutureWrapper(Future):
@@ -366,8 +358,7 @@ def get_bundles_for_indices(
     bundle_indices: list[int],
     world_size: int,
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs for
+    """Return GPU bundle indices paired with node IDs and node IPs for
     explicit bundle indices specified via VLLM_RAY_BUNDLE_INDICES.
     """
     assert len(bundle_indices) == world_size, (
@@ -394,8 +385,7 @@ def get_bundles_for_indices(
 def get_bundles_sorted_by_node(
     placement_group: "PlacementGroup",
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs,
+    """Return GPU bundle indices paired with node IDs and node IPs,
     sorted driver-first.
 
     This utility has to be invoked from the driver node.
@@ -517,24 +507,6 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             ) from None
 
 
-def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
-    ray.util.remove_placement_group(current_placement_group)
-    s = time.time()
-    wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
-        pg = ray.util.get_current_placement_group()
-        if pg is None:
-            break
-
-        # Exponential backoff for warning print.
-        wait_interval *= 2
-        logger.info(
-            "Waiting for removing a placement group of specs for %d seconds.",
-            int(time.time() - s),
-        )
-        time.sleep(wait_interval)
-
-
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
@@ -554,6 +526,7 @@ def initialize_ray_cluster(
             on the current (driver) node and pin the first PG bundle to it.
             Set to False for executors like RayExecutorV2 where all GPU work
             is delegated to remote Ray actors.
+
     """
     assert_ray_available()
     from vllm.platforms import current_platform
@@ -681,29 +654,3 @@ def initialize_ray_cluster(
     )
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
-
-
-def get_num_tpu_nodes() -> int:
-    from ray._private.accelerators import TPUAcceleratorManager
-
-    cluster_resources = ray.cluster_resources()
-    total_tpus = int(cluster_resources["TPU"])
-    tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
-    assert total_tpus % tpus_per_node == 0
-    return total_tpus // tpus_per_node
-
-
-def get_num_nodes_in_placement_group() -> int:
-    pg_table = ray.util.placement_group_table()
-    current_pg = ray.util.get_current_placement_group()
-    num_nodes = 0
-
-    if current_pg:
-        nodes_in_pg = set()
-        for pg_key, pg in pg_table.items():
-            if pg_key == current_pg.id.hex():
-                for _, node in pg["bundles_to_node_id"].items():
-                    nodes_in_pg.add(node)
-        num_nodes = len(nodes_in_pg)
-
-    return num_nodes

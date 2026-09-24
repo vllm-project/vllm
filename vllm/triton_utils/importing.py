@@ -34,6 +34,20 @@ if HAS_TRITON:
             if name != "cpu" and x.driver and x.driver.is_active()
         ]
 
+        # Check Triton CPU
+        if "cpu" in version("vllm"):
+            if "cpu" in backends:
+                HAS_TRITON = True
+                # Suppress following warnings on CPU-only platforms
+                if len(active_drivers) == 0:
+                    active_drivers.append(backends["cpu"].driver)
+            else:
+                logger.warning(
+                    "Triton is installed, but doesn't include CPU backend. "
+                    "Disabling Triton."
+                )
+                HAS_TRITON = False
+
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
         # or HIP_VISIBLE_DEVICES might be temporarily empty (e.g., Ray sets it to ""
         # during actor init)
@@ -63,17 +77,6 @@ if HAS_TRITON:
                 len(active_drivers),
             )
             HAS_TRITON = False
-
-        # Check Triton CPU
-        if "cpu" in version("vllm"):
-            if "cpu" in backends:
-                HAS_TRITON = True
-            else:
-                logger.warning(
-                    "Triton is installed, but doesn't include CPU backend. "
-                    "Disabling Triton."
-                )
-                HAS_TRITON = False
     except ImportError:
         # This can occur if Triton is partially installed or triton.backends
         # is missing.
@@ -121,7 +124,7 @@ class TritonPlaceholder(types.ModuleType):
 class TritonLanguagePlaceholder(types.ModuleType):
     def __init__(self):
         super().__init__("triton.language")
-        self.constexpr = None
+        self.constexpr = lambda value: value
         self.dtype = None
         self.int64 = None
         self.int32 = None

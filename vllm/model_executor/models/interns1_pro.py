@@ -43,12 +43,12 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -181,10 +181,9 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             custom_routing_function=self._custom_routing_function,
         )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             prefix=f"{prefix}.gate",
         )
 
@@ -621,7 +620,7 @@ class InternS1ProForConditionalGeneration(
         return mapper
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """load weights"""
+        """Load weights"""
         orig_to_new_prefix: dict[str, str | None] = {
             "model.visual.": "visual.",
             "lm_head.": "language_model.lm_head.",

@@ -24,7 +24,7 @@
 """Inference-only Ernie VL model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -36,7 +36,7 @@ from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -71,6 +71,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     cached_encode,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -119,7 +120,7 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
 
 
 class Ernie4_5_VisionAttention(nn.Module):
-    """VisionAttention using VLLM framework APIs"""
+    """VisionAttention using VLLM framework APIs."""
 
     def __init__(
         self,
@@ -497,6 +498,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
         Returns:
             Dict with ``rotary_pos_emb``, ``cu_seqlens`` and ``max_seqlen``.
+
         """
         if device is None:
             device = self.device
@@ -538,7 +540,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device)
 
         return {
             "rotary_pos_emb": rotary_pos_emb,
@@ -600,12 +602,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
 
 class Ernie4_5_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - ni: Number of images
-        - cps: Number of channels * patch_size * patch_size
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - ni: Number of images
+    - cps: Number of channels * patch_size * patch_size
     """
 
     type: Literal["pixel_values"]
@@ -618,13 +619,12 @@ Ernie4_5_VLImageInputs = Ernie4_5_VLImagePixelInputs
 
 
 class Ernie4_5_VLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - ni: Number of images
-        - cps: Number of channels * temporal_patch_size * patch_size *
-              patch_size
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - ni: Number of images
+    - cps: Number of channels * temporal_patch_size * patch_size *
+          patch_size
     """
 
     type: Literal["pixel_values_videos"]
@@ -1113,34 +1113,32 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         pixel_values = pixel_values.to(hf_config.dtype)
         return pixel_values
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
 
-        if "images" not in mm_data and "videos" not in mm_data:
-            return BatchFeature(dict(passthrough_data))
+        if "images" not in hf_data and "videos" not in hf_data:
+            return hf_inputs
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        mm_data = dict(mm_data)
-        if "images" not in mm_data:
-            mm_data["images"] = []
-        if "videos" not in mm_data:
-            mm_data["videos"] = []
+        prompt_text = hf_data["text"]
+        hf_data["text"] = [prompt_text]
+        hf_data.setdefault("images", [])
+        hf_data.setdefault("videos", [])
 
         # Check if HF processor supports video metadata
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_inputs.hf_kwargs)
         supports_video_metadata = getattr(
             hf_processor, "supports_video_metadata", False
         )
 
-        videos = mm_data["videos"]
+        videos = hf_data["videos"]
         assert isinstance(videos, Sequence)
         if videos and not supports_video_metadata:
             # Old HF processor, unwrap tuple to pure frames
@@ -1148,49 +1146,43 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
                 "HF processor doesn't support video metadata. "
                 "Timestamps will NOT be rendered. Please upgrade the model."
             )
-            mm_data["videos"] = [v[0] if isinstance(v, tuple) else v for v in videos]
+            hf_data["videos"] = [v[0] if isinstance(v, tuple) else v for v in videos]
 
-        processor_output = self.info.ctx.call_hf_processor(
-            hf_processor,
-            dict(
-                text=[prompt_text], images=mm_data["images"], videos=mm_data["videos"]
-            ),
-            hf_processor_mm_kwargs,
-        )
+        return hf_inputs
+
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "images" not in hf_data and "videos" not in hf_data:
+            return processed_data
 
         # Divide the processor_output into two modalities: image and video.
-        if processor_output is not None:
-            pixel_values = processor_output["images"]
-            if pixel_values is not None:
-                processor_output["images"] = self._pixel_values_norm(
-                    pixel_values, hf_processor_mm_kwargs
-                )
-            for key in list(processor_output.keys()):
-                if processor_output[key] is None:
-                    del processor_output[key]
-                    continue
-                if key == "grid_thw":
-                    grid_thw = processor_output["grid_thw"]
-                    pixel_values_all = processor_output["images"]
-                    # Identify elements where the first
-                    # dimension is greater than 1 and
-                    # treat them as the video modality
-                    mask = grid_thw[:, 0] > 1
-                    processor_output["video_grid_thw"] = grid_thw[mask]
-                    processor_output["image_grid_thw"] = grid_thw[~mask]
-                    image_patch_num = (
-                        processor_output["image_grid_thw"].prod(dim=1).sum()
-                    )
-                    processor_output["pixel_values"] = pixel_values_all[
-                        :image_patch_num
-                    ]
-                    processor_output["pixel_values_videos"] = pixel_values_all[
-                        image_patch_num:
-                    ]
-                    del processor_output["images"]
+        pixel_values = processed_data["images"]
+        if pixel_values is not None:
+            processed_data["images"] = self._pixel_values_norm(pixel_values, hf_kwargs)
+        for key in list(processed_data.keys()):
+            if processed_data[key] is None:
+                del processed_data[key]
+                continue
+            if key == "grid_thw":
+                grid_thw = processed_data["grid_thw"]
+                pixel_values_all = processed_data["images"]
+                # Identify elements where the first
+                # dimension is greater than 1 and
+                # treat them as the video modality
+                mask = grid_thw[:, 0] > 1
+                processed_data["video_grid_thw"] = grid_thw[mask]
+                processed_data["image_grid_thw"] = grid_thw[~mask]
+                image_patch_num = processed_data["image_grid_thw"].prod(dim=1).sum()
+                processed_data["pixel_values"] = pixel_values_all[:image_patch_num]
+                processed_data["pixel_values_videos"] = pixel_values_all[
+                    image_patch_num:
+                ]
+                del processed_data["images"]
 
-        processed_data = processor_output
-        processed_data.update(passthrough_data)
         return processed_data
 
     def _get_prompt_updates(
@@ -1284,33 +1276,26 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1681,6 +1666,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         device,
         dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1746,8 +1732,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
-        grid_thw = mm_kwargs["image_grid_thw"].to(
-            self.vision_model.device, non_blocking=True
+        grid_thw = async_tensor_h2d(
+            mm_kwargs["image_grid_thw"], self.vision_model.device
         )
         image_features = self.vision_model(pixel_values, grid_thw)
         return self.resampler_model(image_features, grid_thw)
@@ -1768,7 +1754,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         output = outputs["default"]
         assert batch_mm_kwargs is not None
         grid_thw_cpu = batch_mm_kwargs["image_grid_thw"]
-        grid_thw = grid_thw_cpu.to(output.device, non_blocking=True)
+        grid_thw = async_tensor_h2d(grid_thw_cpu, output.device)
         # The valid token count slices the graph output for the eager
         # resampler call, so it has to come back to the host.
         num_valid = int(

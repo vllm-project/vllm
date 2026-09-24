@@ -20,7 +20,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
-      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding) -> ()");
+      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding, "
+      "Tensor? bias_vl=None, int image_sentinel_lo=0) -> ()");
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts. topk_ids/expert_map are optional and, when
@@ -38,7 +39,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad,"
-      "                     Tensor? maybe_expert_map) -> ()");
+      "                     Tensor? maybe_expert_map,"
+      "                     Tensor(a!)? scatter_idx=None) -> ()");
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
@@ -78,13 +80,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "Tensor! b_q_weight, Tensor? b_bias_or_none,"
       "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
-      "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
+      "Tensor! workspace,"
       "Tensor sorted_token_ids,"
       "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
       "Tensor! topk_weights, int moe_block_size, int top_k, "
       "bool mul_topk_weights, int b_type_id,"
-      "int size_m, int size_n, int size_k,"
-      "bool is_full_k, bool use_atomic_add,"
+      "int size_m, int size_n, int size_k, bool use_atomic_add,"
       "bool use_fp32_reduce, bool is_zp_float,"
       "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
 
@@ -104,6 +105,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
       "permuted_idx, Tensor! sort_workspace, Tensor! permuted_experts_id, "
       "Tensor! sorted_row_idx, Tensor! topk_ids_for_sort)->()");
+
+  m.def(
+      "moe_prepare_scatter(Tensor topk_ids, Tensor token_expert_indices, "
+      "Tensor? expert_map, int n_expert, int n_local_expert, "
+      "Tensor! expert_first_token_offset, Tensor! scatter_idx, "
+      "Tensor! sort_workspace, Tensor! sorted_experts, Tensor! sorted_rows, "
+      "Tensor! topk_ids_for_sort)->()");
 
   m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
@@ -126,10 +134,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
-
-  // DeepSeek V3 optimized router GEMM for SM90+
-  m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
 #endif
 }
 
