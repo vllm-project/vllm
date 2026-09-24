@@ -3813,6 +3813,45 @@ steps:
     not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
     ROCM_AITER_MLA'
 
+- label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP" # TBD
+  timeout_in_minutes: 85
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_8
+  num_gpus: 8
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - requirements/kv_connectors_rocm.txt
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/models/deepseek_v4/
+  - vllm/v1/attention/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  # A mirror does not inherit the parent env, so it is repeated here in
+  # the parent's order. The layouts must stay empty: unset, the script
+  # defaults to HND, which the V4 indexer rejects.
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    ENABLE_HMA_FLAG=1
+    DP_EP=1
+    GPU_MEMORY_UTILIZATION=0.85
+    PREFILLER_TP_SIZE=4
+    DECODER_TP_SIZE=4
+    PREFILL_BLOCK_SIZE=256
+    DECODE_BLOCK_SIZE=256
+    MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
+    VLLM_ENGINE_READY_TIMEOUT_S=1800
+    VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+    PREFILLER_KV_LAYOUT=
+    DECODER_KV_LAYOUT=
+    bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server) %N"
