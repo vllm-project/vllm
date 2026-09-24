@@ -26,7 +26,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -202,9 +202,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
     @abstractmethod
     def load_draft_model(
-        self,
-        target_model: nn.Module,
-        target_attn_layer_names: set[str],
+        self, target_model: nn.Module, target_attn_layer_names: set[str]
     ) -> nn.Module:
         pass
 
@@ -337,7 +335,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
-            dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+            dcp_local_seq_lens = prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
                 num_reqs,
@@ -366,7 +364,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
-            is_prefilling=self.draft_is_prefilling[:num_reqs],
+            is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
 
@@ -422,10 +420,7 @@ class DraftModelSpeculator(BaseSpeculator):
             )
             if self.draft_watermarker is not None:
                 sampled = self.draft_watermarker.sample(
-                    logits,
-                    sampled,
-                    idx_mapping,
-                    temperature,
+                    logits, sampled, idx_mapping, temperature
                 )
         elif self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
@@ -436,10 +431,7 @@ class DraftModelSpeculator(BaseSpeculator):
         return sampled
 
     def _maybe_predict_acceptance(
-        self,
-        logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        draft_step: torch.Tensor,
+        self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor
     ) -> None:
         if self.acceptance_estimator is not None:
             self.acceptance_estimator.predict(
