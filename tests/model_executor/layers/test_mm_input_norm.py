@@ -302,22 +302,6 @@ class TestFusedMMInputNormInputHandling:
 @requires_accelerator
 @requires_triton
 class TestFusedMMInputNormKernel:
-    @pytest.mark.parametrize("block", [128, 256, 1024, 2048])
-    def test_block_sizes(self, block: int):
-        """``N*C*L`` is never a multiple of the tested blocks, so the masked
-        tail path is exercised for every parameterisation."""
-        N, C, L = 5, 3, 1000
-        set_random_seed(0)
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
-        w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
-        b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
-
-        out = torch.empty_like(x)
-        fused_mm_input_norm_triton(x, out, w, b, block=block)
-
-        expected = x * w.view(1, C, 1) + b.view(1, C, 1)
-        torch.testing.assert_close(out, expected)
-
     @pytest.mark.parametrize(
         "N, C, L",
         [

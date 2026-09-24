@@ -25,17 +25,11 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.custom_op import CustomOp
-from vllm.transformers_utils.processor import get_processor, get_processor_config
+from vllm.transformers_utils.processor import (
+    cached_image_processor_from_config,
+    get_processor_config,
+)
 from vllm.triton_utils import tl, triton
-
-# Default tile size along the flattened element axis. 4096 keeps each
-# program's payload large enough to amortise launch overhead while
-# staying small enough that the grid saturates the SMs for typical
-# image tensors.
-_DEFAULT_BLOCK = 4096
-
-# Target elements per lane for the num_warps heuristic.
-_ELEMS_PER_THREAD = 8
 
 
 @triton.jit
@@ -51,9 +45,11 @@ def _fused_mm_input_norm_kernel(
 ):
     # 1D grid over the flattened (N, C, L) tensor. Each program processes
     # BLOCK contiguous elements; the channel index is recovered from the
-    # flat offset via `(offs // L) % C`.
+    # flat offset via `(offs // L) % C`. int32 offsets: int64 division is
+    # ~2x slower here (measured on GB200); the wrapper asserts
+    # numel < 2**31 so the flat index never overflows.
     pid = tl.program_id(0)
-    offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < numel
     c = (offs // L) % C
 
@@ -78,8 +74,6 @@ def fused_mm_input_norm_triton(
     outputs: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
-    block: int | None = None,
-    num_warps: int | None = None,
 ):
     """Fused per-channel affine transform for normalisation.
 
@@ -89,10 +83,6 @@ def fused_mm_input_norm_triton(
         outputs: Output tensor, contiguous and shaped exactly ``(N, C, L)``.
         weight: Per-channel scale, shape ``(C,)``.
         bias: Per-channel shift, shape ``(C,)``.
-        block: Block size along the flattened element axis. Defaults to
-            ``_DEFAULT_BLOCK``.
-        num_warps: Number of warps per program. If ``None``, derived from
-            ``block`` targeting ~8 elements per lane.
 
     Returns:
         ``outputs``, for chaining.
@@ -110,21 +100,18 @@ def fused_mm_input_norm_triton(
     # auto-materialized without breaking the caller's aliasing.
     assert outputs.is_contiguous(), "outputs must be contiguous"
 
-    if block is None:
-        block = _DEFAULT_BLOCK
+    # Tile size along the flattened element axis. 1024 with 4 warps gives
+    # 8 elements per lane and benchmarks fastest across realistic image
+    # sizes; larger tiles starve the SMs on small inputs.
+    BLOCK_SIZE = 1024
 
     numel = N * C * L
-    grid = (triton.cdiv(numel, block),)
+    # The kernel indexes with int32 offsets (int64 division costs ~2x
+    # throughput); guard the flat index range here.
+    assert numel < 2**31, f"numel={numel} exceeds the int32 index range"
 
-    if num_warps is None:
-        # Target ~_ELEMS_PER_THREAD elements per lane. Triton requires
-        # num_warps to be a power of two; round up and clamp to [1, 16].
-        target = block // (32 * _ELEMS_PER_THREAD)
-        num_warps = 1
-        while num_warps < target and num_warps < 16:
-            num_warps *= 2
+    grid = (triton.cdiv(numel, BLOCK_SIZE),)
 
-    # --- dispatch ------------------------------------------------------
     _fused_mm_input_norm_kernel[grid](
         inputs.contiguous(),
         outputs,
@@ -133,8 +120,8 @@ def fused_mm_input_norm_triton(
         numel,
         L,
         C=C,
-        BLOCK=block,
-        num_warps=num_warps,
+        BLOCK=BLOCK_SIZE,
+        num_warps=4,  # 8 elements per lane at BLOCK_SIZE=1024
     )
     return outputs
 
@@ -167,47 +154,31 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     model = model_config.model
     revision = model_config.revision
 
-    # Try to read parameters from the processor config.
     config = get_processor_config(model, revision=revision)
-    do_rescale: Any = config.get("do_rescale", None)
-    do_normalize: Any = config.get("do_normalize", None)
-    image_mean: Any = config.get("image_mean", None)
-    image_std: Any = config.get("image_std", None)
-    rescale_factor: Any = config.get("rescale_factor", None)
+    image_processor = cached_image_processor_from_config(model_config)
 
-    # Fallback to the image_processor object if any parameter is missing.
-    if any(
-        v is None
-        for v in (do_rescale, do_normalize, image_mean, image_std, rescale_factor)
-    ):
-        image_processor = get_processor(model, revision=revision).image_processor
+    def resolve(key: str) -> Any:
+        """Processor config value, falling back to the image_processor."""
+        if (value := config.get(key)) is not None:
+            return value
+        return getattr(image_processor, key, None)
 
-        if do_rescale is None:
-            do_rescale = getattr(image_processor, "do_rescale", None)
-        if do_normalize is None:
-            do_normalize = getattr(image_processor, "do_normalize", None)
-        if image_mean is None:
-            image_mean = getattr(image_processor, "image_mean", None)
-        if image_std is None:
-            image_std = getattr(image_processor, "image_std", None)
-        if rescale_factor is None:
-            rescale_factor = getattr(image_processor, "rescale_factor", None)
+    do_rescale = bool(resolve("do_rescale"))
+    do_normalize = bool(resolve("do_normalize"))
 
-    # Apply defaults based on flags.
-    if not do_rescale:
-        rescale_factor = 1.0
-    if not do_normalize:
-        num_channels = 3
-        image_mean = [0.0] * num_channels
-        image_std = [1.0] * num_channels
+    # Parameters whose flag is off are unused; default them to no-ops
+    # without resolving them.
+    rescale_factor = resolve("rescale_factor") if do_rescale else 1.0
+    image_mean = resolve("image_mean") if do_normalize else [0.0] * 3
+    image_std = resolve("image_std") if do_normalize else [1.0] * 3
 
     assert rescale_factor is not None, "rescale_factor is still None after resolution."
     assert image_mean is not None, "image_mean is still None after resolution."
     assert image_std is not None, "image_std is still None after resolution."
 
     return NormParams(
-        do_rescale=bool(do_rescale),
-        do_normalize=bool(do_normalize),
+        do_rescale=do_rescale,
+        do_normalize=do_normalize,
         image_mean=[float(v) for v in image_mean],
         image_std=[float(v) for v in image_std],
         rescale_factor=float(rescale_factor),
