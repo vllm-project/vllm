@@ -8,7 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -613,6 +613,58 @@ class DeepseekV32IndexerPrefillMetadata:
 
 
 @dataclass
+class DeepseekV32IndexerDecodeRowShard:
+    """This TP rank's share of the decode rows.
+
+    Decode rows are replicated on every TP rank; with row sharding each rank
+    scores the rows of every ``tp_size``-th request (``rows`` into the decode
+    rows, all of a request's rows together so the paged logits kernel reads
+    its KV once) and the ranks all-gather the finished top-k indices.
+    """
+
+    rows: torch.Tensor
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    indices: torch.Tensor
+    schedule_metadata: torch.Tensor
+    tp_size: int
+    rows_per_req: int
+    num_local_reqs: int
+
+
+def decode_row_shard_plan(
+    num_tokens: int, rows_per_req: int, tp_size: int, rank: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Decode rows that ``rank`` scores: those of requests rank, rank + tp, ...
+
+    Every request is ``rows_per_req`` consecutive rows. Returns (on CPU) the
+    row of each local slot, whether the slot is a real request (padding slots
+    past the last request point at row 0), and a request id per local row
+    with one spare entry, since the paged logits kernel reads ids in pairs.
+    """
+    num_reqs = num_tokens // rows_per_req
+    num_local_reqs = -(-num_reqs // tp_size)
+    req = torch.arange(num_local_reqs) * tp_size + rank
+    valid = (req < num_reqs).repeat_interleave(rows_per_req)
+    rows = (req[:, None] * rows_per_req + torch.arange(rows_per_req)).flatten()
+    ids = torch.arange(num_local_reqs + 1, dtype=torch.int32)
+    ids = ids.repeat_interleave(rows_per_req)[: rows.numel() + 1]
+    return torch.where(valid, rows, 0), valid, ids
+
+
+def restore_decode_row_order(
+    gathered: torch.Tensor,
+    row_shard: "DeepseekV32IndexerDecodeRowShard",
+    num_tokens: int,
+) -> torch.Tensor:
+    """Put rank-ordered all-gathered rows back in decode-row order."""
+    gathered = gathered.view(
+        row_shard.tp_size, row_shard.num_local_reqs, row_shard.rows_per_req, -1
+    )
+    return gathered.transpose(0, 1).reshape(-1, gathered.shape[-1])[:num_tokens]
+
+
+@dataclass
 class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
     # seq_lens: per-token effective context lengths.
@@ -628,6 +680,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    row_shard: DeepseekV32IndexerDecodeRowShard | None = None
 
 
 @dataclass
@@ -993,6 +1046,93 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         self.indexer_decode_block_table_buffer: torch.Tensor | None = None
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+
+        tp_size = parallel_config.tensor_parallel_size
+        self.decode_row_shard_tp = (
+            tp_size
+            if envs.VLLM_DSA_DECODE_INDEXER_ROW_SHARD
+            and tp_size > 1
+            and self.supports_varlen
+            and self.dcp_world_size == 1
+            and not self.use_pcp
+            and not self.vllm_config.attention_config.indexer_sparse_logits
+            else 1
+        )
+        self.decode_row_shard_rank = (
+            get_tp_group().rank_in_group if self.decode_row_shard_tp > 1 else 0
+        )
+        self._row_shard_plans: dict[
+            tuple[int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = {}
+        self._row_shard_seq_lens: torch.Tensor | None = None
+        self._row_shard_block_table: torch.Tensor | None = None
+        self._row_shard_schedule: torch.Tensor | None = None
+
+    def _build_decode_row_shard(
+        self,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        num_tokens: int,
+        rows_per_req: int,
+    ) -> DeepseekV32IndexerDecodeRowShard:
+        """Gather this rank's decode rows (requests rank, rank + tp, ...).
+
+        The plan depends only on the padded row count, so a captured graph
+        replays with the same buffers; dummy slots past the last request
+        score nothing.
+        """
+        tp = self.decode_row_shard_tp
+        num_local_reqs = triton.cdiv(num_tokens // rows_per_req, tp)
+        num_local = num_local_reqs * rows_per_req
+        plan = self._row_shard_plans.get((num_tokens, rows_per_req))
+        if plan is None:
+            rows, valid, ids = decode_row_shard_plan(
+                num_tokens, rows_per_req, tp, self.decode_row_shard_rank
+            )
+            plan = (
+                rows.to(self.device),
+                valid.to(self.device, torch.int32).unsqueeze(-1),
+                ids.to(self.device),
+            )
+            self._row_shard_plans[(num_tokens, rows_per_req)] = plan
+        rows, valid, ids = plan
+        if self._row_shard_seq_lens is None:
+            cap = self._max_num_batched_tokens
+            self._row_shard_seq_lens = torch.zeros(
+                (cap, 1), dtype=torch.int32, device=self.device
+            )
+            self._row_shard_schedule = torch.empty_like(self.scheduler_metadata_buffer)
+        if (
+            self._row_shard_block_table is None
+            or self._row_shard_block_table.shape[1] != block_table.shape[1]
+        ):
+            self._row_shard_block_table = torch.zeros(
+                (self._max_num_batched_tokens, block_table.shape[1]),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        assert self._row_shard_schedule is not None
+        local_seq_lens = self._row_shard_seq_lens[:num_local]
+        torch.index_select(seq_lens, 0, rows, out=local_seq_lens)
+        local_seq_lens.mul_(valid)
+        local_block_table = self._row_shard_block_table[:num_local]
+        torch.index_select(block_table, 0, rows, out=local_block_table)
+        local_ids = ids[:num_local]
+        metadata = get_paged_mqa_logits_metadata(
+            local_seq_lens, self.kv_cache_spec.num_states, self.num_sms, local_ids
+        )
+        schedule = self._row_shard_schedule[: metadata.shape[0]]
+        schedule.copy_(metadata)
+        return DeepseekV32IndexerDecodeRowShard(
+            rows=rows,
+            seq_lens=local_seq_lens,
+            block_table=local_block_table,
+            indices=local_ids,
+            schedule_metadata=schedule,
+            tp_size=tp,
+            rows_per_req=rows_per_req,
+            num_local_reqs=num_local_reqs,
+        )
 
     def _dcp_localize_decode_seq_lens(
         self,
@@ -1601,6 +1741,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
                 schedule_metadata[:] = metadata
 
+            row_shard = None
+            if (
+                self.decode_row_shard_tp > 1
+                and self.supports_varlen
+                and write_is_uniform
+                and num_decode_tokens % max_decode_len == 0
+                and num_decode_tokens // max_decode_len
+                >= envs.VLLM_DSA_DECODE_INDEXER_ROW_SHARD_MIN_REQS
+            ):
+                row_shard = self._build_decode_row_shard(
+                    seq_lens, block_table, num_decode_tokens, max_decode_len
+                )
+
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
@@ -1608,6 +1761,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=schedule_metadata,
                 indices=decode_indices,
+                row_shard=row_shard,
                 global_seq_lens=global_seq_lens_for_decode,
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
