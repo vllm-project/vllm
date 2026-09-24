@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.model_executor.model_loader.attention_sink import load_padded_attn_sink
 
 from vllm.model_executor.model_loader.reload import layerwise
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -26,7 +27,6 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.models.deepseek_v4.sink import load_padded_attn_sink
 
 PADDED_HEADS = 8
 LOCAL_HEADS = 4
@@ -295,3 +295,34 @@ def test_load_padded_attn_sink_degenerate_head_range():
     load_padded_attn_sink(param, _checkpoint(), 0, 0)
 
     assert torch.isneginf(param.data).all()
+
+
+def test_load_padded_attn_sink_builds_runtime_weight_in_param_dtype():
+    """The reconstructed tensor must match the parameter, not the checkpoint.
+
+    Padding is written by the load, so a dtype mismatch between the checkpoint
+    sink and the runtime parameter must be resolved before the load.
+    """
+    param = _make_param().to(torch.bfloat16)
+    loader_inputs = []
+    param.weight_loader = lambda p, w: loader_inputs.append(w)
+
+    load_padded_attn_sink(param, _checkpoint(), 0, LOCAL_HEADS)
+
+    assert loader_inputs[0].dtype == torch.bfloat16
+    assert torch.equal(
+        loader_inputs[0][:LOCAL_HEADS], _checkpoint()[:LOCAL_HEADS].to(torch.bfloat16)
+    )
+    assert torch.isneginf(loader_inputs[0][LOCAL_HEADS:]).all()
+
+
+def test_load_padded_attn_sink_rejects_head_range_wider_than_param():
+    """A rank claiming more heads than the padded parameter must fail loudly.
+
+    Silently truncating would load the wrong heads, and the online loader
+    rejects a source larger than its destination anyway.
+    """
+    param = _make_param(padded_heads=2)
+
+    with pytest.raises(ValueError, match="does not fit the runtime sink parameter"):
+        load_padded_attn_sink(param, _checkpoint(), 0, LOCAL_HEADS)
