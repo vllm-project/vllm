@@ -282,7 +282,7 @@ def create_qwen2_5_omni_thinker_field_factory(
     def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         audio_feature_lengths = hf_inputs.get(
             "audio_feature_lengths", torch.empty((0,))
-        )
+        ).flatten()
 
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         image_pixel_grid_sizes = image_grid_thw.prod(-1)
@@ -332,6 +332,14 @@ def create_qwen2_5_omni_thinker_field_factory(
 
 
 class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    embedding_fields = {
+        **Qwen2VLMultiModalDataParser.embedding_fields,
+        "audio": {
+            "input_audio_features": "values",
+            "audio_feature_lengths": "metadata",
+        },
+    }
+
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(self._spatial_merge_size, *args, **kwargs)
@@ -341,10 +349,15 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("audio")
+            data = dict(data)
+            if "audio_feature_lengths" in data:
+                data["audio_feature_lengths"] = data["audio_feature_lengths"].flatten()
             return DictEmbeddingItems(
                 data,
                 modality="audio",
-                required_fields={"input_audio_features", "audio_feature_lengths"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=create_qwen2_5_omni_thinker_field_factory(
                     self._spatial_merge_size
                 ),
