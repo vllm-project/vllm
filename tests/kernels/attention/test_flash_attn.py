@@ -293,8 +293,8 @@ def test_fa4_hd256_paged_call_shape(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="FA4 adaptive varlen CUDA graphs are enabled on SM100",
+    not current_platform.is_cuda(),
+    reason="FA4 adaptive varlen CUDA graph replay requires CUDA",
 )
 @pytest.mark.parametrize("q_dtype", [None, torch.float8_e4m3fn])
 @torch.inference_mode()
@@ -304,6 +304,8 @@ def test_fa4_cudagraph_replay_with_device_varlen_query_lens(
     """One captured graph must follow changing device-side query boundaries."""
     if not is_fa_version_supported(4):
         pytest.skip(f'FA4 unsupported: "{fa_version_unsupported_reason(4)}"')
+    if q_dtype is not None and not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 FP8 inputs require SM100")
 
     torch.set_default_device("cuda")
     set_random_seed(0)
