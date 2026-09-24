@@ -88,7 +88,12 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, can_share_engram_tables, gather_engram_hashes
+from .engram import (
+    Engram,
+    can_share_engram_tables,
+    engram_table_bytes,
+    gather_engram_hashes,
+)
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     mhc_pre_delayed_overlap,
@@ -621,12 +626,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         self.engram_layout = EngramLayout.from_config(config)
         engram_config = vllm_config.engram_config
-        if (
-            self.engram_layout is not None
-            and engram_config is not None
-            and engram_config.dp_shared_memory
-        ):
-            engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
+        if self.engram_layout is not None and engram_config is not None:
+            if engram_config.dp_shared_memory:
+                engram_config.dp_shared_memory = can_share_engram_tables(
+                    self.engram_layout
+                )
+            # After the shared-memory decision on purpose: falling back from
+            # /dev/shm is exactly what puts the tables on the per-rank pinned path.
+            engram_config.verify_host_memory(
+                engram_table_bytes(self.engram_layout), vllm_config.parallel_config
+            )
 
         # GEMM-RS uses NCCL symmetric-memory multicast, which requires all TP
         # ranks to belong to one NVLink domain. Collective: run before layers.
