@@ -15,7 +15,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
 
-class _FA4Backend(FlashAttentionBackend):
+class _FABackend(FlashAttentionBackend):
     @classmethod
     def supports_combination(
         cls,
@@ -42,22 +42,20 @@ class _FA4Backend(FlashAttentionBackend):
         )
         if reason is not None:
             return reason
-        if (
-            get_flash_attn_version(
-                head_size=head_size,
-                has_sinks=has_sink,
-                kv_cache_block_size=block_size,
-                supports_fa4_hd256=True,
-            )
-            != 4
-        ):
-            return "causal route requires FlashAttention v4"
+        fa_version = get_flash_attn_version(
+            head_size=head_size,
+            has_sinks=has_sink,
+            kv_cache_block_size=block_size,
+            supports_fa4_hd256=True,
+        )
+        if fa_version not in (3, 4):
+            return "causal route requires FlashAttention v3 or v4"
         return None
 
 
 TritonFlashAttentionBackend = create_composite_attention_backend(
     TritonAttentionBackend,
-    _FA4Backend,
+    _FABackend,
     name="TritonFlashAttentionBackend",
     backend_name="TRITON_FLASH_ATTN",
     module=__name__,

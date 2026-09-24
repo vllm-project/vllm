@@ -183,7 +183,7 @@ class B12xPagedAttentionBackend(AttentionBackend):
         return B12xPagedMetadataBuilder
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return list(_B12X_SUPPORTED_PAGE_SIZES)
 
     @classmethod
