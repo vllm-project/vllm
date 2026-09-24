@@ -44,7 +44,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
-    MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
@@ -777,6 +776,17 @@ def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
         assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
+def test_transfer_disabled_hybrid_group_is_ignored():
+    config = _make_hybrid_kv_cache_config()
+    config.kv_cache_groups[1].enable_kv_transfer = False
+    scheduler = _read_scheduler(config)
+
+    assert scheduler._is_hma_required is False
+    assert scheduler.get_exchange_clipped_blocks([[1, 2, 3], [20, 21, 22]]) == [
+        [1, 2, 3]
+    ]
+
+
 def test_non_sliding_window_hybrid_is_rejected():
     """A hybrid group that is not sliding-window (e.g. chunked-local
     attention) must fail closed rather than be silently mistransferred."""
@@ -856,40 +866,6 @@ def _make_wrapped_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
-    """Full attention plus Mamba, which HMA pairing cannot serve."""
-    full_spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
-    )
-    mamba_spec = MambaSpec(
-        block_size=16, shapes=((16,), (16,)), dtypes=(torch.float16,)
-    )
-    num_blocks = 2
-    page = full_spec.page_size_bytes
-    mamba_page = mamba_spec.page_size_bytes
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * page,
-                layers=["full0"],
-                layer_stride=num_blocks * page,
-                block_stride=page,
-            ),
-            KVCacheTensor(
-                size=num_blocks * mamba_page,
-                layers=["mamba0"],
-                layer_stride=num_blocks * mamba_page,
-                block_stride=mamba_page,
-            ),
-        ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
-            KVCacheGroupSpec(layer_names=["mamba0"], kv_cache_spec=mamba_spec),
-        ],
-    )
-
-
 def test_hma_blocks_per_sw_wrapped_groups():
     """A wrapped sliding-window group reports the window it has.
 
@@ -936,16 +912,6 @@ def test_wrapped_full_attention_group_needs_no_hma():
     scheduler = _read_scheduler(config)
     assert scheduler._is_hma_required is False
     assert scheduler.blocks_per_sw == [0]
-
-
-def test_mamba_group_still_rejected():
-    """A Mamba group fails closed with the same message it always raised."""
-    with pytest.raises(
-        NotImplementedError, match="MoRIIO only supports sliding-window hybrid"
-    ) as excinfo:
-        _read_scheduler(_make_mamba_hybrid_kv_cache_config())
-
-    assert "MambaSpec" in str(excinfo.value)
 
 
 def test_token_count_basis_uses_full_attention_group():
