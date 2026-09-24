@@ -52,7 +52,6 @@ from vllm.v1.kv_offload.tiering.base import (
     ParentManager,
     SecondaryTierManager,
     TransferJob,
-    config_info_prefix,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
@@ -981,20 +980,34 @@ class TieringOffloadingManager(OffloadingManager):
         return stats
 
     @override
-    def config_info(self) -> Mapping[str, str | int | float | bool]:
-        """Compose the config facts of the primary tier and every secondary.
+    def config_info(self) -> Sequence[Mapping[str, str | int | float | bool]]:
+        """Compose one info mapping for each tier, primary tier first.
 
-        The primary tier passes through unprefixed, so a CPU fact reads the
-        same standalone and tiered. The label names match the names that
+        Every mapping holds the tier label, so two tiers of one type stay
+        apart. A tier fills the labels it owns, and the frontend renders a label
+        of another tier as an empty value. The label names match the names that
         TieringOffloadingSpec.config_info_keys() declares.
+
+        Returns:
+            One mapping for each tier, primary tier first.
+
+        Raises:
+            ValueError: If the primary tier returns more than one mapping. This
+                manager holds one primary tier, so two mappings would give two
+                series with one tier label.
+
         """
-        info: dict[str, str | int | float | bool] = dict(
-            self.primary_tier.config_info()
-        )
-        for tier_idx, tier in enumerate(self.secondary_tiers):
-            prefix = config_info_prefix(tier_idx, tier.tier_type)
-            info.update({prefix + k: v for k, v in tier.config_info().items()})
-        return info
+        (primary_info,) = self.primary_tier.config_info()
+        primary_tier_info = dict(primary_info)
+        primary_tier_info["tier"] = self._metrics.primary_tier_label[0]
+        tier_infos = [primary_tier_info]
+
+        for tier in self.secondary_tiers:
+            tier_info = dict(tier.config_info())
+            tier_info["tier"] = self._metrics.tier_label(self._tier_index[tier])[0]
+            tier_infos.append(tier_info)
+
+        return tier_infos
 
     @override
     def shutdown(self) -> None:

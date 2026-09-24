@@ -127,24 +127,6 @@ class ParentManager(ABC):
     def on_request_finished(self, req_context: ReqContext) -> None: ...
 
 
-def config_info_prefix(tier_idx: int, tier_type: str) -> str:
-    """Return the info metric label prefix of one secondary tier.
-
-    TieringOffloadingSpec prefixes the label names with this, and
-    TieringOffloadingManager prefixes the values, so both must call this one
-    function. The shape mirrors TieringMetricsTracker.tier_label().
-
-    Args:
-        tier_idx: Zero-based position of the tier in secondary_tiers.
-        tier_type: Tier type identifier, as the tier config names it.
-
-    Returns:
-        The prefix, which ends with "_".
-
-    """
-    return f"tier{tier_idx + 1}_{tier_type}_"
-
-
 class SecondaryTierManager(ABC):
     """Abstract interface for managing a single non-primary offloading tier.
 
@@ -381,16 +363,16 @@ class SecondaryTierManager(ABC):
     def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
         """Return the info metric label names of this tier.
 
-        A tier cannot know its own index, so it declares every name unprefixed.
-        TieringOffloadingSpec adds the index and the tier type, the same way
-        TieringOffloadingManager adds them to the values. Every other rule
-        matches OffloadingSpec.config_info_keys().
+        The metric holds one series for each tier, and the tier label tells the
+        series apart, so a tier declares its own names only.
+        TieringOffloadingSpec merges the names of every tier into one
+        declaration. Every other rule matches OffloadingSpec.config_info_keys().
 
         Args:
             tier_config: Configuration dict of this tier.
 
         Returns:
-            Tuple of unprefixed label names. Empty by default.
+            Tuple of the label names this tier owns. Empty by default.
 
         """
         return ()
@@ -398,9 +380,21 @@ class SecondaryTierManager(ABC):
     def config_info(self) -> Mapping[str, str | int | float | bool]:
         """Return static config facts to publish as info metric labels.
 
-        A tier cannot know its own index, so TieringOffloadingManager prefixes
-        these keys with the index and the tier type. Every other rule matches
+        One tier gives one series, so this returns one mapping and not a list.
+        A tier cannot know its own index, so TieringOffloadingManager adds the
+        tier label. A tier fills the names it owns, and the frontend renders a
+        name of another tier as an empty value. Every other rule matches
         OffloadingManager.config_info(), including the name agreement with
         TieringOffloadingSpec.config_info_keys().
+
+        A test of the implementation should assert that the names here match
+        config_info_keys() of the same class. The runtime check reads the
+        declaration of all tiers together. It therefore cannot see a name that
+        this tier declares and leaves unfilled, because that empty value reads
+        the same as a name of another tier.
+
+        Returns:
+            One mapping of label name to value. Empty by default.
+
         """
         return {}

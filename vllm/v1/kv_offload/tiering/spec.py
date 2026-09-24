@@ -73,7 +73,6 @@ from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
     TieringOffloadingMetrics,
-    config_info_prefix,
 )
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -429,21 +428,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     @classmethod
     @override
     def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
-        """Return the primary tier label names, then every secondary tier name.
+        """Return the label names of all tiers, with no repeat.
 
-        The prefix mirrors TieringOffloadingManager.config_info(), which fills
-        the values in the engine process, so the two sides declare and fill the
-        same names. The primary tier passes through unprefixed.
+        The metric holds one series for each tier, and the tier label tells the
+        series apart, so the declaration is the union of the names of every
+        tier. TieringOffloadingManager.config_info() fills the values in the
+        engine process, so the two sides declare and fill the same names.
         """
-        keys = super().config_info_keys(extra_config)  # primary tier keys
-        for tier_idx, (tier_config, tier_cls) in enumerate(
-            cls._get_secondary_tiers(extra_config)
-        ):
-            prefix = config_info_prefix(tier_idx, tier_config["type"])
-            keys += tuple(
-                prefix + key for key in tier_cls.config_info_keys(tier_config)
-            )
-        return keys
+        # dict.fromkeys() keeps one copy of a name that two tier types share.
+        keys = dict.fromkeys(super().config_info_keys(extra_config))
+        keys["tier"] = None
+        for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
+            keys.update(dict.fromkeys(tier_cls.config_info_keys(tier_config)))
+        return tuple(keys)
 
     @classmethod
     def _get_secondary_tiers(
