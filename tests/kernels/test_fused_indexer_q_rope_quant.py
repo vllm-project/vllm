@@ -45,6 +45,7 @@ def quantize_to_mxfp4(
     Returns:
         packed: [..., head_dim//2]  uint8   2 E2M1 nibbles/byte, low nibble = even index
         scales: [..., head_dim//32] uint8   1 ue8m0 byte
+
     """
     MXFP4_BLOCK_SIZE = 32
     orig_shape = x.shape
@@ -289,16 +290,16 @@ def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
             dtype=torch.uint8,
             device=device,
         )
-        mod.fused_indexer_q_rope_quant_mxfp4_cutedsl(
-            positions[:num_tokens],
-            q[:num_tokens],
-            cos_sin_cache,
-            weights[:num_tokens],
-            1.0,
-            1.0,
-            outputs["q_packed"][:num_tokens],
-            outputs["q_scale"][:num_tokens],
-            weights_out[:num_tokens],
+        mod._INDEXER_Q_MXFP4_KERNEL(
+            positions=positions[:num_tokens],
+            q=q[:num_tokens],
+            cos_sin_cache=cos_sin_cache,
+            weights=weights[:num_tokens],
+            weights_softmax_scale=1.0,
+            weights_head_scale=1.0,
+            q_packed=outputs["q_packed"][:num_tokens],
+            q_scale=outputs["q_scale"][:num_tokens],
+            weights_out=weights_out[:num_tokens],
         )
     else:
         outputs["q_fp8"] = torch.full(
@@ -307,15 +308,15 @@ def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
             dtype=torch.uint8,
             device=device,
         )
-        mod.fused_indexer_q_rope_quant_fp8_cutedsl(
-            positions[:num_tokens],
-            q[:num_tokens],
-            cos_sin_cache,
-            weights[:num_tokens],
-            1.0,
-            1.0,
-            outputs["q_fp8"][:num_tokens].view(torch.float8_e4m3fn),
-            weights_out[:num_tokens],
+        mod._INDEXER_Q_FP8_KERNEL(
+            positions=positions[:num_tokens],
+            q=q[:num_tokens],
+            cos_sin_cache=cos_sin_cache,
+            weights=weights[:num_tokens],
+            weights_softmax_scale=1.0,
+            weights_head_scale=1.0,
+            q_fp8=outputs["q_fp8"][:num_tokens].view(torch.float8_e4m3fn),
+            weights_out=weights_out[:num_tokens],
         )
     torch.accelerator.synchronize()
 
@@ -359,7 +360,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
     num_tokens, compress_ratio, use_fp4, cache_dtype
 ):
     """Insert group ends and preserve skipped slots, graph rows, and page padding."""
-    from vllm.models.deepseek_v4_1.common.ops.indexer_k_store import (
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
         indexer_k_norm_rope_store,
     )
 
@@ -442,7 +443,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
 @torch.inference_mode()
 def test_indexer_k_cuda_graph_replay_reads_current_projection(use_fp4):
     """Replay must consume updated keys and slot mapping through the captured API."""
-    from vllm.models.deepseek_v4_1.common.ops.indexer_k_store import (
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
         indexer_k_norm_rope_store,
     )
 
@@ -501,7 +502,7 @@ def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_rat
     ``block_size > 1``, so a row-major store would feed the indexer permuted
     key bytes and randomize its top-k. Assert the write/read pair is exact.
     """
-    from vllm.models.deepseek_v4_1.common.ops.indexer_k_store import (
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
         indexer_k_norm_rope_store,
     )
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -560,3 +561,55 @@ def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_rat
     torch.testing.assert_close(
         k_scale[emitted], expected_scale[emitted], rtol=0, atol=0
     )
+
+
+@pytest.mark.parametrize("use_cutedsl", [False, True])
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="MXFP4 indexer cache requires an SM100-family GPU",
+)
+@torch.inference_mode()
+def test_fused_indexer_q_rope_quant_writes_bf16_weights(use_cutedsl):
+    """The MXFP4 path can emit the per-head weights in bf16 (what DeepGEMM's
+    sparse MQA-logits kernels take) instead of fp32; the values are the fp32
+    result rounded once, so the scoring kernel needs no cast."""
+    if use_cutedsl and not has_cutedsl():
+        pytest.skip("cutedsl (cutlass) not installed")
+
+    device = "cuda"
+    torch.manual_seed(0)
+    num_tokens, n_head = 257, 32
+    q = torch.randn(num_tokens, n_head, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.randint(
+        0, MAX_POS, (num_tokens,), dtype=torch.int64, device=device
+    )
+    cos_sin_cache = torch.randn(MAX_POS, ROPE_DIM, dtype=torch.float32, device=device)
+    weights = torch.randn(num_tokens, n_head, dtype=torch.bfloat16, device=device)
+    softmax_scale, head_scale = HEAD_DIM**-0.5, 0.125  # pow2 head_scale, see above
+
+    _, weights_ref = _reference(
+        positions, q, cos_sin_cache, weights, softmax_scale, head_scale, n_head, True
+    )
+    cutedsl_patch = (
+        mock.patch(
+            "vllm.models.deepseek_v4.common.ops.fused_indexer_q.has_cutedsl",
+            return_value=False,
+        )
+        if not use_cutedsl
+        else contextlib.nullcontext()
+    )
+    with cutedsl_patch:
+        _, weights_fused = fused_indexer_q_rope_quant(
+            positions,
+            q.clone(),
+            cos_sin_cache,
+            weights,
+            softmax_scale,
+            head_scale,
+            use_fp4=True,
+            weights_out_dtype=torch.bfloat16,
+        )
+    assert weights_fused.dtype == torch.bfloat16
+    assert torch.equal(weights_fused, weights_ref.to(torch.bfloat16))
