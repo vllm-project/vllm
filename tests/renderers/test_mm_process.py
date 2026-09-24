@@ -69,7 +69,6 @@ class _Processor:
         if kwargs.get("fail"):
             raise ValueError("invalid test media")
         if kwargs.get("wait_for_peer"):
-            # Two workers must enter apply together; a serial dispatcher fails.
             self.started.set()
             self.barrier.wait(timeout=30)
         with timing.record("apply_hf_processor"):
@@ -285,8 +284,6 @@ def test_initializer_failure_reaps_workers_waiting_for_warmup(monkeypatch):
             assert manager_waiting.wait(timeout=30)
         spawn_process(executor)
 
-    # Force the manager to snapshot its exit sentinels before the failing
-    # worker exists. The first worker must already be waiting for its peer.
     monkeypatch.setattr(multiprocessing.connection, "wait", wait_with_first_worker_only)
     monkeypatch.setattr(
         ProcessPoolExecutor, "_spawn_process", spawn_after_manager_waits

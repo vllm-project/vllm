@@ -207,7 +207,6 @@ class BaseRenderer(ABC, Generic[_T]):
             mp_context = multiprocessing.get_context("spawn")
             self._mm_process_executor = ProcessPoolExecutor(
                 max_workers=mm_config.mm_processor_num_workers,
-                # Never fork the API server's threads or initialized accelerators.
                 mp_context=mp_context,
                 initializer=partial(
                     initialize_mm_process,
@@ -305,9 +304,6 @@ class BaseRenderer(ABC, Generic[_T]):
                 self._mm_process_executor.submit(ensure_mm_process_ready)
                 for _ in range(mm_config.mm_processor_num_workers)
             ]
-            # submit() wakes the manager before spawning a worker. Wake it again
-            # after all workers exist so a failed initializer cannot leave the
-            # manager watching only workers blocked at the readiness barrier.
             futures.append(
                 self._mm_process_executor.submit(
                     ensure_mm_process_ready, synchronize=False

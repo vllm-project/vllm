@@ -40,8 +40,6 @@ def initialize_mm_process(
             config.model_config, tokenizer=tokenizer
         )
 
-    # Initializers run once in each worker, before it can accept a request.
-    # In particular, numba warmup must not overlap serving in the same process.
     with set_default_torch_num_threads(1):
         mm_counts = {
             modality: 1
@@ -57,8 +55,6 @@ def initialize_mm_process(
 def ensure_mm_process_ready(*, synchronize: bool = True) -> None:
     assert _processor is not None, "Multimodal worker has not been initialized"
     assert _warmup_barrier is not None
-    # Without a rendezvous, the first initialized worker can consume every
-    # readiness task while the rest of the pool is still warming up.
     if synchronize:
         _warmup_barrier.wait()
 

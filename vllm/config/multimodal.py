@@ -92,8 +92,6 @@ class MultiModalDummyOptions(dict[str, BaseDummyOptions]):
     @overload
     def get(self, key: str, default: _T, /) -> BaseDummyOptions | _T: ...
 
-    # The modality-specific overloads refine dict.get's return type. Pylance
-    # reports this override on the implementation, unlike mypy above.
     def get(self, key: str, default: object = None, /) -> object:  # pyright: ignore[reportIncompatibleMethodOverride]
         return super().get(key, default)
 
