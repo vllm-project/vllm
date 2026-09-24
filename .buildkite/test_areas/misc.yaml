@@ -518,6 +518,7 @@ steps:
   - vllm/v1/
   - tests/test_envs.py
   - tests/test_outputs.py
+  - tests/test_pcp_dp.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
   - tests/test_sampling_params.py
@@ -525,6 +526,9 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/reasoning
+  - tools/pre_commit/check_test_tethering.py
+  - tools/pre_commit/test_tethering_allowlist.txt
+  - tests/tools/test_check_test_tethering.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -535,6 +539,7 @@ steps:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
   - pytest -v -s test_outputs.py
+  - pytest -v -s test_pcp_dp.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_sampling_params.py
@@ -552,6 +557,7 @@ steps:
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+  - pytest -v -s tools/test_check_test_tethering.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
