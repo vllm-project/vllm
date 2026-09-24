@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Deterministic watermarking golden candidates; see README.md."""
+"""Deterministic watermarking golden candidates."""
 
 import json
 import math

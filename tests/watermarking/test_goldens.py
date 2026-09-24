@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Check the watermarking goldens still reproduce; see README.md."""
+"""Check the watermarking goldens still reproduce."""
 
 import dataclasses
 from pathlib import Path

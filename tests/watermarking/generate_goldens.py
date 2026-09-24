@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Regenerate tests/watermarking/watermarking_goldens.json; see README.md."""
+"""Regenerate tests/watermarking/watermarking_goldens.json."""
 
 import json
 from pathlib import Path
