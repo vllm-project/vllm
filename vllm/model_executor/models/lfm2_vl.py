@@ -21,7 +21,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -81,12 +81,11 @@ def _pad_cumulative_seqlens_buffer(
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Number of images in the prompt
-        - bn: Batch size * number of images
-        - d: Number of dimensions
-        - fd: Number of features per dimension
+    """Dimensions:
+    - b: Number of images in the prompt
+    - bn: Batch size * number of images
+    - d: Number of dimensions
+    - fd: Number of features per dimension
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -388,26 +387,22 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
 
 class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -538,6 +533,7 @@ class Lfm2VLMultiModalProjector(nn.Module):
 
         Returns:
             projected_packed: (total_projected_tokens, text_hidden_size)
+
         """
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
@@ -667,6 +663,7 @@ class Lfm2VLForConditionalGeneration(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_language_config = vllm_config.model_config.hf_config.text_config
@@ -1276,9 +1273,7 @@ class Lfm2VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",

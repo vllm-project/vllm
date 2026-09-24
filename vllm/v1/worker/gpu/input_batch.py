@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,12 +17,7 @@ if TYPE_CHECKING:
 
 
 class InputBuffers:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
@@ -124,13 +120,14 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -167,7 +164,7 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
-        input_buffers.is_padding[:num_tokens].fill_(True)
+        input_buffers.is_padding[:num_tokens].fill_(is_padding)
         is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
@@ -217,9 +214,12 @@ def set_dummy_context(
     context_len: int,
     num_kv_blocks: int,
     max_model_len: int,
+    input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
     """Give each dummy request context_len of context, used when profiling step cost."""
-    if not block_tables.input_block_tables:
+    if input_block_tables is None:
+        input_block_tables = block_tables.input_block_tables
+    if not input_block_tables:
         # Attention-free models have no KV context to fabricate.
         return
     num_reqs = input_batch.num_reqs
@@ -241,7 +241,7 @@ def set_dummy_context(
 
     seq_len = context_len + query_len
     for block_table, block_size, bpk in zip(
-        block_tables.input_block_tables,
+        input_block_tables,
         block_tables.kernel_block_sizes,
         block_tables.blocks_per_kv_block,
     ):
@@ -469,11 +469,7 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -559,12 +555,28 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
+    broadcast_drafts_ptr,
+    broadcast_drafts_stride,
+    draft_tokens_ptr,
+    draft_tokens_stride,
+    num_spec,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return
+
+    if broadcast_drafts_ptr is not None:
+        # PP path: adopt the draft tokens proposed by the last rank's
+        # speculator so the next verification step embeds the real drafts.
+        for i in range(num_spec):
+            token_id = tl.load(
+                broadcast_drafts_ptr + req_id * broadcast_drafts_stride + i
+            )
+            tl.store(
+                draft_tokens_ptr + req_state_idx * draft_tokens_stride + i, token_id
+            )
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -626,6 +638,11 @@ def post_update(
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
     total_len: torch.Tensor,
+    # [num_reqs, num_spec]; drafts broadcast from the last PP rank. Only
+    # passed on non-last PP ranks, which never run the speculator.
+    broadcast_drafts: torch.Tensor | None = None,
+    # [max_num_reqs, num_spec]
+    draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -642,6 +659,11 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        broadcast_drafts,
+        broadcast_drafts.stride(0) if broadcast_drafts is not None else 0,
+        draft_tokens_out,
+        draft_tokens_out.stride(0) if draft_tokens_out is not None else 0,
+        broadcast_drafts.shape[1] if broadcast_drafts is not None else 0,
         num_warps=1,
     )
 
@@ -706,9 +728,7 @@ def expand_idx_mapping(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(
-        total_num_logits, dtype=torch.int32, device=idx_mapping.device
-    )
+    expanded_local_pos = idx_mapping.new_empty(total_num_logits)
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

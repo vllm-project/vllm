@@ -181,9 +181,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cpu.set_device(device)
 
     @classmethod
@@ -200,6 +198,15 @@ class CpuPlatform(Platform):
 
         if model_config is not None:
             model_config.disable_cascade_attn = True
+
+        # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
+        # which is still being resolved while this platform class is loading.
+        from vllm.triton_utils import HAS_TRITON
+
+        if cls.get_cpu_architecture() == CpuArchEnum.X86 and not HAS_TRITON:
+            logger.warning_once(
+                "Triton is not installed. triton-cpu is expected on x86 CPUs."
+            )
 
         cache_config = vllm_config.cache_config
 
@@ -397,11 +404,23 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # For efficient conv state memory access. The C++ causal_conv1d
-        # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
-        # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
-        if torch.cpu._is_avx512_bf16_supported():
-            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+        # NIXL's Mamba descriptors require DS conv state storage. Select it
+        # before cache shapes are created, while preserving an explicit layout.
+        conv_state_layout_env = "VLLM_SSM_CONV_STATE_LAYOUT"
+        if conv_state_layout_env not in os.environ:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            uses_nixl = kv_transfer_config is not None and any(
+                kv_transfer_config.has_connector(name)
+                for name in (
+                    "NixlConnector",
+                    "NixlPullConnector",
+                    "NixlPushConnector",
+                )
+            )
+            if uses_nixl:
+                os.environ[conv_state_layout_env] = "DS"
+            elif torch.cpu._is_avx512_bf16_supported():
+                os.environ[conv_state_layout_env] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
@@ -500,16 +519,15 @@ class CpuPlatform(Platform):
             return
 
         # reconcile attention and mamba page sizes
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
 
-        cls._align_hybrid_block_size(vllm_config, backend_cls)
+        cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
-        """
-        Discover NUMA topology and keep the last physical core of each numa
+        """Discover NUMA topology and keep the last physical core of each numa
         into one core group list for nixl start_kv_load()
         """
         SYS_NODE = "/sys/devices/system/node"
@@ -518,6 +536,7 @@ class CpuPlatform(Platform):
         if not (os.path.exists(SYS_NODE) and os.path.exists(SYS_CPU)):
             return []
 
+        use_highest_sibling = cls.get_cpu_architecture() == CpuArchEnum.X86
         core_rsv_for_kv = []
         for node in os.listdir(SYS_NODE):
             if not node.startswith("node") or not node[4:].isdigit():
@@ -550,7 +569,7 @@ class CpuPlatform(Platform):
                 else:
                     siblings = [cpu_id]
 
-                phys = min(siblings)
+                phys = max(siblings) if use_highest_sibling else min(siblings)
 
                 if phys not in seen_phys:
                     seen_phys.add(phys)
@@ -570,9 +589,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        """
-        Get device specific communicator class for distributed communication.
-        """
+        """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
 
     @classmethod
@@ -605,26 +622,30 @@ class CpuPlatform(Platform):
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
-                        logger.warning_once("Failed to import from vllm._C: %r", e)
+                        logger.warning_once(
+                            "Failed to import from vllm._C: %s", repr(e)
+                        )
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
                     except ImportError as e:
                         if ignored_msg not in e.msg:
                             logger.warning_once(
-                                "Failed to import from vllm._C_AVX512: %r", e
+                                "Failed to import from vllm._C_AVX512: %s", repr(e)
                             )
             else:
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
-                        logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
+                        logger.warning_once(
+                            "Failed to import from vllm._C_AVX2: %s", repr(e)
+                        )
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
-                logger.warning_once("Failed to import from vllm._C: %r", e)
+                logger.warning_once("Failed to import from vllm._C: %s", repr(e))
 
     @classmethod
     def pack_kv_cache(
@@ -632,9 +653,7 @@ class CpuPlatform(Platform):
         kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
-        """
-        Rewrite the kv cache shape for the current platform.
-        """
+        """Rewrite the kv cache shape for the current platform."""
         # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
         from vllm._custom_ops import cpu_attn_reshape_and_cache

@@ -193,6 +193,7 @@ class WeightSource(ABC):
 
         Returns:
             The held parameter names, or None to hold every one.
+
         """
         return None
 
@@ -329,8 +330,7 @@ class WeightTransferUpdateRequest:
 
 
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
-    """
-    Base class for weight transfer engines that handle transport of model weights
+    """Base class for weight transfer engines that handle transport of model weights
     from a trainer to inference workers.
 
     This abstraction separates weight transfer transport logic from the worker
@@ -386,14 +386,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         device: torch.device,
         model: torch.nn.Module,
     ) -> None:
-        """
-        Initialize the weight transfer engine.
+        """Initialize the weight transfer engine.
 
         Args:
             config: The configuration for the weight transfer engine
             vllm_config: The full vLLM config (provides parallel/model config)
             device: The device this worker's model lives on
             model: The local model instance which will receive the weights
+
         """
         self.config = config
         self.vllm_config = vllm_config
@@ -449,8 +449,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             finalize_layerwise_reload(self.model, self.model_config)
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
-        """
-        Construct typed init info from dict with validation.
+        """Construct typed init info from dict with validation.
 
         Args:
             init_dict: Dictionary containing backend-specific initialization parameters
@@ -460,6 +459,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Raises:
             ValueError: If init_dict is invalid for this backend
+
         """
         try:
             return self.init_info_cls(**init_dict)
@@ -469,8 +469,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             ) from e
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> TUpdateInfo:
-        """
-        Construct typed update info from dict with validation.
+        """Construct typed update info from dict with validation.
 
         Args:
             update_dict: Dictionary containing backend-specific update parameters
@@ -480,6 +479,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Raises:
             ValueError: If update_dict is invalid for this backend
+
         """
         try:
             return self.update_info_cls(**update_dict)
@@ -490,19 +490,18 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def init_transfer_engine(self, init_info: TInitInfo) -> None:
-        """
-        Initialize the weight transfer mechanism.
+        """Initialize the weight transfer mechanism.
         This is called once at the beginning of training.
 
         Args:
             init_info: Backend-specific initialization info
+
         """
         raise NotImplementedError
 
     @abstractmethod
     def start_weight_update(self) -> None:
-        """
-        Prepare the engine for a new weight update.
+        """Prepare the engine for a new weight update.
 
         Engines that receive weights in checkpoint format initialize layerwise reloading
         here, else this is typically a no-op.
@@ -512,8 +511,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def finish_weight_update(self) -> None:
-        """
-        Finalize the current weight update.
+        """Finalize the current weight update.
 
         Checkpoint-format engines finalize layerwise reloading here; engines
         that apply weights in place leave this as a no-op.
@@ -521,11 +519,11 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         raise NotImplementedError
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
-        """
-        Receive one weight update chunk and load it into the model.
+        """Receive one weight update chunk and load it into the model.
 
         Args:
             update_info: Dictionary containing backend-specific update info
+
         """
         trace = None
         if self.config.reload_mode == "trace":
@@ -549,19 +547,18 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:
-        """
-        Receive weights from the trainer and load them into the model.
+        """Receive weights from the trainer and load them into the model.
 
         Args:
             update_info: Backend-specific update info containing parameter metadata
                         and any backend-specific data
+
         """
         raise NotImplementedError
 
     @abstractmethod
     def shutdown(self) -> None:
-        """
-        Shutdown the weight transfer engine.
+        """Shutdown the weight transfer engine.
         This should be called when the worker is shutting down.
         """
         raise NotImplementedError

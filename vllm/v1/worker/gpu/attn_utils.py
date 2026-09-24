@@ -95,6 +95,7 @@ class FastPrefillHelper:
         cu_num_logits_np: np.ndarray,
         has_prefill: bool,
         batch_desc: "BatchExecutionDescriptor",
+        num_active_loras: int = 0,
     ) -> FastPrefillBatchMetadata | None:
         if (
             not has_prefill
@@ -116,7 +117,7 @@ class FastPrefillHelper:
             num_reqs=num_reqs,
             num_tokens=num_logits,
             uniform_token_count=None,
-            num_active_loras=0,
+            num_active_loras=num_active_loras,
         )
         num_logits_padded = min(desc.num_tokens, self.max_num_tokens)
         return FastPrefillBatchMetadata(
@@ -426,6 +427,7 @@ def build_attn_metadata(
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
+    token_to_req_indices: torch.Tensor | None = None
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
         if not attn_groups[i]:
@@ -472,6 +474,7 @@ def build_attn_metadata(
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             req_idx=req_idx,
+            _token_to_req_indices_cache=token_to_req_indices,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -497,6 +500,7 @@ def build_attn_metadata(
                 )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+        token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
     return attn_metadata
 
 
