@@ -324,6 +324,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_IHC_FUSION_MODE: Literal["auto", "cross", "single", "off"] = "auto"
 
 
 def get_default_cache_root():
@@ -2195,6 +2196,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
     "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    # HY V4 iHC scheduling when HPC ops are available. "cross" carries iHC
+    # state across decoder layers, "single" only fuses within each layer,
+    # "off" preserves the existing schedule, and "auto" uses cross-layer
+    # fusion for batches with at least eight tokens.
+    "VLLM_IHC_FUSION_MODE": lambda: os.getenv("VLLM_IHC_FUSION_MODE", "auto"),
     # Whether to skip version suffix when building package
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))

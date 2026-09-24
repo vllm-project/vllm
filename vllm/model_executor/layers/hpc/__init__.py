@@ -8,6 +8,7 @@ from vllm.model_executor.layers.hpc.gated_mla import (
 from vllm.model_executor.layers.hpc.hpc_ihc import (
     HpcIHCHead,
     HpcIHCPost,
+    HpcIHCPostPre,
     HpcIHCPre,
 )
 from vllm.model_executor.layers.hpc.hpc_module import HpcModule
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.hpc.rope_norm import HpcRopeNorm, QkNormPolicy
 __all__ = [
     "HpcIHCHead",
     "HpcIHCPost",
+    "HpcIHCPostPre",
     "HpcIHCPre",
     "HpcModule",
     "HpcRopeNorm",
