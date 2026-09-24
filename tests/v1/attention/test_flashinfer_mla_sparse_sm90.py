@@ -241,6 +241,14 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     assert kwargs["q_data_type"] == torch.bfloat16
     assert kwargs["kv_data_type"] == kv_dtype
 
+    # Replanning a smaller batch must clear the previous rows' lengths.
+    state.plan(1, torch.tensor([TOPK], dtype=torch.int32))
+    assert state._kv_cpu.tolist() == [0, TOPK, TOPK, TOPK, TOPK]
+    assert state._lens_cpu.tolist() == [TOPK, 0, 0, 0]
+    state.plan(0, torch.empty(0, dtype=torch.int32))
+    assert state._kv_cpu.tolist() == [0, 0, 0, 0, 0]
+    assert state._lens_cpu.tolist() == [0, 0, 0, 0]
+
 
 @pytest.mark.parametrize(
     "spec_dtype,expected",
@@ -253,14 +261,6 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
 def test_plan_dtype_translates_fp8_storage(spec_dtype, expected):
     """uint8 fp8 storage is planned as float8_e4m3fn; others pass through."""
     assert FlashInferMLASparseSM90Builder._plan_dtype(spec_dtype) == expected
-
-    # Replanning a smaller batch must clear the previous rows' lengths.
-    state.plan(1, torch.tensor([TOPK], dtype=torch.int32))
-    assert state._kv_cpu.tolist() == [0, TOPK, TOPK, TOPK, TOPK]
-    assert state._lens_cpu.tolist() == [TOPK, 0, 0, 0]
-    state.plan(0, torch.empty(0, dtype=torch.int32))
-    assert state._kv_cpu.tolist() == [0, 0, 0, 0, 0]
-    assert state._lens_cpu.tolist() == [0, 0, 0, 0]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
