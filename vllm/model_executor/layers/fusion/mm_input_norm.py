@@ -262,23 +262,16 @@ class IdentityInputNorm(nn.Module):
 
     Not a no-op: with ``mm_device_do_normalize`` enabled, raw ``uint8``
     pixels travel to the device unprocessed and must be cast to
-    ``visual_dtype`` here (or copied into the ``out`` buffer when given).
+    ``visual_dtype`` here.
     """
 
     # Pixels arrive already processed; no fixed input dtype.
     input_dtype: torch.dtype | None = None
 
     def forward(
-        self,
-        pixel_values: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
+        self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
-        if out is None:
-            return pixel_values.to(visual_dtype, copy=False)
-        out_view = out[: pixel_values.shape[0]]
-        out_view.copy_(pixel_values)
-        return out_view
+        return pixel_values.to(visual_dtype, copy=False)
 
 
 @CustomOp.register("fused_mm_input_norm")
@@ -361,117 +354,58 @@ class FusedMMInputNorm(CustomOp):
     # Internal helpers shared by the platform-specific forward_* methods
     # ------------------------------------------------------------------
 
-    def _prepare_output(
-        self,
-        pixel_values: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None,
-    ) -> tuple[int, int, torch.Tensor | None]:
-        """Validate ``out`` (if provided) and return ``(patches, size, out_view)``."""
+    @staticmethod
+    def _unpack_2d(pixel_values: torch.Tensor) -> tuple[int, int]:
         assert pixel_values.ndim == 2, (
             f"pixel_values must be 2D (patches, size), got {pixel_values.dim()}D "
             f"with shape {tuple(pixel_values.shape)}"
         )
         patches, size = pixel_values.shape
+        return patches, size
 
-        out_view: torch.Tensor | None = None
-        if out is not None:
-            assert out.dim() == 2, (
-                f"out must be 2D (patches, size), got {out.dim()}D "
-                f"with shape {tuple(out.shape)}"
-            )
-            assert out.shape[0] >= patches, (
-                f"out.shape[0]={out.shape[0]} < pixel_values.shape[0]={patches}"
-            )
-            assert out.shape[1] == size, (
-                f"out.shape[1]={out.shape[1]} != pixel_values.shape[1]={size}"
-            )
-            assert out.dtype == visual_dtype, (
-                f"out.dtype={out.dtype} != visual_dtype={visual_dtype}"
-            )
-            assert out.is_contiguous(), "out must be contiguous"
-            assert out.device == pixel_values.device, (
-                f"out.device={out.device} != pixel_values.device={pixel_values.device}"
-            )
-            out_view = out[:patches]
-
-        return patches, size, out_view
+    def _patch_size(self, size: int) -> int:
+        assert size % self.channel == 0, (
+            f"size={size} is not divisible by channel={self.channel}"
+        )
+        return size // self.channel
 
     # ------------------------------------------------------------------
     # Platform-specific implementations
     # ------------------------------------------------------------------
 
     def forward_native(
-        self,
-        pixel_values: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
+        self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Pure PyTorch eager implementation.
 
         This is the semantic reference implementation and the fallback used
         on any platform without a specialised kernel.
         """
-        patches, size, out_view = self._prepare_output(pixel_values, visual_dtype, out)
-
-        assert size % self.channel == 0, (
-            f"size={size} is not divisible by channel={self.channel}"
-        )
-        patch_size = size // self.channel
+        patches, size = self._unpack_2d(pixel_values)
+        patch_size = self._patch_size(size)
 
         x = pixel_values.to(self._compute_dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
-        y = x.view(patches, size)
-        if out_view is None:
-            if y.dtype != visual_dtype:
-                y = y.to(visual_dtype)
-            return y
-        out_view.copy_(y)
-        return out_view
+        return x.view(patches, size).to(visual_dtype)
 
     def forward_cuda(
-        self,
-        pixel_values: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
+        self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
-        patches, size, out_view = self._prepare_output(pixel_values, visual_dtype, out)
+        patches, size = self._unpack_2d(pixel_values)
+        patch_size = self._patch_size(size)
 
-        assert size % self.channel == 0, (
-            f"size={size} is not divisible by channel={self.channel}"
-        )
-        patch_size = size // self.channel
+        x3 = pixel_values.contiguous().view(patches, self.channel, patch_size)
+        y = torch.empty((patches, size), dtype=visual_dtype, device=pixel_values.device)
+        y3 = y.view(patches, self.channel, patch_size)
 
-        # Materialize a contiguous copy once if needed; the kernel
-        # requires contiguous inputs.
-        x = pixel_values.contiguous()
-        x3 = x.view(patches, self.channel, patch_size)
-
-        # The Triton kernel writes in-place into a destination buffer, so
-        # this is the one path that genuinely needs ``out_view`` to exist
-        # before dispatch.
-        if out_view is None:
-            out_view = torch.empty(
-                (patches, size), dtype=visual_dtype, device=pixel_values.device
-            )
-        y3 = out_view.view(patches, self.channel, patch_size)
-
-        fused_mm_input_norm_triton(
-            x3,
-            y3,
-            self.weight,
-            self.bias,
-        )
-        return out_view
+        fused_mm_input_norm_triton(x3, y3, self.weight, self.bias)
+        return y
 
     def forward_xpu(
-        self,
-        pixel_values: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
+        self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """XPU fused custom kernel path.
 
@@ -481,28 +415,19 @@ class FusedMMInputNorm(CustomOp):
         bandwidth saving of transferring uint8 pixel_values. The fused
         kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         """
-        patches, size, out_view = self._prepare_output(pixel_values, visual_dtype, out)
-
         if pixel_values.dtype == torch.uint8 and self.weight.dtype == torch.float32:
-            y = torch.ops.vllm.xpu_fused_input_norm(
+            return torch.ops.vllm.xpu_fused_input_norm(
                 pixel_values, self.weight, self.bias, visual_dtype
             )
-            if out_view is None:
-                return y
-            out_view.copy_(y)
-            return out_view
 
         # Fall back to native for unsupported dtypes on XPU.
-        return self.forward_native(pixel_values, visual_dtype, out)
+        return self.forward_native(pixel_values, visual_dtype)
 
     def forward_oot(
-        self,
-        pixel_values: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
+        self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Out-of-tree platform override entrypoint."""
-        return self.forward_native(pixel_values, visual_dtype, out)
+        return self.forward_native(pixel_values, visual_dtype)
 
 
 def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
