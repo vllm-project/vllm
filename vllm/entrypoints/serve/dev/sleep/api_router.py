@@ -2,11 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from typing import Annotated
+
+from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.v1.engine import PauseMode
+
+from .metrics import sleep_mode_operation_metrics
 
 logger = init_logger(__name__)
 
@@ -19,29 +24,35 @@ router = APIRouter()
 
 
 @router.post("/sleep")
-async def sleep(raw_request: Request):
-    # get POST params
-    level = raw_request.query_params.get("level", "1")
-    mode = raw_request.query_params.get("mode", "abort")
-    await engine_client(raw_request).sleep(int(level), mode)
-    return Response(status_code=200)
+async def sleep(
+    raw_request: Request,
+    level: Annotated[int, Query(ge=0, le=2)] = 1,
+    mode: Annotated[PauseMode, Query()] = "abort",
+) -> JSONResponse:
+    with sleep_mode_operation_metrics().record("sleep"):
+        await engine_client(raw_request).sleep(level, mode)
+    return JSONResponse(content={"status": "sleeping", "level": level})
 
 
 @router.post("/release_kv_cache_memory")
-async def release_kv_cache_memory(raw_request: Request):
-    await engine_client(raw_request).release_kv_cache_memory()
-    return Response(status_code=200)
+async def release_kv_cache_memory(raw_request: Request) -> JSONResponse:
+    with sleep_mode_operation_metrics().record("release_kv_cache_memory"):
+        await engine_client(raw_request).release_kv_cache_memory()
+    return JSONResponse(content={"status": "kv_cache_released"})
 
 
 @router.post("/wake_up")
-async def wake_up(raw_request: Request):
+async def wake_up(raw_request: Request) -> JSONResponse:
     tags = raw_request.query_params.getlist("tags")
     if tags == []:
         # set to None to wake up all tags if no tags are provided
         tags = None
     logger.info("wake up the engine with tags: %s", tags)
-    await engine_client(raw_request).wake_up(tags)
-    return Response(status_code=200)
+    with sleep_mode_operation_metrics().record("wake"):
+        fully_awake = await engine_client(raw_request).wake_up(tags)
+    return JSONResponse(
+        content={"status": "awake" if fully_awake else "sleeping", "tags_woken": tags}
+    )
 
 
 @router.get("/is_sleeping")
