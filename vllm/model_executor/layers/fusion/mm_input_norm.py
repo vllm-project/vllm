@@ -25,10 +25,7 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.custom_op import CustomOp
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config,
-    get_processor_config,
-)
+from vllm.transformers_utils.processor import cached_get_processor, get_processor_config
 from vllm.triton_utils import tl, triton
 
 
@@ -153,7 +150,12 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     revision = model_config.revision
 
     config = get_processor_config(model, revision=revision)
-    image_processor = cached_image_processor_from_config(model_config)
+    # NOTE: do not use cached_image_processor_from_config here — it merges
+    # mm_processor_kwargs, which mm_device_do_normalize poisons with
+    # do_normalize=False.
+    image_processor = cached_get_processor(
+        model, revision=revision, trust_remote_code=model_config.trust_remote_code
+    ).image_processor
 
     def resolve(key: str) -> Any:
         """Processor config value, falling back to the image_processor."""
@@ -284,7 +286,7 @@ class FusedMMInputNorm(CustomOp):
         patch_size = self._patch_size(size)
 
         # weight/bias are fp32, so type promotion makes the arithmetic fp32
-        x = pixel_values.view(patches, self.channel, patch_size)
+        x = pixel_values.reshape(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )

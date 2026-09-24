@@ -16,13 +16,13 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 
-# The fused Triton kernel cannot run on CPU tensors, so derive the test device
-# from the active vLLM platform and skip accelerator-only tests on CPU.
-_DEVICE_TYPE = current_platform.device_type
-_DEVICE = torch.device(_DEVICE_TYPE)
+# Module-level tests run on any platform: the CPU platform exercises
+# forward_native, accelerators exercise the fused kernel. Only the raw
+# kernel tests require an accelerator.
+_DEVICE = torch.device(current_platform.device_type)
 
 requires_accelerator = pytest.mark.skipif(
-    _DEVICE_TYPE == "cpu",
+    current_platform.is_cpu(),
     reason="fused Triton kernel requires a CUDA/XPU accelerator",
 )
 requires_triton = pytest.mark.skipif(not HAS_TRITON, reason="requires Triton")
@@ -90,7 +90,6 @@ def _check_against_reference(
 # Module-level behavior
 # ===========================================================================
 @requires_vllm_config
-@requires_accelerator
 class TestFusedMMInputNormModule:
     def test_matches_reference_above_cudnn_grid_limit(self):
         """num_patches above the old cuDNN batch-norm grid limit (~65535)
@@ -113,7 +112,6 @@ class TestFusedMMInputNormModule:
 # dtype coverage
 # ===========================================================================
 @requires_vllm_config
-@requires_accelerator
 class TestFusedMMInputNormDtypes:
     @pytest.mark.parametrize(
         "in_dtype,out_dtype",
@@ -153,7 +151,6 @@ class TestFusedMMInputNormDtypes:
 # Shape / channel coverage
 # ===========================================================================
 @requires_vllm_config
-@requires_accelerator
 class TestFusedMMInputNormShapes:
     @pytest.mark.parametrize("channel", [1, 3, 4])
     def test_channel_variants(self, channel: int):
@@ -183,7 +180,6 @@ class TestFusedMMInputNormShapes:
 # Input handling: non-contiguous inputs
 # ===========================================================================
 @requires_vllm_config
-@requires_accelerator
 class TestFusedMMInputNormInputHandling:
     def test_non_contiguous_input_matches_reference(self):
         set_random_seed(0)

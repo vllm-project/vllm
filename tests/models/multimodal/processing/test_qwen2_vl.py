@@ -5,11 +5,14 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -197,3 +200,61 @@ def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
         processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
         spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
         assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize(
+    "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
+)
+@pytest.mark.parametrize("num_imgs", [1, 2])
+def test_mm_device_do_normalize(
+    image_assets: ImageTestAssets, model_id: str, num_imgs: int
+) -> None:
+    """Device-side normalisation must reproduce the on-CPU processor result.
+
+    Runs on any platform: the CPU platform exercises the ``forward_native``
+    fallback, accelerators exercise the fused kernel.
+    """
+    device = current_platform.device_type
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": num_imgs},
+    )
+    ctx.model_config.multimodal_config.mm_device_do_normalize = False
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    # Build the image str / prompt based on the number of images we pass
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * num_imgs
+    mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
+
+    processed_inputs_with_normalize = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+    )
+    pixel_values_with_normalize = processed_inputs_with_normalize[
+        "mm_kwargs"
+    ].get_data()["pixel_values"]
+    dtype = pixel_values_with_normalize.dtype
+
+    processed_inputs_without_normalize = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={"do_normalize": False, "do_rescale": False},
+    )
+    pixel_values_without_normalize = processed_inputs_without_normalize[
+        "mm_kwargs"
+    ].get_data()["pixel_values"]
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = True
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+
+    # With normalisation disabled, the processor emits raw uint8 pixels,
+    # matching the production mm_device_do_normalize path.
+    assert pixel_values_without_normalize.dtype == torch.uint8
+    pixel_values_do_input_norm = input_norm(
+        pixel_values_without_normalize.to(device), dtype
+    )
+
+    torch.testing.assert_close(
+        pixel_values_with_normalize.to(device), pixel_values_do_input_norm
+    )
