@@ -548,7 +548,6 @@ numpy==2.2.6
     #   sacrebleu
     #   scikit-learn
     #   scipy
-    #   sentence-transformers
     #   soundfile
     #   soxr
     #   tensorizer
@@ -949,8 +948,10 @@ scipy==1.18.0
     #   pytrec-eval-terrier
     #   scikit-learn
     #   sentence-transformers
-sentence-transformers==5.7.0
-    # via mteb
+sentence-transformers==5.2.0
+    # via
+    #   -r requirements/test/xpu.in
+    #   mteb
 sentencepiece==0.2.1
     # via -r requirements/test/../common.txt
 sentry-sdk==2.68.0
@@ -1060,7 +1061,6 @@ tokenizers==0.23.1
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   cohere
-    #   sentence-transformers
     #   transformers
 torch==2.14.0+xpu
     # via
