@@ -550,7 +550,11 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
-        elif moe_config.has_hash_routing and cls.is_monolithic():
+        elif (
+            moe_config.has_hash_routing
+            and cls.is_monolithic()
+            and not cls._supports_hash_routing()
+        ):
             return False, _make_reason("hash routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
@@ -627,6 +631,15 @@ class FusedMoEExperts(ABC):
         in addition to the experts if certain routers are not supported.
         """
         return True
+
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing itself.
+
+        Kernels that return True receive `input_ids` and `hash_indices_table`
+        in `apply()` for layers with a hash-routing table.
+        """
+        return False
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -1563,6 +1576,8 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1575,6 +1590,11 @@ class FusedMoEKernelMonolithicImpl:
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
+        hash_kwargs = (
+            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
+            if hash_indices_table is not None
+            else {}
+        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1590,6 +1610,7 @@ class FusedMoEKernelMonolithicImpl:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            **hash_kwargs,
         )
 
         if isinstance(fused_out, UnfinalizedMoEOutput):
@@ -1698,6 +1719,8 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1713,6 +1736,8 @@ class FusedMoEKernel:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
     def apply(
