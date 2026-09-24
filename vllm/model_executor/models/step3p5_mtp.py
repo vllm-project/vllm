@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 class SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
