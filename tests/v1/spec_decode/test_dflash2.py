@@ -282,3 +282,74 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+
+
+def test_windowed_drafter_on_full_attention_pages_drops_aot_schedule(monkeypatch):
+    """A windowed drafter keeps its window on FullAttentionSpec when its pages are
+    booked as full attention. FlashAttention's AOT schedule must still be dropped
+    for it, or the draft collapses under full CUDA graphs (see #54374).
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    def group(sliding_window):
+        builder = SimpleNamespace(
+            aot_schedule=True,
+            kv_cache_spec=FullAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                sliding_window=sliding_window,
+            ),
+        )
+        return SimpleNamespace(get_metadata_builder=lambda: builder), builder
+
+    windowed, windowed_builder = group(2048)
+    full, full_builder = group(None)
+
+    def set_attn_base(self, *args):
+        self.attn_groups = [[windowed, full]]
+
+    monkeypatch.setattr(DraftModelSpeculator, "set_attn", set_attn_base)
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.max_num_tokens = 4
+    speculator.device = torch.device("cpu")
+    speculator.requires_non_causal = False
+    speculator.model = SimpleNamespace()
+    speculator.set_attn(None, None, None, None, None)
+
+    assert windowed_builder.aot_schedule is False
+    assert full_builder.aot_schedule is True
+
+
+def test_glm5next_target_books_windowed_draft_layers_as_full_attention():
+    """Only draft layers reach the target hook. GLM-5.3-Flash books sliding-window
+    ones as full attention at its block size, keeping the window for compute.
+    """
+    from vllm.models.glm5next.common.model import Glm5NextForCausalLM
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+
+    swa = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=2048,
+    )
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.draft_attn_layer_names = {"draft.attn"}
+    speculator.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=640)
+    )
+
+    specs = {"draft.attn": swa, "target.attn": swa}
+    speculator.adapt_draft_kv_cache_spec(specs, Glm5NextForCausalLM)
+    draft = specs["draft.attn"]
+    assert type(draft) is FullAttentionSpec
+    assert (draft.block_size, draft.sliding_window) == (640, 2048)
+    assert specs["target.attn"] is swa
+
+    specs = {"draft.attn": swa}
+    speculator.adapt_draft_kv_cache_spec(specs, SimpleNamespace())
+    assert specs["draft.attn"] is swa

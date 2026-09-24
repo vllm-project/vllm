@@ -1220,11 +1220,14 @@ def _get_kv_cache_groups_glm5_next(
         if not isinstance(spec, (MambaSpec, KpoolTailSpec))
     }
     if not mamba_specs or not all(
-        type(spec) is MLAAttentionSpec for spec in attn_specs.values()
+        type(spec) in (MLAAttentionSpec, FullAttentionSpec)
+        for spec in attn_specs.values()
     ):
         return None
-
-    mla_specs = cast(dict[str, MLAAttentionSpec], attn_specs)
+    mla_specs = cast(
+        dict[str, MLAAttentionSpec],
+        {k: v for k, v in attn_specs.items() if type(v) is MLAAttentionSpec},
+    )
     idx_pages = {
         spec.page_size_bytes for spec in mla_specs.values() if spec.tokens_per_state > 1
     }
@@ -1238,7 +1241,8 @@ def _get_kv_cache_groups_glm5_next(
     assert len(mla_pages) == 1
     mla_page = mla_pages.pop()
     uniform_spec = UniformTypeKVCacheSpecs.from_specs(attn_specs)
-    assert uniform_spec is not None
+    if uniform_spec is None:
+        return None
 
     tail_group: KVCacheGroupSpec | None = None
     if tail_specs:
@@ -1309,7 +1313,10 @@ def _glm5_next_tensor_layout(
     tail_group: KVCacheGroupSpec | None = None
     for group in uniform_groups:
         inner = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).kv_cache_specs
-        if all(type(spec) is MLAAttentionSpec for spec in inner.values()):
+        if all(
+            type(spec) in (MLAAttentionSpec, FullAttentionSpec)
+            for spec in inner.values()
+        ) and any(type(spec) is MLAAttentionSpec for spec in inner.values()):
             attn_group = group
         elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
             tail_group = group
@@ -1319,20 +1326,26 @@ def _glm5_next_tensor_layout(
         return None
 
     attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
-    mla_inner = cast(dict[str, MLAAttentionSpec], attn_uniform.kv_cache_specs)
-    if not all(
-        type(spec) is MLAAttentionSpec and spec.page_size_padded is None
-        for spec in mla_inner.values()
-    ):
+    attn_inner = cast(dict[str, FullAttentionSpec], attn_uniform.kv_cache_specs)
+    mla_specs = {
+        name: spec
+        for name, spec in attn_inner.items()
+        if type(spec) is MLAAttentionSpec
+    }
+    if not all(spec.page_size_padded is None for spec in attn_inner.values()):
         return None
     mla_names = [
-        name for name in attn_group.layer_names if mla_inner[name].tokens_per_state == 1
+        name
+        for name in attn_group.layer_names
+        if name in mla_specs and mla_specs[name].tokens_per_state == 1
     ]
     idx_names = [
-        name for name in attn_group.layer_names if mla_inner[name].tokens_per_state > 1
+        name
+        for name in attn_group.layer_names
+        if name in mla_specs and mla_specs[name].tokens_per_state > 1
     ]
-    mla_pages = {mla_inner[name].page_size_bytes for name in mla_names}
-    idx_pages = {mla_inner[name].page_size_bytes for name in idx_names}
+    mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
+    idx_pages = {mla_specs[name].page_size_bytes for name in idx_names}
     if len(mla_pages) != 1 or len(idx_pages) != 1:
         return None
     mla_page = mla_pages.pop()
@@ -1597,8 +1610,8 @@ def _get_kv_cache_bytes_per_block(
 ) -> int:
     """Return the largest cache group's bytes per block."""
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
-        return len(mla_names) * mla_page + len(idx_names) * idx_page
+        attn_group, *_ = glm5_layout
+        return attn_group.kv_cache_spec.page_size_bytes
 
     bytes_per_block = max(
         sum(
@@ -1706,7 +1719,7 @@ def get_kv_cache_config_from_groups(
             tail_names,
             _,
         ) = glm5_layout
-        bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        bytes_per_block = attn_group.kv_cache_spec.page_size_bytes
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
         )
@@ -1748,6 +1761,12 @@ def get_kv_cache_config_from_groups(
                     UniformTypeKVCacheSpecs, tail_group.kv_cache_spec
                 ).kv_cache_specs
                 add_tensor(tail_name, tail_specs[tail_name], offset)
+
+        offset = (len(mla_names) * mla_page + len(idx_names) * idx_page) * num_blocks
+        for name, spec in attn_specs.items():
+            if type(spec) is FullAttentionSpec:
+                add_tensor(name, spec, offset)
+                offset += spec.page_size_bytes * num_blocks
 
         return KVCacheConfig(
             num_blocks=num_blocks,
@@ -2484,7 +2503,7 @@ def _max_memory_usage_bytes_from_groups(
         )
         if tail_names:
             total_blocks += 1
-        return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
+        return total_blocks * uniform_spec.page_size_bytes
 
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0

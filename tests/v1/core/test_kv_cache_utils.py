@@ -4414,3 +4414,76 @@ def test_trailing_layer_fallback_requires_exact_partition():
     _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
 
     assert not any(g.is_eagle_group for g in trimmed)
+
+
+def test_glm5_grouping_does_not_promote_sliding_window_layers():
+    """The GLM layout must not decide which SWA layers use full allocation."""
+    specs, _ = _glm5_like_kv_cache_spec()
+    swa = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=2048,
+    )
+    specs["layers.0.swa"] = swa
+    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    assert kv_cache_utils._get_kv_cache_groups_glm5_next(config, specs) is None
+    assert specs["layers.0.swa"] is swa
+
+
+def test_get_kv_cache_config_glm5_with_full_attention_layers():
+    """Full-attention pages join MLA/indexer allocation without spec rewriting."""
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_spec, _ = _glm5_like_kv_cache_spec()
+    mla_block_size = kv_cache_spec["layers.3.attn"].block_size
+    for i in range(5):
+        kv_cache_spec[f"draft.layers.{i}.attn"] = FullAttentionSpec(
+            block_size=mla_block_size,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+        )
+    mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
+    idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
+    draft_page = 2 * 8 * 128 * 2 * mla_block_size
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    uniform_groups = [
+        g for g in groups if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+    ]
+    assert len(groups) == 5
+    assert len(uniform_groups) == 1
+    attn_specs = uniform_groups[0].kv_cache_spec.kv_cache_specs
+    assert attn_specs == {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if isinstance(spec, FullAttentionSpec)
+    }
+
+    layout = kv_cache_utils._glm5_next_tensor_layout(groups)
+    assert layout is not None
+
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    assert bytes_per_block == 11 * mla_page + 11 * idx_page + 5 * draft_page
+
+    attn_blocks = uniform_groups[0].kv_cache_spec.max_memory_usage_pages(vllm_config)
+    mamba_blocks = 4 * (1 + new_mamba_spec().num_speculative_blocks)
+    assert kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups) == (
+        (attn_blocks + mamba_blocks) * bytes_per_block
+    )
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, bytes_per_block * 100 + 1
+    )
+    assert kv_cache_config.num_blocks == 100
+    tensors = _tensor_by_layer(kv_cache_config)
+    target_region = (11 * mla_page + 11 * idx_page) * 100
+    for i in range(5):
+        t = tensors[f"draft.layers.{i}.attn"]
+        assert t.block_stride == draft_page
+        assert t.offset == target_region + i * draft_page * 100
+    assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
