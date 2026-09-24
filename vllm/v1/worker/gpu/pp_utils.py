@@ -70,7 +70,10 @@ class PPHandler:
 
     Uses a dedicated NCCL communicator (sibling of the PP `device_group`)
     for the broadcast so it does not serialize on the wire with the
-    inter-stage hidden-state p2p send/recv ops.
+    inter-stage hidden-state p2p send/recv ops. The last rank still posts
+    immediately; its sends queue on `broadcast_stream`, so only the head send
+    can be active while waiting for delayed receivers. Every device-sync
+    boundary must therefore flush the PP group collectively first.
     """
 
     def __init__(
@@ -80,6 +83,7 @@ class PPHandler:
         device: torch.device,
         async_scheduling: bool | None,
     ):
+        assert async_scheduling is not None, "async scheduling must be resolved"
         pp_group = get_pp_group()
         self.is_last_rank = pp_group.is_last_rank
         self.last_rank = pp_group.last_rank

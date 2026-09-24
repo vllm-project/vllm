@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
 
 
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,6 +160,53 @@ def test_postprocess_state_scalar_with_int32_mapping(
         [expected_value, 9, expected_value, 9], dtype=torch.int32, device="cuda"
     )
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pp_warmup_postprocess_is_state_neutral() -> None:
+    device = torch.device("cuda")
+    recurrent_state = torch.full((2, 8), 7, dtype=torch.float32, device=device)
+    block_table = torch.tensor([[0, 1]], dtype=torch.int32, device=device)
+
+    def tensor(values: list[int], dtype: torch.dtype) -> torch.Tensor:
+        return torch.tensor(values, dtype=dtype, device=device)
+
+    ctx = MambaSpecDecodeGPUContext(
+        state_base_addrs=tensor([recurrent_state.data_ptr()], torch.int64),
+        state_block_strides=tensor(
+            [recurrent_state.stride(0) * recurrent_state.element_size()], torch.int64
+        ),
+        state_elem_sizes=tensor([recurrent_state.element_size()], torch.int32),
+        state_inner_sizes=tensor([recurrent_state.shape[1]], torch.int64),
+        state_conv_widths=tensor([0], torch.int32),
+        state_group_indices=tensor([0], torch.int32),
+        state_dim_row_count=tensor([0], torch.int32),
+        state_dim_row_stride=tensor([0], torch.int64),
+        block_size=8,
+        num_states=1,
+        mamba_group_ids=[0],
+        num_groups=1,
+        num_accepted_tokens_out=torch.zeros(4, dtype=torch.int32, device=device),
+        block_table_ptrs=tensor([block_table.data_ptr()], torch.int64),
+        block_table_stride_req=block_table.stride(0),
+        is_initialized=True,
+    )
+    state = object.__new__(MambaHybridModelState)
+    state.num_accepted_tokens_gpu = tensor([9, 8, 7, 6], torch.int32)
+    state._align_mode = True
+    state._mamba_ctx = ctx
+    state._mamba_state_idx_gpu = tensor([0, 0, 0, 0], torch.int32)
+
+    accepted_before = state.num_accepted_tokens_gpu.clone()
+    recurrent_before = recurrent_state.clone()
+    state.warmup_postprocess_state(
+        tensor([-1], torch.int64),
+        tensor([3], torch.int32),
+        tensor([8, 8, 8, 8], torch.int32),
+    )
+
+    torch.testing.assert_close(state.num_accepted_tokens_gpu, accepted_before)
+    torch.testing.assert_close(recurrent_state, recurrent_before)
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:

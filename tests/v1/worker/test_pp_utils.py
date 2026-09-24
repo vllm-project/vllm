@@ -7,10 +7,25 @@ from contextlib import nullcontext
 from unittest.mock import Mock, call
 
 import numpy as np
+import pytest
 import torch
 
-from vllm.v1.worker.gpu import pp_utils
+from vllm.v1.worker.gpu import model_runner, pp_utils
 from vllm.v1.worker.gpu.pp_utils import PPHandler
+
+
+def _cuda_handler(max_sample_len=6):
+    handler = object.__new__(PPHandler)
+    handler.is_last_rank = True
+    handler.max_sample_len = max_sample_len
+    handler.num_speculative_steps = max_sample_len - 1
+    handler.recv_launch_delay = 0
+    handler.last_rank = 1
+    handler.broadcast_group = Mock()
+    handler.device = torch.device("cuda")
+    handler.main_stream = torch.cuda.current_stream()
+    handler.broadcast_stream = torch.cuda.Stream()
+    return handler
 
 
 def _batch(num_computed, prefill_len, num_scheduled):
@@ -134,3 +149,65 @@ def test_receive_launch_is_idempotent_when_cpu_event_is_none(monkeypatch):
     assert slot.launched
     handler.broadcast_stream.wait_stream.assert_called_once_with(handler.main_stream)
     assert [item.args[0] for item in broadcast.call_args_list] == tensors
+
+
+def test_alloc_combined_keeps_unbind_views_16_byte_aligned():
+    for num_reqs in range(1, 9):
+        combined = pp_utils._alloc_combined(num_reqs, torch.device("cpu"))
+        num_sampled, num_rejected = combined.unbind(dim=0)
+        assert num_sampled.data_ptr() % 16 == 0
+        assert num_rejected.data_ptr() % 16 == 0
+        assert combined.shape[1] >= num_reqs
+
+
+def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
+    calls = []
+    monkeypatch.setattr(model_runner, "post_update", lambda *args: calls.append(args))
+
+    runner = object.__new__(model_runner.GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.pp_handler = Mock(max_sample_len=3)
+    runner.req_states = Mock()
+    runner.model_state = Mock()
+
+    runner.warmup_pp_decode_update()
+
+    assert len(calls) == 1
+    args = calls[0]
+    idx_mapping, _, _, output_bin_counts = args[:4]
+    sampled_tokens, num_sampled, num_rejected, query_start_loc = args[4:8]
+    assert len(args) == 10
+    assert idx_mapping.tolist() == [-1] and idx_mapping.dtype == torch.int64
+    assert output_bin_counts is None
+    assert query_start_loc is None
+    assert sampled_tokens.shape == (1, 3) and sampled_tokens.dtype == torch.int64
+    assert num_sampled.dtype == torch.int32
+    assert num_rejected.dtype == torch.int32
+    runner.model_state.warmup_postprocess_state.assert_called_once_with(
+        idx_mapping,
+        num_sampled,
+        runner.req_states.num_computed_tokens.gpu,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA stream")
+def test_broadcast_pads_plain_sampler_rows_to_max_sample_len(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        pp_utils.torch.distributed,
+        "broadcast",
+        lambda tensor, **kw: sent.append(tensor),
+    )
+    handler = _cuda_handler()
+    batch = _batch(num_computed=[10], prefill_len=[8], num_scheduled=[1])
+
+    handler.broadcast(
+        torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+        torch.ones(1, dtype=torch.int32, device="cuda"),
+        torch.zeros(1, dtype=torch.int32, device="cuda"),
+        batch,
+    )
+
+    assert sent[0].shape == (1, 6)
+    assert sent[1].shape == (2, 4)
+    torch.accelerator.synchronize()

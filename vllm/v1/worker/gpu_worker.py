@@ -1229,7 +1229,8 @@ class Worker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if not forward_pass and self.use_v2_model_runner:
             # SchedulerOutput is replicated across PP ranks, so this flush
-            # boundary is group-uniform.
+            # boundary is group-uniform. The runner's zero-token launch is an
+            # additional safety net for direct runner invocations.
             self.flush_pending_collectives()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
