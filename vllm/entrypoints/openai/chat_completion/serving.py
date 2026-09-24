@@ -249,7 +249,8 @@ class OpenAIServingChat(GenerateBaseServing):
             message for message in request.messages if message["role"] == "system"
         ]
         if not system_messages or (
-            len(system_messages) == 1 and request.messages[0] is system_messages[0]
+            len(system_messages) == 1
+            and request.messages[0] == system_messages[0]
         ):
             return
 
@@ -262,11 +263,12 @@ class OpenAIServingChat(GenerateBaseServing):
 
         merged_system = {
             "role": "system",
-            "content": "".join(system_texts),
+            "content": "\n".join(system_texts),
         }
         request.messages = [
             merged_system,
-            *(message for message in request.messages if message not in system_messages),
+            *(message for message in request.messages
+              if message not in system_messages),
         ]
 
     async def render_chat_request(
