@@ -123,6 +123,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
+    VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -1180,6 +1181,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_FORCE_FIRST_CONFIG": lambda: (
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
         in ("1", "true")
+    ),
+    # Maximum compiler threads per worker for registered CUDA Triton JIT warmup.
+    # Set to 1 for serial warmup. Does not affect runtime JIT or autotuning.
+    "VLLM_TRITON_JIT_WARMUP_NUM_THREADS": lambda: int(
+        os.getenv("VLLM_TRITON_JIT_WARMUP_NUM_THREADS", "4")
     ),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
@@ -2272,6 +2278,7 @@ def compile_factors() -> dict[str, object]:
     hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
