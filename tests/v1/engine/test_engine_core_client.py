@@ -214,6 +214,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
+    client._kv_event_sources = {}
     return client
 
 
@@ -1490,3 +1491,57 @@ def test_ready_response_queries_executor_with_weight_transfer():
 
     executor.supports_draft_weight_updates.assert_called_once()
     assert response.supports_draft_weight_updates is True
+
+
+def test_apply_ready_response_retains_kv_event_sources():
+    """Each engine's resolved publisher config is kept by DP rank; engines
+    without KV events contribute nothing."""
+    import msgspec
+
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
+    client._kv_event_sources = {}
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+    )
+
+    def ready(rank: int, config: KVEventsConfig | None) -> bytes:
+        return msgspec.msgpack.encode(
+            EngineCoreReadyResponse(
+                max_model_len=8192,
+                num_gpu_blocks=100,
+                block_size=16,
+                dp_stats_address=None,
+                dtype="bfloat16",
+                vllm_version="test",
+                world_size=2,
+                data_parallel_size=2,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                decode_context_parallel_size=1,
+                data_parallel_rank=rank,
+                max_num_seqs=256,
+                max_num_batched_tokens=8192,
+                instance_id="test-instance",
+                supports_lora=False,
+                max_loras=0,
+                kv_events_config=config,
+            )
+        )
+
+    rank1 = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:41233"
+    )
+    client._apply_ready_response(ready(1, rank1))
+    client._apply_ready_response(ready(0, None))
+    assert client.get_kv_event_sources() == {1: rank1}
+
+    # A rank that comes back (elastic re-add) reports its new port.
+    rank1_again = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:47001"
+    )
+    client._apply_ready_response(ready(1, rank1_again))
+    assert client.get_kv_event_sources() == {1: rank1_again}

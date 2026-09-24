@@ -53,8 +53,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
-    TranscriptionResponse,
-    TranscriptionResponseVerbose,
+    TranscriptionResponseVariant,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationRequest,
@@ -203,8 +202,7 @@ AllResponse: TypeAlias = (
     | EmbeddingResponse
     | ScoreResponse
     | RerankResponse
-    | TranscriptionResponse
-    | TranscriptionResponseVerbose
+    | TranscriptionResponseVariant
     | TranslationResponse
     | TranslationResponseVerbose
 )
@@ -660,8 +658,7 @@ def make_transcription_wrapper(
         async def transcription_wrapper(
             batch_request_body: (BatchTranscriptionRequest | BatchTranslationRequest),
         ) -> (
-            TranscriptionResponse
-            | TranscriptionResponseVerbose
+            TranscriptionResponseVariant
             | TranslationResponse
             | TranslationResponseVerbose
             | ErrorResponse

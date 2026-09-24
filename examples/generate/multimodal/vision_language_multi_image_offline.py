@@ -55,7 +55,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
     engine_args = EngineArgs(
         model=model_name,
-        tokenizer_mode="slow",
         trust_remote_code=True,
         dtype="bfloat16",
         limit_mm_per_prompt={"image": len(image_urls)},

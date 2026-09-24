@@ -113,63 +113,6 @@ __forceinline__ __device__ void dequant_4bit_8_fp16(uint32_t qa, half2 (&dq)[4],
 // bf16 path
 // ---------------------------------------------------------------------------
 
-// Bit-trick magic for bf16:
-//   bf16(128) == 0x4300 (sign 0, exp 134, mantissa 0).
-//   For nibble n in [0..15], bits [3:0] of mantissa hold n exactly because
-//   bf16's ULP at 128 is 1 (mantissa step = 2^(7-7) = 1). So
-//   ((qa & 0x000F000F) | 0x43004300) bitcasts to bfloat162(128+n_lo, 128+n_hi).
-//
-// Because bf16's mantissa is only 7 bits, we cannot use the fp16 "upper nibble
-// * 16" trick. Instead each pair of nibbles is shifted down to [3:0]/[19:16]
-// via a single 4/8/12-bit right-shift before the OR. That costs one extra
-// shift per pair vs fp16, but keeps the FMA structure identical.
-__forceinline__ __device__ void prep_zero_scale_bf16(uint32_t zero,
-                                                     bf16_t scale,
-                                                     bf162_t& z_prep,
-                                                     bf162_t& y_prep) {
-  // z = scale * -(128 + zero); y = scale.
-  float scale_f = __bfloat162float(scale);
-  float zf = -(128.0f + (float)zero) * scale_f;
-  bf16_t zb = __float2bfloat16(zf);
-  z_prep = __bfloat162bfloat162(zb);
-  y_prep = __bfloat162bfloat162(scale);
-}
-
-__forceinline__ __device__ void dequant_4bit_8_bf16(uint32_t qa,
-                                                    bf162_t (&dq)[4],
-                                                    bf162_t z_prep,
-                                                    bf162_t y_prep) {
-  const uint32_t c0 = 0x43004300;
-
-  union {
-    uint32_t u;
-    bf162_t b2;
-  } q0, q1, q2, q3;
-  q0.u = ((qa >> 0) & 0x000F000F) | c0;   // bf162(128+q[0], 128+q[1])
-  q1.u = ((qa >> 4) & 0x000F000F) | c0;   // bf162(128+q[2], 128+q[3])
-  q2.u = ((qa >> 8) & 0x000F000F) | c0;   // bf162(128+q[4], 128+q[5])
-  q3.u = ((qa >> 12) & 0x000F000F) | c0;  // bf162(128+q[6], 128+q[7])
-
-  // dq = q_b * scale + (-(128+zero)*scale) = (q - zero) * scale
-  dq[0] = __hfma2(q0.b2, y_prep, z_prep);
-  dq[1] = __hfma2(q1.b2, y_prep, z_prep);
-  dq[2] = __hfma2(q2.b2, y_prep, z_prep);
-  dq[3] = __hfma2(q3.b2, y_prep, z_prep);
-}
-
-// ---------------------------------------------------------------------------
-// bf16-input → fp32-output dequant (RDNA3 scalar path).
-//
-// RDNA3 (gfx1100) has no v_pk_fma_bf16; packed bf16 FMA lowers to a slow
-// fallback. Rather than computing dq in bf16 and widening at FMA time in
-// the dot product, we widen to fp32 here once (a free left-shift by 16) and
-// emit the (q - zero) * scale FMA directly in fp32. This:
-//   * Replaces 4× slow bf16 packed FMA with 8× fast fp32 FMA per int32.
-//   * Eliminates 4× bf16→fp32 widens that the dot product would do.
-//   * Keeps the dot product accumulator in fp32 without a roundtrip.
-//
-// Output: fp32 dq[8], one element per K position (consumed by the
-// fp32-overload of dot22_8_f in q_gemm_rdna3.cu).
 __forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
                                                          bf16_t scale,
                                                          float& z_prep,
@@ -177,60 +120,6 @@ __forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
   float scale_f = __bfloat162float(scale);
   z_prep = -(128.0f + (float)zero) * scale_f;
   y_prep = scale_f;
-}
-
-// Pure-q dequant for the M_COUNT=1 factored path: outputs the unscaled fp32
-// values 128+nibble, without folding scale/zero. The caller folds scale/zb
-// into the accumulator outside the inner loop using a precomputed sum_a,
-// which saves ~27% of the FMA count vs the per-col-dequant approach above
-// (only beneficial at M_COUNT=1; break-even at M_COUNT=2).
-//
-// Cost: 0 FMAs (pure bit-trick + as_float reinterprets).
-__forceinline__ __device__ void dequant_4bit_8_bf16_q_only(uint32_t qa,
-                                                           float (&q_f32)[8]) {
-  const uint32_t c0 = 0x43004300;
-  const uint32_t q0 = ((qa >> 0) & 0x000F000F) | c0;
-  const uint32_t q1 = ((qa >> 4) & 0x000F000F) | c0;
-  const uint32_t q2 = ((qa >> 8) & 0x000F000F) | c0;
-  const uint32_t q3 = ((qa >> 12) & 0x000F000F) | c0;
-  q_f32[0] = __uint_as_float((q0 & 0xFFFFu) << 16);
-  q_f32[1] = __uint_as_float(q0 & 0xFFFF0000u);
-  q_f32[2] = __uint_as_float((q1 & 0xFFFFu) << 16);
-  q_f32[3] = __uint_as_float(q1 & 0xFFFF0000u);
-  q_f32[4] = __uint_as_float((q2 & 0xFFFFu) << 16);
-  q_f32[5] = __uint_as_float(q2 & 0xFFFF0000u);
-  q_f32[6] = __uint_as_float((q3 & 0xFFFFu) << 16);
-  q_f32[7] = __uint_as_float(q3 & 0xFFFF0000u);
-}
-
-__forceinline__ __device__ void dequant_4bit_8_bf16_f32(uint32_t qa,
-                                                        float (&dq)[8],
-                                                        float z_prep,
-                                                        float y_prep) {
-  const uint32_t c0 = 0x43004300;
-  const uint32_t q0 = ((qa >> 0) & 0x000F000F) | c0;
-  const uint32_t q1 = ((qa >> 4) & 0x000F000F) | c0;
-  const uint32_t q2 = ((qa >> 8) & 0x000F000F) | c0;
-  const uint32_t q3 = ((qa >> 12) & 0x000F000F) | c0;
-  // bf16(128+nibble) bits → fp32(128+nibble) bits via left-shift by 16
-  // (just zero-extends the mantissa from 7 to 23 bits; exponent preserved).
-  const float q0x = __uint_as_float((q0 & 0xFFFFu) << 16);
-  const float q0y = __uint_as_float(q0 & 0xFFFF0000u);
-  const float q1x = __uint_as_float((q1 & 0xFFFFu) << 16);
-  const float q1y = __uint_as_float(q1 & 0xFFFF0000u);
-  const float q2x = __uint_as_float((q2 & 0xFFFFu) << 16);
-  const float q2y = __uint_as_float(q2 & 0xFFFF0000u);
-  const float q3x = __uint_as_float((q3 & 0xFFFFu) << 16);
-  const float q3y = __uint_as_float(q3 & 0xFFFF0000u);
-  // dq[i] = q_f32 * scale + (-(128+zero)*scale) = (nibble - zero) * scale
-  dq[0] = __fmaf_rn(q0x, y_prep, z_prep);
-  dq[1] = __fmaf_rn(q0y, y_prep, z_prep);
-  dq[2] = __fmaf_rn(q1x, y_prep, z_prep);
-  dq[3] = __fmaf_rn(q1y, y_prep, z_prep);
-  dq[4] = __fmaf_rn(q2x, y_prep, z_prep);
-  dq[5] = __fmaf_rn(q2y, y_prep, z_prep);
-  dq[6] = __fmaf_rn(q3x, y_prep, z_prep);
-  dq[7] = __fmaf_rn(q3y, y_prep, z_prep);
 }
 
 }  // namespace gptq_rdna3

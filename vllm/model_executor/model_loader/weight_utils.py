@@ -12,18 +12,17 @@ import os
 import tempfile
 import threading
 import time
-from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import filelock
 import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open, save_file
+from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -61,6 +60,9 @@ except ImportError:
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -184,56 +186,6 @@ def maybe_download_from_modelscope(
                 model_path = model
         return model_path
     return None
-
-
-def _shared_pointers(tensors):
-    ptrs = defaultdict(list)
-    for k, v in tensors.items():
-        ptrs[v.data_ptr()].append(k)
-    failing = []
-    for _, names in ptrs.items():
-        if len(names) > 1:
-            failing.append(names)
-    return failing
-
-
-def convert_bin_to_safetensor_file(
-    pt_filename: str,
-    sf_filename: str,
-) -> None:
-    loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
-    if "state_dict" in loaded:
-        loaded = loaded["state_dict"]
-    shared = _shared_pointers(loaded)
-    for shared_weights in shared:
-        for name in shared_weights[1:]:
-            loaded.pop(name)
-
-    # For tensors to be contiguous
-    loaded = {k: v.contiguous() for k, v in loaded.items()}
-
-    dirname = os.path.dirname(sf_filename)
-    os.makedirs(dirname, exist_ok=True)
-    save_file(loaded, sf_filename, metadata={"format": "pt"})
-
-    # check file size
-    sf_size = os.stat(sf_filename).st_size
-    pt_size = os.stat(pt_filename).st_size
-    if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(
-            f"""The file size different is more than 1%:
-         - {sf_filename}: {sf_size}
-         - {pt_filename}: {pt_size}
-         """
-        )
-
-    # check if the tensors are the same
-    reloaded = load_file(sf_filename)
-    for k in loaded:
-        pt_tensor = loaded[k]
-        sf_tensor = reloaded[k]
-        if not torch.equal(pt_tensor, sf_tensor):
-            raise RuntimeError(f"The output tensors do not match for key {k}")
 
 
 # TODO(woosuk): Move this to other place.
@@ -654,6 +606,171 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
         f for f in hf_weights_files if not any(f.endswith(x) for x in blacklist)
     ]
     return hf_weights_files
+
+
+def _normalize_module_prefixes(
+    language_model_names: Iterable[str] | None,
+) -> tuple[str, ...]:
+    names = tuple(language_model_names or ())
+    return tuple(n if n.endswith(".") else f"{n}." for n in names)
+
+
+def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str | None:
+    """Apply ``WeightsMapper.map_name`` when present; else identity."""
+    if weights_mapper is None:
+        return key
+    return weights_mapper.map_name(key)
+
+
+def _hf_prefix_maps_to_lm(
+    new_name: str | None, lm_module_prefixes: tuple[str, ...]
+) -> bool:
+    if not new_name:
+        return False
+    new_p = new_name if new_name.endswith(".") else f"{new_name}."
+    return any(new_p.startswith(p) or p.startswith(new_p) for p in lm_module_prefixes)
+
+
+def _shared_hf_root_module_prefixes(
+    lm_module_prefixes: tuple[str, ...],
+    weights_mapper: "WeightsMapper | None",
+) -> tuple[str, ...]:
+    """Module prefixes that are also an HF root for non-LM weights.
+
+    E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
+    under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
+    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
+    """
+    if weights_mapper is None:
+        return ()
+    mapping = weights_mapper.orig_to_new_prefix
+    if not mapping:
+        return ()
+
+    non_lm_origs: list[str] = []
+    for orig, new in mapping.items():
+        orig_p = orig if orig.endswith(".") else f"{orig}."
+        if not _hf_prefix_maps_to_lm(new, lm_module_prefixes):
+            non_lm_origs.append(orig_p)
+
+    if not non_lm_origs:
+        return ()
+
+    shared = [
+        p
+        for p in lm_module_prefixes
+        if any(orig.startswith(p) for orig in non_lm_origs)
+    ]
+    return tuple(shared)
+
+
+def resolve_mm_encoder_only_lm_prefixes(
+    language_model_names: Iterable[str] | None,
+    *,
+    weights_mapper: "WeightsMapper | None" = None,
+) -> tuple[str, ...] | None:
+    """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
+
+    Prefixes come from ``_language_model_names``. Classification of HF index
+    keys is done later via optional ``weights_mapper`` (see
+    ``filter_mm_encoder_only_safetensors_files``), so this helper does **not**
+    hard-code Qwen/HF nest lists.
+
+    Returns ``None`` (leave the safetensors file list unchanged) when
+    ``_language_model_names`` is empty/missing, or when a module prefix is a
+    shared HF checkpoint root for both LM and non-LM weights — fail-closed so
+    Molmo / Phi-4-MM / Muse cannot under-load the encoder.
+    """
+    prefixes = _normalize_module_prefixes(language_model_names)
+    if not prefixes:
+        return None
+    shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
+    if shared:
+        logger.warning_once(
+            "mm-encoder-only whole-shard filter not applied: LM module "
+            "prefix(es) %s share an HF checkpoint root with non-LM weights "
+            "(via WeightsMapper). Encoder-only load keeps the full "
+            "safetensors file list; finer HF prefixes or key-level "
+            "filtering can enable skip later.",
+            shared,
+        )
+        return None
+    return prefixes
+
+
+def filter_mm_encoder_only_safetensors_files(
+    hf_weights_files: list[str],
+    hf_folder: str,
+    index_file: str,
+    language_model_prefixes: Iterable[str],
+    *,
+    weights_mapper: "WeightsMapper | None" = None,
+) -> list[str]:
+    """Drop safetensors shards that only contain language-model weights.
+
+    Used with ``--mm-encoder-only`` so Encoder-only EPD instances avoid reading
+    pure LM shards from disk/DRAM.
+
+    Each HF index key is classified by mapping through ``weights_mapper`` (when
+    provided) and testing the *vLLM* name against ``language_model_prefixes``.
+    Without a mapper, HF names are compared directly (identity checkpoint
+    layout, e.g. Kimi ``language_model.*``).
+
+    A shard is kept if it contains any non-LM key. Without an index file,
+    returns ``hf_weights_files`` unchanged.
+    """
+    prefixes = tuple(language_model_prefixes)
+    if not prefixes:
+        return hf_weights_files
+
+    index_path = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_path):
+        logger.warning_once(
+            "mm-encoder-only shard filter skipped: index file %s not found",
+            index_path,
+        )
+        return hf_weights_files
+
+    with open(index_path) as f:
+        weight_map: dict[str, str] = json.load(f)["weight_map"]
+
+    keys_by_file: dict[str, list[str]] = {}
+    for weight_name, weight_file in weight_map.items():
+        keys_by_file.setdefault(weight_file, []).append(weight_name)
+
+    def _is_lm_key(key: str) -> bool:
+        mapped = _mapped_weight_name(weights_mapper, key)
+        if mapped is None:
+            return False
+        return any(mapped.startswith(p) for p in prefixes)
+
+    def _is_lm_only(weight_file: str) -> bool:
+        keys = keys_by_file.get(weight_file)
+        if not keys:
+            # Not listed in the index (e.g. extra matched glob) — keep.
+            return False
+        return all(_is_lm_key(key) for key in keys)
+
+    kept: list[str] = []
+    skipped = 0
+    for path in hf_weights_files:
+        rel = os.path.relpath(path, hf_folder)
+        # Index weight_map values are usually basenames; tolerate either form.
+        basename = os.path.basename(path)
+        if _is_lm_only(rel) or _is_lm_only(basename):
+            skipped += 1
+            continue
+        kept.append(path)
+
+    if skipped:
+        logger.info_once(
+            "mm-encoder-only: skipped %d/%d safetensors shard(s) that only "
+            "contain language-model weights (prefixes=%s)",
+            skipped,
+            skipped + len(kept),
+            prefixes,
+        )
+    return kept
 
 
 # explicitly use pure text format, with a newline at the end
@@ -1311,29 +1428,6 @@ def composed_weight_loader(
         return
 
     return composed_loader
-
-
-def initialize_dummy_weights(
-    model: torch.nn.Module,
-    model_config: ModelConfig,
-    low: float = -1e-3,
-    high: float = 1e-3,
-    seed: int = 1234,
-) -> None:
-    """Initialize model weights with random values.
-
-    The model weights must be randomly initialized for accurate performance
-    measurements. Additionally, the model weights should not cause NaNs in the
-    forward pass. We empirically found that initializing the weights with
-    values between -1e-3 and 1e-3 works well for most models.
-
-    We use per-parameter random seed, so that dummy weights are consistent,
-    even if the model is partitioned across multiple devices. When the seed
-    is fixed, the random values generated by this function only depends on
-    the parameter's number of elements and its data type.
-    """
-    for param in model.state_dict().values():
-        initialize_single_dummy_weight(param, low, high, seed)
 
 
 @torch.no_grad()

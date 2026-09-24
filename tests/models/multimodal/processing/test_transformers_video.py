@@ -183,6 +183,7 @@ def test_repeated_video_hits_the_processor_cache():
             prompt=VIDEO_MODEL_SETTINGS["Qwen/Qwen3-VL-2B-Instruct"]["prompt"],
             mm_items=mm_processor.info.parse_mm_data({"video": video}),
             hf_processor_mm_kwargs={},
+            cache=cache,
         )
 
     first, second = process(), process()

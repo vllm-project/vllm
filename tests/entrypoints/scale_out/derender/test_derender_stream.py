@@ -5,28 +5,32 @@
 
 Tests are split into two layers:
 
-1. Unit tests (no server): covers ``_detokenize_delta`` correctness
-   (chunked == one-shot) and ``derender_completion_stream`` /
-   ``derender_chat_stream`` logic via a real tokenizer on a tiny model.
+1. Unit tests (no server): covers `_detokenize_delta` correctness
+   (chunked == one-shot) and `derender_completion_stream` /
+   `derender_chat_stream` logic via a real tokenizer on a tiny model.
    The parser path is covered both with a deterministic stub parser and
-   with the real ``HarmonyParser`` (skipped without ``openai_harmony``).
+   with the real `HarmonyParser` (skipped without `openai_harmony`).
 
 2. Integration tests (require a running render server): covers the full
    HTTP round-trip through the streaming endpoint.  Marked with
-   ``@pytest.mark.asyncio`` and gated by the ``server`` / ``client``
-   fixtures from the sibling ``test_derender.py``.
+   `@pytest.mark.asyncio` and gated by the `server` / `client`
+   fixtures from the sibling `test_derender.py`.
 """
 
 import json
-from collections.abc import Callable
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import pytest_asyncio
 
+from tests.entrypoints.scale_out.derender.utils import stream_chat_derender
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    PerRequestMetrics,
+    SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
@@ -164,6 +168,7 @@ def _make_stream_chunk(
     finish_reason: str | None = None,
     request_id: str = "test-req",
     usage: dict | None = None,
+    metrics: PerRequestMetrics | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
     return GenerateStreamResponse(
@@ -176,6 +181,7 @@ def _make_stream_chunk(
             )
         ],
         usage=UsageInfo(**usage) if usage else None,
+        metrics=metrics,
     )
 
 
@@ -210,7 +216,7 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
-def derenderer(tokenizer):
+def derenderer(tokenizer, request):
     """Construct a minimal OnlineDerenderer backed by a stub renderer."""
     from unittest.mock import MagicMock
 
@@ -218,6 +224,10 @@ def derenderer(tokenizer):
 
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    request.addfinalizer(executor.shutdown)
+    renderer._executor = executor
 
     model_config = MagicMock()
     model_config.hf_config.model_type = "llama"
@@ -240,13 +250,11 @@ def derenderer(tokenizer):
 def parsed_derenderer(tokenizer):
     """OnlineDerenderer with `_FakeParser` wired in as `self.parser`.
 
-    The parser configured path runs `_derender_chat_stream_parsed` via
-    `make_async(..., executor=renderer._executor)`, so unlike
-    `derenderer` above (whose streaming paths never touch the executor),
-    `renderer._executor` must be a real `ThreadPoolExecutor` here.
+    The parser-configured path runs `_derender_chat_stream_parsed` via
+    `make_async(..., executor=renderer._executor)`, so
+    `renderer._executor` must be a real `ThreadPoolExecutor`.
     `loop.run_in_executor` cannot submit work to a `MagicMock`.
     """
-    from concurrent.futures import ThreadPoolExecutor
     from unittest.mock import MagicMock
 
     from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -352,7 +360,7 @@ class TestDetokenizeDelta:
         """prev_tokens must not grow with the number of chunks (bounded transport).
 
         Guards that the carried decode window is a small constant
-        tail, so cumulative ``stream_state`` transport is O(n) and not O(n^2).
+        tail, so cumulative `stream_state` transport is O(n) and not O(n^2).
         """
         token_ids = tokenizer.encode(
             "a reasonably long ascii stream of tokens used to exercise the "
@@ -384,6 +392,46 @@ class TestDetokenizeDelta:
 
         assert len(set(results)) == 1, "All independent streams must produce same text"
         assert results[0] == self._one_shot(tokenizer, token_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stream_method",
+    ["derender_chat_stream", "derender_completion_stream"],
+)
+async def test_streaming_detokenization_runs_off_event_loop(
+    derenderer, monkeypatch, stream_method
+):
+    """Streaming detokenization runs on the renderer executor."""
+    import vllm.renderers.online_derenderer as online_derenderer_module
+
+    event_loop_thread_id = threading.get_ident()
+    executor_thread_id = derenderer.renderer._executor.submit(
+        threading.get_ident
+    ).result()
+
+    detokenize_thread_id = None
+    original_detokenize = online_derenderer_module.detokenize_incrementally
+
+    def record_detokenize_thread(*args, **kwargs):
+        nonlocal detokenize_thread_id
+        detokenize_thread_id = threading.get_ident()
+        return original_detokenize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        online_derenderer_module,
+        "detokenize_incrementally",
+        record_detokenize_thread,
+    )
+
+    await getattr(derenderer, stream_method)(
+        model=MODEL_NAME,
+        generate_chunk=_make_stream_chunk([10]),
+    )
+
+    assert detokenize_thread_id is not None
+    assert detokenize_thread_id == executor_thread_id
+    assert detokenize_thread_id != event_loop_thread_id
 
 
 class TestDerenderCompletionStream:
@@ -511,6 +559,26 @@ class TestDerenderChatStream:
 
         assert chunk1.choices[0].delta.role == "assistant"
         assert chunk2.choices[0].delta.role is None
+
+    @pytest.mark.asyncio
+    async def test_metrics_passthrough(self, derenderer):
+        metrics = PerRequestMetrics(
+            speculative_decoding=SpeculativeDecodingMetrics(
+                mean_acceptance_length=2.0,
+                draft_acceptance_rate=0.5,
+                acceptance_histogram=[0, 1],
+                num_spec_steps=1,
+                num_accepted_draft_tokens=1,
+                num_draft_tokens=2,
+                num_spec_tokens=1,
+            )
+        )
+        chunk, _ = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([], metrics=metrics),
+            state=DerenderStreamState(),
+        )
+        assert chunk.metrics == metrics
 
     @pytest.mark.asyncio
     async def test_chunked_equals_oneshot(self, derenderer, tokenizer):
@@ -851,7 +919,6 @@ def harmony_derenderer(harmony_tokenizer):
     with a real tokenizer and parser, so the replay path is exercised
     against Harmony's actual channel grammar rather than a stub.
     """
-    from concurrent.futures import ThreadPoolExecutor
     from unittest.mock import MagicMock
 
     from vllm.parser.harmony import HarmonyParser
@@ -1592,86 +1659,6 @@ async def _render_parser_chat(client, messages: list[dict]) -> dict:
     return resp.json()
 
 
-async def _stream_chat_derender(
-    client,
-    output_ids: list[int],
-    chunk_sizes: list[int],
-    chat_request: dict,
-    prompt_tokens: int,
-    prompt_token_ids: list[int],
-    on_chunk: Callable[[list[dict]], None] | None = None,
-) -> dict:
-    """Feed `output_ids` through the streaming chat derender endpoint in
-    the given `chunk_sizes`, threading `stream_state` across calls and
-    return the assembled message.
-
-    If `on_chunk` is given, it is called after every chunk with a
-    snapshot (deep copy) of the `tool_calls` accumulator so far, letting
-    callers assert properties of the intermediate deltas (e.g. monotonic
-    argument growth) rather than only the final assembled result.
-    """
-    state = None
-    content = ""
-    reasoning = ""
-    tool_calls: list[dict] = []
-    finish_reason = None
-
-    pos = 0
-    for i, size in enumerate(chunk_sizes):
-        tids = output_ids[pos : pos + size]
-        pos += size
-        is_last = i == len(chunk_sizes) - 1
-        resp = await client.post(
-            "/v1/chat/completions/derender",
-            json={
-                "stream": True,
-                "model": PARSER_MODEL,
-                "generate_chunk": {
-                    "request_id": "stream-test",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "token_ids": tids,
-                            "finish_reason": "stop" if is_last else None,
-                        }
-                    ],
-                },
-                "stream_state": state,
-                "prompt_tokens": prompt_tokens,
-                "prompt_token_ids": prompt_token_ids,
-                "chat_request": chat_request,
-            },
-        )
-        assert resp.status_code == 200, resp.text
-        data = resp.json()
-        state = data["stream_state"]
-        delta = data["chunk"]["choices"][0]["delta"]
-        content += delta.get("content") or ""
-        reasoning += delta.get("reasoning") or ""
-        for tc in delta.get("tool_calls") or []:
-            idx = tc["index"]
-            while len(tool_calls) <= idx:
-                tool_calls.append({"id": None, "name": None, "arguments": ""})
-            if tc.get("id"):
-                tool_calls[idx]["id"] = tc["id"]
-            fn = tc.get("function") or {}
-            if fn.get("name"):
-                tool_calls[idx]["name"] = fn["name"]
-            if fn.get("arguments"):
-                tool_calls[idx]["arguments"] += fn["arguments"]
-        if is_last:
-            finish_reason = data["chunk"]["choices"][0]["finish_reason"]
-        if on_chunk is not None:
-            on_chunk([dict(tc) for tc in tool_calls])
-
-    return {
-        "content": content or None,
-        "reasoning": reasoning or None,
-        "tool_calls": tool_calls,
-        "finish_reason": finish_reason,
-    }
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chunking",
@@ -1731,7 +1718,7 @@ async def test_stream_parsed_matches_batch_reasoning(
         "triples": [3] * (n // 3) + [n % 3],
     }[chunking]
     chunk_sizes = [c for c in chunk_sizes if c > 0]
-    streamed = await _stream_chat_derender(
+    streamed = await stream_chat_derender(
         parser_client,
         output_ids,
         chunk_sizes,
@@ -1799,7 +1786,7 @@ async def test_stream_parsed_matches_batch_tool_call(parser_client, parser_token
             if tool_calls and tool_calls[0]["arguments"]:
                 _snapshots.append(tool_calls[0]["arguments"])
 
-        streamed = await _stream_chat_derender(
+        streamed = await stream_chat_derender(
             parser_client,
             output_ids,
             chunk_sizes,
@@ -1844,7 +1831,7 @@ async def test_stream_parsed_cjk_across_chunk_boundaries(
         "messages": messages,
         "include_reasoning": True,
     }
-    streamed = await _stream_chat_derender(
+    streamed = await stream_chat_derender(
         parser_client,
         output_ids,
         [1] * len(output_ids),
@@ -1872,7 +1859,7 @@ async def test_stream_parsed_include_reasoning_false(parser_client, parser_token
         "messages": messages,
         "include_reasoning": False,
     }
-    streamed = await _stream_chat_derender(
+    streamed = await stream_chat_derender(
         parser_client,
         output_ids,
         [1] * len(output_ids),
