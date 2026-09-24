@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import time
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, make_offload_key
+from vllm.v1.kv_offload.tiering import metrics as tiering_metrics
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
@@ -213,9 +214,14 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
 
 
 def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch):
-    """Tracker observes registration-to-completion, not the reported transfer_time."""
+    """Tracker measures registration-to-completion, not transfer_time.
+
+    Includes failed promotions.
+    """
     clock = 100.0
-    monkeypatch.setattr(time, "monotonic", lambda: clock)
+    monkeypatch.setattr(
+        tiering_metrics, "time", SimpleNamespace(monotonic=lambda: clock)
+    )
 
     tracker = TieringMetricsTracker(
         tier_types=["fs", "p2p"],
@@ -267,7 +273,8 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+    observations = values[TieringOffloadingMetrics.PROMOTION_LATENCY]
+    assert observations == {("1:fs",): pytest.approx([0.2])}
     tracker.assert_idle()
 
 

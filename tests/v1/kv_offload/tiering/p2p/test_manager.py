@@ -23,7 +23,12 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.base import (
+    JobResult,
+    TieringOffloadingMetrics,
+    TransferJob,
+)
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _UNBOUND_STORE_TIMEOUT_S,
@@ -110,6 +115,8 @@ def _job_metadata(
 def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
+    mgr.tier_type = "p2p"
+    mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
     mgr._hash_seed = "0"
     mgr._finished_jobs = []
@@ -521,6 +528,65 @@ class TestSubmitLoad:
         job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+
+# ---------------------------------------------------------------------------
+# Tests for promotion latency metrics
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionLatency:
+    def test_p2p_load_without_transfer_time_records_promotion_latency(self):
+        """P2P load results omit transfer_time; the manager records promotion
+        latency from job registration to completion."""
+        p2p_tier = _make_manager()
+        primary_kv_view = memoryview(np.zeros((5, 16), dtype=np.uint8))
+
+        primary_tier = SimpleNamespace(
+            _num_chunks=5,
+            get_kv_memoryview=lambda: primary_kv_view,
+            complete_write=lambda *args: None,
+            get_stats=lambda: None,
+        )
+        tiering_manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[p2p_tier],
+        )
+        job = TransferJob(
+            job_id=42,
+            keys=[b"key1"],
+            chunk_ids=np.array([0]),
+            is_promotion=True,
+            req_context=_req_context(_remote_prefiller_kv_params()),
+        )
+        tiering_manager._register_job(job, tier_idx=0)
+
+        session = _FakeSession(
+            peer_id="10.0.0.1:8000",
+            loads=[LoadResult(job_id=42, kv_request_id="req-1", success=True)],
+        )
+        p2p_tier._sessions[session.peer_id] = session
+        p2p_tier._control = SimpleNamespace(poll=lambda: [])
+        reported_results: list[JobResult] = []
+        get_finished_jobs = p2p_tier.get_finished_jobs
+
+        def capture_finished_jobs():
+            results = list(get_finished_jobs())
+            reported_results.extend(results)
+            return results
+
+        p2p_tier.get_finished_jobs = capture_finished_jobs
+        p2p_tier.submit_load(job)
+        assert session.requests == [(42, "req-1")]
+
+        tiering_manager._process_finished_jobs()
+
+        assert reported_results == [JobResult(job_id=42, success=True)]
+        assert reported_results[0].transfer_time is None
+        stats = tiering_manager.get_stats()
+        assert stats is not None
+        observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+        assert len(observations[("1:p2p",)]) == 1
 
 
 # ---------------------------------------------------------------------------
