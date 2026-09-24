@@ -88,7 +88,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes
+from .engram import Engram, can_share_engram_tables, gather_engram_hashes
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     mhc_pre_delayed_overlap,
@@ -193,6 +193,30 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
+    """Set up the fused ``wo_b`` GEMM + reduce-scatter when opted in.
+
+    Sequence parallel is the only topology where ``wo_b`` ends in a
+    reduce-scatter, so the kernel is bound to RS mode. The workspace is a
+    process-wide singleton shared with any other model code in this worker
+    (the DSpark drafter reuses it), and its NVLink multicast rendezvous is
+    collective, so every TP rank must take the same decision here.
+    """
+    if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
+        return False
+
+    # The kernel module pulls in cute_dsl, so import it only once opted in.
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+        maybe_init_gemm_rs_ar,
+    )
+
+    hidden_size = vllm_config.model_config.hf_config.hidden_size
+    if not maybe_init_gemm_rs_ar(vllm_config, N=hidden_size, all_reduce=False):
+        return False
+    logger.info_once("To disable DeepSeek-V4.1 GEMM-RS, set VLLM_ENABLE_GEMM_RS=0.")
+    return True
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -202,6 +226,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        run_gemm_rs: bool = False,
         mhc_stream: torch.cuda.Stream | None = None,
         fuse_mhc_all_reduce: bool = False,
     ):
@@ -236,6 +261,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         if self.use_sequence_parallel or fuse_mhc_all_reduce:
             self.attn.wo_b.reduce_results = False
+            if run_gemm_rs:
+                # Binds only when wo_b's kernel and shape qualify; otherwise
+                # forward keeps the separate reduce-scatter below.
+                self.attn.bind_gemm_rs()
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -385,8 +414,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
             or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not torch.cuda.is_current_stream_capturing()
         ):
-            # A side stream cannot remain unjoined across breakable graph segments.
+            # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
             mhc_stream = None
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, stream=mhc_stream)
@@ -491,7 +521,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
-        if self.use_sequence_parallel:
+        # With GEMM-RS bound, the attention output is already this rank's
+        # sequence-parallel shard (see DeepseekV4Attention._wo_b_proj).
+        if self.use_sequence_parallel and self.attn.gemm_rs is None:
             x = sp_reduce_scatter(x)
 
         if mhc_stream is not None:
@@ -588,6 +620,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        engram_config = vllm_config.engram_config
+        if (
+            self.engram_layout is not None
+            and engram_config is not None
+            and engram_config.dp_shared_memory
+        ):
+            engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
+
+        # GEMM-RS uses NCCL symmetric-memory multicast, which requires all TP
+        # ranks to belong to one NVLink domain. Collective: run before layers.
+        self.run_gemm_rs = maybe_init_gemm_rs(vllm_config, self.use_sequence_parallel)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -598,6 +641,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                run_gemm_rs=self.run_gemm_rs,
                 mhc_stream=mhc_stream,
                 fuse_mhc_all_reduce=self.fuse_mhc_all_reduce,
             ),

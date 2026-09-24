@@ -367,7 +367,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.py /scripts/benchmark_helion_kernels.py
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools /tools
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
@@ -750,7 +750,7 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmar
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.py /scripts/benchmark_helion_kernels.py
-COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools /tools
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
@@ -938,7 +938,7 @@ RUN case "$(which python3)" in \
         *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --upgrade huggingface-hub[cli]
+    uv pip install --system --upgrade huggingface-hub
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
