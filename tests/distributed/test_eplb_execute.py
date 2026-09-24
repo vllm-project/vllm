@@ -36,7 +36,11 @@ def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
     gsd._install_copy_checkers()
     monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
 
-    monkeypatch.setattr(eplb_comm, "P2POp", lambda op, tensor, peer, group: tensor)
+    monkeypatch.setattr(
+        eplb_comm,
+        "P2POp",
+        lambda op, tensor, peer=None, group=None, tag=0, group_peer=None: tensor,
+    )
 
     def receive(tensors):
         for tensor in tensors:
