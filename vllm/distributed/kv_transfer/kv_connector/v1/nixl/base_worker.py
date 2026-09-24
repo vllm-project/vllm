@@ -315,20 +315,27 @@ class NixlBaseConnectorWorker:
         src_blocks_data: np.ndarray,
         num_fa_descs: int,
         block_size_ratio: int = 1,
-    ) -> Iterator[list[tuple[int, int, int]]]:
+    ) -> Iterator[np.ndarray]:
         """Build split handle data for P_TP > D_TP scenario.
 
         num_fa_descs is the boundary between FA and SSM descriptors.
         Split counts are derived from source_ranks_per_group lengths.
         FA uses rank_to_attention_slot for the slot offset;
         SSM uses the rank's positional index.
+        Each Nx5 strided desc covers one region, so slicing it slices every block.
         """
         fa_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
         fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
 
-        has_ssm_descs = num_fa_descs < len(src_blocks_data)
+        src_strided_descs = src_blocks_data.tolist()
+        # Flat index of each strided desc's first block; the total is popped.
+        flat_desc_offsets = list(
+            itertools.accumulate((count for *_, count in src_strided_descs), initial=0)
+        )
+        num_descs = flat_desc_offsets.pop()
+        has_ssm_descs = num_fa_descs < num_descs
         ssm_idx = next(
             (i for i, t in enumerate(self._group_spec_types) if _is_ssm_spec(t)),
             None,
@@ -339,38 +346,48 @@ class NixlBaseConnectorWorker:
             else 0
         )
 
-        # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
-        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
-        sharded_desc_end = len(src_blocks_data) - (
+        # One replicate flag per FA strided desc, in _build_fa_local emission
+        # order (region-major, uniform block count per region). Defaults to
+        # SPLIT when no regions are registered (tests without register_kv_caches).
+        blocks_per_region = 0
+        if self.block_len_per_layer and self.num_regions:
+            blocks_per_region = num_fa_descs // self.num_regions
+            assert blocks_per_region * len(self.block_len_per_layer) == num_fa_descs
+        fa_replicated = [
+            self._is_region_replicated(start // blocks_per_region)
+            if blocks_per_region
+            else False
+            for start in flat_desc_offsets
+            if start < num_fa_descs
+        ]
+        sharded_desc_end = num_descs - (
             self._logical_num_blocks if self._ple_region_index is not None else 0
         )
         assert num_fa_descs <= sharded_desc_end
 
-        assert block_size_ratio == 1 or fa_num_splits == 1 or all(fa_desc_replicated), (
+        assert block_size_ratio == 1 or fa_num_splits == 1 or all(fa_replicated), (
             "Head-sharded attention reads with P_TP > D_TP and heterogeneous "
             "block sizes are not supported"
         )
-        src_blocks_list = src_blocks_data.tolist()
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
 
-            handle: list[tuple[int, int, int]] = []
-            for j, (addr, local_len, dev) in enumerate(src_blocks_list):
-                if j < num_fa_descs:
-                    if fa_desc_replicated[j]:
-                        # REPLICATE (MLA): whole block written on every rank.
-                        handle.append((addr, local_len, dev))
-                    else:
-                        # SPLIT (full-attn): this rank's head slice.
-                        chunk = local_len // fa_num_splits
-                        handle.append((addr + fa_slot * chunk, chunk, dev))
-                elif j < sharded_desc_end:
-                    chunk = local_len // ssm_num_splits
-                    handle.append((addr + p_idx * chunk, chunk, dev))
-                else:
-                    handle.append((addr, local_len, dev))
-            yield handle
+            handle: list[tuple[int, int, int, int, int]] = []
+            for idx, ((addr, length, dev, stride, count), start) in enumerate(
+                zip(src_strided_descs, flat_desc_offsets)
+            ):
+                if start < num_fa_descs:
+                    # REPLICATE (MLA): whole block written on every rank.
+                    # SPLIT (full-attn): this rank's head slice.
+                    if not fa_replicated[idx]:
+                        length //= fa_num_splits
+                        addr += fa_slot * length
+                elif start < sharded_desc_end:
+                    length //= ssm_num_splits
+                    addr += p_idx * length
+                handle.append((addr, length, dev, stride, count))
+            yield self._pack_strided_descs(handle)
 
     def _needs_split_local_xfer_handles(self, tp_ratio: int, plan: TPMapping) -> bool:
         """Whether reads need per-source slices of the local KV region.
@@ -382,24 +399,6 @@ class NixlBaseConnectorWorker:
         contains multiple source ranks for the sharded SSM state.
         """
         return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
-
-    def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
-        """Per-FA-descriptor replicate flag, in _build_fa_local emission order
-        (region-major; one desc per block, with K/V packed). Length ``num_fa_descs``.
-        """
-        assert self.transfer_topo is not None
-        n_regions = len(self.block_len_per_layer)
-        if n_regions == 0 or self.num_regions == 0:
-            return [False] * num_fa_descs
-        nblk = num_fa_descs // self.num_regions
-        flags: list[bool] = []
-        for i in range(n_regions):
-            replicated = self._is_region_replicated(i)
-            flags.extend([replicated] * nblk)
-        assert len(flags) == num_fa_descs, (
-            f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
-        )
-        return flags
 
     def _is_region_replicated(self, region_idx: int) -> bool:
         """Whether region ``region_idx`` is transferred REPLICATE vs SPLIT.
@@ -1807,7 +1806,7 @@ class NixlBaseConnectorWorker:
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
-        local mamba blocks with DS conv layout, as an Nx3 uint64 array.
+        local mamba blocks with DS conv layout, as Nx5 uint64 strided descs.
 
         A Mamba block interleaves conv and SSM state, which crucially differ in
         size, so the two are indexed as separate sub-regions. Attention blocks
@@ -1845,28 +1844,37 @@ class NixlBaseConnectorWorker:
         num_blocks = self._logical_num_blocks
         physical_per_logical = self._physical_blocks_per_logical_kv_block
         device_id = self.device_id
-        block_arange = np.arange(num_blocks, dtype=np.uint64)
-        parts: list[np.ndarray] = []
+        strided_descs: list[tuple[int, int, int, int, int]] = []
 
         region_indices = self._ssm_region_indices or range(len(base_addresses))
         for i in region_indices:
             base_addr = base_addresses[i]
             block_stride = self.block_stride_per_layer[i] * physical_per_logical
-            blk_addrs = base_addr + block_arange * block_stride
             for off, sz in conv_offsets:
-                parts.append(self._stack_descs(blk_addrs + off, sz, device_id))
+                strided_descs.append(
+                    (base_addr + off, sz, device_id, block_stride, num_blocks)
+                )
             # SSM temporal state follows the conv state.
-            parts.append(self._stack_descs(blk_addrs + conv_size, ssm_size, device_id))
+            strided_descs.append(
+                (base_addr + conv_size, ssm_size, device_id, block_stride, num_blocks)
+            )
 
         if (region_index := self._ple_region_index) is not None:
             block_len = self.block_len_per_layer[region_index] * physical_per_logical
             block_stride = (
                 self.block_stride_per_layer[region_index] * physical_per_logical
             )
-            block_addrs = base_addresses[region_index] + block_arange * block_stride
-            parts.append(self._stack_descs(block_addrs, block_len, self.device_id))
+            strided_descs.append(
+                (
+                    base_addresses[region_index],
+                    block_len,
+                    device_id,
+                    block_stride,
+                    num_blocks,
+                )
+            )
 
-        return np.concatenate(parts)
+        return self._pack_strided_descs(strided_descs)
 
     def _build_mamba_remote(
         self,
@@ -1876,7 +1884,7 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. Returns an Nx3 uint64 array."""
+        the P rank. Returns Nx5 uint64 strided descs."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
@@ -1896,9 +1904,8 @@ class NixlBaseConnectorWorker:
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
         num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
         device_id = nixl_agent_meta.device_id
-        block_arange = np.arange(num_blocks, dtype=np.uint64)
 
-        parts: list[np.ndarray] = []
+        strided_descs: list[tuple[int, int, int, int, int]] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
         region_indices = self._ssm_region_indices or range(
@@ -1909,12 +1916,15 @@ class NixlBaseConnectorWorker:
             block_stride = (
                 nixl_agent_meta.block_strides[i] * remote_physical_per_logical
             )
-            blk_addrs = base_addr + block_arange * block_stride
             for off, sz in conv_offsets:
-                parts.append(self._stack_descs(blk_addrs + off, sz, device_id))
+                strided_descs.append(
+                    (base_addr + off, sz, device_id, block_stride, num_blocks)
+                )
             # SSM temporal state is also TP-sharded on the heads dimension.
-            ssm_addrs = blk_addrs + conv_size_remote + local_offset * ssm_read_size
-            parts.append(self._stack_descs(ssm_addrs, ssm_read_size, device_id))
+            ssm_addr = base_addr + conv_size_remote + local_offset * ssm_read_size
+            strided_descs.append(
+                (ssm_addr, ssm_read_size, device_id, block_stride, num_blocks)
+            )
 
         if (region_index := self._ple_region_index) is not None:
             local_block_len = (
@@ -1933,52 +1943,101 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.block_strides[region_index]
                 * remote_physical_per_logical
             )
-            block_addrs = (
-                nixl_agent_meta.kv_caches_base_addr[region_index]
-                + block_arange * remote_block_stride
+            strided_descs.append(
+                (
+                    nixl_agent_meta.kv_caches_base_addr[region_index],
+                    remote_block_len,
+                    device_id,
+                    remote_block_stride,
+                    num_blocks,
+                )
             )
-            parts.append(self._stack_descs(block_addrs, remote_block_len, device_id))
 
-        return np.concatenate(parts)
+        return self._pack_strided_descs(strided_descs)
 
     @staticmethod
-    def _stack_descs(addrs: np.ndarray, length: int, device_id: int) -> np.ndarray:
-        out = np.empty((addrs.shape[0], 3), dtype=np.uint64)
-        out[:, 0] = addrs
-        out[:, 1] = length
-        out[:, 2] = device_id
-        return out
+    def _pack_strided_descs(
+        strided_descs: list[tuple[int, int, int, int, int]],
+    ) -> np.ndarray:
+        """Pack (addr, len, dev_id, stride, count) rows into an Nx5 uint64 array.
+
+        Each row describes `count` blocks of `len` bytes whose starts are
+        `stride` bytes apart; NIXL >= 1.5 prepares this layout directly.
+        """
+        return np.array(strided_descs, dtype=np.uint64).reshape(-1, 5)
+
+    @staticmethod
+    def _block_strided_descs(
+        base_addr: int,
+        block_len: int,
+        block_stride: int,
+        num_blocks: int,
+        block_size_ratio: int,
+        device_id: int,
+    ) -> np.ndarray:
+        """Nx5 strided descs for `num_blocks` blocks, each split into
+        `block_size_ratio` sub-blocks of `block_len` bytes.
+
+        Evenly spaced sub-blocks collapse into one strided desc. In a padded
+        block the sub-blocks abut only within the block, so each block gets
+        its own.
+        """
+        if block_size_ratio == 1 or block_stride == block_size_ratio * block_len:
+            stride = block_stride // block_size_ratio
+            count = num_blocks * block_size_ratio
+            return np.array(
+                [[base_addr, block_len, device_id, stride, count]], dtype=np.uint64
+            )
+        strided_descs = np.empty((num_blocks, 5), dtype=np.uint64)
+        strided_descs[:, 0] = (
+            base_addr + np.arange(num_blocks, dtype=np.uint64) * block_stride
+        )
+        strided_descs[:, 1] = block_len
+        strided_descs[:, 2] = device_id
+        strided_descs[:, 3] = block_len
+        strided_descs[:, 4] = block_size_ratio
+        return strided_descs
+
+    @staticmethod
+    def _strided_desc_is_dram(
+        desc_is_dram: np.ndarray, strided_descs: np.ndarray
+    ) -> np.ndarray:
+        """Per-strided-desc DRAM flags from per-block ones. A strided desc never
+        spans regions, so its first block decides."""
+        counts = strided_descs[:, 4]
+        return desc_is_dram[np.cumsum(counts) - counts]
+
+    def _prep_xfer_dlist(
+        self, agent_name: str, strided_descs: np.ndarray, mem_type: str
+    ) -> int:
+        """Prepare a NIXL dlist handle from Nx5 strided descs."""
+        return self.nixl_wrapper.prep_xfer_dlist(
+            agent_name, strided_descs, mem_type=mem_type
+        )
 
     def _build_fa_local(
         self,
         base_addresses: list[int],
         block_size_ratio: int,
     ) -> np.ndarray:
-        """Build local FA descriptors as an Nx3 uint64 array."""
+        """Build local FA descriptors as Nx5 uint64 strided descs."""
         assert self.transfer_topo is not None
         assert base_addresses, "Local KV cache base addresses must not be empty."
         device_id = self.device_id
         region_indices = self._transfer_layer_region_indices or range(
             len(base_addresses)
         )
-        parts: list[np.ndarray] = []
-        for i in region_indices:
-            base_addr = base_addresses[i]
-            block_len = self.block_len_per_layer[i] // block_size_ratio
-            logical_blocks = np.repeat(
-                np.arange(self.region_num_blocks[i], dtype=np.uint64),
-                block_size_ratio,
-            )
-            split_offsets = np.tile(
-                np.arange(block_size_ratio, dtype=np.uint64),
+        parts = [
+            self._block_strided_descs(
+                base_addresses[i],
+                self.block_len_per_layer[i] // block_size_ratio,
+                self.block_stride_per_layer[i],
                 self.region_num_blocks[i],
+                block_size_ratio,
+                device_id,
             )
-            addrs = (
-                base_addr
-                + logical_blocks * self.block_stride_per_layer[i]
-                + split_offsets * block_len
-            )
-            parts.append(self._stack_descs(addrs, block_len, device_id))
+            for i in region_indices
+        ]
         return np.concatenate(parts)
 
     def _build_fa_remote(
@@ -1987,7 +2046,7 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         block_size_ratio: int,
     ) -> np.ndarray:
-        """Build remote FA descriptors as an Nx3 uint64 array."""
+        """Build remote FA descriptors as Nx5 uint64 strided descs."""
         assert self.transfer_topo is not None
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
@@ -2003,7 +2062,7 @@ class NixlBaseConnectorWorker:
         ] * len(nixl_agent_meta.kv_caches_base_addr)
         device_id = nixl_agent_meta.device_id
         block_strides = nixl_agent_meta.block_strides
-        parts: list[np.ndarray] = []
+        strided_descs: list[tuple[int, int, int, int, int]] = []
         use_layer_name_routing = bool(self._transfer_layer_region_indices)
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             local_region = (
@@ -2025,10 +2084,12 @@ class NixlBaseConnectorWorker:
             )
             local_block_len = local_block_len // num_reads
 
-            block_arange = np.arange(region_num_blocks[i], dtype=np.uint64)
-            addrs = base_addr + rank_offset + block_arange * block_strides[i]
-            parts.append(self._stack_descs(addrs, local_block_len, device_id))
-        return np.concatenate(parts)
+            addr = base_addr + rank_offset
+            count = region_num_blocks[i]
+            strided_descs.append(
+                (addr, local_block_len, device_id, block_strides[i], count)
+            )
+        return self._pack_strided_descs(strided_descs)
 
     def register_local_xfer_handler(
         self,
@@ -2051,13 +2112,13 @@ class NixlBaseConnectorWorker:
         blocks_data = self._build_fa_local(local_base_addresses, block_size_ratio)
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
-            len(blocks_data),
+            blocks_data[:, 4].sum(),
             self.engine_id,
             self.tp_rank,
             self.device_id,
         )
         if self._has_mamba:
-            assert self.num_descs * block_size_ratio == len(blocks_data)
+            assert self.num_descs * block_size_ratio == blocks_data[:, 4].sum()
             # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
             # is unnecessary — a single conv desc per block suffices.  Consider
             # adding a fast path that falls back to the standard 2-region
@@ -2083,7 +2144,7 @@ class NixlBaseConnectorWorker:
                     )
                 ]
             )
-            assert len(desc_is_dram) == len(blocks_data)
+            assert len(desc_is_dram) == blocks_data[:, 4].sum()
             desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
             dram_idx = np.where(desc_is_dram)[0]
             vram_idx = np.where(~desc_is_dram)[0]
@@ -2091,30 +2152,22 @@ class NixlBaseConnectorWorker:
             desc_pos[vram_idx] = np.arange(len(vram_idx), dtype=np.int64)
             self._desc_is_dram_by_block_size[block_size] = desc_is_dram
             self._desc_pos_by_block_size[block_size] = desc_pos
-
             # DRAM descriptors are registered under CPU device 0.
-            blocks_data = [
-                (addr, length, 0) if is_dram else (addr, length, dev)
-                for (addr, length, dev), is_dram in zip(
-                    blocks_data, desc_is_dram, strict=True
-                )
-            ]
-            dram_blocks = [blocks_data[i] for i in dram_idx]
-            vram_blocks = [blocks_data[i] for i in vram_idx]
-            dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
-            self._dram_src_handles_by_block_size[block_size] = (
-                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
+            strided_is_dram = self._strided_desc_is_dram(desc_is_dram, blocks_data)
+            blocks_data[strided_is_dram, 2] = 0
+            self._dram_src_handles_by_block_size[block_size] = self._prep_xfer_dlist(
+                "NIXL_INIT_AGENT", blocks_data[strided_is_dram], "DRAM"
             )
-            descs = self.nixl_wrapper.get_xfer_descs(vram_blocks, self.nixl_memory_type)
-            return (
-                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs),
-                blocks_data,
+            device_handle = self._prep_xfer_dlist(
+                "NIXL_INIT_AGENT", blocks_data[~strided_is_dram], self.nixl_memory_type
             )
+            return device_handle, blocks_data
 
-        mem_type = self.region_mem_types[0]
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, mem_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
-        return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
+        handle = self._prep_xfer_dlist(
+            "NIXL_INIT_AGENT", blocks_data, self.region_mem_types[0]
+        )
+        return handle, blocks_data
 
     def add_remote_agent(
         self,
@@ -2331,20 +2384,18 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
             ):
                 if self._mixed_mem_types:
-                    handle_data = np.asarray(handle_data, dtype=np.uint64)
                     desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
-                    dram_descs = self.nixl_wrapper.get_xfer_descs(
-                        handle_data[desc_is_dram], "DRAM"
+                    strided_is_dram = self._strided_desc_is_dram(
+                        desc_is_dram, handle_data
                     )
-                    dram_handle = self.nixl_wrapper.prep_xfer_dlist(
-                        "NIXL_INIT_AGENT", dram_descs
+                    dram_handle = self._prep_xfer_dlist(
+                        "NIXL_INIT_AGENT", handle_data[strided_is_dram], "DRAM"
                     )
                     self._dram_src_handles_by_tp_ratio[split_key].append(dram_handle)
-                    handle_data = handle_data[~desc_is_dram]
-                descs = self.nixl_wrapper.get_xfer_descs(
-                    handle_data, self.nixl_memory_type
+                    handle_data = handle_data[~strided_is_dram]
+                handle = self._prep_xfer_dlist(
+                    "NIXL_INIT_AGENT", handle_data, self.nixl_memory_type
                 )
-                handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
                 self.src_xfer_handles_by_tp_ratio[split_key].append(handle)
 
         ### Register remote agent memory regions
@@ -2361,7 +2412,7 @@ class NixlBaseConnectorWorker:
         )
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
-            len(blocks_data),
+            blocks_data[:, 4].sum(),
             engine_id,
             remote_tp_rank,
             self.tp_rank,
@@ -2380,9 +2431,8 @@ class NixlBaseConnectorWorker:
             raise NotImplementedError(
                 "NIXL pull does not yet support a mixed-memory producer"
             )
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, remote_mem_types.pop())
-        self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
-            self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
+        self.dst_xfer_side_handles[engine_id][remote_tp_rank] = self._prep_xfer_dlist(
+            remote_agent_name, blocks_data, remote_mem_types.pop()
         )
 
         return remote_agent_name

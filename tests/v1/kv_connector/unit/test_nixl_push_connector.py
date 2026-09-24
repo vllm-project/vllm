@@ -60,7 +60,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_request, make_nixl_push_scheduler
+from .utils import create_request, expand_strided_descs, make_nixl_push_scheduler
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -1913,8 +1913,13 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     assert consumer.kv_caches_base_addr == [0xB000, 0xC000, 0xC000]
 
     plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
-    local_descs = worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
-    remote_descs = worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    # Builders emit one strided run per region; expand to per-block descriptors.
+    local_descs = expand_strided_descs(
+        worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
+    )
+    remote_descs = expand_strided_descs(
+        worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    )
     local_counts = [local_num_blocks[i] for i in worker._transfer_layer_region_indices]
     local_ids = worker._compute_desc_ids(
         [[1, 2], [3]], 4, None, 1, region_num_blocks=local_counts
