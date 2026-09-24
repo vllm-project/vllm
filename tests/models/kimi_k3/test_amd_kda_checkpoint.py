@@ -395,7 +395,7 @@ def test_conv_checkpoint_addresses_row_past_int32_limit() -> None:
     stride_row = DIM * (STATE_LEN + 8)
     row = 2**31 // stride_row + 1
     need = (row + 1) * stride_row * 2
-    free, _ = torch.cuda.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < need + (4 << 30):
         pytest.skip(f"needs {need >> 30} GiB of free VRAM to reach the wrap")
 
