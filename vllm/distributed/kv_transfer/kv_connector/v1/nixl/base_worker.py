@@ -1636,13 +1636,13 @@ class NixlBaseConnectorWorker:
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
                 elif packed_mla_push and use_layer_name_routing:
-                    # A PP producer registers only its own layer's page of each row.
+                    # PP>1 prefill stage: register only this layer's page of each row.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
                     ]
                 elif packed_mla_push:
-                    # A PP=1 peer transfers whole rows, and advertises where this
-                    # layer's page sits so a PP producer can address it.
+                    # PP=1 decode or prefill: register whole rows, and advertise where
+                    # this layer's page sits so a PP>1 prefill can write into it.
                     storage_block_len = registration_len // num_blocks
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
