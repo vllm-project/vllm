@@ -963,9 +963,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                  for i in range(len(_bi_cu) - 1)],
                 dim=0,
             )
+            num_actual_tokens = mixed_qkvz.size(0)
         else:
             mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
+            num_actual_tokens = num_tokens
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
@@ -975,7 +977,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         if use_fused_gdn_decode:
             core_attn_out = torch.zeros(
-                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                (num_actual_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
@@ -1011,7 +1013,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
         core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            (num_actual_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -1438,7 +1440,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # non_spec_query_start_loc covers ALL non-spec sequences
                 # (both prefill and decode in mixed batches).
                 device = mixed_qkv_non_spec_T.device
-                cu_list = non_spec_query_start_loc.tolist()
+                cu_list = (attn_metadata.non_spec_query_start_loc_cpu
+                           if attn_metadata.non_spec_query_start_loc_cpu is not None
+                           else non_spec_query_start_loc.tolist())
                 num_non_spec_seqs = non_spec_query_start_loc.numel() - 1
                 chunks = []
                 for _pi in range(num_non_spec_seqs):
@@ -1656,7 +1660,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             initial_state[~prefill_has_initial_state, ...] = 0
             if envs.VLLM_BATCH_INVARIANT:
                 assert attn_metadata.prefill_query_start_loc is not None
-                cu_seqlens_list = attn_metadata.prefill_query_start_loc.tolist()
+                cu_seqlens_list = (attn_metadata.prefill_query_start_loc_cpu
+                                   if attn_metadata.prefill_query_start_loc_cpu is not None
+                                   else attn_metadata.prefill_query_start_loc.tolist())
                 device = query_non_spec.device
                 outputs: list[torch.Tensor] = []
                 last_states: list[torch.Tensor] = []

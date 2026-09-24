@@ -89,6 +89,7 @@ class GDNAttentionMetadata:
     chunk_offsets: torch.Tensor | None = None
     # Chunk-kernel inputs for prefill
     prefill_query_start_loc: torch.Tensor | None = None
+    prefill_query_start_loc_cpu: list[int] | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
 
@@ -128,6 +129,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+
+        # Batch invariance is incompatible with speculative decoding
+        if envs.VLLM_BATCH_INVARIANT and self.use_spec_decode:
+            raise ValueError(
+                "Batch invariance (VLLM_BATCH_INVARIANT=1) is not supported "
+                "with speculative decoding on GDN_ATTN backend. "
+                "Please disable one of: VLLM_BATCH_INVARIANT or "
+                "speculative_config.num_speculative_tokens."
+            )
 
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -518,6 +528,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        # Convert prefill_query_start_loc_cpu to list for batch-invariant path
+        prefill_query_start_loc_cpu_list = None
+        if (prefill_query_start_loc_cpu is not None
+            and envs.VLLM_BATCH_INVARIANT
+            and num_prefills > 0):
+            prefill_query_start_loc_cpu_list = (
+                prefill_query_start_loc_cpu.tolist()
+                if isinstance(prefill_query_start_loc_cpu, torch.Tensor)
+                else prefill_query_start_loc_cpu
+            )
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -530,6 +551,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             prefill_query_start_loc=prefill_query_start_loc,
+            prefill_query_start_loc_cpu=prefill_query_start_loc_cpu_list,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
