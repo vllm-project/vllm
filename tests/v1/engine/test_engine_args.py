@@ -55,6 +55,83 @@ def test_prefix_caching_from_cli():
     assert vllm_config.cache_config.prefix_cache_retention_interval == 64
 
 
+def _mock_eagle_spec_config(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from vllm.config import SpeculativeConfig
+
+    try:
+        spec_config = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+        spec_config.method = "eagle"
+    except (ValueError, TypeError):
+        spec_config = MagicMock()
+        spec_config.use_eagle.return_value = True
+    monkeypatch.setattr(
+        EngineArgs, "create_speculative_config", lambda self, **kwargs: spec_config
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_hybrid", "use_eagle", "explicit", "expected"),
+    [
+        pytest.param(True, True, "unset", "k_block", id="hybrid-eagle-unset"),
+        pytest.param(True, True, 0, 0, id="hybrid-eagle-explicit-zero"),
+        pytest.param(True, True, None, None, id="hybrid-eagle-explicit-none"),
+        pytest.param(True, True, 64, 64, id="hybrid-eagle-explicit-interval"),
+        pytest.param(True, False, "unset", 0, id="hybrid-without-eagle"),
+        pytest.param(False, True, "unset", 0, id="eagle-without-hybrid"),
+        pytest.param(False, False, "unset", 0, id="plain-model"),
+    ],
+)
+def test_prefix_cache_retention_interval_default_resolution(
+    monkeypatch, is_hybrid, use_eagle, explicit, expected
+):
+    """Default hybrid+EAGLE retention to k * scheduler block_size.
+
+    Explicit 0/None/N and non-hybrid / non-EAGLE unset stay unchanged.
+    """
+    from vllm.config.cache import (
+        HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS,
+        CacheConfig,
+    )
+
+    monkeypatch.setattr(ModelConfig, "is_hybrid", property(lambda self: is_hybrid))
+    if use_eagle:
+        _mock_eagle_spec_config(monkeypatch)
+    engine_kwargs = (
+        {} if explicit == "unset" else {"prefix_cache_retention_interval": explicit}
+    )
+    vllm_config = EngineArgs(
+        model="facebook/opt-125m", **engine_kwargs
+    ).create_engine_config()
+    if expected == "k_block":
+        # Applied after create_speculative_config using DEFAULT_BLOCK_SIZE
+        # unless --block-size was set. Some platforms (CPU) then bump
+        # block_size in check_and_update_config without re-applying.
+        applied_block_size = (
+            vllm_config.cache_config.block_size
+            if vllm_config.cache_config.user_specified_block_size
+            else CacheConfig.DEFAULT_BLOCK_SIZE
+        )
+        expected = HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS * applied_block_size
+    assert vllm_config.cache_config.prefix_cache_retention_interval == expected
+
+
+def test_prefix_cache_retention_interval_hybrid_eagle_uses_block_size(monkeypatch):
+    from vllm.config.cache import HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS
+
+    monkeypatch.setattr(ModelConfig, "is_hybrid", property(lambda self: True))
+    _mock_eagle_spec_config(monkeypatch)
+    vllm_config = EngineArgs(
+        model="facebook/opt-125m",
+        block_size=32,
+    ).create_engine_config()
+    assert (
+        vllm_config.cache_config.prefix_cache_retention_interval
+        == HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS * 32
+    )
+
+
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
 def test_prefix_caching_xxhash_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

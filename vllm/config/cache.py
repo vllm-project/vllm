@@ -69,6 +69,11 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    # Unset hybrid+EAGLE retention is this many scheduler blocks.
+    # #58303 measured 13056 = 6 * 2176. Larger k retains fewer states (less
+    # pool pressure) with coarser hits:
+    # hit = floor(prompt_tokens / interval) * interval.
+    HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS: ClassVar[int] = 6
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
@@ -284,6 +289,7 @@ class CacheConfig:
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
+            "_prefix_cache_retention_interval_unset",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
@@ -315,6 +321,8 @@ class CacheConfig:
 
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
+    _prefix_cache_retention_interval_unset: bool = field(default=False, init=False)
+    """True when the EngineArgs retention interval was left unset."""
 
     @field_validator("block_size", mode="wrap")
     @classmethod
@@ -377,3 +385,33 @@ class CacheConfig:
                 "set by the user."
             )
         return _layout_from_name(self.kv_cache_layout)
+
+
+HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS = (
+    CacheConfig.HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS
+)
+
+
+def maybe_apply_hybrid_eagle_retention_default(
+    cache_config: CacheConfig,
+    *,
+    is_hybrid: bool,
+    use_eagle: bool,
+) -> None:
+    if not cache_config._prefix_cache_retention_interval_unset:
+        return
+    if not is_hybrid or not use_eagle:
+        return
+    interval = HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS * cache_config.block_size
+    if cache_config.prefix_cache_retention_interval == interval:
+        return
+    cache_config.prefix_cache_retention_interval = interval
+    logger.info(
+        "Hybrid model with EAGLE speculative decoding: defaulting "
+        "prefix_cache_retention_interval to %s (%s * block_size %s). "
+        "Dense checkpointing is capacity-worst; 0 never hits under EAGLE "
+        "(tail-block drop makes the replay-boundary checkpoint unreachable).",
+        interval,
+        HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS,
+        cache_config.block_size,
+    )

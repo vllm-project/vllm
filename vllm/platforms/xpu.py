@@ -424,6 +424,7 @@ class XPUPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
+        from vllm.config.cache import maybe_apply_hybrid_eagle_retention_default
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -431,6 +432,7 @@ class XPUPlatform(Platform):
         from vllm.utils.math_utils import cdiv
 
         cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
         # special fix for GDN since kernel only supports block size dividable by 64
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
@@ -444,33 +446,41 @@ class XPUPlatform(Platform):
                 kernel_block_size = 64
                 break
 
-        if kernel_block_size is None:
-            return
-        new_block_size = (
-            cdiv(cache_config.block_size, kernel_block_size) * kernel_block_size
-        )
-        if new_block_size == cache_config.block_size:
-            return
+        if kernel_block_size is not None:
+            new_block_size = (
+                cdiv(cache_config.block_size, kernel_block_size) * kernel_block_size
+            )
+            if new_block_size != cache_config.block_size:
+                if cache_config.mamba_cache_mode == "align":
+                    cache_config.mamba_block_size = new_block_size
+                original_mamba_page_size_padded = cache_config.mamba_page_size_padded
+                if cache_config.mamba_page_size_padded is not None:
+                    attn_page_size_1_token = (
+                        cache_config.mamba_page_size_padded // cache_config.block_size
+                    )
+                    cache_config.mamba_page_size_padded = (
+                        new_block_size * attn_page_size_1_token
+                    )
+                cache_config.block_size = new_block_size
+                logger.info(
+                    "[XPU]Setting attention block size to %d tokens to ensure "
+                    "multiple of %d, set mamba_page_size_padded to %d bytes "
+                    "accordingly, before was %d bytes.",
+                    new_block_size,
+                    kernel_block_size,
+                    cache_config.mamba_page_size_padded,
+                    original_mamba_page_size_padded,
+                )
 
-        if cache_config.mamba_cache_mode == "align":
-            cache_config.mamba_block_size = new_block_size
-        original_mamba_page_size_padded = cache_config.mamba_page_size_padded
-        if cache_config.mamba_page_size_padded is not None:
-            attn_page_size_1_token = (
-                cache_config.mamba_page_size_padded // cache_config.block_size
+        if model_config is not None:
+            maybe_apply_hybrid_eagle_retention_default(
+                cache_config,
+                is_hybrid=model_config.is_hybrid,
+                use_eagle=(
+                    vllm_config.speculative_config is not None
+                    and vllm_config.speculative_config.use_eagle()
+                ),
             )
-            cache_config.mamba_page_size_padded = (
-                new_block_size * attn_page_size_1_token
-            )
-        cache_config.block_size = new_block_size
-        logger.info(
-            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
-            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
-            new_block_size,
-            kernel_block_size,
-            cache_config.mamba_page_size_padded,
-            original_mamba_page_size_padded,
-        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
