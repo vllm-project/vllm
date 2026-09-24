@@ -195,7 +195,8 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         # drafts behind a rejected pool-completing draft overwrite the keys
         # read by its redo.
         span = self._index_kpool + vllm_config.num_speculative_tokens
-        ring = self._index_kpool * cdiv(span, self._index_kpool)
+        ring = self._index_kpool * next_power_of_2(cdiv(span, self._index_kpool))
+        assert self.cache_config.block_size % ring == 0
         return KpoolTailSpec(
             block_size=ring,
             num_kv_heads=2,
