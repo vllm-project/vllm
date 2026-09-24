@@ -676,7 +676,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:prompt_tokens",
             documentation=(
                 "Prompt tokens summed over sequences, including prefix-cache hits; "
-                "each parallel-sampling child counts its prompt separately. "
+                "each parallel-sampling child counts its prompt separately, and a "
+                "streaming-input session counts only its first input chunk. "
                 "Equals the sum of vllm:prompt_tokens_by_source_total."
             ),
             labelnames=labelnames,

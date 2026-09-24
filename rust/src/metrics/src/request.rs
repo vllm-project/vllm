@@ -129,7 +129,7 @@ impl RequestMetrics {
         let prompt_tokens = Family::default();
         registry.register(
             "vllm:prompt_tokens",
-            "Prompt tokens summed over sequences, including prefix-cache hits; each parallel-sampling child counts its prompt separately. Equals the sum of vllm:prompt_tokens_by_source_total.",
+            "Prompt tokens summed over sequences, including prefix-cache hits; each parallel-sampling child counts its prompt separately, and a streaming-input session counts only its first input chunk. Equals the sum of vllm:prompt_tokens_by_source_total.",
             prompt_tokens.clone(),
         );
 
