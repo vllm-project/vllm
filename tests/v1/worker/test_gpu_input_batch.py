@@ -506,3 +506,35 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+def test_sampling_metadata_prompt_embeds_use_vocab_size_as_token_id_pad():
+    input_batch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=8,
+        max_num_batched_tokens=8,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
+    )
+    input_batch.token_ids_cpu[:].fill(VOCAB_SIZE + 1)
+    req = CachedRequestState(
+        req_id="prompt-embeds",
+        prompt_token_ids=None,
+        prompt_embeds=torch.zeros((3, 4)),
+        mm_features=[],
+        sampling_params=SamplingParams(presence_penalty=0.1),
+        pooling_params=None,
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=0,
+        output_token_ids=[],
+    )
+    input_batch.add_request(req)
+
+    metadata = input_batch._make_sampling_metadata()
+
+    assert metadata.prompt_token_ids is not None
+    assert metadata.prompt_token_ids[0].tolist() == [VOCAB_SIZE] * 3

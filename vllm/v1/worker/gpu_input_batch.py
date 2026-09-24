@@ -995,6 +995,9 @@ class InputBatch:
         # token_id of this value.
         for i in range(num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
+        prompt_token_ids[~self.is_token_ids[:num_reqs, :max_prompt_len]] = (
+            self.vocab_size
+        )
         return prompt_token_ids_cpu_tensor
 
     def make_lora_inputs(
