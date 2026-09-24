@@ -402,6 +402,21 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_dsv4_rope_quant() -> bool:
+    """Return whether the DSv4 sparse MLA decode can fuse the inverse RoPE and
+    FP8 output quant (flashinfer-ai/flashinfer#4918)."""
+    if not has_flashinfer():
+        return False
+    import inspect
+
+    mod = _get_submodule("flashinfer.mla")
+    fn = getattr(mod, "trtllm_batch_decode_sparse_mla_dsv4", None) if mod else None
+    return fn is not None and (
+        "dsv4_inv_rope_cos_sin_cache" in inspect.signature(fn).parameters
+    )
+
+
+@functools.cache
 def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
     """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
 
@@ -1282,6 +1297,7 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+    "has_flashinfer_dsv4_rope_quant",
     "flashinfer_xqa_batch_decode_with_kv_cache",
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",

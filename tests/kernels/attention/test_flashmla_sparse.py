@@ -565,3 +565,102 @@ def test_flashinfer_sparse_forward_reads_packed_kv_rows(model, page_padding):
     attn._forward(query, None, cache, metadata, None, True, output)
     expected = torch.tensor([2, 3, 3], dtype=output.dtype, device=device)
     torch.testing.assert_close(output, expected[:, None, None].expand_as(output))
+
+
+def test_flashinfer_rope_quant_matches_unfused_o_proj():
+    """RopeQuant's fused output must project like the bf16 + inv-RoPE/quant path.
+
+    One mixed step (two decodes, a three-token prefill) plus CUDA-graph pad rows,
+    so both calls run over the full buffer with un-rebased cum_seq_lens_q.
+    """
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as mod
+    from vllm.models.deepseek_v4.nvidia.ops.o_proj import rope_quant_attn_out
+    from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer_dsv4_rope_quant
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Requires FlashInfer TRTLLM sparse MLA on SM100/SM103")
+    if not has_flashinfer_dsv4_rope_quant():
+        pytest.skip("FlashInfer predates DSv4 RopeQuant")
+    torch.manual_seed(0)
+    device = "cuda"
+    heads, groups, rank, block_size = 128, 16, 256, 64
+    q_lens, seq_lens = [1, 1, 3], [5, 9, 70]
+    num_tokens, num_rows = sum(q_lens), sum(q_lens) + 3
+    cache = torch.randn((3, block_size, 512), device=device).to(torch.float8_e4m3fn)
+
+    angles = torch.arange(128, device=device, dtype=torch.float32)[:, None] * 0.05
+    angles = angles + torch.arange(32, device=device)[None] * 0.1
+    attn = object.__new__(mod.DeepseekV4FlashInferMLAAttention)
+    attn.compress_ratio = 1
+    attn.window_size = 128
+    attn.scale = 512**-0.5
+    attn.kv_cache_torch_dtype = torch.float8_e4m3fn
+    attn._flashinfer_fp8_bmm1_scale = attn.scale
+    attn._flashinfer_fp8_bmm2_scale = 1.0
+    attn.attn_sink = torch.linspace(-1, 1, heads, device=device)
+    attn.padded_heads = heads
+    attn.topk_indices_buffer = torch.empty(
+        (num_rows, 0), dtype=torch.int32, device=device
+    )
+    attn.rotary_emb = SimpleNamespace(
+        cos_sin_cache=torch.cat((angles.cos(), angles.sin()), -1).contiguous()
+    )
+    attn.n_local_heads, attn.n_local_groups, attn.o_lora_rank = heads, groups, rank
+    attn.nope_head_dim, attn.rope_head_dim = 448, 64
+    attn._einsum_recipe, attn._tma_aligned_scales = (1, 1, 128), True
+    attn.wo_a = SimpleNamespace(
+        weight=(torch.randn((groups, rank, 4096), device=device) * 0.05).to(
+            torch.float8_e4m3fn
+        ),
+        weight_scale=torch.ones((groups, rank, 32), device=device),
+    )
+    attn.wo_b = lambda z: z
+
+    decode_indices = torch.full((2, 128), -1, dtype=torch.int32, device=device)
+    for i, seq_len in enumerate(seq_lens[:2]):
+        decode_indices[i, :seq_len] = torch.arange(
+            i * block_size, i * block_size + seq_len, device=device
+        )
+    query_start = torch.tensor([0, 1, 2, 5], dtype=torch.int32)
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.tensor([[0], [1], [2]], dtype=torch.int32, device=device),
+        slot_mapping=torch.zeros(num_tokens, dtype=torch.int64, device=device),
+        block_size=block_size,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+        query_start_loc=query_start.to(device),
+        query_start_loc_cpu=query_start,
+        token_to_req_indices=torch.tensor(
+            [0, 1, 2, 2, 2], dtype=torch.int32, device=device
+        ),
+        decode_swa_indices=decode_indices,
+        decode_swa_lens=torch.tensor(seq_lens[:2], dtype=torch.int32, device=device),
+        decode_swa_width=128,
+        is_valid_token=torch.ones(num_tokens, dtype=torch.bool, device=device),
+        num_decodes=2,
+        num_prefills=1,
+        num_decode_tokens=2,
+        num_prefill_tokens=3,
+        max_decode_query_len=1,
+    )
+    positions = torch.tensor([4, 8, 67, 68, 69], device=device)
+    q = torch.randn((num_rows, heads, 512), device=device).to(torch.float8_e4m3fn)
+
+    def project(attn_out):
+        if isinstance(attn_out, torch.Tensor):
+            attn_out = attn_out[:, :heads]
+        return attn._o_proj(attn_out, positions).view(-1, groups, rank)
+
+    unfused = torch.empty((num_rows, heads, 512), dtype=torch.bfloat16, device=device)
+    attn._forward(q, None, cache, metadata, None, True, unfused)
+    fused = rope_quant_attn_out(num_rows, torch.device(device))
+    metadata.flashinfer_sparse_index_cache.clear()
+    attn._forward(q, None, cache, metadata, None, True, fused)
+
+    expected = project(unfused[:num_tokens])
+    actual = project(fused)[:num_tokens].float()
+    rel = (actual - expected.float()).norm() / expected.float().norm()
+    assert rel < 2e-2, rel

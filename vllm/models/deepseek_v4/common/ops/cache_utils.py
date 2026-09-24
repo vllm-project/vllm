@@ -1099,6 +1099,7 @@ def build_flashinfer_mixed_sparse_indices(
     prefill_left_visible: torch.Tensor | None = None,
     prefill_right_visible: torch.Tensor | None = None,
     max_image_tokens: int = 0,
+    num_rows: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
@@ -1108,6 +1109,9 @@ def build_flashinfer_mixed_sparse_indices(
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
+
+    ``num_rows`` (>= ``num_tokens``) sizes both outputs for a kernel call that
+    spans a CUDA-graph-padded batch; the rows past ``num_tokens`` stay unset.
 
     When ``prefill_left_visible``/``prefill_right_visible`` are given (vision
     variant), the SWA column region widens by ``max_image_tokens`` and prefill
@@ -1170,13 +1174,15 @@ def build_flashinfer_mixed_sparse_indices(
     # by ``sparse_topk_lens``, so padding never changes the attention result.
     padded_topk = max(topk, decode_compressed_topk)
     padded_topk = (padded_topk + 3) // 4 * 4
+    num_rows = num_tokens if num_rows is None else num_rows
+    assert num_rows >= num_tokens
     sparse_indices = torch.empty(
-        (num_tokens, swa_total_width + padded_topk),
+        (num_rows, swa_total_width + padded_topk),
         dtype=torch.int32,
         device=decode_swa_indices.device,
     )
     sparse_topk_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=decode_swa_indices.device
+        num_rows, dtype=torch.int32, device=decode_swa_indices.device
     )
     if num_tokens == 0:
         return sparse_indices, sparse_topk_lens
@@ -1193,9 +1199,10 @@ def build_flashinfer_mixed_sparse_indices(
         if compressed_block_span is None
         else compressed_block_span
     )
+    # The launch grid follows the output rows, so hand over only the real ones.
     _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL(
-        sparse_indices,
-        sparse_topk_lens,
+        sparse_indices[:num_tokens],
+        sparse_topk_lens[:num_tokens],
         decode_swa_indices,
         decode_compressed_indices,
         decode_compressed_topk_lens,
