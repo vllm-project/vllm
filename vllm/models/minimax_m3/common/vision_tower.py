@@ -381,8 +381,11 @@ class MiniMaxVLVisionTransformer(nn.Module):
     ) -> torch.Tensor:
         """Compute 3D RoPE frequencies for a single (T, H, W) grid.
 
-        Returns (T*H*W, half_rot_dim) on the same device as inv_freq buffers.
-        Mirrors the reference ``_get_3d_rope_embed`` exactly.
+        Returns (3, T*H*W, half_rot_dim) t/h/w planes for triton_mrope on the
+        same device as the inv_freq buffers: each axis's frequencies sit at
+        their section columns of their own plane (the kernel's per-axis masks
+        read only those columns). Frequencies match the reference
+        ``_get_3d_rope_embed``'s concatenated sections.
         """
         tokens_per_frame = grid_h * grid_w
 
@@ -438,9 +441,15 @@ class MiniMaxVLVisionTransformer(nn.Module):
         freqs_h = torch.outer(seq_hw, self.inv_freq_h)  # (max_hw, h_dim/2)
         freqs_w = torch.outer(seq_hw, self.inv_freq_w)  # (max_hw, w_dim/2)
 
-        return torch.cat(
-            [freqs_t[tpos_ids], freqs_h[hpos_ids], freqs_w[wpos_ids]], dim=-1
-        )  # (T*H*W, half_rot_dim)
+        # Emit triton_mrope's (3, T*H*W, half_rot_dim) t/h/w planes directly:
+        # each axis's frequencies sit at their section columns of their own
+        # plane; the kernel's per-axis masks read only those columns.
+        half_t, half_h, half_w = self.t_dim // 2, self.h_dim // 2, self.w_dim // 2
+        planes = freqs_t.new_zeros(3, tpos_ids.numel(), half_t + half_h + half_w)
+        planes[0, :, :half_t] = freqs_t[tpos_ids]
+        planes[1, :, half_t : half_t + half_h] = freqs_h[hpos_ids]
+        planes[2, :, half_t + half_h :] = freqs_w[wpos_ids]
+        return planes
 
     def _get_rope_embed_3d(
         self, grid_thw: list[list[int]], spatial_merge_size: int
@@ -448,7 +457,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         embeds = [
             self._get_3d_rope_embed(t, h, w, spatial_merge_size) for t, h, w in grid_thw
         ]
-        return torch.cat(embeds, dim=0)  # (total_N, half_rot_dim)
+        return torch.cat(embeds, dim=1)  # (3, total_N, half_rot_dim)
 
     # ── Frame-limit helper (mirrors the reference) ───────────────────────
 
@@ -504,18 +513,12 @@ class MiniMaxVLVisionTransformer(nn.Module):
             hidden.device,
         )
 
-        # 3D RoPE freqs: (total_N, half_rot_dim) fp32
+        # 3D RoPE freqs: (3, total_N, half_rot_dim) fp32 t/h/w planes for
+        # triton_mrope. Kept fp32 so the kernel computes the rotation in
+        # fp32, matching the reference precision.
         freqs = self._get_rope_embed_3d(limited, self.spatial_merge_size)
         freqs = freqs.to(device=hidden.device)
-        # triton_mrope expects (3, N, half_rot_dim) t/h/w planes and reads
-        # each section from its plane via masks, so broadcasting the full
-        # per-token vector to all three planes is sufficient (masked-out
-        # entries are never loaded). Kept fp32 so the kernel computes the
-        # rotation in fp32, matching the reference precision. Materialize
-        # once per forward so the per-layer contiguous() in triton_mrope is
-        # a no-op.
-        rotary_cos = freqs.cos().unsqueeze(0).expand(3, -1, -1).contiguous()
-        rotary_sin = freqs.sin().unsqueeze(0).expand(3, -1, -1).contiguous()
+        rotary_cos, rotary_sin = freqs.cos(), freqs.sin()
 
         # Encoder expects (N, 1, hidden_size) — add batch dim
         hidden = hidden.unsqueeze(1)
