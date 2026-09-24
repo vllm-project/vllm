@@ -196,6 +196,10 @@ steps:
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
       depends_on:
       - image-build-amd
 
