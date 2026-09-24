@@ -1209,6 +1209,9 @@ def test_sparse_attn_decode_mxfp8_output() -> None:
 def test_rocm_mxfp8_wo_a_bmm(
     num_tokens: int, n_groups: int, block_scales: bool
 ) -> None:
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _as_block32_scale,
+    )
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         _mxfp8_e4m3_quantize_torch,
     )
@@ -1224,8 +1227,10 @@ def test_rocm_mxfp8_wo_a_bmm(
         torch.randn(n_groups * o_lora_rank, group_dim, device=device)
     )
     if block_scales:
-        # A 32x32 checkpoint keeps one scale row per 32 weight rows.
-        w_scale = w_scale[::32].contiguous()
+        # A 32x32 checkpoint loads as per-row scales that repeat every 32 rows;
+        # RocmDotScaledMxfp8LinearKernel compacts them before wo_a sees them.
+        w_scale = _as_block32_scale(w_scale[::32].repeat_interleave(32, dim=0))
+        assert w_scale is not None
     wo_a = SimpleNamespace(weight=w, weight_scale=w_scale)
 
     out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
