@@ -36,10 +36,8 @@ class GPUWatermarkSampler(Sampler):
         self.watermarking.np.fill(True)
         self.watermarking.copy_to_uva()
 
-    def add_request(
-        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
-    ) -> None:
-        super().add_request(req_idx, prompt_len, sampling_params)
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        super().add_request(req_idx, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
         if sampling_params.watermarking and sampling_params.temperature == 0:
             logger.warning_once(
@@ -60,7 +58,7 @@ class GPUWatermarkSampler(Sampler):
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        use_flashinfer: bool,
+        use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking.np[idx_mapping_np] & (
             self.sampling_states.temperature.np[idx_mapping_np] != 0
@@ -73,7 +71,7 @@ class GPUWatermarkSampler(Sampler):
                 pos,
                 top_k,
                 top_p,
-                use_flashinfer,
+                use_fused_sampler,
             )
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)

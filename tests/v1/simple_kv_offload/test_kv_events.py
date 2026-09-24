@@ -19,8 +19,10 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     SchedulerFixture,
     _alloc_and_register,
     _allocate_cp_gpu_blocks,
+    _allocate_gpu_blocks,
     _make_cp_request,
     _make_kv_cache_config,
+    _make_scratch_kv_cache_config,
     _make_vllm_config,
     make_request,
     make_scheduler_output,
@@ -757,3 +759,37 @@ def test_mamba_align_skips_positional_event_metadata() -> None:
             get_block_hash(make_block_hash_with_group_id(req.block_hashes[idx], 0))
         )
         assert ev.block_hashes == [expected_hash]
+
+
+def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
+    """Event metadata is resolved only for prefix-cacheable groups.
+
+    A scratch group (GLM-5.3-Flash kpool tail) has a block size that does not
+    divide the hash block size, so viewing the request hashes at its block
+    size is impossible; the store must skip it and still emit BlockStored
+    for the attention blocks.
+    """
+    fix = make_events_scheduler(kv_cache_config=_make_scratch_kv_cache_config(16))
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    num_blocks = 2
+
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    scratch_block = gpu_pool.get_new_blocks(1)
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in fa_blocks)
+    simulate_store_completion(sched, meta.store_event)
+
+    events = list(sched.take_events())
+    assert len(events) == num_blocks
+    assert all(isinstance(e, BlockStored) for e in events)
+    assert {e.group_idx for e in events} == {0}
+    assert all(len(e.token_ids) == BLOCK_SIZE for e in events)

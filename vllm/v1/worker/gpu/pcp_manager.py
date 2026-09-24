@@ -192,8 +192,7 @@ class PCPManager:
 
     @staticmethod
     def _reorder_segments(
-        segments: list[RankSegment],
-        is_prefilling: np.ndarray,
+        segments: list[RankSegment], is_prefilling: np.ndarray
     ) -> list[RankSegment]:
         """Order this rank's rows decodes-first, then prefills, canonically."""
 
@@ -218,9 +217,7 @@ class PCPManager:
         return segments
 
     def replicated_requests(
-        self,
-        num_scheduled_tokens: np.ndarray,
-        is_prefilling: np.ndarray,
+        self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray
     ) -> np.ndarray:
         """Per global request, whether every PCP rank gets the whole query."""
         num_chunks = 2 * self.pcp_world_size
@@ -407,10 +404,7 @@ class PCPManager:
         return self._input_buffers
 
     def partition_batch(
-        self,
-        input_batch: InputBatch,
-        padded_num_tokens: int | None = None,
-        padded_num_reqs: int | None = None,
+        self, input_batch: InputBatch, batch_desc: "BatchExecutionDescriptor"
     ) -> InputBatch:
         assert self._input_buffers is not None
         input_buffers = self._input_buffers
@@ -421,6 +415,13 @@ class PCPManager:
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
+
+        padded_num_tokens = None
+        padded_num_reqs = None
+        if batch_desc.cg_mode != CUDAGraphMode.NONE:
+            padded_num_tokens = batch_desc.num_tokens
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                padded_num_reqs = batch_desc.num_reqs
 
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
@@ -442,9 +443,7 @@ class PCPManager:
 
         num_local_reqs = len(local_segments)
         num_reqs_after_padding = self._resolve_num_reqs_after_padding(
-            global_batch,
-            padded_num_reqs,
-            num_local_reqs,
+            global_batch, padded_num_reqs, num_local_reqs
         )
         if num_reqs_after_padding > input_buffers.max_num_reqs:
             raise RuntimeError(
@@ -714,8 +713,7 @@ class PCPManager:
         return self._gathered_kv_slot_mappings[:, : num_tokens * self.pcp_world_size]
 
     def _convert_to_gathered_slot_mappings(
-        self,
-        global_batch_slot_mappings: torch.Tensor,
+        self, global_batch_slot_mappings: torch.Tensor
     ) -> torch.Tensor:
         assert self._padded_gather_idx is not None
         assert self._gathered_kv_write_mask is not None
@@ -754,10 +752,9 @@ class PCPManager:
         return self.draft_prefill_batch or input_buffers
 
     def prepare_draft_prefill(
-        self,
-        input_batch: InputBatch,
-        input_ids: torch.Tensor,
+        self, input_batch: InputBatch, input_ids: torch.Tensor
     ) -> None:
+        self.draft_prefill_batch = None
         if input_batch is not self._global_batch or self._local_batch is None:
             return
         local_batch = self._local_batch
@@ -789,54 +786,15 @@ class PCPManager:
         return last_hidden_states, hidden_states
 
     def restore_for_sampling(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, InputBatch]:
+        self, hidden_states: torch.Tensor, aux_hidden_states: list[torch.Tensor] | None
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None, InputBatch]:
         assert self._global_batch is not None
-        return self.restore_hidden_states(hidden_states), self._global_batch
-
-
-def maybe_partition_pcp_batch(
-    manager: PCPManager | None,
-    input_batch: InputBatch,
-    batch_desc: "BatchExecutionDescriptor",
-) -> InputBatch:
-    if manager is None:
-        return input_batch
-
-    padded_num_tokens = None
-    padded_num_reqs = None
-    if batch_desc.cg_mode != CUDAGraphMode.NONE:
-        padded_num_tokens = batch_desc.num_tokens
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            padded_num_reqs = batch_desc.num_reqs
-
-    return manager.partition_batch(
-        input_batch,
-        padded_num_tokens=padded_num_tokens,
-        padded_num_reqs=padded_num_reqs,
-    )
-
-
-def maybe_get_pcp_dummy_slot_mappings(
-    manager: PCPManager | None,
-    block_tables: BlockTables,
-    num_tokens: int,
-) -> torch.Tensor:
-    if manager is None:
-        return block_tables.get_dummy_slot_mappings(num_tokens)
-    return manager.get_dummy_slot_mappings(num_tokens)
-
-
-def maybe_restore_pcp_for_sampling(
-    manager: PCPManager | None,
-    hidden_states: torch.Tensor | None,
-    input_batch: InputBatch,
-) -> tuple[torch.Tensor, InputBatch]:
-    assert hidden_states is not None
-    if manager is None:
-        return hidden_states, input_batch
-    return manager.restore_for_sampling(hidden_states)
+        hidden_states = self.restore_hidden_states(hidden_states)
+        if aux_hidden_states is not None:
+            aux_hidden_states = [
+                self.restore_hidden_states(states) for states in aux_hidden_states
+            ]
+        return hidden_states, aux_hidden_states, self._global_batch
 
 
 def maybe_build_pcp_manager(

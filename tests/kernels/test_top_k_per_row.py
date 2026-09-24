@@ -1871,17 +1871,32 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     has_coop = _has_cooperative_topk()
     has_fi = _has_flashinfer_topk()
 
-    # "auto" is exactly the pre-existing chain: cooperative -> persistent ->
-    # per_row. It must never select the opt-in backends by itself.
+    # "auto" is the chain cooperative -> persistent -> per_row, with the
+    # cooperative/persistent switch at cooperative_topk's cluster-wave row
+    # limit. It must never select the opt-in backends by itself.
     if has_coop:
-        assert resolve("auto") == "cooperative"
+        from vllm.model_executor.layers.indexer_topk import (
+            AUTO_COOPERATIVE_MAX_ROWS,
+        )
+
+        # cooperative for every batch within its cluster-wave row limit...
+        assert (
+            resolve("auto", k=512, num_rows=AUTO_COOPERATIVE_MAX_ROWS) == "cooperative"
+        )
         assert resolve("auto", k=512, num_rows=8) == "cooperative"
-        # Past cooperative's 64-row limit -> persistent, even where
-        # DeepSelect would be applicable.
+        # ...persistent past the row limit, even where DeepSelect would be
+        # applicable.
+        assert (
+            resolve("auto", k=512, num_rows=AUTO_COOPERATIVE_MAX_ROWS + 1)
+            == "persistent"
+        )
         assert resolve("auto", k=512, num_rows=128) == "persistent"
-        # 16B-aligned (cooperative TMA ok) but not DeepSelect-aligned:
-        # still cooperative at <= 64 rows...
-        assert resolve("auto", unaligned_logits, num_rows=64) == "cooperative"
+        # 16B-aligned (cooperative TMA ok) but not DeepSelect-aligned: the
+        # same row-limit logic applies.
+        assert (
+            resolve("auto", unaligned_logits, num_rows=AUTO_COOPERATIVE_MAX_ROWS)
+            == "cooperative"
+        )
     # ...and persistent past the row limit.
     assert resolve("auto", unaligned_logits, num_rows=128) == "persistent"
     # Unsupported topk (outside {512, 1024, 2048} for the workspace kernels)
