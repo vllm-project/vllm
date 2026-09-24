@@ -11,7 +11,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_engram_dp_size,
     get_pp_group,
@@ -184,12 +184,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
-    use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    moe_needs_token_sharded_input = (
+        vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    )
     return (
         parallel_config.pipeline_parallel_size == 1
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
-        and (use_mega_moe or parallel_config.data_parallel_size > 1)
+        and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
     )
 
 
@@ -562,9 +564,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+        self.use_native_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
-        if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
+        if (
+            self.use_native_mega_moe
+            and not vllm_config.parallel_config.enable_expert_parallel
+        ):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
                 "Enable it with --enable-expert-parallel, or pick a different "
@@ -737,7 +744,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        if self.use_mega_moe:
+        if self.use_native_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
@@ -812,7 +819,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = sp_shard(input_ids)
 
         mega_gate_metadata = None
-        if self.use_mega_moe:
+        if self.use_native_mega_moe:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=False,
@@ -1053,7 +1060,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
-        if first_layer.ffn.use_mega_moe:
+        if first_layer.ffn.use_native_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)

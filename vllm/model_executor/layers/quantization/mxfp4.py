@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import torch
 
 from vllm.logger import init_logger
@@ -781,7 +782,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             return
 

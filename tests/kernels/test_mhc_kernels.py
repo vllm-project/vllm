@@ -166,7 +166,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
-        use_mega_moe=False,
+        use_native_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
