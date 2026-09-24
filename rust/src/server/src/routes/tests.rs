@@ -6373,6 +6373,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         })
     })
     .await;
+    let metrics_before = METRICS.render().unwrap();
 
     let mut responses = Vec::new();
     for (method, path, body) in [
@@ -6435,6 +6436,51 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         );
     }
     engine_task.await.expect("mock engine task");
+    let metrics_after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operations_total",
+            Some("operation=\"update\",status=\"success\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operation_duration_seconds_count",
+            Some("operation=\"update\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_value(
+            &metrics_after,
+            "vllm:rl_weight_update_operations_in_flight",
+            Some("operation=\"update\""),
+        ),
+        Some(0.0)
+    );
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operations_total",
+            Some("operation=\"finish\",status=\"success\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operations_total",
+            Some("operation=\"set_version\",status=\"success\""),
+        ),
+        2.0
+    );
     expect_test::expect![[r#"
         [
             "{\"message\":\"Weight transfer initialized\"}",
@@ -6453,6 +6499,79 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_transfer_routes_reject_top_level_json_arrays() {
+    // `Json<T>` also deserializes a struct from a positional sequence, so
+    // `[{}]` used to be accepted and recorded as a successful operation. These
+    // bodies must be rejected as "not a JSON object", before the recorder.
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("array body reached engine: {message:?}");
+        })
+    })
+    .await;
+    let metrics_before = METRICS.render().unwrap();
+
+    for (path, body) in [
+        ("/init_weight_transfer_engine", "[{}]"),
+        ("/init_weight_transfer_engine", r#"[{"init_info":{}}]"#),
+        ("/init_weight_transfer_engine", "[1]"),
+        ("/update_weights", "[{}]"),
+        ("/finish_weight_update", r#"["array-version"]"#),
+        ("/update_weight_version", r#"["array-version-2"]"#),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+        let payload = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let error: serde_json::Value = serde_json::from_slice(&payload).expect("decode json");
+        assert_eq!(
+            error["error"]["message"].as_str(),
+            Some("Request body must be a JSON object"),
+            "{path}: {body}"
+        );
+    }
+
+    // No operation may be recorded for a body that is not an object.
+    let metrics_after = METRICS.render().unwrap();
+    for operation in ["init", "update", "finish", "set_version"] {
+        for status in ["success", "error"] {
+            assert_eq!(
+                metric_delta(
+                    &metrics_before,
+                    &metrics_after,
+                    "vllm:rl_weight_update_operations_total",
+                    Some(&format!("operation=\"{operation}\",status=\"{status}\"")),
+                ),
+                0.0,
+                "{operation}/{status}"
+            );
+        }
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_operations_in_flight",
+                Some(&format!("operation=\"{operation}\"")),
+            ),
+            0.0,
+            "{operation} gauge"
+        );
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
         boxed_test_future(async move {
@@ -6461,6 +6580,7 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
         })
     })
     .await;
+    let metrics_before = METRICS.render().unwrap();
 
     for (path, body) in [
         ("/init_weight_transfer_engine", "{"),
@@ -6476,6 +6596,15 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
         ("/finish_weight_update", r#"{"weight_version":1}"#),
         ("/update_weight_version", "{}"),
         ("/update_weight_version", r#"{"new_version":null}"#),
+        // Top-level positional arrays: serde can deserialize a struct from a
+        // sequence, so these must be rejected as "not a JSON object" instead of
+        // reaching the recorder as a successful operation.
+        ("/init_weight_transfer_engine", "[{}]"),
+        ("/init_weight_transfer_engine", "[1]"),
+        ("/update_weights", "[{}]"),
+        ("/finish_weight_update", r#"["array-version"]"#),
+        ("/update_weight_version", r#"["array-version-2"]"#),
+        ("/init_weight_transfer_engine", r#"[{"init_info":{}}]"#),
     ] {
         let response = app
             .call(
@@ -6489,6 +6618,33 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
             .await
             .expect("call app");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    let metrics_after = METRICS.render().unwrap();
+    for (operation, status) in [
+        ("init", "error"),
+        ("update", "error"),
+        ("finish", "error"),
+        ("set_version", "error"),
+    ] {
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_operations_total",
+                Some(&format!("operation=\"{operation}\",status=\"{status}\"")),
+            ),
+            0.0
+        );
+        // A rejected request never enters the recorder, so the gauge stays put.
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_operations_in_flight",
+                Some(&format!("operation=\"{operation}\"")),
+            ),
+            0.0
+        );
     }
     engine_task.abort_and_join().await;
 }
@@ -6570,6 +6726,110 @@ async fn weight_transfer_routes_do_not_commit_version_when_finish_fails() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
         json!({"weight_version": "step-0"})
+    );
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_record_finish_success_when_version_fails() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("collective_rpc"));
+            assert_eq!(
+                array[3].as_array().expect("args")[0],
+                Value::from("finish_weight_update")
+            );
+            send_outputs(
+                push,
+                utility_outputs(array[1].as_u64().expect("call id"), utility_none_result()),
+            )
+            .await;
+
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("set_weight_version"));
+            assert_eq!(array[3].as_array().expect("args")[0], Value::from("step-1"));
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: array[1].as_u64().expect("call id").into(),
+                        failure_message: Some("version rejected".to_string()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+        })
+    })
+    .await;
+    let metrics_before = METRICS.render().unwrap();
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"weight_version":"step-1"}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("version rejected")
+    );
+
+    // The engine did finish the transfer, so the finish operation succeeded; only
+    // the version handshake failed and must not be charged to finish.
+    let metrics_after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operations_total",
+            Some("operation=\"finish\",status=\"success\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operations_total",
+            Some("operation=\"set_version\",status=\"error\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_operations_total",
+            Some("operation=\"set_version\",status=\"success\""),
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_value(
+            &metrics_after,
+            "vllm:rl_weight_update_operations_in_flight",
+            Some("operation=\"set_version\""),
+        ),
+        Some(0.0)
     );
     engine_task.await.expect("mock engine task");
 }

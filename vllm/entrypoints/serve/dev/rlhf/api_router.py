@@ -13,10 +13,28 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
 logger = init_logger(__name__)
+
+# Import-time alias: the accessor constructs collectors lazily on first call.
+_weight_metrics = weight_operation_metrics
+
+
+async def _json_object_body(raw_request: Request) -> dict:
+    """Parse the request body, requiring a top-level JSON object."""
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Request body must be a JSON object",
+        )
+    return body
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -155,49 +173,65 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 @router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_object_body(raw_request)
     init_info = body.get("init_info")
     if init_info is None:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'init_info' in request body",
         )
-    await engine_client(raw_request).init_weight_transfer_engine(
-        WeightTransferInitRequest(init_info=init_info)
-    )
+    if not isinstance(init_info, dict):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="'init_info' must be a JSON object",
+        )
+    with _weight_metrics().record("init"):
+        await engine_client(raw_request).init_weight_transfer_engine(
+            WeightTransferInitRequest(init_info=init_info)
+        )
     return JSONResponse(content={"message": "Weight transfer initialized"})
 
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    await engine_client(raw_request).start_weight_update()
+    with _weight_metrics().record("start"):
+        await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
 
 
 @router.post("/start_draft_weight_update")
 async def start_draft_weight_update(raw_request: Request):
-    await engine_client(raw_request).start_draft_weight_update()
+    with _weight_metrics().record("start_draft"):
+        await engine_client(raw_request).start_draft_weight_update()
     return JSONResponse(content={"message": "Draft weight update started"})
 
 
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_object_body(raw_request)
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
-    await engine_client(raw_request).update_weights(
-        request=WeightTransferUpdateRequest(update_info=update_info)
+    # Same accepted shapes as the Rust frontend: an object, or a list of objects.
+    valid_update_info = isinstance(update_info, dict) or (
+        isinstance(update_info, list)
+        and all(isinstance(item, dict) for item in update_info)
     )
+    if not valid_update_info:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=(
+                "'update_info' must be a JSON object or a list of per-worker "
+                "JSON objects"
+            ),
+        )
+    with _weight_metrics().record("update"):
+        await engine_client(raw_request).update_weights(
+            request=WeightTransferUpdateRequest(update_info=update_info)
+        )
     return JSONResponse(content={"message": "Weights updated"})
 
 
@@ -206,7 +240,12 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
 ):
-    await engine_client(raw_request).finish_weight_update(weight_version)
+    # Separate observations so a version failure is not charged to finish.
+    with _weight_metrics().record("finish"):
+        await engine_client(raw_request).finish_weight_update()
+    if weight_version is not None:
+        with _weight_metrics().record("set_version"):
+            await engine_client(raw_request).update_weight_version(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
 
 
@@ -215,7 +254,8 @@ async def update_weight_version(
     raw_request: Request,
     new_version: Annotated[str, Body(embed=True)],
 ):
-    await engine_client(raw_request).update_weight_version(new_version)
+    with _weight_metrics().record("set_version"):
+        await engine_client(raw_request).update_weight_version(new_version)
     return JSONResponse(content={"success": True, "new_version": new_version})
 
 
