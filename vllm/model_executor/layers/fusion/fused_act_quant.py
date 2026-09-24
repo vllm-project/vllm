@@ -219,7 +219,6 @@ def maybe_fused_act_quant(
     Returns a QuantizedActivation when a fused kernel matches the activation and
     the consumer's effective input quantization key, else the plain activation.
     """
-    raise ValueError("maybe_fused_act_quant")
     global _manual_fusion_count
     key = get_input_quant_key(linear)
     if key is not None:
