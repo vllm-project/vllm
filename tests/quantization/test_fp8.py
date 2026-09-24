@@ -25,6 +25,9 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
@@ -47,6 +50,12 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+    kFp8DynamicTensorSym,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -938,3 +947,46 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     for i, layer in enumerate(model.model.decoder.layers):
         expected = "auto" if str(i) in ["0", "2"] else "fp8"
         assert layer.self_attn.attn.kv_cache_dtype == expected
+
+
+def _make_fp8_linear_config(group_shape):
+    return FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=QuantKey(
+            dtype=torch.float8_e4m3fn,
+            scale=ScaleDesc(
+                dtype=torch.float32,
+                static=True,
+                group_shape=group_shape,
+            ),
+        ),
+        activation_quant_key=kFp8DynamicTensorSym,
+        weight_shape=(256, 256),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+
+
+@pytest.mark.parametrize(
+    "group_shape",
+    [
+        GroupShape.PER_TENSOR,
+        GroupShape.PER_CHANNEL,
+        GroupShape.PER_TOKEN,
+        GroupShape(128, 128),
+    ],
+)
+def test_marlin_fp8_accepts_compatible_quantizations(group_shape):
+    compatible_accept, compatible_accept_reason = (
+        MarlinFP8ScaledMMLinearKernel.can_implement(
+            _make_fp8_linear_config(group_shape)
+        )
+    )
+    assert compatible_accept
+    assert compatible_accept_reason is None
+
+
+def test_marlin_fp8_rejects_incompatible_quantization():
+    incompatible_accept, _ = MarlinFP8ScaledMMLinearKernel.can_implement(
+        _make_fp8_linear_config(GroupShape(64, 64))
+    )
+    assert not incompatible_accept
