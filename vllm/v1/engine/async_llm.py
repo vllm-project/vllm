@@ -216,11 +216,12 @@ class AsyncLLM(EngineClient):
         self.profiler = profiler
         self._frontend_profiler_injected = profiler is not None
         self._profile_lock = asyncio.Lock()
-        self._frontend_profiler_running = False
+        self._profile_session_guard_enabled = client_count == 1
         self._profile_session_active = False
         if (
             not self._frontend_profiler_injected
             and vllm_config.profiler_config.should_profile_frontend
+            and self._profile_session_guard_enabled
         ):
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
@@ -242,6 +243,14 @@ class AsyncLLM(EngineClient):
                 worker_name=self._frontend_profiler_worker_name,
                 local_rank=0,
                 activities=["CPU"],
+            )
+        elif (
+            not self._frontend_profiler_injected
+            and vllm_config.profiler_config.should_profile_frontend
+        ):
+            logger.warning(
+                "Frontend CPU profiling is disabled when multiple API server "
+                "processes share an engine."
             )
 
     @classmethod
@@ -1080,12 +1089,13 @@ class AsyncLLM(EngineClient):
         max_iterations: int | None = None,
     ) -> None:
         async with self._profile_lock:
-            if self._profile_session_active:
+            if self._profile_session_guard_enabled and self._profile_session_active:
                 raise ProfilerAlreadyActiveError()
             validate_profile_prefix(profile_prefix)
             validate_profile_iteration_bounds(delay_iterations, max_iterations)
 
-            self._profile_session_active = True
+            if self._profile_session_guard_enabled:
+                self._profile_session_active = True
             coros = [
                 self.engine_core.profile_async(
                     True,
@@ -1094,23 +1104,25 @@ class AsyncLLM(EngineClient):
                     max_iterations,
                 )
             ]
-            if self.profiler is not None and not self._frontend_profiler_running:
+            if self.profiler is not None:
                 if not self._frontend_profiler_injected:
                     worker_name = self._frontend_profiler_worker_name
                     if profile_prefix is not None:
                         worker_name = f"{profile_prefix}_{worker_name}"
                     self.profiler.set_output_name(worker_name)
                 coros.append(asyncio.to_thread(self.profiler.start))
-            await asyncio.gather(*coros)
-            self._frontend_profiler_running = self.profiler is not None
+            try:
+                await asyncio.gather(*coros)
+            except BaseException:
+                self._profile_session_active = False
+                raise
 
     async def stop_profile(self) -> None:
         async with self._profile_lock:
             coros = [self.engine_core.profile_async(False)]
-            if self.profiler is not None and self._frontend_profiler_running:
+            if self.profiler is not None:
                 coros.append(asyncio.to_thread(self.profiler.stop))
             await asyncio.gather(*coros)
-            self._frontend_profiler_running = False
             self._profile_session_active = False
 
     async def reset_mm_cache(self) -> None:

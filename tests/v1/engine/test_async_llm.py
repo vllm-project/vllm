@@ -216,7 +216,89 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
     frontend_profiler.start.assert_called_once_with()
     frontend_profiler.stop.assert_called_once_with()
     assert engine._profile_session_active is False
-    assert engine._frontend_profiler_running is False
+
+
+def test_engine_profile_start_failure_allows_explicit_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    frontend_profiler = MagicMock()
+
+    async def profile_async(is_start, *args):
+        if is_start:
+            raise RuntimeError("engine profiler failed to start")
+
+    engine_core.profile_async.side_effect = profile_async
+    engine = AsyncLLM(
+        vllm_config,
+        MagicMock(),
+        log_stats=False,
+        profiler=frontend_profiler,
+    )
+
+    async def profile():
+        with pytest.raises(RuntimeError, match="failed to start"):
+            await engine.start_profile()
+        assert engine._profile_session_active is False
+        await engine.stop_profile()
+
+    asyncio.run(profile())
+
+    engine_core.profile_async.assert_has_awaits(
+        [call(True, None, None, None), call(False)]
+    )
+    frontend_profiler.start.assert_called_once_with()
+    frontend_profiler.stop.assert_called_once_with()
+    assert engine._profile_session_active is False
+
+
+def test_multi_client_profile_uses_idempotent_engine_requests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_activities=["CPU"],
+    )
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+    engines = [
+        AsyncLLM(
+            vllm_config,
+            MagicMock(),
+            log_stats=False,
+            client_count=2,
+            client_index=client_index,
+        )
+        for client_index in range(2)
+    ]
+
+    assert all(engine.profiler is None for engine in engines)
+    profiler.assert_not_called()
+
+    async def profile():
+        await engines[0].start_profile()
+        await engines[1].start_profile()
+        await engines[1].stop_profile()
+        await engines[0].start_profile()
+
+    asyncio.run(profile())
+
+    engine_core.profile_async.assert_has_awaits(
+        [
+            call(True, None, None, None),
+            call(True, None, None, None),
+            call(False),
+            call(True, None, None, None),
+        ]
+    )
 
 
 def test_frontend_profiler_ignores_worker_iteration_bounds(
