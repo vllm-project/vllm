@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 from ...serve.engine.protocol import ErrorResponse
 from .protocol import (
     GenerateRequest,
-    GenerateResponse,
+    GenerateResponseBase,
 )
 from .serving import ServingTokens
 
@@ -67,35 +67,44 @@ async def generate(request: GenerateRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, GenerateResponse):
+    elif isinstance(generator, GenerateResponseBase):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
+abort_router = APIRouter()
+
+
+@abort_router.post("/abort_requests")
+async def abort_requests(raw_request: Request):
+    """Abort one or more requests. To be used in a
+    Disaggregated Everything setup.
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"JSON decode error: {e}",
+        ) from e
+    request_ids = body.get("request_ids")
+    if request_ids is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Missing 'request_ids' in request body",
+        )
+    # Abort requests in background
+    asyncio.create_task(engine_client(raw_request).abort(request_ids))
+    return Response(status_code=200)
+
+
 def attach_router(app: FastAPI):
-    if getattr(app.state.args, "tokens_only", False):
-
-        @router.post("/abort_requests")
-        async def abort_requests(raw_request: Request):
-            """Abort one or more requests. To be used in a
-            Disaggregated Everything setup.
-            """
-            try:
-                body = await raw_request.json()
-            except json.JSONDecodeError as e:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail=f"JSON decode error: {e}",
-                ) from e
-            request_ids = body.get("request_ids")
-            if request_ids is None:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Missing 'request_ids' in request body",
-                )
-            # Abort requests in background
-            asyncio.create_task(engine_client(raw_request).abort(request_ids))
-            return Response(status_code=200)
-
     app.include_router(router)
+    # The RLHF dev router registers its own /abort_requests first. Registering
+    # this one too would only add a shadowed route with a duplicate operation ID.
+    has_abort_route = any(
+        getattr(route, "path", None) == "/abort_requests" for route in app.routes
+    )
+    if not has_abort_route:
+        app.include_router(abort_router)
