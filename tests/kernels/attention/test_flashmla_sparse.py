@@ -558,6 +558,39 @@ def test_flashinfer_mixed_sparse_indices_noncausal_rows_have_no_active_gaps():
     assert sparse_lens.cpu().tolist() == [7, 6]
 
 
+def test_flashinfer_mixed_sparse_indices_noncausal_pad_rows_keep_min_length():
+    """A CUDA-graph pad token of the DSpark graph (a zero-length request) gets
+    a causal pad row's shape instead of negative spill arithmetic."""
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        build_flashinfer_mixed_sparse_indices,
+    )
+
+    device = torch.device("cuda")
+    window, width = 128, 192
+    decode_swa = torch.full((3, width), -1, dtype=torch.int32, device=device)
+    decode_swa[:2, :3] = torch.arange(3, dtype=torch.int32, device=device)
+    sparse_indices, sparse_lens = build_flashinfer_mixed_sparse_indices(
+        decode_swa_indices=decode_swa,
+        decode_compressed_indices=None,
+        decode_compressed_topk_lens=None,
+        prefill_topk_indices=torch.empty((0, 0), dtype=torch.int32, device=device),
+        # Request 1 is the padding: no query tokens, seq_len 0.
+        query_start_loc=torch.tensor([0, 2, 2], dtype=torch.int32, device=device),
+        seq_lens=torch.tensor([3, 0], dtype=torch.int32, device=device),
+        token_to_req_indices=torch.tensor([0, 0, 1], dtype=torch.int32, device=device),
+        swa_block_table=torch.zeros((2, 1), dtype=torch.int32, device=device),
+        swa_block_size=64,
+        compressed_block_table=None,
+        compressed_block_size=64,
+        window_size=window,
+        compress_ratio=1,
+        topk=0,
+    )
+
+    assert sparse_lens.cpu().tolist() == [129, 128, 128]
+    assert (sparse_indices[2] == -1).all()
+
+
 @pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
 @pytest.mark.parametrize("page_padding", [0, 64])
 def test_flashinfer_sparse_forward_reads_packed_kv_rows(model, page_padding):

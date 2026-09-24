@@ -1344,12 +1344,18 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 query_start = tl.load(query_start_loc_ptr + req_idx)
                 query_len = tl.load(query_start_loc_ptr + req_idx + 1) - query_start
                 context_len = tl.load(seq_lens_ptr + req_idx) - query_len
-                window_len = tl.minimum(
-                    context_len + token_idx - query_start + 1, WINDOW_SIZE
-                )
+                token_in_query = token_idx - query_start
+                window_len = tl.minimum(context_len + token_in_query + 1, WINDOW_SIZE)
                 spill_len = (
                     tl.minimum(context_len, WINDOW_SIZE) + query_len - window_len
                 )
+                # A CUDA-graph pad token sits outside its empty request, so
+                # the kernel never reads its row; keep it the shape of a
+                # causal pad row (all -1, WINDOW_SIZE long) rather than let
+                # the formulas above go negative.
+                is_block_token = (token_in_query >= 0) & (token_in_query < query_len)
+                window_len = tl.where(is_block_token, window_len, 0)
+                spill_len = tl.where(is_block_token, spill_len, 0)
                 compressed_start = WINDOW_SIZE + spill_len
             for i in range(0, SWA_TOTAL_WIDTH, WINDOW_BLOCK_SIZE):
                 offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
