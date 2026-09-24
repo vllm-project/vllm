@@ -343,49 +343,37 @@ class TestFusedMMInputNormKernel:
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out, expected)
 
-    def test_larger_output_buffer(self):
-        """Only the leading ``N`` rows of an oversized ``out`` are written."""
+    def test_non_contiguous_inputs_materialized(self):
+        """Read-only tensors are made contiguous internally."""
         N, C, L = 3, 3, 100
         set_random_seed(0)
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        base = torch.randn(N, C, L, 2, dtype=torch.float32, device=_DEVICE)
+        x = base[..., 0]
+        assert not x.is_contiguous()
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
-        # Pad only along dim 0. Padding C or L would break the flat index
-        # mapping and is explicitly disallowed.
-        out = torch.full(
-            (N + 2, C, L),
-            123.0,
-            dtype=torch.float32,
-            device=_DEVICE,
-        )
+        out = torch.empty(N, C, L, dtype=torch.float32, device=_DEVICE)
         fused_mm_input_norm_triton(x, out, w, b)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
-        torch.testing.assert_close(out[:N], expected)
-        assert torch.all(out[N:] == 123.0)
+        torch.testing.assert_close(out, expected)
 
-    def test_rejects_channel_or_width_padded_output(self):
-        """The flat 1D kernel cannot address a buffer padded along C or L."""
+    def test_rejects_mismatched_output_shape(self):
+        """``outputs`` must be shaped exactly like ``inputs``."""
         N, C, L = 3, 3, 100
         x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
-        with pytest.raises(AssertionError):
-            fused_mm_input_norm_triton(
-                x,
-                torch.empty(N, C + 1, L, dtype=torch.float32, device=_DEVICE),
-                w,
-                b,
-            )
-        with pytest.raises(AssertionError):
-            fused_mm_input_norm_triton(
-                x,
-                torch.empty(N, C, L + 1, dtype=torch.float32, device=_DEVICE),
-                w,
-                b,
-            )
+        for out_shape in ((N, C + 1, L), (N, C, L + 1), (N + 2, C, L)):
+            with pytest.raises(AssertionError):
+                fused_mm_input_norm_triton(
+                    x,
+                    torch.empty(*out_shape, dtype=torch.float32, device=_DEVICE),
+                    w,
+                    b,
+                )
 
 
 # ===========================================================================

@@ -31,14 +31,6 @@ from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
-_SUPPORTED_INPUTS = (
-    torch.uint8,
-    torch.float16,
-    torch.bfloat16,
-    torch.float32,
-)
-_SUPPORTED_OUTPUTS = (torch.float16, torch.bfloat16, torch.float32)
-
 # Default tile size along the flattened element axis. 4096 keeps each
 # program's payload large enough to amortise launch overhead while
 # staying small enough that the grid saturates the SMs for typical
@@ -95,13 +87,11 @@ def fused_mm_input_norm_triton(
     """Fused per-channel affine transform for normalisation.
 
     Args:
-        inputs: Input tensor, shape ``(N, C, L)``. Must be contiguous; the
-            caller is expected to materialize a contiguous copy beforehand.
-        outputs: Output tensor. Must be contiguous and shaped exactly
-            ``(N_out, C, L)`` with ``N_out >= N``; only the leading ``N``
-            rows are written.
-        weight: Per-channel scale, shape ``(C,)``, contiguous.
-        bias: Per-channel shift, shape ``(C,)``, contiguous.
+        inputs: Input tensor, shape ``(N, C, L)``. A contiguous copy is
+            materialized internally if needed.
+        outputs: Output tensor, contiguous and shaped exactly ``(N, C, L)``.
+        weight: Per-channel scale, shape ``(C,)``.
+        bias: Per-channel shift, shape ``(C,)``.
         block: Block size along the flattened element axis. Defaults to
             ``_DEFAULT_BLOCK``.
         num_warps: Number of warps per program. If ``None``, derived from
@@ -111,51 +101,21 @@ def fused_mm_input_norm_triton(
         ``outputs``, for chaining.
 
     """
-    # --- dtype validation ---------------------------------------------
-    assert inputs.dtype in _SUPPORTED_INPUTS, f"unsupported input dtype: {inputs.dtype}"
-    assert outputs.dtype in _SUPPORTED_OUTPUTS, (
-        f"unsupported output dtype: {outputs.dtype}"
-    )
-
-    # --- shape validation ---------------------------------------------
-    assert inputs.dim() == 3, (
-        f"expected inputs to be 3D (N, C, L), got {tuple(inputs.shape)}"
-    )
-    assert outputs.dim() == 3, (
-        f"expected outputs to be 3D (N, C, L), got {tuple(outputs.shape)}"
-    )
     N, C, L = inputs.shape
-    assert outputs.shape[0] >= N, (
-        f"outputs.shape[0]={outputs.shape[0]} < inputs.shape[0]={N}"
-    )
-    # The flat 1D kernel addresses the output buffer as a contiguous
-    # ``N * C * L`` block (``y_ptr + offs``), so the buffer's physical
-    # layout must match the input exactly on the C and L axes. Only the
-    # batch dim (dim 0) may be padded.
-    assert outputs.shape[1:] == (C, L), (
-        f"outputs.shape[1:]={tuple(outputs.shape[1:])} != (C, L)={(C, L)}; "
-        "the flat 1D kernel addresses the output as a contiguous "
-        "N * C * L block and cannot handle a channel- or width-padded "
-        "output buffer"
+    assert outputs.shape == (N, C, L), (
+        f"outputs shape {tuple(outputs.shape)} != inputs shape {(N, C, L)}"
     )
     assert weight.numel() == C and bias.numel() == C, (
         f"weight/bias must have {C} elements, got {weight.numel()} / {bias.numel()}"
     )
-    assert weight.is_contiguous() and bias.is_contiguous(), (
-        "weight and bias must be contiguous"
-    )
-    assert inputs.is_contiguous(), (
-        "inputs must be contiguous; materialize a copy before calling the kernel"
-    )
-    assert outputs.is_contiguous(), (
-        "outputs must be contiguous; only inputs is auto-materialized"
-    )
+    # The flat 1D kernel writes outputs by raw offset; a non-contiguous
+    # buffer would be written at the wrong locations and cannot be
+    # auto-materialized without breaking the caller's aliasing.
+    assert outputs.is_contiguous(), "outputs must be contiguous"
 
-    # --- derive launch config -----------------------------------------
     if block is None:
         block = _DEFAULT_BLOCK
 
-    # The kernel only ever writes the leading ``N`` rows
     numel = N * C * L
     grid = (triton.cdiv(numel, block),)
 
@@ -169,10 +129,10 @@ def fused_mm_input_norm_triton(
 
     # --- dispatch ------------------------------------------------------
     _fused_mm_input_norm_kernel[grid](
-        inputs,
+        inputs.contiguous(),
         outputs,
-        weight,
-        bias,
+        weight.contiguous(),
+        bias.contiguous(),
         numel,
         L,
         C=C,
@@ -397,7 +357,7 @@ class FusedMMInputNorm(CustomOp):
         patches, size = self._unpack_2d(pixel_values)
         patch_size = self._patch_size(size)
 
-        x3 = pixel_values.contiguous().view(patches, self.channel, patch_size)
+        x3 = pixel_values.reshape(patches, self.channel, patch_size)
         y = torch.empty((patches, size), dtype=visual_dtype, device=pixel_values.device)
         y3 = y.view(patches, self.channel, patch_size)
 
