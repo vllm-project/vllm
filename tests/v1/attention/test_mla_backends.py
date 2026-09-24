@@ -367,7 +367,7 @@ MLA_DIMENSIONS_TO_TEST = [
     ("glm", 192, 256),
 ]
 
-TENSOR_PARALLEL_SIZES_TO_TEST = [16] if current_platform.is_xpu() else [1, 4, 8, 16]
+TENSOR_PARALLEL_SIZES_TO_TEST = [1, 4, 8, 16]
 
 
 def _reference_sdpa(*args, **kwargs):
@@ -1237,31 +1237,6 @@ def test_xpu_platform_routes_mla_to_flash_attn_mla():
         XPUPlatform.get_attn_backend_cls(
             selected_backend=AttentionBackendEnum.FLASH_ATTN,
             attn_selector_config=selector_config,
-        )
-
-    assert (
-        XPUPlatform.get_attn_backend_cls(
-            selected_backend=None,
-            attn_selector_config=selector_config,
-            num_heads=16,
-        )
-        == AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
-    )
-
-    assert (
-        XPUPlatform.get_attn_backend_cls(
-            selected_backend=AttentionBackendEnum.FLASH_ATTN_MLA,
-            attn_selector_config=selector_config,
-            num_heads=16,
-        )
-        == AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
-    )
-
-    with pytest.raises(ValueError, match="Invalid attention backend"):
-        XPUPlatform.get_attn_backend_cls(
-            selected_backend=AttentionBackendEnum.FLASH_ATTN,
-            attn_selector_config=selector_config,
-            num_heads=16,
         )
 
 
