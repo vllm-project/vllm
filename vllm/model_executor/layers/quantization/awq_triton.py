@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 
@@ -18,7 +18,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
-    current_platform.has_device_capability(89)
+    current_platform.is_device_capability(89)
 )
 
 
@@ -120,7 +120,7 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
         BLOCK_SIZE_N: int
         BLOCK_SIZE_K: int = 32
 
-    kernel: ClassVar[Any] = staticmethod(awq_gemm_fused_fp32_kernel)
+    kernel: Any = staticmethod(awq_gemm_fused_fp32_kernel)
 
     def dispatch(  # type: ignore[override]
         self, *, m: int, N: int, K: int, GROUP_SIZE: int
@@ -148,7 +148,9 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
             qweight=TritonWarmupTensor(
                 torch.int32, shape=(compile_key.K, compile_key.N // 8)
             ),
-            scales=TritonWarmupTensor(torch.float16, shape=(num_groups, compile_key.N)),
+            scales=TritonWarmupTensor(
+                torch.float16, shape=(num_groups, compile_key.N)
+            ),
             zeros=TritonWarmupTensor(
                 torch.int32, shape=(num_groups, compile_key.N // 8)
             ),
