@@ -79,7 +79,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         backend = SimpleNamespace(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
-            get_supported_kernel_block_sizes=lambda sizes=sizes: sizes,
+            get_supported_kernel_block_sizes=lambda *_, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,

@@ -36,7 +36,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
@@ -303,7 +303,7 @@ def _make_mock_backend_for_kernel_block_size(
             return "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return supported_sizes
 
     return _MockBackend()
@@ -441,13 +441,13 @@ def _mock_backend(supported: list, *, exact: bool = False):
             return "MOCK_EXACT" if exact else "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return list(supported)
 
         if exact:
 
             @classmethod
-            def supports_block_size(cls, block_size: int | None) -> bool:
+            def supports_block_size(cls, block_size, kv_cache_spec=None):
                 return block_size is None or block_size in supported
 
     return _MockBackendCls
@@ -469,21 +469,61 @@ def _mock_backend(supported: list, *, exact: bool = False):
     ],
 )
 def test_preferred_block_size_satisfies_every_backend(backends, expected):
-    classes = [_mock_backend(s) for s in backends]
-    assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+    specs = [(_mock_backend(s), None) for s in backends]
+    assert Platform._preferred_block_size_for_backends(specs, 16, None) == expected
 
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
     # Extending greedily picks lcm(16, 32) = 32, which the exact backend
     # rejects; 96 is accepted by both.
-    classes = [_mock_backend([16, 96], exact=True), _mock_backend([MultipleOf(32)])]
-    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 96
+    specs = [(_mock_backend([16, 96], exact=True), None), (_mock_backend([32]), None)]
+    assert Platform._preferred_block_size_for_backends(specs, 16, None) == 96
 
 
 def test_preferred_block_size_rejects_backends_with_no_common_size():
-    classes = [_mock_backend([16], exact=True), _mock_backend([MultipleOf(64)])]
+    specs = [(_mock_backend([16], exact=True), None), (_mock_backend([64]), None)]
     with pytest.raises(ValueError, match="share no supported KV cache block size"):
-        Platform._preferred_block_size_for_backends(classes, 16, None)
+        Platform._preferred_block_size_for_backends(specs, 16, None)
+
+
+class _SpecAwareMockBackend(AttentionBackend):
+    """FlashAttention-like: a 128-token page for head size 256 (and model-wide),
+    multiples of 16 for other head sizes."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "MOCK_SPEC_AWARE"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        if kv_cache_spec is None or kv_cache_spec.head_size == 256:
+            return [128]
+        return [MultipleOf(16)]
+
+
+def _spec(head_size: int) -> FullAttentionSpec:
+    return FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.bfloat16
+    )
+
+
+def test_preferred_block_size_resolves_constraints_per_spec():
+    target = _mock_backend([16, 32, 64])  # FlashInfer-like head-size-256 target
+    drafter = _SpecAwareMockBackend  # FlashAttention drafter, head size 128
+    # Without specs, the drafter is held to the target's 128-token page.
+    backend_specs = [(target, None), (drafter, None)]
+    assert Platform._preferred_block_size_for_backends(backend_specs, 16, None) == 128
+    backend_specs = [(target, _spec(256)), (drafter, _spec(128))]
+    assert Platform._preferred_block_size_for_backends(backend_specs, 16, None) == 16
+
+
+def test_select_common_block_size_resolves_sizes_per_spec():
+    backend = _SpecAwareMockBackend
+    # 832 is a hybrid head-size-256 target's mamba-aligned manager block; its
+    # drafter's head-size-128 layers must not be held to the 128-token page.
+    with pytest.raises(ValueError):
+        select_common_block_size(832, [backend])
+    assert select_common_block_size(832, [backend], [_spec(128)]) == 832
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():

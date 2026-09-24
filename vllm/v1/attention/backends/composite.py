@@ -397,10 +397,10 @@ def create_composite_attention_backend(
             )
 
         @classmethod
-        def supports_block_size(cls, block_size):
+        def supports_block_size(cls, block_size, kv_cache_spec=None):
             return bool(
-                cls.get_supported_kernel_block_sizes()
-            ) and super().supports_block_size(block_size)
+                cls.get_supported_kernel_block_sizes(kv_cache_spec)
+            ) and super().supports_block_size(block_size, kv_cache_spec)
 
         @classmethod
         def get_supported_head_sizes(cls):

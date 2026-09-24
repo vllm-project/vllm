@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.kv_cache_interface import KVCacheSpec
 else:
     FlexibleArgumentParser = object
 
@@ -592,10 +593,13 @@ class Platform:
         pass
 
     @classmethod
-    def _find_non_ssm_backends(
+    def _find_non_ssm_backend_specs(
         cls, vllm_config: "VllmConfig"
-    ) -> "list[type[AttentionBackend]]":
-        """Distinct non-SSM attention backends, in layer order."""
+    ) -> "list[tuple[type[AttentionBackend], KVCacheSpec | None]]":
+        """Distinct (non-SSM attention backend, KV cache spec) pairs, in layer
+        order. A backend's kernel block sizes may depend on the spec it serves
+        (e.g. a drafter's head size), so one backend can appear with several.
+        """
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -605,21 +609,33 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        backends: list[type[AttentionBackend]] = []
+        backend_specs: list[tuple[type[AttentionBackend], KVCacheSpec | None]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm() and b not in backends:
-                backends.append(b)
-        return backends
+            if b.is_ssm():
+                continue
+            backend_spec = (b, layer.get_kv_cache_spec(vllm_config))
+            if backend_spec not in backend_specs:
+                backend_specs.append(backend_spec)
+        return backend_specs
+
+    @classmethod
+    def _find_non_ssm_backends(
+        cls, vllm_config: "VllmConfig"
+    ) -> "list[type[AttentionBackend]]":
+        """Distinct non-SSM attention backends, in layer order."""
+        return list(
+            dict.fromkeys(b for b, _ in cls._find_non_ssm_backend_specs(vllm_config))
+        )
 
     @classmethod
     def _preferred_block_size_for_backends(
         cls,
-        backend_classes: "list[type[AttentionBackend]]",
+        backend_specs: "list[tuple[type[AttentionBackend], KVCacheSpec | None]]",
         default_block_size: int,
         vllm_config: "VllmConfig",
     ) -> int:
-        """Smallest block size every backend accepts.
+        """Smallest block size every backend accepts for the spec it serves.
 
         ``supports_block_size`` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -634,30 +650,36 @@ class Platform:
 
         # Backends may read the current config to decide a preference.
         with set_current_vllm_config(vllm_config):
-            if len(backend_classes) == 1:
-                return backend_classes[0].get_preferred_block_size(default_block_size)
-            if all(b.supports_block_size(default_block_size) for b in backend_classes):
+            # A lone backend keeps its preference, whichever specs it serves.
+            if len({b for b, _ in backend_specs}) == 1:
+                return backend_specs[0][0].get_preferred_block_size(default_block_size)
+            if all(
+                b.supports_block_size(default_block_size, spec)
+                for b, spec in backend_specs
+            ):
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [
                 [
                     s.base if isinstance(s, MultipleOf) else s
-                    for s in b.get_supported_kernel_block_sizes()
+                    for s in b.get_supported_kernel_block_sizes(spec)
                 ]
                 or [1]
-                for b in backend_classes
+                for b, spec in backend_specs
             ]
             candidates = sorted(
                 {math.lcm(*sizes) for sizes in itertools.product(*per_backend_sizes)}
             )
             for candidate in candidates:
-                if all(b.supports_block_size(candidate) for b in backend_classes):
+                if all(
+                    b.supports_block_size(candidate, spec) for b, spec in backend_specs
+                ):
                     return candidate
         raise ValueError(
             "The attention backends share no supported KV cache block size ("
             + "; ".join(
-                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
-                for b in backend_classes
+                f"{b.get_name()}: {b.get_supported_kernel_block_sizes(spec)}"
+                for b, spec in backend_specs
             )
             + ")."
         )
@@ -676,7 +698,8 @@ class Platform:
         if not model_config:
             return
 
-        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        backend_specs = cls._find_non_ssm_backend_specs(vllm_config)
+        backend_classes = list(dict.fromkeys(b for b, _ in backend_specs))
         if not backend_classes:
             return
 
@@ -686,7 +709,7 @@ class Platform:
         # select_common_block_size().
         if not cache_config.user_specified_block_size:
             preferred = cls._preferred_block_size_for_backends(
-                backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+                backend_specs, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
             )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
