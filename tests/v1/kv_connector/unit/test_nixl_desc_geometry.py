@@ -275,10 +275,15 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
-    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
+def _make_mla_hybrid_worker(
+    local_block_size, kernel_block_size, num_logical_blocks, push_pp=1
+):
+    """Build a real worker with a hybrid MLA + 2xKDA HMA layout."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -329,6 +334,9 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
 
     vllm_config = create_vllm_config(block_size=local_block_size)
     vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.parallel_config.pipeline_parallel_size = push_pp
+    if push_pp > 1:
+        vllm_config.kv_transfer_config.kv_role = "kv_producer"
     # kv_buffer_device defaults to the *real* platform's device type, which on
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared-tensor regions this test builds
@@ -351,13 +359,15 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
         patch.object(bw, "current_platform", fake_platform),
+        patch.object(NixlPushConnectorWorker, "_push_writer_loop"),
         patch(
             "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
             return_value="DS",
         ),
         set_current_vllm_config(vllm_config),
     ):
-        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker_cls = NixlPushConnectorWorker if push_pp > 1 else NixlConnectorWorker
+        worker = worker_cls(vllm_config, "local-engine", kv_cache_config)
         worker.use_mla = True
 
         # Attention caches are kernel-block granular on dim 0, as the
@@ -384,6 +394,111 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     worker._test_tensors_2d = tensors
     worker._test_unified_page = unified_page
     return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("remote_tp_size", [1, 2])
+def test_kimi_pp_push_pairs_pooled_mla_ssm_write_ranges(remote_tp_size):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    worker = _make_mla_hybrid_worker(12, 4, 8, push_pp=2)
+    metadata = _make_remote_meta(
+        worker, 12, 4, 10, (48 // remote_tp_size, 64 // remote_tp_size)
+    )
+    metadata.region_members = [
+        ["mla.1", "kda_a.0", "kda_b.1", "other.stage"],
+        ["mla.0", "kda_a.1", "kda_b.0"],
+    ]
+    metadata.region_num_blocks = [30, 36]
+    _register_remote_agents(worker, metadata, remote_tp_size)
+    local_ids = ([1], [3], [5])
+    remote_ids = ([2], [4], [6])
+    request = ReqMeta(
+        local_block_ids=local_ids,
+        local_physical_block_ids=worker._logical_to_kernel_block_ids(local_ids, 3),
+        tp_size=remote_tp_size,
+        remote=RemoteMeta(
+            block_ids=remote_ids,
+            engine_id="remote-engine",
+            request_id="request",
+            host="remote-host",
+            port=1234,
+        ),
+    )
+    worker._xfer_blocks_for_req("request", request)
+
+    assert worker.num_descs == 48
+    assert len(worker.nixl_wrapper.registered) == 1
+    assert len(worker.nixl_wrapper.registered[0][0]) == 2
+    assert len(worker.nixl_wrapper.xfers) == remote_tp_size
+    _assert_local_writes_within(worker, _owned_byte_ranges(worker, local_ids))
+    local_bases = [tensor.data_ptr() for tensor in worker._test_tensors]
+    remote_bases = [0x10_000_000, 0x20_000_000]
+    remote_region_by_layer = {
+        "mla.1": 0,
+        "kda_a.0": 0,
+        "kda_b.1": 0,
+        "mla.0": 1,
+        "kda_a.1": 1,
+        "kda_b.0": 1,
+    }
+    for rank, (
+        op,
+        local_handle,
+        local_desc_ids,
+        remote_handle,
+        remote_desc_ids,
+    ) in enumerate(worker.nixl_wrapper.xfers):
+        expected_local: list[list[int]] = []
+        expected_remote: list[list[int]] = []
+        for is_ssm in (False, True):
+            for layer, region, group in zip(
+                worker._transfer_layer_names,
+                worker._transfer_layer_region_indices,
+                worker._transfer_layer_group_ids,
+                strict=True,
+            ):
+                if (group != 0) != is_ssm:
+                    continue
+                if is_ssm:
+                    ssm_chunk = 64 // remote_tp_size
+                    local_offsets = [
+                        (offset + rank * size // remote_tp_size, size // remote_tp_size)
+                        for offset, size in ((0, 12), (12, 12), (24, 24))
+                    ] + [(48 + rank * ssm_chunk, ssm_chunk)]
+                    remote_offsets = [
+                        (offset // remote_tp_size, size // remote_tp_size)
+                        for offset, size in ((0, 12), (12, 12), (24, 24))
+                    ] + [(48 // remote_tp_size, ssm_chunk)]
+                else:
+                    local_offsets = remote_offsets = [
+                        (offset * 48, 48) for offset in range(3)
+                    ]
+                expected_local.extend(
+                    [local_bases[region] + local_ids[group][0] * 144 + offset, length]
+                    for offset, length in local_offsets
+                )
+                expected_remote.extend(
+                    [
+                        remote_bases[remote_region_by_layer[layer]]
+                        + remote_ids[group][0] * 144
+                        + offset,
+                        length,
+                    ]
+                    for offset, length in remote_offsets
+                )
+        assert op == "WRITE"
+        assert (
+            worker.nixl_wrapper.dlists[local_handle][local_desc_ids, :2].tolist()
+            == expected_local
+        )
+        assert (
+            worker.nixl_wrapper.dlists[remote_handle][remote_desc_ids, :2].tolist()
+            == expected_remote
+        )
 
 
 @pytest.mark.cpu_test

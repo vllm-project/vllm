@@ -215,6 +215,28 @@ class NixlBaseConnectorWorker:
         num_fa_descs = sum(region_num_blocks)
 
         if use_layer_name_routing:
+            if self._has_mamba:
+                assert self._conv_decomp is not None
+                desc_ids: list[np.ndarray] = []
+                offset = 0
+                for is_ssm in (False, True):
+                    for group_id, capacity in zip(
+                        self._transfer_layer_group_ids, region_num_blocks, strict=True
+                    ):
+                        if _is_ssm_spec(self._group_spec_types[group_id]) != is_ssm:
+                            continue
+                        repeats = 1
+                        if is_ssm:
+                            capacity = int(capacity / (block_size_ratio or 1))
+                            assert capacity % physical_blocks_per_logical == 0
+                            capacity //= physical_blocks_per_logical
+                            repeats = len(self._conv_decomp.local_conv_offsets) + 1
+                        for _ in range(repeats):
+                            desc_ids.append(
+                                np.asarray(block_ids[group_id], dtype=np.int64) + offset
+                            )
+                            offset += capacity
+                return np.concatenate(desc_ids)
             # Descriptors in layer order, using each layer's KV-cache group.
             return np.concatenate(
                 [
@@ -388,6 +410,8 @@ class NixlBaseConnectorWorker:
         (region-major; one desc per block, with K/V packed). Length ``num_fa_descs``.
         """
         assert self.transfer_topo is not None
+        if self._has_mamba and self._transfer_layer_group_ids:
+            return [True] * num_fa_descs
         n_regions = len(self.block_len_per_layer)
         if n_regions == 0 or self.num_regions == 0:
             return [False] * num_fa_descs
@@ -434,12 +458,7 @@ class NixlBaseConnectorWorker:
 
     def _requires_layer_name_routing(self) -> bool:
         """Whether PP push must match HMA layers by name, not region index."""
-        return (
-            self._supports_pp_hma
-            and self.pp_size > 1
-            and self._is_hma_required
-            and not self._has_mamba
-        )
+        return self._supports_pp_hma and self.pp_size > 1 and self._is_hma_required
 
     def _align_remote_regions_by_layer(
         self, nixl_agent_meta: NixlAgentMetadata
@@ -761,12 +780,21 @@ class NixlBaseConnectorWorker:
                     "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                     "for PP + HMA."
                 )
-            # PP push routes HMA (hybrid) attention layouts by layer name;
-            # Mamba/SSM hybrids are not yet supported under PP.
-            if self._has_mamba:
+            if self._has_mamba and (
+                self._is_csa_linear
+                or not any(
+                    isinstance(spec, MLAAttentionSpec)
+                    for spec in self._layer_specs.values()
+                )
+                or not all(
+                    isinstance(spec, (MLAAttentionSpec, MambaSpec))
+                    for spec in self._layer_specs.values()
+                )
+            ):
                 raise NotImplementedError(
                     "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                    "with Mamba/SSM hybrid KV cache layouts yet."
+                    "with Mamba/SSM layouts other than MLA+SSM; "
+                    "each producer stage must contain an MLA layer."
                 )
             # Decode-side PP is unsupported (completions counted per consumer rank).
             if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
@@ -1436,9 +1464,7 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
-        track_region_layers = (
-            self._supports_pp_hma and self._is_hma_required and not self._has_mamba
-        )
+        track_region_layers = self._supports_pp_hma and self._is_hma_required
         region_layers: list[list[str]] = []
 
         # K and V are packed into the content dim, so each attention layer is a
@@ -1722,6 +1748,14 @@ class NixlBaseConnectorWorker:
             else self.region_num_blocks
         )
         self.num_descs = sum(xfer_region_num_blocks)
+        if self._has_mamba and self._transfer_layer_group_ids:
+            self.num_descs = sum(
+                capacity
+                for capacity, group_id in zip(
+                    xfer_region_num_blocks, self._transfer_layer_group_ids, strict=True
+                )
+                if _is_attention_spec(self._group_spec_types[group_id])
+            )
 
         self._mixed_mem_types = len(set(region_mem_types)) > 1
         if self._mixed_mem_types:
@@ -1848,8 +1882,25 @@ class NixlBaseConnectorWorker:
         block_arange = np.arange(num_blocks, dtype=np.uint64)
         parts: list[np.ndarray] = []
 
-        region_indices = self._ssm_region_indices or range(len(base_addresses))
+        region_indices = (
+            [
+                region
+                for region, group_id in zip(
+                    self._transfer_layer_region_indices,
+                    self._transfer_layer_group_ids,
+                    strict=True,
+                )
+                if _is_ssm_spec(self._group_spec_types[group_id])
+            ]
+            if self._transfer_layer_group_ids
+            else self._ssm_region_indices or range(len(base_addresses))
+        )
         for i in region_indices:
+            if self._transfer_layer_group_ids:
+                assert self.region_num_blocks[i] % physical_per_logical == 0
+                block_arange = np.arange(
+                    self.region_num_blocks[i] // physical_per_logical, dtype=np.uint64
+                )
             base_addr = base_addresses[i]
             block_stride = self.block_stride_per_layer[i] * physical_per_logical
             blk_addrs = base_addr + block_arange * block_stride
@@ -1866,7 +1917,7 @@ class NixlBaseConnectorWorker:
             block_addrs = base_addresses[region_index] + block_arange * block_stride
             parts.append(self._stack_descs(block_addrs, block_len, self.device_id))
 
-        return np.concatenate(parts)
+        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
 
     def _build_mamba_remote(
         self,
@@ -1901,10 +1952,27 @@ class NixlBaseConnectorWorker:
         parts: list[np.ndarray] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        region_indices = self._ssm_region_indices or range(
-            len(nixl_agent_meta.kv_caches_base_addr)
+        region_indices = (
+            [
+                region
+                for region, group_id in enumerate(self._transfer_layer_group_ids)
+                if _is_ssm_spec(self._group_spec_types[group_id])
+            ]
+            if self._transfer_layer_group_ids
+            else self._ssm_region_indices
+            or range(len(nixl_agent_meta.kv_caches_base_addr))
         )
         for i in region_indices:
+            if self._transfer_layer_group_ids:
+                capacity = (
+                    nixl_agent_meta.region_num_blocks[i]
+                    if nixl_agent_meta.region_num_blocks is not None
+                    else nixl_agent_meta.num_blocks
+                )
+                assert capacity % remote_physical_per_logical == 0
+                block_arange = np.arange(
+                    capacity // remote_physical_per_logical, dtype=np.uint64
+                )
             base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             block_stride = (
                 nixl_agent_meta.block_strides[i] * remote_physical_per_logical
@@ -1939,7 +2007,7 @@ class NixlBaseConnectorWorker:
             )
             parts.append(self._stack_descs(block_addrs, remote_block_len, device_id))
 
-        return np.concatenate(parts)
+        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
 
     @staticmethod
     def _stack_descs(addrs: np.ndarray, length: int, device_id: int) -> np.ndarray:
@@ -1962,7 +2030,11 @@ class NixlBaseConnectorWorker:
             len(base_addresses)
         )
         parts: list[np.ndarray] = []
-        for i in region_indices:
+        for layer_index, i in enumerate(region_indices):
+            if self._transfer_layer_region_indices and self._has_mamba:
+                group_id = self._transfer_layer_group_ids[layer_index]
+                if _is_ssm_spec(self._group_spec_types[group_id]):
+                    continue
             base_addr = base_addresses[i]
             block_len = self.block_len_per_layer[i] // block_size_ratio
             logical_blocks = np.repeat(
@@ -1979,7 +2051,7 @@ class NixlBaseConnectorWorker:
                 + split_offsets * block_len
             )
             parts.append(self._stack_descs(addrs, block_len, device_id))
-        return np.concatenate(parts)
+        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
 
     def _build_fa_remote(
         self,
@@ -2006,6 +2078,10 @@ class NixlBaseConnectorWorker:
         parts: list[np.ndarray] = []
         use_layer_name_routing = bool(self._transfer_layer_region_indices)
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            if use_layer_name_routing and self._has_mamba:
+                group_id = self._transfer_layer_group_ids[i]
+                if _is_ssm_spec(self._group_spec_types[group_id]):
+                    continue
             local_region = (
                 self._transfer_layer_region_indices[i] if use_layer_name_routing else i
             )
@@ -2028,7 +2104,7 @@ class NixlBaseConnectorWorker:
             block_arange = np.arange(region_num_blocks[i], dtype=np.uint64)
             addrs = base_addr + rank_offset + block_arange * block_strides[i]
             parts.append(self._stack_descs(addrs, local_block_len, device_id))
-        return np.concatenate(parts)
+        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
 
     def register_local_xfer_handler(
         self,
@@ -2536,7 +2612,7 @@ class NixlBaseConnectorWorker:
             # match up to the kernel block size ratio even under
             # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
-            assert self.block_len_per_layer == [
+            assert [self.block_len_per_layer[region] for region in local_regions] == [
                 block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
             ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
@@ -2591,6 +2667,10 @@ class NixlBaseConnectorWorker:
         num_remote_regions = len(nixl_agent_meta.kv_caches_base_addr)
         if nixl_agent_meta.region_num_blocks is not None:
             assert len(nixl_agent_meta.region_num_blocks) == num_remote_regions
+            if self._has_mamba and self._transfer_layer_group_ids:
+                assert self.dst_region_num_blocks[remote_engine_id] == (
+                    nixl_agent_meta.region_num_blocks
+                ), "Remote TP ranks advertised inconsistent layer capacities"
         assert len(nixl_agent_meta.block_strides) == num_remote_regions
         assert all(
             stride >= block_len

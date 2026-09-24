@@ -118,9 +118,10 @@ so a PP-sharded prefiller can write into a `PP=1` decoder. See
 Current push PP + HMA limitations:
 
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
-- Hybrid SSM/Mamba layouts are not supported under PP.
+- PP push supports MLA+SSM layouts (such as Kimi KDA+MLA), with an MLA layer
+  in every producer stage. Other SSM hybrids, including CSA-linear, remain unsupported.
 - HMA requires the same block size on P and D.
-- Attention-HMA member routing requires decode TP to be no greater than prefill TP.
+- Non-MLA attention-HMA member routing requires decode TP to be no greater than prefill TP.
 
 ### Quantized KV cache
 
