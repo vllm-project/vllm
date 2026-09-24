@@ -80,9 +80,25 @@ def prepare_weight(weight: torch.Tensor, weight_scale: torch.Tensor):
     ``mxfp4_to_f32`` / ``e8m0_to_f32`` matches the layout Quark wrote.
 
     Returns ``(packed_b, packed_b_scale)`` flat uint8 buffers.
+
+    Dequantizing in row chunks rather than whole: ``mxfp4_to_f32``, the
+    ``repeat_interleave`` of the scales and their product are each a full-size
+    fp32 tensor, so the naive expression peaks at 7.5x the bf16 operand it
+    produces (measured 3.75 GiB for a 16384x16384 layer whose operand is 0.50
+    GiB). On the largest shape AITER itself tunes for, 106496x16384, that is
+    ~24 GiB of transient allocation per layer at load.
     """
-    w = mxfp4_to_f32(weight) * e8m0_to_f32(weight_scale.repeat_interleave(32, dim=1))
-    return quant_mxfp4_gemm(w.bfloat16())
+    n, k = weight.shape[0], weight.shape[1] * 2
+    out = torch.empty((n, k), dtype=torch.bfloat16, device=weight.device)
+    # ~256 MiB of fp32 scratch per chunk, and at least one row.
+    rows = max(1, min(n, (1 << 26) // max(k, 1)))
+    for i in range(0, n, rows):
+        j = min(i + rows, n)
+        out[i:j] = (
+            mxfp4_to_f32(weight[i:j])
+            * e8m0_to_f32(weight_scale[i:j].repeat_interleave(32, dim=1))
+        ).bfloat16()
+    return quant_mxfp4_gemm(out)
 
 
 def _aiter_a6w4_linear_impl(
@@ -100,7 +116,14 @@ def _aiter_a6w4_linear_impl(
         return torch.empty((0, n), dtype=torch.bfloat16, device=x.device)
     a_packed, a_scale = quant_mxfp6_gemm(x.contiguous())
     out = gemm_a6w4(a_packed, b_packed, a_scale, b_scale, m, n, k)
-    # gemm_a6w4 returns a view into a padded buffer when N is not tile-aligned.
+    # gemm_a6w4 returns out[:M, :N] of a tile-padded [padM, padN] buffer. That
+    # slice is non-contiguous when N is unaligned, so .contiguous() copies. When
+    # N *is* aligned but M < padM it is already contiguous, so .contiguous()
+    # would be a no-op and the small logical result would keep the whole padded
+    # allocation alive -- 16 MiB behind a 64 KiB answer at M=1, N=32768, on
+    # every decode step. Clone when the backing storage is materially larger.
+    if out.untyped_storage().size() > 2 * out.numel() * out.element_size():
+        return out.clone()
     return out.contiguous()
 
 

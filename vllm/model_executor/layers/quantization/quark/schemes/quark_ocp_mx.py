@@ -245,9 +245,12 @@ class QuarkOCP_MX(QuarkScheme):
         # so a static MXFP4 checkpoint must be requantized -- ~1.45x the error
         # (see aiter_a6w4_linear). Prefer the exact kernel when it is there.
         self.use_flydsl_a6w4 = self.is_a6w4 and is_flydsl_a6w4_supported()
-        self.use_aiter_a6w4 = (
+        # Capability, not selection: FlyDSL's eligibility is per-layer (N%128,
+        # K%256) and is not known until process_weights_after_loading, so a
+        # shape FlyDSL rejects must still be able to land on ASM rather than
+        # dropping all the way to emulation.
+        self.aiter_a6w4_available = (
             self.is_a6w4
-            and not self.use_flydsl_a6w4
             and is_aiter_a6w4_supported()
             and self.out_dtype == torch.bfloat16  # the ASM kernel is bf16-only
         )
@@ -258,7 +261,7 @@ class QuarkOCP_MX(QuarkScheme):
                     "linears through the FlyDSL a6w4 kernel.",
                     scope="local",
                 )
-            elif self.use_aiter_a6w4:
+            elif self.aiter_a6w4_available:
                 logger.info_once(
                     "QuarkOCP_MX: routing W4A6 (mxfp6_e2m3 act / mxfp4 weight) "
                     "linears through AITER's ASM a6w4 kernel. Its operands are "
@@ -345,13 +348,8 @@ class QuarkOCP_MX(QuarkScheme):
         # is packed uint8 [N, K//2] at this point -- EXCEPT for dynamically
         # quantized layers (bf16 in the checkpoint, e.g. DeepSeek MLA attention),
         # which must be packed to mxfp4 here before preshuffle.
-        # AITER ASM a6w4: no N/K divisibility constraint, so every W4A6 layer
-        # is eligible. The requantization happens once, here.
-        if self.use_aiter_a6w4:
-            if self.dynamic_mxfp4_quant and layer.weight.dtype != torch.uint8:
-                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
-                layer.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
+        def _use_aiter_asm() -> bool:
+            """Prepare this layer for the ASM kernel. No N/K constraint."""
             layer._a6w4_n = layer.weight.shape[0]
             layer._a6w4_k = layer.weight.shape[1] * 2
             b_packed, b_scale = prepare_aiter_a6w4_weight(
@@ -360,6 +358,14 @@ class QuarkOCP_MX(QuarkScheme):
             layer.weight = torch.nn.Parameter(b_packed, requires_grad=False)
             layer.weight_scale = torch.nn.Parameter(b_scale, requires_grad=False)
             layer._aiter_a6w4 = True
+            return True
+
+        if self.aiter_a6w4_available and not self.use_flydsl_a6w4:
+            if self.dynamic_mxfp4_quant and layer.weight.dtype != torch.uint8:
+                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+                layer.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
+            _use_aiter_asm()
             return
 
         if self.use_flydsl_a6w4:
@@ -378,6 +384,17 @@ class QuarkOCP_MX(QuarkScheme):
                     requires_grad=False,
                 )
                 layer._flydsl_a6w4 = True
+                return
+            if self.aiter_a6w4_available:
+                logger.warning_once(
+                    "QuarkOCP_MX: W4A6 layer N=%d K=%d ineligible for the "
+                    "FlyDSL kernel (needs N%%128, K%%256); using AITER's ASM "
+                    "a6w4 kernel for this layer (requantized weights).",
+                    n,
+                    k,
+                    scope="local",
+                )
+                _use_aiter_asm()
                 return
             logger.warning_once(
                 "QuarkOCP_MX: W4A6 layer N=%d K=%d ineligible for the FlyDSL "
