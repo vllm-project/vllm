@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod client;
+mod connector_metrics;
 mod coordinator;
 mod error;
 mod metrics;

@@ -58,6 +58,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics_descriptor import (
+    INC_BY_U64,
+    OBSERVE_EACH_F64,
+    build_metrics_descriptor,
+    maybe_attach_metrics_descriptor,
+    metric_def,
+    strip_metrics_descriptor,
+)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -1018,9 +1026,72 @@ class HF3FSKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics."""
 
     def __post_init__(self):
+        # Wire may include _metrics_descriptor; keep it out of the accumulator.
+        self.data = strip_metrics_descriptor(self.data) or {}
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
+
+    def to_dict(self) -> dict[str, Any]:
+        return maybe_attach_metrics_descriptor(
+            self.data,
+            connector_id="HF3FSKVConnector",
+            descriptor=self._metrics_descriptor(),
+        )
+
+    @staticmethod
+    def _metrics_descriptor() -> dict[str, Any]:
+        """Build MetricsDescriptorV1 matching HF3FSPromMetrics construction."""
+        duration_buckets = [
+            0.001,
+            0.005,
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.2,
+            0.3,
+            0.5,
+            0.75,
+            1.0,
+            5.0,
+        ]
+        return build_metrics_descriptor(
+            "HF3FSKVConnector",
+            [
+                metric_def(
+                    name="vllm:hf3fs_save_duration_seconds",
+                    type="histogram",
+                    documentation="Histogram of save duration for HF3FSKVConnector.",
+                    samples_path="save_duration",
+                    sample_kind=OBSERVE_EACH_F64,
+                    buckets=duration_buckets,
+                ),
+                metric_def(
+                    name="vllm:hf3fs_load_duration_seconds",
+                    type="histogram",
+                    documentation="Histogram of load duration for HF3FSKVConnector.",
+                    samples_path="load_duration",
+                    sample_kind=OBSERVE_EACH_F64,
+                    buckets=duration_buckets,
+                ),
+                metric_def(
+                    name="vllm:hf3fs_num_failed_save",
+                    type="counter",
+                    documentation="Number of failed HF3FS KV save.",
+                    samples_path="num_failed_save",
+                    sample_kind=INC_BY_U64,
+                ),
+                metric_def(
+                    name="vllm:hf3fs_num_failed_load",
+                    type="counter",
+                    documentation="Number of failed HF3FS KV load.",
+                    samples_path="num_failed_load",
+                    sample_kind=INC_BY_U64,
+                ),
+            ],
+        )
 
     def reset(self):
         # Must be serializable

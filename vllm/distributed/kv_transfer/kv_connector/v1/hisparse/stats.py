@@ -12,11 +12,104 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.v1.metrics.buckets import histogram_buckets
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics_descriptor import (
+    INC_BY_SUM_U64,
+    OBSERVE_EACH_F64,
+    SET_F64,
+    build_metrics_descriptor,
+    maybe_attach_metrics_descriptor,
+    metric_def,
+    strip_metrics_descriptor,
+)
+from vllm.v1.metrics.buckets import KV_CACHE_RESIDENCY_BUCKETS, histogram_buckets
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 _HISPARSE_LEVEL_KEYS = frozenset({"host_cache_usage_perc", "pending_page_transfers"})
+
+
+def build_hisparse_metrics_descriptor() -> dict[str, Any]:
+    """MetricsDescriptorV1 mirroring ``HiSparsePromMetrics`` (kept in sync by test).
+
+    Host-block residency histograms (#59485) use the default
+    ``kv_cache_residency`` bucket family. Python Prom only registers them when
+    ``kv_cache_metrics`` is enabled; the descriptor always advertises them so
+    the Rust frontend can register matching series.
+    """
+    counters = (
+        ("cache_hits", "Number of HiSparse device hot-buffer hits."),
+        ("cache_misses", "Number of HiSparse device hot-buffer misses."),
+        (
+            "host_to_device_bytes",
+            "Bytes transferred from host KV storage to HiSparse hot buffers.",
+        ),
+    )
+    gauges = (
+        (
+            "host_cache_usage_perc",
+            "HiSparse host KV-cache usage. 1 means 100 percent usage. "
+            "Evictable cached blocks count as free.",
+        ),
+        (
+            "pending_page_transfers",
+            "HiSparse page transfers (write-backs and restores) not yet completed.",
+        ),
+    )
+    histograms = (
+        (
+            "host_block_lifetime_seconds",
+            "Histogram of HiSparse host KV block lifetime from allocation "
+            "to eviction. Sampled metrics (controlled by "
+            "--kv-cache-metrics-sample).",
+        ),
+        (
+            "host_block_idle_before_evict_seconds",
+            "Histogram of HiSparse host KV block idle time before eviction. "
+            "Sampled metrics (controlled by --kv-cache-metrics-sample).",
+        ),
+        (
+            "host_block_reuse_gap_seconds",
+            "Histogram of time gaps between consecutive HiSparse host KV "
+            "block accesses. Sampled metrics (controlled by "
+            "--kv-cache-metrics-sample).",
+        ),
+    )
+    residency_buckets = list(KV_CACHE_RESIDENCY_BUCKETS)
+    return build_metrics_descriptor(
+        "HiSparseConnector",
+        [
+            metric_def(
+                name=f"vllm:hisparse_{wire_key}",
+                type="counter",
+                documentation=documentation,
+                samples_path=wire_key,
+                sample_kind=INC_BY_SUM_U64,
+            )
+            for wire_key, documentation in counters
+        ]
+        + [
+            # Level values: Rust sets the gauge to the last list sample.
+            metric_def(
+                name=f"vllm:hisparse_{wire_key}",
+                type="gauge",
+                documentation=documentation,
+                samples_path=wire_key,
+                sample_kind=SET_F64,
+            )
+            for wire_key, documentation in gauges
+        ]
+        + [
+            metric_def(
+                name=f"vllm:hisparse_{wire_key}",
+                type="histogram",
+                documentation=documentation,
+                samples_path=wire_key,
+                sample_kind=OBSERVE_EACH_F64,
+                buckets=residency_buckets,
+            )
+            for wire_key, documentation in histograms
+        ],
+    )
 
 
 @dataclass
@@ -30,9 +123,18 @@ class HiSparseKVConnectorStats(KVConnectorStats):
     """
 
     def __post_init__(self):
+        # Wire may include _metrics_descriptor; keep it out of the accumulator.
+        self.data = strip_metrics_descriptor(self.data) or {}
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
+
+    def to_dict(self) -> dict[str, Any]:
+        return maybe_attach_metrics_descriptor(
+            self.data,
+            connector_id="HiSparseConnector",
+            descriptor=build_hisparse_metrics_descriptor(),
+        )
 
     def reset(self):
         # Must be serializable
