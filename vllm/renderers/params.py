@@ -446,7 +446,10 @@ class TokenizeParams:
                 parameter="pad_prompt_tokens",
             )
 
-        return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
+        padding = [tokenizer.pad_token_id] * (pad_length - len(tokens))
+        if tokenizer.padding_side == "left":
+            return padding + tokens
+        return tokens + padding
 
     def _truncation_slice(
         self, tokenizer: TokenizerLike | None, length: int
@@ -552,5 +555,18 @@ class TokenizeParams:
             truncation = self._truncation_slice(tokenizer, len(parallel))
             if truncation is not None:
                 prompt_dict[key] = parallel[truncation]
+
+        offsets = prompt_dict.get("prompt_token_offsets")
+        if offsets is not None and self.pad_prompt_tokens is not None:
+            num_padding = len(prompt_dict["prompt_token_ids"]) - len(offsets)
+            if num_padding > 0:
+                assert tokenizer is not None
+                # Padding has no span in the source text, matching HF offsets.
+                padding = [(0, 0)] * num_padding
+                prompt_dict["prompt_token_offsets"] = (
+                    padding + offsets
+                    if tokenizer.padding_side == "left"
+                    else offsets + padding
+                )
 
         return prompt

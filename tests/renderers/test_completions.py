@@ -3,12 +3,14 @@
 
 import io
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
 import pybase64
 import pytest
 import torch
+from transformers import BertTokenizer
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
@@ -16,6 +18,7 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -62,6 +65,7 @@ class MockVllmConfig:
 @dataclass
 class DummyTokenizer:
     truncation_side: str = "left"
+    padding_side: str = "right"
     max_chars_per_token: int = 1
     # Deliberately outside the range of ids `encode` returns, so a test can
     # tell a pad token apart from a real one.
@@ -96,6 +100,7 @@ def _build_renderer(
     model_config: MockModelConfig,
     *,
     truncation_side: str = "left",
+    padding_side: str = "right",
     max_chars_per_token: int = 1,
 ):
     renderer = HfRenderer(
@@ -105,6 +110,7 @@ def _build_renderer(
             if model_config.skip_tokenizer_init
             else DummyTokenizer(
                 truncation_side=truncation_side,
+                padding_side=padding_side,
                 max_chars_per_token=max_chars_per_token,
             )
         ),
@@ -125,6 +131,30 @@ def _preprocess_prompt(
         )
         for prompt in prompt_to_seq(prompt_or_prompts)
     ]
+
+
+@pytest.fixture
+def padding_renderer():
+    vocab = [
+        "[PAD]",
+        "[UNK]",
+        "[CLS]",
+        "[SEP]",
+        "[MASK]",
+        "one",
+        "two",
+        "three",
+        "four",
+    ]
+    tokenizer = BertTokenizer(vocab={token: i for i, token in enumerate(vocab)})
+    renderer = HfRenderer(
+        MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+        tokenizer=get_cached_tokenizer(tokenizer),
+    )
+    try:
+        yield renderer, tokenizer
+    finally:
+        renderer.shutdown()
 
 
 class TestValidatePrompt:
@@ -483,6 +513,72 @@ class TestRenderPrompt:
 
         assert len(results) == 1
         assert results[0]["prompt_token_ids"] == list(range(50)) + [pad_id] * 50
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    @pytest.mark.parametrize("as_tokens", [False, True])
+    @pytest.mark.parametrize("pad_length", [None, 2, 4, 8])
+    def test_padding_matches_hf(self, padding_renderer, side, as_tokens, pad_length):
+        """Explicit padding preserves token IDs and source offsets like HF."""
+        renderer, reference = padding_renderer
+        renderer.tokenizer.padding_side = reference.padding_side = side
+        text = "one two three four"
+        expected = reference(
+            text,
+            add_special_tokens=False,
+            padding="max_length" if pad_length is not None else False,
+            max_length=pad_length,
+            return_offsets_mapping=True,
+        )
+        prompt = (
+            {"prompt_token_ids": reference.encode(text, add_special_tokens=False)}
+            if as_tokens
+            else {"prompt": text}
+        )
+        (result,) = renderer.render_cmpl(
+            [prompt],
+            TokenizeParams(
+                max_total_tokens=16,
+                pad_prompt_tokens=pad_length,
+                add_special_tokens=False,
+                return_token_offsets=True,
+            ),
+        )
+        assert result["prompt_token_ids"] == expected["input_ids"]
+        if not as_tokens:
+            assert result["prompt_token_offsets"] == expected["offset_mapping"]
+
+    @pytest.mark.parametrize("padding_side", ["left", "right"])
+    @pytest.mark.parametrize("truncation_side", ["left", "right"])
+    def test_padding_after_truncation_matches_hf(
+        self, padding_renderer, padding_side, truncation_side
+    ):
+        """Truncation and padding use independent directions for IDs and offsets."""
+        renderer, reference = padding_renderer
+        renderer.tokenizer.padding_side = padding_side
+        # The Rust backend accepts distinct truncation and padding lengths.
+        backend = deepcopy(reference.backend_tokenizer)
+        backend.enable_truncation(max_length=2, direction=truncation_side)
+        backend.enable_padding(
+            length=8,
+            direction=padding_side,
+            pad_id=reference.pad_token_id,
+            pad_token=reference.pad_token,
+        )
+        text = "one two three four"
+        expected = backend.encode(text, add_special_tokens=False)
+        (result,) = renderer.render_cmpl(
+            [{"prompt": text}],
+            TokenizeParams(
+                max_total_tokens=16,
+                pad_prompt_tokens=8,
+                truncate_prompt_tokens=2,
+                truncation_side=truncation_side,
+                add_special_tokens=False,
+                return_token_offsets=True,
+            ),
+        )
+        assert result["prompt_token_ids"] == expected.ids
+        assert result["prompt_token_offsets"] == expected.offsets
 
     def test_explicit_side_text_pretokenization_guard(self):
         renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)

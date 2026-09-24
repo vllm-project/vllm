@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 
 import pytest
+from transformers import BertTokenizer
 
 from vllm import TokensPrompt
 from vllm.entrypoints.pooling.scoring.io_processor import (
@@ -19,6 +20,7 @@ pytestmark = pytest.mark.skip_global_cleanup
 @dataclass
 class _DummyTokenizer:
     truncation_side: str = "left"
+    padding_side: str = "right"
     # Outside the range of the prompt ids below, so a test can tell a pad
     # token apart from a real one.
     pad_token_id: int = 99999
@@ -58,3 +60,34 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     assert first_doc == 10
     assert prompt_token_ids[:first_doc] == list(range(10, num_query))
     assert prompt_token_ids[first_doc:40] == list(range(num_query, 50))
+
+
+@pytest.mark.parametrize("keep", [None, 2])
+def test_left_padding_token_types_match_hf(keep):
+    """Padding has type 0 even when left truncation keeps only document tokens."""
+    vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "query", "document"]
+    tokenizer = BertTokenizer(
+        vocab={token: i for i, token in enumerate(vocab)}, padding_side="left"
+    )
+    encoded = tokenizer("query", "document")
+    expected_input = {
+        key: list(value) if keep is None else value[-keep:]
+        for key, value in encoded.items()
+    }
+    expected = tokenizer.pad(expected_input, padding="max_length", max_length=8)
+    params = TokenizeParams(
+        max_total_tokens=8,
+        pad_prompt_tokens=8,
+        truncate_prompt_tokens=keep,
+        truncation_side="left",
+    )
+    actual = params.apply_post_tokenization(
+        tokenizer, TokensPrompt(prompt_token_ids=encoded["input_ids"])
+    )
+    types = _apply_post_tokenization_to_token_type_ids(
+        tokenizer, params, encoded["token_type_ids"]
+    )
+    assert actual["prompt_token_ids"] == expected["input_ids"]
+    assert types == expected["token_type_ids"]
+    boundary = compress_token_type_ids(types)
+    assert [int(i >= boundary) for i in range(len(types))] == expected["token_type_ids"]
