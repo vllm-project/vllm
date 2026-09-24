@@ -221,6 +221,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # forward_native dispatches this non-overlapping patch projection to GEMM.
         x = self.proj.forward_native(x).view(x.size(0), self.proj.out_channels)
         if pos_embeds is not None:
             return x + pos_embeds
