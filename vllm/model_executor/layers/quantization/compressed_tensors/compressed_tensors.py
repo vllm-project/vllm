@@ -511,6 +511,13 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_dynamic_token_w4a8_int(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
+        if not weight_quant or not input_quant:
+            return False
+        if (
+            weight_quant.type != QuantizationType.INT
+            or input_quant.type != QuantizationType.INT
+        ):
+            return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
         weight_strategy = (
@@ -574,6 +581,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         if not weight_quant or not input_quant:
+            return False
+        if (
+            weight_quant.type != QuantizationType.INT
+            or input_quant.type != QuantizationType.FLOAT
+        ):
             return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
