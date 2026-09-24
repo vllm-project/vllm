@@ -19,7 +19,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    MLACommonPrefillMetadata,
     QueryLenSupport,
+    accumulate_mla_context_chunk,
+    init_mla_context_partial,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -159,6 +162,18 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return bool(on_gfx950())
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_gather_kv_b_proj():
+    """Load the fused chunked-context gather requires gather_kv_b_proj.
+    falls back to _compute_prefill_context.
+    """
+    try:
+        from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+    except ImportError:
+        return None
+    return gather_kv_b_proj
 
 
 @functools.lru_cache(maxsize=1)
@@ -443,6 +458,9 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     fp8_prefill_reduce_partial_map: torch.Tensor | None = None
     fp8_prefill_max_q_len: int | None = None
     fp8_prefill_num_partial_tiles: int | None = None
+
+    # Per-token flat KV indices for each chunked-context chunk
+    context_chunk_kv_indices: list[torch.Tensor] | None = None
 
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
@@ -1288,6 +1306,40 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return attn_metadata
 
+    def _build_context_chunk_kv_indices(
+        self, attn_metadata: AiterMLAMetadata
+    ) -> list[torch.Tensor] | None:
+        """Flatten each context chunk's block table into per-token KV indices.
+
+        gather_kv_b_proj addresses its KV buffer one token per entry, so it
+        needs flat indices rather than block ids.
+        """
+        prefill = attn_metadata.prefill
+        if prefill is None or prefill.chunked_context is None:
+            return None
+
+        indices = []
+        for chunk in prefill.chunked_context.chunks:
+            block_table = prefill.block_table[chunk.request_slice]
+            cu_seq_lens = chunk.cu_seq_lens
+            kv_indices = torch.empty(
+                chunk.num_context_tokens,
+                dtype=torch.int32,
+                device=block_table.device,
+            )
+            _expand_page_indices_kernel[(cu_seq_lens.shape[0] - 1,)](
+                kv_indices,
+                block_table,
+                block_table.stride(0),
+                cu_seq_lens,
+                KERNEL_BLOCK_SIZE=self.kernel_block_size,
+                BLOCK_SIZE=1024,
+                HAS_START_OFFSETS=True,
+                start_offsets=chunk.starts,
+            )
+            indices.append(kv_indices)
+        return indices
+
     def build(
         self,
         common_prefix_len: int,
@@ -1301,6 +1353,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._decode_causal = common_attn_metadata.causal
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
+        )
+        attn_metadata.context_chunk_kv_indices = self._build_context_chunk_kv_indices(
+            attn_metadata
         )
         if (
             attn_metadata.decode is not None
@@ -1329,6 +1384,8 @@ def _expand_page_indices_kernel(
     cu_num_tokens,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    HAS_START_OFFSETS: tl.constexpr = False,
+    start_offsets=None,
 ):
     """Expand block table entries into per-token flat page indices.
 
@@ -1342,21 +1399,31 @@ def _expand_page_indices_kernel(
 
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
+
+    With HAS_START_OFFSETS the request's rows begin start_offsets[req] tokens
+    into its sequence rather than at 0, which is what a chunked-context prefill
+    needs.
     """
     req_idx = tl.program_id(0)
     row_ptr = block_table + req_idx * block_table_stride
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
+    if HAS_START_OFFSETS:
+        start = tl.load(start_offsets + req_idx)
+    else:
+        start = 0
+
     offset = tl.arange(0, BLOCK_SIZE)
     for i in tl.range(0, num_tokens, BLOCK_SIZE):
         token_offsets = i + offset
         mask = token_offsets < num_tokens
+        seq_positions = token_offsets + start
 
         # Which block in the block table does this token belong to?
-        block_idx = token_offsets // KERNEL_BLOCK_SIZE
+        block_idx = seq_positions // KERNEL_BLOCK_SIZE
         # Offset within that block
-        offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
+        offset_in_block = seq_positions % KERNEL_BLOCK_SIZE
 
         # Load the block ID from the block table
         block_ids = tl.load(row_ptr + block_idx, mask=mask)
@@ -1686,6 +1753,155 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
+
+        self._use_fused_mla_kv_concat = (
+            hasattr(torch.ops._C, "fused_kimi_k3_mla_kv_concat")
+            and self.qk_nope_head_dim == 128
+            and self.qk_rope_head_dim == 64
+        )
+
+    def _concat_k_nope_k_pe(
+        self, k_nope: torch.Tensor, k_pe: torch.Tensor
+    ) -> torch.Tensor:
+        """Build [k_nope | k_pe] broadcasting k_pe over the heads.
+        falls back to the generic copies for other shapes."""
+        if not (
+            self._use_fused_mla_kv_concat
+            and k_nope.dim() == 3
+            and k_nope.dtype in (torch.bfloat16, torch.float16)
+            and k_pe.dtype == k_nope.dtype
+        ):
+            return super()._concat_k_nope_k_pe(k_nope, k_pe)
+        k = torch.empty(
+            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+            dtype=k_nope.dtype,
+            device=k_nope.device,
+        )
+        torch.ops._C.fused_kimi_k3_mla_kv_concat(
+            k_nope, k_pe.reshape(k_pe.shape[0], k_pe.shape[-1]), k
+        )
+        return k
+
+    def _can_fuse_context_gather(
+        self,
+        q: torch.Tensor,
+        prefill_metadata: MLACommonPrefillMetadata,
+        kv_c_and_k_pe_cache: torch.Tensor,
+    ) -> bool:
+        from vllm.platforms import current_platform
+
+        weight = getattr(self.kv_b_proj, "weight", None)
+        return (
+            self.kv_cache_dtype != "fp8_ds_mla"
+            and prefill_metadata.q_data_type != current_platform.fp8_dtype()
+            and q.dtype in (torch.bfloat16, torch.float16)
+            and _aiter_gather_kv_b_proj() is not None
+            and kv_c_and_k_pe_cache.is_contiguous()
+            and weight is not None
+            and weight.dtype in (torch.bfloat16, torch.float16)
+            and getattr(self.kv_b_proj, "weight_scale", None) is None
+        )
+
+    def _gather_context_chunk(
+        self,
+        chunk,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_indices: torch.Tensor,
+        k_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather one context chunk and expand it into (k, v)."""
+        num_blocks, block_size, cache_width = kv_c_and_k_pe_cache.shape
+        rope_dim = cache_width - self.kv_lora_rank
+        num_rows = chunk.num_context_tokens
+        k = torch.empty(
+            (num_rows, self.num_heads, self.qk_nope_head_dim + rope_dim),
+            dtype=out_dtype,
+            device=kv_c_and_k_pe_cache.device,
+        )
+        v = torch.empty(
+            (num_rows, self.num_heads, self.v_head_dim),
+            dtype=out_dtype,
+            device=kv_c_and_k_pe_cache.device,
+        )
+        if num_rows == 0:
+            return k, v
+
+        _aiter_gather_kv_b_proj()(
+            kv_c_and_k_pe_cache.view(num_blocks * block_size, 1, cache_width),
+            k_scale,
+            chunk.cu_seq_lens,
+            kv_indices,
+            chunk.cu_seq_lens,
+            self.kv_b_proj.weight,
+            None,
+            k,
+            v,
+        )
+        return k, v
+
+    def _compute_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: AiterMLAMetadata,
+        k_scale: torch.Tensor,
+    ):
+        """Attend the cached prefix, gathering and expanding it in one kernel"""
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
+
+        if not self._can_fuse_context_gather(q, prefill_metadata, kv_c_and_k_pe_cache):
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+        kv_indices = attn_metadata.context_chunk_kv_indices
+        if kv_indices is None:
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+
+        assert prefill_metadata.prefill_backend is not None
+        chunked_context = prefill_metadata.chunked_context
+        assert chunked_context is not None
+
+        output = None
+        output_lse = None
+        for chunk in chunked_context.chunks:
+            k, v = self._gather_context_chunk(
+                chunk,
+                kv_c_and_k_pe_cache,
+                kv_indices[chunk.index],
+                k_scale,
+                q.dtype,
+            )
+
+            attn_output, attn_softmax_lse = (
+                prefill_metadata.prefill_backend.run_prefill_context_chunk(
+                    chunk=chunk,
+                    q=q[chunk.token_slice],
+                    k=k,
+                    v=v,
+                )
+            )
+
+            if output is None:
+                if (
+                    len(chunked_context.chunks) == 1
+                    and not chunked_context.empty_token_slices
+                ):
+                    return attn_output, attn_softmax_lse
+                output, output_lse = init_mla_context_partial(
+                    chunked_context,
+                    attn_output,
+                    attn_softmax_lse,
+                    num_tokens=q.shape[0],
+                )
+            accumulate_mla_context_chunk(
+                chunk, attn_output, attn_softmax_lse, output, output_lse
+            )
+
+        return output, output_lse
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
