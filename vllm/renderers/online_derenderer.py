@@ -398,6 +398,7 @@ class OnlineDerenderer:
             model=model,
             choices=stream_choices,
             usage=usage,
+            metrics=generate_chunk.metrics,
         )
         return chunk, updated_state
 
@@ -595,6 +596,7 @@ class OnlineDerenderer:
             model=model,
             choices=stream_choices,
             usage=usage,
+            metrics=generate_chunk.metrics,
         )
         return chunk, updated_state
 
@@ -741,6 +743,7 @@ class OnlineDerenderer:
             model=model,
             choices=stream_choices,
             usage=usage,
+            metrics=generate_chunk.metrics,
         )
         return chunk, updated_state
 
