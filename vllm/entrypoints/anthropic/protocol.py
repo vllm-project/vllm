@@ -118,9 +118,10 @@ class AnthropicOutputConfig(BaseModel):
     format: AnthropicJsonOutputFormat | None = None
 
 
-AnthropicDisabledThinkingEffort = Literal[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max"
+AnthropicThinkingEffortLevel = Literal[
+    "minimal", "low", "medium", "high", "xhigh", "max"
 ]
+AnthropicDisabledThinkingEffort = Literal["none", AnthropicThinkingEffortLevel]
 AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
 
 
