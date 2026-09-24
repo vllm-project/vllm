@@ -314,9 +314,16 @@ class Worker(WorkerBase):
         # MemPool while the allocator is still strongly held avoids the
         # finalize-order crash (pytorch/pytorch#145168). Manual per-block frees
         # instead race the destructor and double-free (MMU fault).
-        allocator = CuMemAllocator.get_instance()
-        data = allocator.allocator_and_pools.pop("kv_cache", None)
+        # The KV cache only lives in a CuMem pool when the allocator is enabled, which is the sleep-mode path.
+        # With it disabled the tensors are ordinary caching-allocator memory, so there is no pool to pop and the
+        # pages come back through empty_cache() instead. Asserting here would turn a supported configuration into
+        # a crash.
+        pooled = not isinstance(self._maybe_get_memory_pool_context("kv_cache"), nullcontext)
+        allocator = CuMemAllocator.get_instance() if pooled else None
+        data = allocator.allocator_and_pools.pop("kv_cache", None) if allocator is not None else None
         released = 0
+        if data is None:
+            torch.cuda.empty_cache()
         if data is not None:
             mem_pool, pool_alloc = data
             for allocation in mem_pool.snapshot():

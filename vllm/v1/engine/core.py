@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import os
+import math
 import queue
 import signal
 import threading
@@ -106,6 +107,27 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+def _trimtab_validate_reinit(fields: dict) -> dict:
+    """Reject values that would produce a live engine nobody can use.
+
+    A zero or negative capacity leaves the scheduler unable to admit or to budget tokens, and a memory fraction
+    outside (0, 1] cannot be profiled, so both are refused before the current KV cache is released.
+    """
+    rejected: dict[str, str] = {}
+    for key in ("max_num_seqs", "max_num_batched_tokens"):
+        if key not in fields:
+            continue
+        value = fields[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) != value or int(value) < 1:
+            rejected[key] = "must be a positive integer"
+    if "gpu_memory_utilization" in fields:
+        value = fields["gpu_memory_utilization"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) \
+                or not 0.0 < float(value) <= 1.0:
+            rejected["gpu_memory_utilization"] = "must be a finite fraction in (0, 1]"
+    return rejected
 
 
 class EngineCore:
@@ -1628,7 +1650,7 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
-    def trimtab_reinit(self, fields: dict) -> dict:
+    def trimtab_reinit(self, fields: dict) -> dict:  # noqa: D401
         """trimtab warm reinit. Rebuild the KV cache, attention groups, CUDA
         graphs and the scheduler at a new size. Weights never leave the GPU.
 
@@ -1646,6 +1668,11 @@ class EngineCoreProc(EngineCore):
             return {"ok": False, "error": "warm reinit needs the server launched with --enable-sleep-mode"}
         if self.scheduler.has_requests():
             return {"ok": False, "error": "engine busy, drain before a warm reinit"}
+        invalid = _trimtab_validate_reinit(fields)
+        if invalid:
+            # validation happens before the release below, because a bad value that is only caught during the
+            # rebuild would leave the engine with no KV cache at all
+            return {"ok": False, "error": "invalid values", "rejected": invalid}
 
         cc, sc = self.vllm_config.cache_config, self.vllm_config.scheduler_config
         previous = {"gpu_memory_utilization": cc.gpu_memory_utilization,
@@ -1665,7 +1692,7 @@ class EngineCoreProc(EngineCore):
             kv_cache_config = self._initialize_kv_caches(self.vllm_config)
             block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, self.vllm_config)
             old = self.scheduler
-            self.scheduler = type(old)(
+            replacement = type(old)(
                 vllm_config=self.vllm_config,
                 kv_cache_config=kv_cache_config,
                 structured_output_manager=self.structured_output_manager,
@@ -1674,6 +1701,13 @@ class EngineCoreProc(EngineCore):
                 block_size=block_size,
                 hash_block_size=hash_block_size,
             )
+            # the scheduler being replaced owns a KV event publisher and any configured connectors, so it is shut
+            # down rather than dropped; build the replacement first so a failure above leaves the old one serving
+            try:
+                old.shutdown()
+            except Exception:
+                logger.exception("trimtab: shutting down the replaced scheduler failed")
+            self.scheduler = replacement
             return kv_cache_config
 
         try:
