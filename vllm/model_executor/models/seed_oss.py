@@ -28,7 +28,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig as SeedOssConfig
+from transformers import PreTrainedConfig as SeedOssConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
