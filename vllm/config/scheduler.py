@@ -84,6 +84,12 @@ class SchedulerConfig:
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
 
+    long_prefill_token_threshold_adaptive: bool = Field(default=False)
+    """Floor the effective long prefill token threshold at a fair share of
+    the token budget: max_num_batched_tokens divided by the number of
+    queued and running requests. Only applies when
+    long_prefill_token_threshold is nonzero."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
@@ -232,13 +238,17 @@ class SchedulerConfig:
 
         # The first half of this warning can be removed once the Scheduler interface is
         # finalized and we can maintain support for scheduler classes that implement it
-        logger.warning_once(
-            "Using custom scheduler class %s. This scheduler interface is not public "
-            "and compatibility may not be maintained. If you have subclassed Scheduler "
-            "instead of AsyncScheduler, you will see degraded performance due to async "
-            "scheduling being disabled.",
-            self.scheduler_cls,  # type: ignore[arg-type]
-        )
+        if not (
+            isinstance(self.scheduler_cls, str)
+            and self.scheduler_cls.startswith("vllm.")
+        ):
+            logger.warning_once(
+                "Using custom scheduler class %s. This scheduler interface is not "
+                "public and compatibility may not be maintained. If you have "
+                "subclassed Scheduler instead of AsyncScheduler, you will see "
+                "degraded performance due to async scheduling being disabled.",
+                self.scheduler_cls,  # type: ignore[arg-type]
+            )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
