@@ -27,7 +27,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV41SparseSWAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950, on_gfx950
+from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -670,7 +670,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
     ) -> torch.Tensor | QuantizedActivation:
-        if not on_gfx950():
+        if not _ON_GFX950:
             return super()._alloc_attn_out(num_tokens, hidden_states)
         # wo_a's MXFP8 input: the decode reduce writes it directly, prefill
         # rows are rotated and quantized after their bf16 attention.
@@ -1084,7 +1084,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
             ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
         ]
-        if on_gfx950():
+        if _ON_GFX950:
             shapes.append(
                 (
                     (num_prefill_tokens, self.n_local_heads, self.head_dim),
