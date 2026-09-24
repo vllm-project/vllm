@@ -70,6 +70,12 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.all_states = ["reasoning", "response"]
 
         self.current_state = "idle"
+        # Set once we have entered the <answer> (response) region. The outer
+        # streaming hand-off must not declare reasoning finished until the whole
+        # envelope has closed (i.e. the closing `\n</answer>` tokens are
+        # consumed). Otherwise the state machine stops receiving deltas and the
+        # closing marker leaks straight into streamed content (issue #58127).
+        self._response_seen = False
         self.expected_sequence = self.think_start_ids
         # this sequence only for the think start, it has two way to start.
         self.expected_sequence_side = self.think_start_ids_fast
@@ -79,6 +85,22 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.current_state == "response"
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        # The prompt-time check above (`state == "response"`) would flip the
+        # outer parser into the post-reasoning content phase the moment
+        # `<answer>` starts, before this state machine has consumed the closing
+        # `\n</answer>`. Those closing deltas would then bypass the parser and
+        # be emitted verbatim as content (issue #58127).
+        #
+        # Keep streaming the whole envelope instead: the answer body is already
+        # routed to content by `extract_reasoning_streaming` while we sit in the
+        # "response" state, and the closing marker is buffered/suppressed. Only
+        # once we have entered the response region AND left it again (envelope
+        # closed) do we declare reasoning ended.
+        return self._response_seen and self.current_state == "idle"
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for hunyuan streaming reason parsing, the stream parse
@@ -189,6 +211,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
                     self.expected_sequence_side = self.response_start_ids_fast
                 elif self.current_state == "think":
                     self.current_state = "response"
+                    self._response_seen = True
                     self.expected_sequence = response_end_sequence
                 elif self.current_state == "response":
                     self.current_state = "idle"
