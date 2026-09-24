@@ -50,6 +50,7 @@ class NvFp4MoeBackend(Enum):
     MARLIN = "MARLIN"
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
+    FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -148,6 +149,12 @@ def backend_to_kernel_cls(
         )
 
         return [Nvfp4QuantizationEmulationTritonExperts]
+    elif backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (  # noqa: E501
+            FlashInferMoeEpExperts,
+        )
+
+        return [FlashInferMoeEpExperts]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -160,6 +167,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_trtllm": NvFp4MoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        "flashinfer_moe_ep_cutedsl": NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
         "flashinfer_b12x": NvFp4MoeBackend.FLASHINFER_B12X,
         "marlin": NvFp4MoeBackend.MARLIN,
         "humming": NvFp4MoeBackend.HUMMING,
@@ -207,6 +215,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.EMULATION,
@@ -281,8 +290,9 @@ def select_nvfp4_moe_backend(
                 f"Model sets swiglu_limit={config.swiglu_limit}, but the "
                 f"explicitly requested moe_backend={runner_backend!r} does "
                 f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm', "
-                f"'flashinfer_cutlass', 'flashinfer_cutedsl', 'cutlass', "
-                f"'b12x', 'marlin', or 'humming' instead."
+                f"'flashinfer_cutlass', 'flashinfer_cutedsl', "
+                f"'flashinfer_moe_ep_cutedsl', 'cutlass', 'b12x', 'marlin', "
+                f"or 'humming' instead."
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
@@ -599,14 +609,23 @@ def make_nvfp4_moe_kernel(
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-        input_dtype=moe_config.in_dtype if per_token_activation else None,
-    )
+    prepare_finalize: mk.FusedMoEPrepareAndFinalize | None
+    if backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (  # noqa: E501
+            FlashInferMoeEpPrepareAndFinalize,
+        )
+
+        # The megakernel dispatches and combines itself.
+        prepare_finalize = FlashInferMoeEpPrepareAndFinalize()
+    else:
+        prepare_finalize = maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=moe_quant_config,
+            routing_tables=routing_tables,
+            allow_new_interface=True,
+            use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+            input_dtype=moe_config.in_dtype if per_token_activation else None,
+        )
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)

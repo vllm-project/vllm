@@ -1,116 +1,79 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the flashinfer moe_ep backend plumbing.
 
-Everything here runs without a GPU or a flashinfer install: the flashinfer
-modules the helpers import lazily are replaced with capture fakes.
-"""
-
-import sys
-from dataclasses import dataclass, field
-from types import ModuleType, SimpleNamespace
-from typing import Any
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_BACKENDS,
+    FLASHINFER_MOE_EP_CUTEDSL,
+    FLASHINFER_MOE_EP_DEEP_GEMM,
     MEGA_MOE_BACKENDS,
+    NATIVE_MEGA_MOE_BACKENDS,
     validate_flashinfer_moe_ep_model,
 )
-from vllm.utils.flashinfer_moe_ep import (
-    _E2M1_LUT,
-    FI_MOE_EP_BACKEND_SPECS,
-    _dequant_fp4_ue8m0_gran32,
-    build_fi_mega_config,
-    fi_moe_ep_backend_spec,
-    make_fi_moe_ep_bootstrap,
-    megakernel_runtime_requirements,
+from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
+from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    RoutingMethodType,
+    nvfp4_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
+    FlashInferMoeEpExperts,
+    FlashInferMoeEpPrepareAndFinalize,
+    epilogue_from_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    FLASHINFER_MOE_EP_MXFP4_BACKENDS,
+    Mxfp4MoeBackend,
+    make_mxfp4_moe_quant_config,
+    map_mxfp4_backend,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    backend_to_kernel_cls as mxfp4_backend_to_kernel_cls,
+)
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
+    map_nvfp4_backend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    backend_to_kernel_cls as nvfp4_backend_to_kernel_cls,
+)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Static,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 
 
-@dataclass
-class _FakeBootstrapConfig:
-    world_size: int
-    rank: int
-    process_group: Any = None
-    auto_bootstrap: bool = True
-    device: int | None = field(default=None, kw_only=True)
+def test_flashinfer_backends_are_megakernels_outside_the_native_model_path():
+    assert FLASHINFER_MOE_EP_BACKENDS <= MEGA_MOE_BACKENDS
+    assert FLASHINFER_MOE_EP_BACKENDS.isdisjoint(NATIVE_MEGA_MOE_BACKENDS)
 
 
-@dataclass
-class _FakeDeepGemmMegaMoeConfig:
-    intermediate_size: int
-    top_k: int
-    activation_clamp: float | None
-    fast_math: bool
-
-
-@dataclass
-class _FakeNvfp4CutedslMegaMoeConfig:
-    intermediate_size: int
-    top_k: int
-    activation_clamp: float | None
-    fast_math: bool
-
-
-@dataclass
-class _FakeMegaConfig:
-    megakernel: Any
-    preprocess_weights: bool
-    quantize_input: bool
-
-
-@pytest.fixture
-def fake_flashinfer(monkeypatch):
-    """Install a minimal fake flashinfer.moe_ep for the lazy imports."""
-    moe_ep = ModuleType("flashinfer.moe_ep")
-    core = ModuleType("flashinfer.moe_ep.core")
-    runtime = ModuleType("flashinfer.moe_ep.core.runtime")
-    flashinfer = ModuleType("flashinfer")
-    fake_attrs: dict[ModuleType, dict[str, Any]] = {
-        moe_ep: {
-            "BootstrapConfig": _FakeBootstrapConfig,
-            "DeepGemmMegaMoeConfig": _FakeDeepGemmMegaMoeConfig,
-            "Nvfp4CutedslMegaMoeConfig": _FakeNvfp4CutedslMegaMoeConfig,
-            "MegaConfig": _FakeMegaConfig,
-            "core": core,
-        },
-        runtime: {"TORCH_DIST": "torch_dist", "NVSHMEM": "nvshmem"},
-        flashinfer: {"moe_ep": moe_ep},
-        core: {"runtime": runtime},
-    }
-    for mod, attrs in fake_attrs.items():
-        for attr, value in attrs.items():
-            setattr(mod, attr, value)
-
-    for name, mod in {
-        "flashinfer": flashinfer,
-        "flashinfer.moe_ep": moe_ep,
-        "flashinfer.moe_ep.core": core,
-        "flashinfer.moe_ep.core.runtime": runtime,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, mod)
-    return moe_ep
-
-
-def test_fi_backend_strings_are_registered_mega_moe_backends():
-    assert set(FI_MOE_EP_BACKEND_SPECS) == FLASHINFER_MOE_EP_BACKENDS
-    assert FLASHINFER_MOE_EP_BACKENDS < MEGA_MOE_BACKENDS
-
-
-@pytest.mark.parametrize("moe_backend", sorted(FLASHINFER_MOE_EP_BACKENDS))
-def test_fi_moe_ep_backend_rejected_for_non_dsv4(moe_backend):
-    """An FI moe_ep backend with a non-DSv4 model must fail at config time
-    instead of silently falling through to the generic FusedMoE path."""
+def test_only_deep_gemm_backend_is_dsv4_specific():
+    validate_flashinfer_moe_ep_model(
+        FLASHINFER_MOE_EP_CUTEDSL,
+        ["MixtralForCausalLM"],
+    )
     with pytest.raises(ValueError, match="only supported for DeepSeek-V4"):
-        validate_flashinfer_moe_ep_model(moe_backend, ["MixtralForCausalLM"])
-
-
-@pytest.mark.parametrize("moe_backend", sorted(FLASHINFER_MOE_EP_BACKENDS))
-def test_fi_moe_ep_backend_accepted_for_dsv4(moe_backend):
-    validate_flashinfer_moe_ep_model(moe_backend, ["DeepseekV4ForCausalLM"])
+        validate_flashinfer_moe_ep_model(
+            FLASHINFER_MOE_EP_DEEP_GEMM,
+            ["MixtralForCausalLM"],
+        )
+    validate_flashinfer_moe_ep_model(
+        FLASHINFER_MOE_EP_DEEP_GEMM,
+        ["DeepseekV4ForCausalLM"],
+    )
 
 
 @pytest.mark.parametrize(
@@ -118,8 +81,7 @@ def test_fi_moe_ep_backend_accepted_for_dsv4(moe_backend):
     [["KimiK3ForConditionalGeneration"], ["MixtralForCausalLM"]],
 )
 def test_native_deep_gemm_mega_moe_not_arch_gated(architectures):
-    """VLLM's own deep_gemm mega path is not DSv4-only (Kimi K3 uses it);
-    models validate their own constraints at construction time."""
+    """Models validate native deep_gemm mega constraints at construction time."""
     validate_flashinfer_moe_ep_model("deep_gemm_mega_moe", architectures)
 
 
@@ -128,11 +90,7 @@ def test_non_fi_backend_ignores_architectures():
 
 
 @pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
-def test_all_mega_backends_get_sequence_parallel_moe(moe_backend):
-    """Every mega backend must qualify for sequence-parallel MoE at
-    TP>1/EP: the predicate once matched only the native backend string,
-    which silently ran the fi backends full-batch with an all-reduce on
-    every rank — 0.42-0.65x native e2e at TP8."""
+def test_token_sharding_backends_enable_dsv4_sequence_parallel(moe_backend: str):
     from vllm.models.deepseek_v4.nvidia.model import _use_sequence_parallel
 
     vllm_config = SimpleNamespace(
@@ -147,113 +105,199 @@ def test_all_mega_backends_get_sequence_parallel_moe(moe_backend):
     assert _use_sequence_parallel(vllm_config)
 
 
-def test_fi_moe_ep_backend_spec_kernel_and_nvshmem_contract():
-    dg = fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_deep_gemm")
-    assert dg.megakernel == "deep_gemm_mega"
-    assert not dg.needs_nvshmem
-
-    cd = fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_cutedsl")
-    assert cd.megakernel == "nvfp4_cutedsl"
-    assert cd.needs_nvshmem
-
-    with pytest.raises(ValueError, match="not a flashinfer moe_ep backend"):
-        fi_moe_ep_backend_spec("deep_gemm_mega_moe")
+def test_dsv4_requests_pre_fc2_router_weight_placement():
+    dsv4 = SimpleNamespace(routing_method=RoutingMethodType.DeepseekV4)
+    default = SimpleNamespace(routing_method=RoutingMethodType.Default)
+    assert fi_ep.apply_topk_in_fc1(dsv4)
+    assert not fi_ep.apply_topk_in_fc1(default)
 
 
-def test_megakernel_runtime_requirements(fake_flashinfer):
-    dg = megakernel_runtime_requirements(
-        fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_deep_gemm")
+def test_backend_specs_preserve_weight_format_contracts():
+    cutedsl = fi_ep.flashinfer_moe_ep_backend_spec(FLASHINFER_MOE_EP_CUTEDSL)
+    assert cutedsl.kernel == "cutedsl"
+    assert cutedsl.weight_formats == frozenset({"nvfp4", "mxfp4"})
+
+    deep_gemm = fi_ep.flashinfer_moe_ep_backend_spec(FLASHINFER_MOE_EP_DEEP_GEMM)
+    assert deep_gemm.kernel == "deep_gemm"
+    assert deep_gemm.weight_formats == frozenset({"mxfp4"})
+
+
+def _megakernel_moe(moe_backend: str, **overrides) -> SimpleNamespace:
+    fields = dict(
+        moe_backend=moe_backend,
+        moe_parallel_config=SimpleNamespace(
+            use_ep=True, use_batched_activation_format=False
+        ),
+        is_act_and_mul=True,
+        activation=MoEActivation.SILU,
+        has_hash_routing=False,
+        routing_method=RoutingMethodType.DeepseekV4,
+        router_logits_dtype=torch.float32,
+        hidden_dim=256,
+        is_lora_enabled=False,
+        skip_final_all_reduce=False,
+        in_dtype=torch.bfloat16,
+        has_bias=False,
+        swiglu_alpha=None,
+        swiglu_beta=None,
     )
-    assert dg == frozenset({"torch_dist"})
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
-    cd = megakernel_runtime_requirements(
-        fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_cutedsl")
+
+def _is_supported(moe, weight_key, activation_key) -> tuple[bool, str]:
+    supported, reason = FlashInferMoeEpExperts.is_supported_config(
+        FlashInferMoeEpExperts,
+        moe,
+        weight_key,
+        activation_key,
+        mk.FusedMoEActivationFormat.Standard,
     )
-    assert cd == frozenset({"torch_dist", "nvshmem"})
+    return supported, reason or ""
 
 
-def test_bootstrap_pins_the_device_vllm_bound(fake_flashinfer, monkeypatch):
-    """The runtime must not rederive the device from LOCAL_RANK/rank: under a
-    remapped CUDA_VISIBLE_DEVICES that ordinal points at the wrong GPU
-    (CUDA_ERROR_ILLEGAL_ADDRESS in the weight transforms). vLLM passes the
-    device it already bound via BootstrapConfig.device."""
-    import vllm.utils.flashinfer_moe_ep as mod
-
-    pg = object()
+@pytest.fixture
+def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A vLLM config without DBO/EPLB/weight transfer, on a supported device."""
+    config = SimpleNamespace(
+        weight_transfer_config=None,
+        parallel_config=SimpleNamespace(enable_dbo=False, enable_eplb=False),
+    )
+    monkeypatch.setattr(fi_ep, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(
-        mod,
-        "get_ep_group",
-        lambda: SimpleNamespace(world_size=4, rank_in_group=2, device_group=pg),
+        FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
-    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 3)
-
-    bootstrap = make_fi_moe_ep_bootstrap()
-
-    assert bootstrap.world_size == 4
-    assert bootstrap.rank == 2
-    assert bootstrap.process_group is pg
-    assert bootstrap.auto_bootstrap is False
-    assert bootstrap.device == 3
+    return config
 
 
-def test_build_fi_mega_config_selects_kernel_config(fake_flashinfer):
-    dg = build_fi_mega_config(
-        intermediate_size=2048,
-        top_k=8,
-        activation_clamp=7.0,
-        megakernel="deep_gemm_mega",
+def test_megakernel_requires_expert_parallel(megakernel_host):
+    """The oracle rejects the megakernel through the experts' support check."""
+    moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    assert _is_supported(moe, kNvfp4Static, kNvfp4Dynamic) == (True, "")
+
+    moe.moe_parallel_config.use_ep = False
+    supported, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
+    assert not supported and "parallel config" in reason
+
+
+def test_megakernel_reports_its_own_constraints(megakernel_host):
+    """Constraints the framework does not know about surface as reasons."""
+    _, reason = _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL), kNvfp4Static, None
     )
-    assert isinstance(dg.megakernel, _FakeDeepGemmMegaMoeConfig)
-    assert dg.megakernel.intermediate_size == 2048
-    assert dg.megakernel.top_k == 8
-    assert dg.megakernel.activation_clamp == 7.0
-    assert dg.preprocess_weights and dg.quantize_input
+    assert "A16 activations" in reason
 
-    cd = build_fi_mega_config(
-        intermediate_size=2048,
-        top_k=8,
-        activation_clamp=None,
-        megakernel="nvfp4_cutedsl",
+    deep_gemm = _megakernel_moe(
+        FLASHINFER_MOE_EP_DEEP_GEMM, routing_method=RoutingMethodType.Renormalize
     )
-    assert isinstance(cd.megakernel, _FakeNvfp4CutedslMegaMoeConfig)
+    _, reason = _is_supported(deep_gemm, kMxfp4Static, None)
+    assert "routing method" in reason
 
-    with pytest.raises(ValueError, match="Unsupported fi_moe_ep megakernel"):
-        build_fi_mega_config(
-            intermediate_size=2048,
-            top_k=8,
-            activation_clamp=None,
-            megakernel="deep_gemm",
-        )
-
-
-def test_ckpt_uses_nvfp4_experts_reads_moe_quant_algo():
-    from vllm.models.deepseek_v4.nvidia.fi_moe import ckpt_uses_nvfp4_experts
-
-    nvfp4 = SimpleNamespace(quant_config=SimpleNamespace(moe_quant_algo="NVFP4"))
-    assert ckpt_uses_nvfp4_experts(nvfp4)
-
-    mxfp4 = SimpleNamespace(quant_config=SimpleNamespace(moe_quant_algo=None))
-    assert not ckpt_uses_nvfp4_experts(mxfp4)
-
-    no_algo = SimpleNamespace(quant_config=SimpleNamespace())
-    assert not ckpt_uses_nvfp4_experts(no_algo)
+    megakernel_host.parallel_config.enable_eplb = True
+    _, reason = _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
+    )
+    assert reason.endswith("EPLB")
 
 
-def test_dequant_fp4_ue8m0_gran32_decodes_lut_and_scales():
-    """One 32-element scale group per row: low nibble is the even element,
-    high nibble the odd one, ue8m0 scale applies to the whole group."""
-    packed = torch.arange(32, dtype=torch.uint8).reshape(2, 16)
-    sf = torch.tensor([[127], [128]], dtype=torch.uint8)  # 2**0, 2**1
+def test_megakernels_are_oracle_backends():
+    """Quant methods reach the megakernel through the NVFP4/MXFP4 oracles."""
+    nvfp4 = map_nvfp4_backend(FLASHINFER_MOE_EP_CUTEDSL)
+    assert nvfp4 is NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
+    assert nvfp4_backend_to_kernel_cls(nvfp4) == [FlashInferMoeEpExperts]
 
-    out = _dequant_fp4_ue8m0_gran32(packed, sf)
+    assert map_mxfp4_backend(FLASHINFER_MOE_EP_DEEP_GEMM) == [
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM
+    ]
+    for backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+        assert mxfp4_backend_to_kernel_cls(backend) == [FlashInferMoeEpExperts]
+        # The megakernel takes the model's own dimensions.
+        assert mxfp4_round_up_hidden_size_and_intermediate_size(
+            backend, 2880, 2880
+        ) == (2880, 2880)
 
-    assert out.shape == (2, 32)
-    assert out.dtype == torch.bfloat16
-    expected = torch.empty(2, 32)
-    for row in range(2):
-        for col in range(16):
-            byte = int(packed[row, col])
-            expected[row, 2 * col] = _E2M1_LUT[byte & 0x0F]
-            expected[row, 2 * col + 1] = _E2M1_LUT[byte >> 4]
-        expected[row] *= 2.0**row
-    assert torch.equal(out, expected.to(torch.bfloat16))
+    quant_config = make_mxfp4_moe_quant_config(
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, w1_scale=None, w2_scale=None
+    )
+    assert quant_config is not None and quant_config.use_nvfp4_w4a4
+
+
+def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
+    """The megakernel plugs into ``FusedMoEKernel`` like any other experts impl.
+
+    Routing stays outside (top-k ids in), dispatch and combine happen inside,
+    so prepare passes tokens through untouched and finalize has nothing to do.
+    """
+    moe = make_dummy_moe_config(
+        num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128
+    )
+    quant_config = FusedMoEQuantConfig.make("nvfp4", weight_dtype="nvfp4")
+    kernel = mk.FusedMoEKernel(
+        FlashInferMoeEpPrepareAndFinalize(),
+        FlashInferMoeEpExperts(moe, quant_config),
+    )
+
+    assert not kernel.is_monolithic
+    assert kernel.prepare_finalize.output_is_reduced()
+    assert kernel.prepare_finalize.topk_indices_dtype() is torch.int32
+    assert kernel.fused_experts.expects_unquantized_inputs
+    assert isinstance(
+        kernel.fused_experts.finalize_weight_and_reduce_impl(), TopKWeightAndReduceNoOP
+    )
+    assert kernel.fused_experts.workspace_shapes(
+        16, 256, 256, 2, 8, 8, None, MoEActivation.SILU
+    ) == ((0,), (0,), (16, 256))
+
+    tokens = torch.zeros(4, 256, dtype=torch.bfloat16)
+    prepared = kernel.prepare_finalize.prepare(
+        tokens,
+        torch.ones(4, 2),
+        torch.zeros(4, 2, dtype=torch.int32),
+        8,
+        None,
+        False,
+        quant_config,
+    )
+    assert prepared[0] is tokens and all(item is None for item in prepared[1:])
+
+
+def test_epilogue_takes_the_weight_global_scales_from_the_quant_config():
+    """The canonical ``g1/g2_alphas`` become the per-expert fc1/fc2 alphas and
+    keep aliasing the layer's tensors, so EPLB permutations reach the kernel."""
+    g1_alphas = torch.tensor([1.0, 2.0])
+    g2_alphas = torch.tensor([3.0, 4.0])
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        a1_gscale=torch.ones(2),
+        a2_gscale=torch.ones(2),
+        w1_scale=torch.ones(2, 4, 1),
+        w2_scale=torch.ones(2, 2, 1),
+    )
+
+    epilogue = epilogue_from_quant_config(quant_config)
+
+    assert epilogue.fc1_alpha is not None and epilogue.fc2_alpha is not None
+    assert epilogue.fc1_alpha.data_ptr() == g1_alphas.data_ptr()
+    assert epilogue.fc2_alpha.data_ptr() == g2_alphas.data_ptr()
+    # Activations are quantized dynamically: no norm constants.
+    assert epilogue.input_norm_const == 1.0 and epilogue.fc1_norm_const is None
+
+
+def test_epilogue_rejects_unloaded_weight_global_scales():
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=torch.tensor([1.0, float("nan")]),
+        g2_alphas=torch.ones(2),
+        a1_gscale=torch.ones(2),
+        a2_gscale=torch.ones(2),
+        w1_scale=torch.ones(2, 4, 1),
+        w2_scale=torch.ones(2, 2, 1),
+    )
+    with pytest.raises(ValueError, match="g1_alphas"):
+        epilogue_from_quant_config(quant_config)
+
+
+def test_mxfp4_checkpoints_keep_the_default_epilogue():
+    """MXFP4 has no per-tensor global scales; the megakernel needs no alphas."""
+    quant_config = FusedMoEQuantConfig.make("nvfp4", weight_dtype="mxfp4")
+    assert epilogue_from_quant_config(quant_config) == fi_ep.FlashInferMoeEpEpilogue()
