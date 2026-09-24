@@ -29,6 +29,13 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 
+# Initial sizes of the per-axis RoPE cos/sin tables. 512 covers the t bound
+# (500-frame processor cap / temporal_patch_size=2) and 4096 covers h/w
+# (pixel-count caps with MAX_RATIO=200 give h/w <= ~680); tables are grown
+# on demand since max_pixels is request-overridable.
+_ROPE_TABLE_T = 512
+_ROPE_TABLE_HW = 4096
+
 
 class MiniMaxVLPatchEmbed(nn.Module):
     """Conv3d-based patch embedding.
@@ -350,6 +357,18 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.register_buffer("inv_freq_h", inv_freq_h, persistent=False)
         self.register_buffer("inv_freq_w", inv_freq_w, persistent=False)
 
+        # Vision analog of the text model's cos_sin_cache: per-axis cos/sin
+        # tables indexed by position, gathered in _get_3d_rope_embed.
+        cos_t, sin_t = self._build_rope_table(_ROPE_TABLE_T, inv_freq_t)
+        cos_h, sin_h = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_h)
+        cos_w, sin_w = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_w)
+        self.register_buffer("rope_cos_t", cos_t, persistent=False)
+        self.register_buffer("rope_sin_t", sin_t, persistent=False)
+        self.register_buffer("rope_cos_h", cos_h, persistent=False)
+        self.register_buffer("rope_sin_h", sin_h, persistent=False)
+        self.register_buffer("rope_cos_w", cos_w, persistent=False)
+        self.register_buffer("rope_sin_w", sin_w, persistent=False)
+
         self.embeddings = MiniMaxVLPatchEmbed(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -376,16 +395,34 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
     # ── RoPE helpers ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _build_rope_table(
+        n: int, inv_freq: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        freqs = torch.outer(
+            torch.arange(n, device=inv_freq.device, dtype=inv_freq.dtype), inv_freq
+        )
+        return freqs.cos(), freqs.sin()
+
+    def _grow_rope_table(
+        self, axis: str, inv_freq: torch.Tensor, min_positions: int
+    ) -> None:
+        n = getattr(self, f"rope_cos_{axis}").shape[0]
+        if min_positions <= n:
+            return
+        cos, sin = self._build_rope_table(max(min_positions, 2 * n), inv_freq)
+        setattr(self, f"rope_cos_{axis}", cos)
+        setattr(self, f"rope_sin_{axis}", sin)
+
     def _get_3d_rope_embed(
         self, grid_t: int, grid_h: int, grid_w: int, spatial_merge_size: int
-    ) -> torch.Tensor:
-        """Compute 3D RoPE frequencies for a single (T, H, W) grid.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute 3D RoPE cos/sin for a single (T, H, W) grid.
 
-        Returns (3, T*H*W, half_rot_dim) t/h/w planes for triton_mrope on the
-        same device as the inv_freq buffers: each axis's frequencies sit at
-        their section columns of their own plane (the kernel's per-axis masks
-        read only those columns). Frequencies match the reference
-        ``_get_3d_rope_embed``'s concatenated sections.
+        Returns (3, T*H*W, half_rot_dim) t/h/w cos and sin planes for
+        triton_mrope, gathered from the cached per-axis tables: each axis's
+        values sit at their section columns of their own plane (the kernel's
+        per-axis masks read only those columns).
         """
         tokens_per_frame = grid_h * grid_w
 
@@ -427,37 +464,30 @@ class MiniMaxVLVisionTransformer(nn.Module):
             .flatten()
         )
 
-        max_t = max(grid_t, 1)
-        max_hw = max(grid_h, grid_w)
+        self._grow_rope_table("t", self.inv_freq_t, grid_t)
+        self._grow_rope_table("h", self.inv_freq_h, grid_h)
+        self._grow_rope_table("w", self.inv_freq_w, grid_w)
 
-        seq_t = torch.arange(
-            max_t, device=self.inv_freq_t.device, dtype=self.inv_freq_t.dtype
-        )
-        seq_hw = torch.arange(
-            max_hw, device=self.inv_freq_h.device, dtype=self.inv_freq_h.dtype
-        )
-
-        freqs_t = torch.outer(seq_t, self.inv_freq_t)  # (max_t, t_dim/2)
-        freqs_h = torch.outer(seq_hw, self.inv_freq_h)  # (max_hw, h_dim/2)
-        freqs_w = torch.outer(seq_hw, self.inv_freq_w)  # (max_hw, w_dim/2)
-
-        # Emit triton_mrope's (3, T*H*W, half_rot_dim) t/h/w planes directly:
-        # each axis's frequencies sit at their section columns of their own
-        # plane; the kernel's per-axis masks read only those columns.
         half_t, half_h, half_w = self.t_dim // 2, self.h_dim // 2, self.w_dim // 2
-        planes = freqs_t.new_zeros(3, tpos_ids.numel(), half_t + half_h + half_w)
-        planes[0, :, :half_t] = freqs_t[tpos_ids]
-        planes[1, :, half_t : half_t + half_h] = freqs_h[hpos_ids]
-        planes[2, :, half_t + half_h :] = freqs_w[wpos_ids]
-        return planes
+        n = tpos_ids.numel()
+        cos = self.rope_cos_t.new_zeros(3, n, half_t + half_h + half_w)
+        sin = self.rope_sin_t.new_zeros(3, n, half_t + half_h + half_w)
+        cos[0, :, :half_t] = self.rope_cos_t[tpos_ids]
+        cos[1, :, half_t : half_t + half_h] = self.rope_cos_h[hpos_ids]
+        cos[2, :, half_t + half_h :] = self.rope_cos_w[wpos_ids]
+        sin[0, :, :half_t] = self.rope_sin_t[tpos_ids]
+        sin[1, :, half_t : half_t + half_h] = self.rope_sin_h[hpos_ids]
+        sin[2, :, half_t + half_h :] = self.rope_sin_w[wpos_ids]
+        return cos, sin
 
     def _get_rope_embed_3d(
         self, grid_thw: list[list[int]], spatial_merge_size: int
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         embeds = [
             self._get_3d_rope_embed(t, h, w, spatial_merge_size) for t, h, w in grid_thw
         ]
-        return torch.cat(embeds, dim=1)  # (3, total_N, half_rot_dim)
+        cos, sin = zip(*embeds, strict=True)
+        return torch.cat(cos, dim=1), torch.cat(sin, dim=1)
 
     # ── Frame-limit helper (mirrors the reference) ───────────────────────
 
@@ -513,12 +543,14 @@ class MiniMaxVLVisionTransformer(nn.Module):
             hidden.device,
         )
 
-        # 3D RoPE freqs: (3, total_N, half_rot_dim) fp32 t/h/w planes for
-        # triton_mrope. Kept fp32 so the kernel computes the rotation in
-        # fp32, matching the reference precision.
-        freqs = self._get_rope_embed_3d(limited, self.spatial_merge_size)
-        freqs = freqs.to(device=hidden.device)
-        rotary_cos, rotary_sin = freqs.cos(), freqs.sin()
+        # 3D RoPE cos/sin: (3, total_N, half_rot_dim) fp32 t/h/w planes for
+        # triton_mrope, gathered from the cached per-axis tables. Kept fp32
+        # so the kernel computes the rotation in fp32, matching the reference.
+        rotary_cos, rotary_sin = self._get_rope_embed_3d(
+            limited, self.spatial_merge_size
+        )
+        rotary_cos = rotary_cos.to(device=hidden.device)
+        rotary_sin = rotary_sin.to(device=hidden.device)
 
         # Encoder expects (N, 1, hidden_size) — add batch dim
         hidden = hidden.unsqueeze(1)
