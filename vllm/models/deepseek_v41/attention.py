@@ -1346,7 +1346,7 @@ class DeepseekV4Indexer(nn.Module):
             SparseMQAIndexer.weights_dtype if use_sparse_logits else torch.float32
         )
 
-    def produce_k(
+    def _produce_k(
         self,
         latent: torch.Tensor | None,
         positions: torch.Tensor,
@@ -1380,7 +1380,7 @@ class DeepseekV4Indexer(nn.Module):
             self.use_fp4_kv,
         )
 
-    def q_side(
+    def forward_q(
         self,
         qr: torch.Tensor | QuantizedActivation,
         qr_scale: torch.Tensor | None,
@@ -1391,7 +1391,7 @@ class DeepseekV4Indexer(nn.Module):
         """Build the indexer queries: wq_b over qr plus fused RoPE/quant.
 
         Split out so the ROCm layer can schedule it apart from
-        ``produce_k`` (e.g. on an aux stream once ``qr`` is ready).
+        ``_produce_k`` (e.g. on an aux stream once ``qr`` is ready).
         """
         q = self._wq_b_proj(qr, qr_scale)
         q = q.view(-1, self.n_head, self.head_dim)
@@ -1430,7 +1430,7 @@ class DeepseekV4Indexer(nn.Module):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
                 if self.owns_k:
-                    self.produce_k(latent, positions, rotary_emb)
+                    self._produce_k(latent, positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
                 num_tokens = (
                     indexer_metadata.num_decode_tokens
@@ -1450,9 +1450,9 @@ class DeepseekV4Indexer(nn.Module):
         if self.owns_k:
             # K write must land before indexer_op reads the cache
             # (skip_k_cache_insert=True).
-            self.produce_k(latent, positions, rotary_emb)
+            self._produce_k(latent, positions, rotary_emb)
 
-        return self.q_side(qr, qr_scale, indexer_weights, positions, rotary_emb)
+        return self.forward_q(qr, qr_scale, indexer_weights, positions, rotary_emb)
 
     def _wq_b_proj(
         self,

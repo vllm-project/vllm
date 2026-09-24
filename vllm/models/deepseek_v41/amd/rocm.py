@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 
 import torch
 
@@ -30,6 +29,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel_default_first
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -492,34 +492,6 @@ class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
         return DeepseekV4ROCMAiterSparseSWAMetadataBuilder
 
 
-def _execute_in_parallel_default_first(
-    default_fn: Callable[[], Any],
-    aux_fns: list[Callable[[], Any]],
-    start_event: torch.cuda.Event,
-    done_events: list[torch.cuda.Event],
-    aux_streams: list[torch.cuda.Stream],
-) -> tuple[Any, list[Any]]:
-    """``execute_in_parallel`` with the default chain enqueued first.
-
-    The default chain is the longest, so launching it first lets it start
-    before the aux chains; the aux streams only wait on the pre-fork default
-    stream work (``start_event``), so they still overlap the default chain.
-    """
-    start_event.record()
-    default_result = default_fn()
-    aux_results: list[Any] = [None] * len(aux_fns)
-    pending: list[torch.cuda.Event] = []
-    for i, fn in enumerate(aux_fns):
-        with torch.cuda.stream(aux_streams[i]):
-            start_event.wait()
-            aux_results[i] = fn()
-            done_events[i].record()
-        pending.append(done_events[i])
-    for ev in pending:
-        ev.wait()
-    return default_result, aux_results
-
-
 class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4.1."""
 
@@ -683,12 +655,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
         if self.compressor is not None:
-            q, kv, index_q, index_q_scale, index_weights = (
-                self._csa_overlapped_pipeline(hidden_states, positions)
+            q, kv, index_q, index_q_scale, index_weights = self._forward_csa2_full(
+                hidden_states, positions
             )
         else:
-            q, kv, index_q, index_q_scale, index_weights = (
-                self._indexer_overlapped_pipeline(hidden_states, positions)
+            q, kv, index_q, index_q_scale, index_weights = self._forward_csa2_reindex(
+                hidden_states, positions
             )
         self._sparse_indexer_and_attn(
             hidden_states,
@@ -702,7 +674,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         return self._o_proj(attn_out, positions)
 
-    def _csa_overlapped_pipeline(
+    def _forward_csa2_full(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> tuple[
         torch.Tensor,
@@ -756,7 +728,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             return weights
 
         (q, qr, qr_scale, kv), (latent, indexer_weights) = (
-            _execute_in_parallel_default_first(
+            execute_in_parallel_default_first(
                 default_chain,
                 [compressor_chain, indexer_weights_chain],
                 self.ln_events[0],
@@ -765,13 +737,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             )
         )
 
-        indexer.produce_k(latent, positions, self.indexer_rotary_emb)
-        index_q, index_q_scale, index_weights_out = indexer.q_side(
+        indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+        index_q, index_q_scale, index_weights_out = indexer.forward_q(
             qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
         )
         return q, kv, index_q, index_q_scale, index_weights_out
 
-    def _indexer_overlapped_pipeline(
+    def _forward_csa2_reindex(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> tuple[
         torch.Tensor,
@@ -801,13 +773,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         def indexer_q_chain():
-            return indexer.q_side(
+            return indexer.forward_q(
                 qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
             )
 
         aux_streams = self.aux_stream_list
         assert aux_streams is not None
-        q, aux_results = _execute_in_parallel_default_first(
+        q, aux_results = execute_in_parallel_default_first(
             swa_q_chain,
             [indexer_q_chain],
             self.ln_events[0],

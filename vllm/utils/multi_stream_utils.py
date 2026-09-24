@@ -132,3 +132,31 @@ def execute_in_parallel(
         ev.wait()
 
     return default_result, aux_results
+
+
+def execute_in_parallel_default_first(
+    default_fn: Callable[[], Any],
+    aux_fns: list[Callable[[], Any]],
+    start_event: torch.cuda.Event,
+    done_events: list[torch.cuda.Event],
+    aux_streams: list[torch.cuda.Stream],
+) -> tuple[Any, list[Any]]:
+    """``execute_in_parallel`` with the default chain enqueued first.
+
+    The default chain is the longest, so launching it first lets it start
+    before the aux chains; the aux streams only wait on the pre-fork default
+    stream work (``start_event``), so they still overlap the default chain.
+    """
+    start_event.record()
+    default_result = default_fn()
+    aux_results: list[Any] = [None] * len(aux_fns)
+    pending: list[torch.cuda.Event] = []
+    for i, fn in enumerate(aux_fns):
+        with torch.cuda.stream(aux_streams[i]):
+            start_event.wait()
+            aux_results[i] = fn()
+            done_events[i].record()
+        pending.append(done_events[i])
+    for ev in pending:
+        ev.wait()
+    return default_result, aux_results
