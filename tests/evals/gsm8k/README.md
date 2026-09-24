@@ -54,3 +54,14 @@ Use `--enforce-eager` and a compatible modular MoE backend, such as
 assignments, and negative values are rejected. Prepare/finalize backends that
 do not support token dropping ignore the limit; monolithic kernels reject it.
 Keep concurrency and scheduler batch limits fixed when comparing accuracy.
+
+Set `VLLM_DEBUG_MOE_WORKSPACE=1` to log modular kernel workspace high-water
+marks per kernel instance and GPU. `MOE_WORKSPACE` records logical buffer
+bytes, requested bytes (accounting for output/workspace13 reuse), and unique
+backing-storage bytes. Backing storage includes workspace-manager alignment
+and retained allocations shared with other layers; do not sum per-layer peaks.
+The five entries in `peaks_bytes` correspond to workspace13, workspace2,
+output, requested, and backing bytes. These independent peaks include startup
+profiling and warmup. They exclude backend-internal allocations, dispatch
+buffers, and CUDA allocator reserved memory. Tracking uses tensor metadata
+without GPU synchronization and logs only when a peak increases.

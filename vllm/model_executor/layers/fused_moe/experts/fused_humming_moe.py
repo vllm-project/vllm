@@ -483,7 +483,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert self.max_num_tokens is not None
             assert self.num_dispatchers is not None
             batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
-            real_shape_m = num_experts * batch_tokens
+            real_shape_m = num_experts * self._batched_workspace_tokens(
+                M
+            )  # bit redundant
             input_shape_m = real_shape_m
             output_shape = (num_experts, batch_tokens, K)
         else:

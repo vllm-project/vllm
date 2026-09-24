@@ -211,6 +211,7 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_TEST_MOE_EXPERT_CAPACITY: int | None = None
+    VLLM_DEBUG_MOE_WORKSPACE: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -1613,6 +1614,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # a prepare/finalize backend that supports token dropping.
     "VLLM_TEST_MOE_EXPERT_CAPACITY": lambda: maybe_convert_int(
         os.getenv("VLLM_TEST_MOE_EXPERT_CAPACITY")
+    ),
+    # Log modular MoE workspace high-water marks without synchronizing the GPU.
+    "VLLM_DEBUG_MOE_WORKSPACE": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_MOE_WORKSPACE", "0"))
     ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to

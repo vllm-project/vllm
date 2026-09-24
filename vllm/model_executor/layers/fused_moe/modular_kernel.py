@@ -492,6 +492,15 @@ class FusedMoEExperts(ABC):
         self.num_dispatchers = num_dispatchers
         self.expert_capacity: int | None = None
 
+    def _batched_workspace_tokens(self, dispatched_tokens: int) -> int:
+        """Bound scratch rows while retaining the physical dispatch padding."""
+        assert self.max_num_tokens is not None
+        assert self.num_dispatchers is not None
+        tokens_per_dispatcher = self.max_num_tokens
+        if self.expert_capacity is not None:
+            tokens_per_dispatcher = min(tokens_per_dispatcher, self.expert_capacity)
+        return max(dispatched_tokens, tokens_per_dispatcher * self.num_dispatchers)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
@@ -826,6 +835,9 @@ class FusedMoEExpertsModular(FusedMoEExperts):
 
         Scratch shapes may use self.expert_capacity as a bound on valid
         assignments per expert per dispatcher, preserving required padding.
+        It is None when prepare/finalize does not support token dropping.
+        Standard layouts use the dispatched M directly: support for skipping
+        assignments does not imply that the dispatcher compacts token rows.
         The output shape must cover the full dispatched layout regardless of
         capacity.
 
@@ -1074,6 +1086,7 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        self._workspace_peaks: tuple[int, ...] = (0, 0, 0, 0, 0)
         self.expert_capacity = (
             fused_experts.moe_config.expert_capacity
             if prepare_finalize.supports_token_dropping
@@ -1092,6 +1105,41 @@ class FusedMoEKernelModularImpl:
             moe_parallel_config is not None
             and moe_parallel_config.dp_size > 1
             and moe_parallel_config.use_ep
+        )
+
+    def _record_workspace_usage(
+        self,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        output: torch.Tensor,
+        M_chunk: int,
+        M_full: int,
+    ) -> None:
+        """Log per-instance peaks; shared backing storage may serve other layers."""
+        buffers = (workspace13, workspace2, output)
+        logical = tuple(t.numel() * t.element_size() for t in buffers)
+        requested = max(logical[0], logical[2]) + logical[1]
+        storages = {
+            t.untyped_storage().data_ptr(): t.untyped_storage() for t in buffers
+        }
+        backing = sum(s.nbytes() for s in storages.values())
+        usage = (*logical, requested, backing)
+        peaks = tuple(max(old, new) for old, new in zip(self._workspace_peaks, usage))
+        if peaks == self._workspace_peaks:
+            return
+        self._workspace_peaks = peaks
+        logger.info(
+            "MOE_WORKSPACE instance=%s backend=%s device=%s capacity=%s "
+            "M_chunk=%d M_full=%d workspace13_bytes=%d workspace2_bytes=%d "
+            "output_bytes=%d requested_bytes=%d backing_bytes=%d peaks_bytes=%s",
+            hex(id(self)),
+            type(self.fused_experts).__name__,
+            output.device,
+            self.expert_capacity,
+            M_chunk,
+            M_full,
+            *usage,
+            peaks,
         )
 
     def _allocate_buffers(
@@ -1164,6 +1212,10 @@ class FusedMoEKernelModularImpl:
             )
             workspace13 = _resize_cache(common_workspace, workspace13_shape)
             fused_out = _resize_cache(common_workspace, fused_out_shape)
+            if envs.VLLM_DEBUG_MOE_WORKSPACE:
+                self._record_workspace_usage(
+                    workspace13, workspace2, fused_out, M_chunk, M_full
+                )
             return workspace13, workspace2, fused_out
 
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
@@ -1173,6 +1225,10 @@ class FusedMoEKernelModularImpl:
         workspace13 = _resize_cache(common_workspace, workspace13_shape)
         fused_out = _resize_cache(common_workspace, fused_out_shape)
 
+        if envs.VLLM_DEBUG_MOE_WORKSPACE:
+            self._record_workspace_usage(
+                workspace13, workspace2, fused_out, M_chunk, M_full
+            )
         return workspace13, workspace2, fused_out
 
     def _maybe_apply_shared_experts(

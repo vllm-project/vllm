@@ -168,6 +168,39 @@ def test_unsupported_dispatch_leaves_routing_unchanged(monkeypatch):
     assert observed["weights"] is weights
 
 
+@pytest.mark.parametrize("supports_dropping", [False, True])
+def test_dispatch_support_controls_batched_workspace_capacity(supports_dropping):
+    """An unsupported dispatcher must retain the original workspace sizes."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        BatchedTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+        BatchedPrepareAndFinalize,
+    )
+
+    config = make_dummy_moe_config(
+        num_experts=2,
+        experts_per_token=2,
+        hidden_dim=128,
+        intermediate_size=128,
+        in_dtype=torch.float32,
+        max_num_tokens=128,
+    )
+    config.expert_capacity = 7
+    dispatcher = BatchedPrepareAndFinalize(128, 2, 1, 0)
+    dispatcher.supports_token_dropping = supports_dropping
+    experts = BatchedTritonExperts(config, FusedMoEQuantConfig.make(None), 128, 1)
+    mk.FusedMoEKernelModularImpl(dispatcher, experts)
+    scratch13, scratch2, output = experts.workspace_shapes(
+        16, 256, 128, 2, 2, 2, None, config.activation
+    )
+    rows = 16 if supports_dropping else 128
+    assert scratch13 == (2, rows, 256)
+    assert scratch2 == (2, rows, 128)
+    assert output == (2, 128, 128)
+
+
 def test_dropping_rejects_compilation(monkeypatch):
     kernel, _ = make_kernel(monkeypatch, 1)
     monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
@@ -310,17 +343,18 @@ def test_batched_workspaces_follow_dispatch_layout(
         MoEActivation.SILU,
     )
     rows = max(512, dispatched_tokens)
+    scratch_rows = rows if capacity is None else max(dispatched_tokens, capacity * 4)
     assert output == (4, rows, 32)
     if expert_name == "naive":
         assert workspace13 == (4, rows, 32)
         scratch_rows = rows if capacity is None else min(rows, capacity * 4)
         assert workspace2 == (scratch_rows, 64)
     elif expert_name == "marlin":
-        assert workspace13 == (4 * rows, 128)
-        assert workspace2 == (4 * rows, 64)
+        assert workspace13 == (4 * scratch_rows, 128)
+        assert workspace2 == (4 * scratch_rows, 64)
     else:
-        assert workspace13 == (4, rows, 64)
-        assert workspace2 == (4, rows, 32)
+        assert workspace13 == (4, scratch_rows, 64)
+        assert workspace2 == (4, scratch_rows, 32)
 
 
 @pytest.mark.parametrize("capacity", [None, 7])
@@ -345,3 +379,20 @@ def test_workspace_allocation_preserves_full_output_shape(monkeypatch, capacity)
     )
     assert output.shape == (32, 4)
     assert [call.args[0] for call in shapes.call_args_list] == [16, 32]
+
+
+def test_workspace_tracking_counts_shared_storage_once(monkeypatch):
+    """Views share backing bytes; smaller requests must not reset the peak."""
+    kernel, _ = make_kernel(monkeypatch, 128)
+    log = Mock()
+    monkeypatch.setattr(mk.logger, "info", log)
+    storage = torch.empty(128, dtype=torch.float32)
+    kernel._record_workspace_usage(storage[:32], storage[64:96], storage[:16], 4, 8)
+    assert kernel._workspace_peaks == (128, 128, 64, 256, 512)
+    kernel._record_workspace_usage(storage[:16], storage[64:80], storage[:8], 2, 4)
+    assert kernel._workspace_peaks == (128, 128, 64, 256, 512)
+    assert log.call_count == 1
+    separate = torch.empty(256, dtype=torch.float32)
+    kernel._record_workspace_usage(storage[:32], separate, storage[:16], 4, 8)
+    assert kernel._workspace_peaks == (128, 1024, 64, 1152, 1536)
+    assert log.call_count == 2
