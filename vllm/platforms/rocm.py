@@ -1015,6 +1015,11 @@ class RocmPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
+        # Ported from cuda side - If the model requires prefix lm and is multimodal,
+        # we should disable chunked mm input as we want the image tokens to be attended
+        # bidirectionally. Chunked prefill splits a multimodal item, the scheduler
+        # can break that intended attention pattern. ROCm should do the same because
+        # the issue is scheduler/model semantics
         model_config = vllm_config.model_config
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
