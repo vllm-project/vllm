@@ -265,8 +265,9 @@ def make_common_metadata(per_req_positions, own_blocks, with_positions=True):
     )
 
 
-def make_tail_builder(block_size=KPOOL, max_num_batched_tokens=128):
+def make_tail_builder(block_size=KPOOL, max_num_batched_tokens=128, pcp_world_size=1):
     builder = object.__new__(KpoolTailMetadataBuilder)
+    builder.pcp_world_size = pcp_world_size
     builder.kv_cache_spec = SimpleNamespace(block_size=block_size)
     builder.slot_mapping_buffer = torch.empty(max_num_batched_tokens, dtype=torch.int64)
     return builder
@@ -511,3 +512,46 @@ def test_rejected_completing_draft_needs_ring_slots(ring_pools):
         assert not torch.allclose(redo, expected)
     else:
         torch.testing.assert_close(redo, expected)
+
+
+def test_pcp_tail_mapping_owns_gathered_circular_slots(monkeypatch):
+    from vllm.v1.attention.backends.mla import indexer
+
+    builder = make_tail_builder(max_num_batched_tokens=7, pcp_world_size=4)
+    metadata = make_common_metadata([[9, 10, 11]], [5])
+    metadata.slot_mapping = torch.full((28,), -1, dtype=torch.int64)
+    expected_local = torch.tensor([21, 22, 23, -1, -1, -1, -1])
+    scratch = torch.empty(28, dtype=torch.int64)
+
+    def gather(local, dim):
+        assert dim == 0
+        torch.testing.assert_close(local, expected_local)
+        return scratch.copy_(local.repeat(4))
+
+    monkeypatch.setattr(
+        indexer, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
+    )
+    result = builder.build(0, metadata)
+    torch.testing.assert_close(result.slot_mapping, expected_local.repeat(4))
+    # A later same-shaped all-gather must not overwrite retained metadata.
+    scratch.fill_(99)
+    torch.testing.assert_close(result.slot_mapping, expected_local.repeat(4))
+
+
+def test_pcp_tail_mapping_keeps_unexpanded_draft_mapping_local(monkeypatch):
+    """Replicated MTP drafts carry a local-length slot mapping under PCP."""
+    from vllm.v1.attention.backends.mla import indexer
+
+    def gather(local, dim):
+        raise AssertionError("an unexpanded slot mapping must not be gathered")
+
+    monkeypatch.setattr(
+        indexer, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
+    )
+    builder = make_tail_builder(max_num_batched_tokens=7, pcp_world_size=4)
+    # A local-length (padded) slot mapping, not one spanning the 4 ranks.
+    metadata = make_common_metadata([[9, 10, 11]], [5])
+    result = builder.build(0, metadata)
+    torch.testing.assert_close(
+        result.slot_mapping, torch.tensor([21, 22, 23, -1, -1, -1, -1])
+    )

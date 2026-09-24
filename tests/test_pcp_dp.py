@@ -159,3 +159,27 @@ def test_expanded_slot_mapping_keeps_pcp_prefill_padding(monkeypatch):
     assert calls == [1, 1]
     assert cache_kv.shape == (4, 2)
     assert cache_slots.tolist() == [3, 4, 8, -1]
+
+
+def test_nope_latent_gather_only_gathers_the_latent(monkeypatch):
+    """NoPE layers have an empty k_pe; only the latent is gathered."""
+    calls = []
+
+    def all_gather(tensor, dim):
+        calls.append(tuple(tensor.shape))
+        return torch.cat((tensor, tensor + 100), dim=dim)
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.ops.pcp.get_pcp_group",
+        lambda: SimpleNamespace(world_size=2, all_gather=all_gather),
+    )
+    kv = torch.arange(6.0).reshape(3, 2)  # One decode, then two prefill rows.
+    pe = torch.empty(3, 1, 0)
+    slots = torch.tensor([5, 6, 7, 5, 8, 9])
+    cache_kv, cache_pe, cache_slots = maybe_gather_mla_latent_cache_inputs(
+        kv, pe, slots, num_decode_tokens=1, use_pcp=True
+    )
+    assert calls == [(2, 2)]
+    assert cache_slots.tolist() == [5, 6, 7, 8, 9]
+    torch.testing.assert_close(cache_kv, torch.cat((kv, kv[1:] + 100)))
+    assert cache_pe.shape == (5, 1, 0)
