@@ -106,6 +106,13 @@ class LoadConfig:
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
+    release_weight_page_cache: bool = False
+    """Drop the checkpoint files from the OS page cache once this worker has
+    loaded its weights (`posix_fadvise(POSIX_FADV_DONTNEED)` on every file).
+    The pages are clean and are not read again after loading, so releasing
+    them returns the checkpoint's size in host memory to the node; the cost is
+    a cold re-read of the files on the next start. Only local files are
+    affected. Off by default."""
     pt_load_map_location: str | dict[str, str] = "cpu"
     """
     The map location for loading pytorch checkpoint, to support loading
