@@ -112,13 +112,13 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
     """Processing info for DiffusionGemma.
 
     Overrides ``get_hf_config`` to accept ``DiffusionGemmaConfig``
-    (which inherits from ``PretrainedConfig``, not ``Gemma4Config``).
+    (which inherits from ``PreTrainedConfig``, not ``Gemma4Config``).
     Supports image and video modalities.
     """
 
     def get_hf_config(self):
         # DiffusionGemmaConfig doesn't inherit from Gemma4Config, so we
-        # accept any PretrainedConfig here.
+        # accept any PreTrainedConfig here.
         return self.ctx.get_hf_config()
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:

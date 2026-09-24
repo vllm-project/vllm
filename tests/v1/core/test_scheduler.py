@@ -796,6 +796,26 @@ def test_long_prefill_threshold_applies_with_other_requests():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def test_long_prefill_threshold_floored_by_fair_share():
+    """With the adaptive flag, the effective threshold never falls below the
+    fair share of the token budget: max_num_batched_tokens / num queued +
+    running requests."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=100,
+        long_prefill_token_threshold_adaptive=True,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # 100 is below the fair share (1024 // 2 = 512), so the floor binds.
+    assert output.num_scheduled_tokens[long_req.request_id] == 512
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
@@ -3876,6 +3896,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
+    scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
@@ -6067,6 +6088,201 @@ def test_unavailable_encoder_input_fails_the_request_as_retryable():
     assert request.status == RequestStatus.FINISHED_ERROR
     engine_outputs = outputs[0].outputs
     assert [o.finish_reason for o in engine_outputs] == [FinishReason.ERROR]
+
+
+def _create_mm_request_with_embedding_positions(
+    request_id: str, identifier: str, is_embed: list[bool]
+) -> Request:
+    return create_requests(
+        num_requests=1,
+        num_tokens=len(is_embed),
+        mm_hashes_list=[[identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=len(is_embed),
+                    is_embed=torch.tensor(is_embed),
+                )
+            ]
+        ],
+        req_ids=[request_id],
+    )[0]
+
+
+def test_encoder_cache_accepts_matching_embed_count():
+    """An actively referenced entry is reused when embedding counts match."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-client-uuid"
+    owner = _create_mm_request_with_embedding_positions(
+        "owner", identifier, [True, True, True, False, False, False]
+    )
+    compatible = _create_mm_request_with_embedding_positions(
+        "compatible", identifier, [True, False, True, False, True, False, False]
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    scheduler.add_request(compatible)
+
+    scheduler_output = scheduler.schedule()
+
+    assert compatible.request_id in scheduler_output.num_scheduled_tokens
+    assert compatible.request_id not in scheduler.encoder_cache_mismatch_reqs
+    assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
+
+
+def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):
+    """A completed request's freeable entry rejects an incompatible reuse."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-client-uuid"
+    owner = _create_mm_request_with_embedding_positions(
+        "owner", identifier, [True, True, True, False, False, False]
+    )
+    mismatched = _create_mm_request_with_embedding_positions(
+        "mismatched", identifier, [True, True, True, True, False, False]
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    scheduler.encoder_cache_manager.free(owner)
+    freeable_slots_before = scheduler.encoder_cache_manager.num_freeable_slots
+    scheduler.add_request(mismatched)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert mismatched.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert (
+        "multimodal identifier 'reused-client-uuid' holds 3 embeddings"
+        in caplog_vllm.text
+        and "expects 4" in caplog_vllm.text
+    )
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert mismatched.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.encoder_cache_mismatch_reqs
+    assert mismatched.request_id not in scheduler.requests
+    assert scheduler.encoder_cache_manager.cached[identifier] == set()
+    assert (
+        mismatched.request_id not in scheduler.encoder_cache_manager.request_cached_ids
+    )
+    assert scheduler.encoder_cache_manager.freeable[identifier] == 3
+    assert scheduler.encoder_cache_manager.num_freeable_slots == freeable_slots_before
+    output = outputs[mismatched.client_index].outputs[0]
+    assert output.request_id == mismatched.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+    healthy = create_requests(num_requests=1, req_ids=["healthy"], num_tokens=6)[0]
+    scheduler.add_request(healthy)
+    next_output = scheduler.schedule()
+    assert healthy.request_id in next_output.num_scheduled_tokens
+
+
+def test_encoder_cache_embed_count_mismatch_restores_prior_hit_state():
+    """A prior hit is released when a later mismatch fails the request."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    manager = scheduler.encoder_cache_manager
+    valid_identifier = "valid-reuse"
+    mismatch_identifier = "mismatched-reuse"
+    valid_owner = _create_mm_request_with_embedding_positions(
+        "valid-owner", valid_identifier, [True, True, False]
+    )
+    mismatch_owner = _create_mm_request_with_embedding_positions(
+        "mismatch-owner", mismatch_identifier, [True, True, True, False]
+    )
+    manager.allocate(valid_owner, 0)
+    manager.free(valid_owner)
+    manager.allocate(mismatch_owner, 0)
+    manager.free(mismatch_owner)
+    freeable_slots_before = manager.num_freeable_slots
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=7,
+        mm_hashes_list=[[valid_identifier, mismatch_identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=3,
+                    is_embed=torch.tensor([True, True, False]),
+                ),
+                PlaceholderRange(
+                    offset=3,
+                    length=4,
+                    is_embed=torch.tensor([True, True, True, True]),
+                ),
+            ]
+        ],
+        req_ids=["partially-mutated"],
+    )[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id in manager.cached[valid_identifier]
+    assert valid_identifier not in manager.freeable
+    assert manager.num_freeable_slots == freeable_slots_before - 2
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id not in scheduler.requests
+    assert request.request_id not in manager.request_cached_ids
+    assert manager.cached[valid_identifier] == set()
+    assert manager.freeable[valid_identifier] == 2
+    assert manager.freeable[mismatch_identifier] == 3
+    assert manager.num_freeable_slots == freeable_slots_before
+    output = outputs[request.client_index].outputs[0]
+    assert output.finish_reason == FinishReason.ERROR
+
+
+def test_encoder_cache_rejects_mismatched_embed_count_within_request():
+    """One request cannot reuse an identifier with a different embed count."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-within-request"
+    request = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_hashes_list=[[identifier, identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=4,
+                    is_embed=torch.tensor([True, True, False, False]),
+                ),
+                PlaceholderRange(
+                    offset=4,
+                    length=4,
+                    is_embed=torch.tensor([True, True, True, False]),
+                ),
+            ]
+        ],
+        req_ids=["mismatched-within-request"],
+    )[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert identifier not in scheduler.encoder_cache_manager.cached
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id not in scheduler.requests
+    output = outputs[request.client_index].outputs[0]
+    assert output.request_id == request.request_id
+    assert output.finish_reason == FinishReason.ERROR
 
 
 def test_free_encoder_inputs_defers_for_eagle_lookahead():
