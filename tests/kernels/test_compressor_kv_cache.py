@@ -756,6 +756,52 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+def test_v41_compressor_ring_never_writes_the_null_block():
+    """A request whose ring block is 0 owns no ring: warmup and CUDA-graph
+    capture run dummy batches with zeroed block tables. Block 0 is the null
+    block shared by every KV-cache group, so its tokens must map to PAD rather
+    than into other layers' pages."""
+    from unittest.mock import MagicMock
+
+    from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+    capacity = 8
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_batched_tokens = 16
+    spec = CircularBufferSpec(
+        block_size=capacity,
+        num_kv_heads=1,
+        head_size=1024,
+        head_size_v=0,
+        dtype=torch.float32,
+    )
+    device = torch.device("cuda")
+    builder = CompressorMetadataBuilder(spec, ["state"], vllm_config, device)
+
+    # A dummy request on the null block, then a real one on ring block 3.
+    query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
+    positions = torch.tensor([0, 1, 9, 10], device=device)
+    block_table = torch.tensor([[0], [3]], dtype=torch.int32, device=device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=torch.tensor([2, 11], dtype=torch.int32, device=device),
+        num_reqs=2,
+        num_actual_tokens=4,
+        max_query_len=2,
+        max_seq_len=11,
+        block_table_tensor=block_table,
+        slot_mapping=torch.full((4,), -1, dtype=torch.int64, device=device),
+        positions=positions,
+    )
+    metadata = builder.build(0, common)
+
+    assert metadata.slot_mapping.tolist() == [-1, -1, 3 * 8 + 1, 3 * 8 + 2]
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA stream coverage")
 @pytest.mark.parametrize(
     "use_aux,use_graph", [(False, False), (True, False), (True, True)]
