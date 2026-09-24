@@ -115,12 +115,12 @@ def get_mla_prefill_backend(
         # when its kernels are present, else the generic SDPA one.
         for backend_enum in (MLAPrefillBackendEnum.ZEN_CPU, MLAPrefillBackendEnum.CPU):
             try:
-                backend_cls = backend_enum.get_class()
+                cpu_backend_cls = backend_enum.get_class()
             except ImportError:
                 continue
-            if backend_cls.is_available():
+            if cpu_backend_cls.is_available():
                 logger.info_once("Using %s MLA prefill backend.", backend_enum.name)
-                return backend_cls
+                return cpu_backend_cls
         raise ValueError("No valid CPU MLA prefill backend found.")
 
     device_capability = current_platform.get_device_capability()
