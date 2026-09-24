@@ -225,6 +225,16 @@ def init_logger(name: str) -> _VllmLogger:
     return cast(_VllmLogger, logger)
 
 
+def bind_external_request_id(
+    logger: Logger, external_request_id: str | None
+) -> logging.LoggerAdapter:
+    """Bind an external request ID so related log records can be correlated."""
+    extra = (
+        {"request_id": external_request_id} if external_request_id is not None else {}
+    )
+    return logging.LoggerAdapter(logger, extra)
+
+
 @contextmanager
 def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     current_level = logging.root.manager.disable
