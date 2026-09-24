@@ -117,6 +117,90 @@ def test_rocm_mxfp8_linear_handles_extreme_magnitudes():
     assert (out[0] == 0).all(), "an all-zero activation row must give a zero row"
 
 
+# (name, N, K) of the DeepSeek-V4.1-Flash MXFP8 linears at TP=2 and TP=4. The
+# checkpoint stores their scales in 32x32 blocks; shared_down at TP=4 has
+# K % 128 != 0, which only the block-scaled GEMM runs natively.
+V41_BLOCK32_SHAPES = [
+    ("fused_wqa_wkv", 1280 + 512, 5120),
+    ("wq_b_tp2", 64 * 512 // 2, 1280),
+    ("indexer_wq_b", 32 * 128, 1280),
+    ("wo_b_tp2", 5120, 8192 // 2),
+    ("shared_gate_up_tp2", 2 * 2304 // 2, 5120),
+    ("shared_down_tp2", 5120, 2304 // 2),
+    ("shared_down_tp4", 5120, 2304 // 4),
+]
+
+
+def _make_block32_layer(n: int, k: int, device: str) -> torch.nn.Module:
+    """An MXFP8 layer with 32x32 block scales, expanded per row as loaded."""
+    blocks = (torch.randn(n, k, device=device) * 0.05).view(n // 32, 32, k // 32, 32)
+    amax = blocks.abs().amax(dim=(1, 3)).clamp(min=torch.finfo(torch.float32).tiny)
+    bits = (torch.ceil(torch.log2(amax / 448.0)) + 127.0).clamp(0, 254)
+    weight = (blocks * torch.exp2(127.0 - bits)[:, None, :, None]).view(n, k)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        weight.to(torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        bits.to(torch.uint8).repeat_interleave(32, dim=0), requires_grad=False
+    )
+    return layer
+
+
+@pytest.mark.parametrize("name,n,k", V41_BLOCK32_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("num_tokens", [1, 7, 32, 33, 192, 1024])
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_block32_matches_dequant_reference(name, n, k, num_tokens):
+    """32x32 block scales stay compact and the block-scaled GEMM is exact.
+
+    The token counts cover the packed, tiled and split-K configurations.
+    """
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+
+    torch.manual_seed(num_tokens)
+    device = "cuda"
+    layer = _make_block32_layer(n, k, device)
+    row_scale = layer.weight_scale.data.clone()
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(bmm_batch_size=None))
+    kernel.process_weights_after_loading(layer)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale.shape == (n // 32, k // 32)
+
+    x = torch.randn(num_tokens, k, device=device, dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(layer.weight, row_scale).float().T
+    )
+    assert out.shape == (num_tokens, n)
+    rel = (out.float() - expected).norm() / expected.norm()
+    assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_keeps_per_row_scales():
+    """Scales that differ within a 32-row block are not compacted."""
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+
+    layer = _make_block32_layer(64, 256, "cuda")
+    layer.weight_scale.data[1, 0] += 1
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(bmm_batch_size=None))
+    kernel.process_weights_after_loading(layer)
+    assert layer.weight_scale.shape == (64, 256 // 32)
+
+
 @pytest.mark.parametrize("num_rows", [1, 64, 65])
 @torch.inference_mode()
 def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
