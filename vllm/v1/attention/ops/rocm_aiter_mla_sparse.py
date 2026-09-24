@@ -3,7 +3,6 @@
 import functools
 import importlib
 import math
-import os
 from collections.abc import Callable
 from importlib.util import find_spec
 
@@ -1332,10 +1331,6 @@ def rocm_aiter_sparse_attn_indexer(
                         _ON_GFX942
                         and chunk.pcp_deinterleave_idx is None
                         and chunk.local_total_seq_lens == chunk.total_seq_lens
-                        and os.environ.get(
-                            "VLLM_DSV41_FLYDSL_PREFILL_VARIANT", "r4"
-                        ).lower()
-                        != "auto"
                     )
                     else None
                 ),
