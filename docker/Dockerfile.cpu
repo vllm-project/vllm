@@ -107,55 +107,6 @@ ENV UV_LINK_MODE="copy"
 
 ENV TARGETARCH=${TARGETARCH}
 
-######################### TRITON-CPU BUILD IMAGE #########################
-# Branches off base-common directly (before requirements/cpu.txt is installed
-# below) so a torch/etc. version bump doesn't invalidate this stage's cache --
-# it builds triton-cpu in an isolated `uv build` environment and never touches
-# these packages.
-FROM base-common AS vllm-triton-cpu-build
-
-# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
-# Re-declared here because this stage is `FROM base-common` (not `vllm-build`),
-# so it does not inherit the ARG/ENV defined there. Without it, the guard
-# below would see an empty value and build triton-cpu on non-x86 targets
-# (e.g. arm64).
-ARG VLLM_CPU_X86=0
-
-ARG USE_SCCACHE
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_LOCAL_ONLY=0
-
-WORKDIR /vllm-workspace
-
-RUN mkdir dist
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
-    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
-    --mount=type=cache,target=/root/.triton \
-    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
-    set -ex; \
-    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
-        cd triton-cpu; \
-        git checkout "270e696d"; \
-        if [ "$USE_SCCACHE" = "1" ]; then \
-            if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
-                unset SCCACHE_BUCKET SCCACHE_REGION; \
-                export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
-            elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
-                export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
-            fi; \
-            export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
-            sccache --show-stats; \
-        fi; \
-        uv build --wheel --out-dir=../dist; \
-        if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi; \
-        cd ..; \
-        rm -rf triton-cpu; \
-    fi
-
 ######################### COMMON BASE IMAGE + PYTHON DEPS #########################
 FROM base-common AS base-common-pydeps
 
@@ -379,9 +330,12 @@ WORKDIR /vllm-workspace
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
-# packages unavailable on aarch64 (decord, terratorch) for arm builds.
+# packages unavailable on aarch64 (decord, terratorch) for arm builds. Also
+# drop the generic PyPI triton pulled in transitively (via xgrammar) on x86
+# builds, so it doesn't clobber the triton-cpu wheel from requirements/cpu.txt.
 RUN case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
+    x86_64) sed -i '/^triton==/d' requirements/test/cpu.txt ;; \
     esac
 
 # pytrec-eval-terrier bundles pre-C23 trec_eval sources. GCC 15 defaults to C23;
@@ -434,14 +388,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# Installed after requirements/test/cpu.txt (which pins triton==3.6.0) so the
-# triton-cpu wheel isn't overwritten by that pin.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if ls dist/*.whl >/dev/null 2>&1; then \
-        uv pip install dist/*.whl; \
-    fi
-
 ENTRYPOINT ["bash"]
 
 ######################### TEST IMAGE #########################
@@ -453,18 +399,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if ls dist/*.whl >/dev/null 2>&1; then \
-        uv pip install dist/*.whl; \
-    fi
-
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+# tools/ carries repo-tooling code that a few tests exercise directly
+# (e.g. tests/tools/test_check_test_tethering.py imports
+# tools.pre_commit.check_test_tethering).
+ADD ./tools/ ./tools/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -484,13 +428,7 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install "$(realpath dist/*.whl)[audio]"
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if ls dist/*.whl >/dev/null 2>&1; then \
-        uv pip install dist/*.whl; \
-    fi
+    uv pip install "$(realpath dist/*.whl)[audio,bench]"
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"

@@ -212,12 +212,15 @@ class Gemma4Config(VerifyAndUpdateConfig):
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
-        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
-        mixed backend selection and numerical divergence.
+        layers. The default FA3 on Hopper cannot handle head_dim > 256.
 
-        When FA4 is available we force it for ALL layers, giving a uniform kernel path
-        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
-        to Triton.
+        On SM90 with FP8 KV cache, use FA3 for supported layers and let the generic
+        FlashAttention selector upgrade larger head dimensions to FA4.
+        The multimodal-prefix composite routes image masks to Triton and causal
+        requests to this per-layer FA3/FA4 selection. For other configurations,
+        force FA4 for all layers to avoid the mixed
+        FA3+FA4 penalty.
+        When FA4 is not available, fall back to Triton.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -230,6 +233,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -241,12 +245,22 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 and vllm_config.attention_config.backend
                 in (None, AttentionBackendEnum.FLASH_ATTN)
             ):
-                vllm_config.attention_config.flash_attn_version = 4
-                logger.info(
-                    "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
-                    "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dims,
-                )
+                use_per_layer_fa = current_platform.is_device_capability_family(
+                    90
+                ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
+                if use_per_layer_fa:
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using "
+                        "per-layer FA3/FA4 selection for FP8 KV cache on SM90.",
+                        head_dims,
+                    )
+                else:
+                    vllm_config.attention_config.flash_attn_version = 4
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using FA4 "
+                        "for all layers to avoid mixed FA3/FA4 penalty.",
+                        head_dims,
+                    )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
@@ -280,11 +294,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "FLASH_ATTN or TRITON_ATTN instead."
             )
         if attention_config.backend is None and not attention_config.use_non_causal:
+            # Only the sm_100 default backend order reads this flag (it puts
+            # FlashInfer first for causal models). Elsewhere Gemma4Config above
+            # keeps FlashInfer out: FA4 on every layer, else TRITON_ATTN.
             attention_config.use_non_causal = True
             logger.info(
-                "DiffusionGemma uses mixed causal/bidirectional attention "
-                "within a batch; setting use_non_causal=True to exclude "
-                "FlashInfer from auto-selection."
+                "DiffusionGemma mixes causal and bidirectional attention in "
+                "one batch; setting use_non_causal=True so the default backend "
+                "order prefers FlashAttention over FlashInfer."
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
