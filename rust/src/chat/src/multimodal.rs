@@ -23,6 +23,7 @@ use llm_multimodal::{
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
     ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
+    VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -55,6 +56,8 @@ pub use self::timing::{mm_request_span, mm_timing_layer};
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
+    /// Rendered placeholder marker IDs for all resolved modalities.
+    placeholder_token_ids: Vec<u32>,
     image: Option<VisionModalitySupport>,
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
@@ -420,8 +423,18 @@ impl MultimodalModelInfo {
             MediaConnectorConfig::default(),
         )?);
 
+        let placeholder_token_ids = [
+            image.as_ref().map(|support| support.placeholder.marker_token_id),
+            video.as_ref().map(|support| support.placeholder.marker_token_id),
+            audio.as_ref().map(|support| support.placeholder.marker_token_id),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
         Ok(Some(Self {
             context,
+            placeholder_token_ids,
             image,
             video,
             audio,
@@ -547,6 +560,20 @@ impl MultimodalModelInfo {
             Modality::ImageEmbeds => None,
         }
     }
+
+    fn vision_preprocessing_context(
+        &self,
+        prompt_token_ids: &[u32],
+        max_model_len: Option<usize>,
+    ) -> VisionPreprocessingContext {
+        let text_prompt_length = prompt_token_ids
+            .iter()
+            .filter(|token_id| !self.placeholder_token_ids.contains(token_id))
+            .count();
+        VisionPreprocessingContext {
+            token_budget: max_model_len.map(|limit| limit.saturating_sub(text_prompt_length)),
+        }
+    }
 }
 
 /// Finalize a rendered chat prompt into text-generation input.
@@ -559,6 +586,7 @@ pub(crate) async fn finalize_rendered_prompt(
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
+    max_model_len: Option<usize>,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
     if media_parts.is_empty() {
@@ -574,7 +602,12 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let prepared = info
-        .prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype)
+        .prepare_multimodal(
+            media_parts,
+            &mut prompt_token_ids,
+            model_dtype,
+            max_model_len,
+        )
         .instrument(mm_request_span(&request.request_id))
         .await?;
 
@@ -599,7 +632,8 @@ fn extract_media_parts(
                 ChatMessage::System { content }
                 | ChatMessage::Developer { content, .. }
                 | ChatMessage::User { content }
-                | ChatMessage::ToolResponse { content, .. } => content,
+                | ChatMessage::ToolResponse { content, .. }
+                | ChatMessage::Custom { content, .. } => content,
                 ChatMessage::Assistant { .. } => {
                     bail_multimodal!("renderer reported multimodal assistant content")
                 }
@@ -622,7 +656,8 @@ fn extract_media_parts(
                 ChatMessage::System { content }
                 | ChatMessage::Developer { content, .. }
                 | ChatMessage::User { content }
-                | ChatMessage::ToolResponse { content, .. } => Some(content),
+                | ChatMessage::ToolResponse { content, .. }
+                | ChatMessage::Custom { content, .. } => Some(content),
                 ChatMessage::Assistant { .. } => None,
             };
             match content {
@@ -766,11 +801,13 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype).await
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
+            .await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -786,15 +823,24 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
+        let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared
-                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    vision_context,
+                )
+                .await?,
+            );
         }
         if !fetched.videos.is_empty() {
             prepared
@@ -1039,6 +1085,100 @@ mod tests {
         assert_ne!(
             info.image.as_ref().unwrap().placeholder.marker_token_id,
             info.video.as_ref().unwrap().placeholder.marker_token_id,
+        );
+    }
+
+    #[test]
+    fn vision_preprocessing_context_uses_runtime_budget_and_text_tokens() {
+        let info = qwen3_vl_info();
+        let context = info.vision_preprocessing_context(
+            &[11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13],
+            Some(4096),
+        );
+
+        assert_eq!(context.token_budget, Some(4096 - 3));
+        assert_eq!(
+            info.vision_preprocessing_context(&[11, 12, 13], Some(2)).token_budget,
+            Some(0)
+        );
+        assert_eq!(
+            info.vision_preprocessing_context(&[11], None).token_budget,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn nemotron_budget_controls_preprocessing_and_engine_features() {
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<image>", 1018)
+            .with_regular_token("<img>", 1019)
+            .with_regular_token("</img>", 1020);
+        let config = serde_json::json!({
+            "model_type": "nemotron_h_omni",
+            "img_context_token_id": 1018,
+            "max_position_embeddings": 512,
+            "patch_size": 16,
+            "downsample_ratio": 0.5,
+            "norm_mean": [0.0, 0.0, 0.0],
+            "norm_std": [1.0, 1.0, 1.0],
+            "vision_config": {
+                "args": {"min_num_patches": 1024, "max_num_patches": 13312}
+            }
+        });
+        let info = test_info("nemotron_h_omni", config, tokenizer);
+        let media = MediaContentPart::ImageUrl {
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
+            detail: None,
+            uuid: None,
+        };
+        let mut prompt = vec![11; 100];
+        prompt.push(1018);
+
+        let mut tokens = prompt.clone();
+        let features = info
+            .prepare_multimodal(
+                vec![media.clone()],
+                &mut tokens,
+                ModelDtype::Float32,
+                Some(512),
+            )
+            .await
+            .unwrap();
+        assert_eq!(features.len(), 1);
+        let feature = &features[0];
+        assert_eq!(
+            (feature.mm_position.offset, feature.mm_position.length),
+            (100, 258)
+        );
+        assert_eq!(tokens.len(), 358);
+        assert_eq!(tokens[100], 1019);
+        assert!(tokens[101..357].iter().all(|&token| token == 1018));
+        assert_eq!(tokens[357], 1020);
+        let data = feature.data.as_ref().unwrap();
+        assert!(matches!(
+            data["pixel_values_flat"].data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [3, 512, 512]
+        ));
+        assert_eq!(
+            data["num_tokens_per_image"].data,
+            Some(MmKwargValue::Int(256))
+        );
+        assert_eq!(
+            data["imgs_sizes"].data,
+            Some(MmKwargValue::List(vec![
+                MmKwargValue::Int(512),
+                MmKwargValue::Int(512),
+            ]))
+        );
+
+        let error = info
+            .prepare_multimodal(vec![media], &mut prompt, ModelDtype::Float32, Some(100))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Multimodal(message) if message.contains("exceeding token_budget"))
         );
     }
 
