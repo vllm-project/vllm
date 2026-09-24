@@ -573,6 +573,9 @@ class EngineArgs:
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
+    long_prefill_token_threshold_adaptive: bool = (
+        SchedulerConfig.long_prefill_token_threshold_adaptive
+    )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
@@ -1298,7 +1301,10 @@ class EngineArgs:
         )
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
-            "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
+            "--gpu-memory-utilization",
+            "--device-memory-utilization",
+            dest="gpu_memory_utilization",
+            **cache_kwargs["gpu_memory_utilization"],
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
@@ -1639,6 +1645,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
+        )
+        scheduler_group.add_argument(
+            "--long-prefill-token-threshold-adaptive",
+            **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
@@ -2486,6 +2496,9 @@ class EngineArgs:
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            long_prefill_token_threshold_adaptive=(
+                self.long_prefill_token_threshold_adaptive
+            ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,

@@ -167,7 +167,10 @@ mod tests {
     #[test]
     fn structural_tag_uses_compact_hy4_skeleton() {
         let tools = tools();
-        let parser = HyV4UnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let tokenizer = Arc::new(tokenizer());
+        let mut parser = HyV4UnifiedParser::new(&tools, tokenizer.clone()).unwrap();
+        let prompt = tokenizer.encode("<think:opensource>", false).unwrap();
+        parser.initialize(&prompt).unwrap();
         let tag = parser
             .build_output_grammar(&OutputGrammarContext {
                 tools: &tools,
@@ -177,10 +180,11 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        assert_eq!(tag.coverage, GrammarCoverage::FinalOutputOnly);
+        assert_eq!(tag.coverage, GrammarCoverage::FromTokenZero);
         let tag = StructuralTag::new(tag.format).to_json_string().unwrap();
 
         assert!(tag.contains("<tool_calls:opensource>"));
+        assert!(tag.contains("</think:opensource>"));
         assert!(tag.contains("<tool_call:opensource>get_weather"));
         assert!(tag.contains("<arg_key:opensource>"));
         assert!(tag.contains("</tool_call:opensource>"));
