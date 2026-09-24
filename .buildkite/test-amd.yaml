@@ -327,7 +327,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/utils/import_utils.py
-  - scripts/benchmark_helion_kernels.py
+  - tools/benchmark_helion_kernels.py
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
@@ -4125,6 +4125,33 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc-rocm.txt
+
+- label: ":amd: (MI355) LM Eval TurboQuant t3nc"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/test-amd.yaml
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/triton_unified_attention.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+  - vllm/v1/attention/ops/flydsl_kernels/
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
 - label: ":amd: (MI355) LM Eval Small Models Distributed"
   timeout_in_minutes: 55
