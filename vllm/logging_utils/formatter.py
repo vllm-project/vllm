@@ -9,7 +9,7 @@ class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
     def __init__(self, fmt, datefmt=None, style="%", *, log_level: str | None = None):
-        super().__init__(fmt, datefmt, style)
+        super().__init__(fmt, datefmt, style, defaults={"request_id": "-"})
 
         self.use_relpath = log_level == "DEBUG"
         if self.use_relpath:
