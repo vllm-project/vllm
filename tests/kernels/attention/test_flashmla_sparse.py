@@ -705,12 +705,9 @@ def _assert_projects_alike(z_unfused, z_fused):
 
 def _skip_unless_rope_quant():
     from vllm.platforms import current_platform
-    from vllm.utils.flashinfer import has_flashinfer_dsv4_rope_quant
 
     if not current_platform.is_device_capability_family(100):
         pytest.skip("Requires FlashInfer TRTLLM sparse MLA on SM100/SM103")
-    if not has_flashinfer_dsv4_rope_quant():
-        pytest.skip("FlashInfer predates DSv4 RopeQuant")
 
 
 def test_flashinfer_rope_quant_matches_unfused_o_proj():

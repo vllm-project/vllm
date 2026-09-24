@@ -242,9 +242,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # since every call passes the real per-request seq_lens. The one
         # exception is a draft block running past max_model_len, whose clamped
         # positions it does not reproduce; that only costs those drafts.
-        reason = rope_quant_unsupported_reason(
-            self, self._einsum_recipe, self._tma_aligned_scales
-        )
+        reason = rope_quant_unsupported_reason(self)
         self._fuse_rope_quant = reason is None
         if reason is None:
             logger.info_once(

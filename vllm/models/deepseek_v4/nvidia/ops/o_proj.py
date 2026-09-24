@@ -14,7 +14,6 @@ from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
-from vllm.utils.flashinfer import has_flashinfer_dsv4_rope_quant
 
 
 def compute_fp8_einsum_recipe(
@@ -105,47 +104,30 @@ def deep_gemm_fp8_o_proj(
 
 
 # TRTLLM-gen's DSv4 RopeQuant epilogue (flashinfer-ai/flashinfer#4918) has one
-# fixed schedule: 128 query heads in groups of 8, the inverse GPT-J RoPE on the
-# last 64 dims of each 512-wide head, and FP8 with one packed UE8M0 scale per
-# 128 elements.
+# fixed schedule: 128 query heads in groups of 8 512-wide heads, and FP8 with
+# one packed UE8M0 scale per 128 elements.
 _ROPE_QUANT_NUM_HEADS = 128
 _ROPE_QUANT_HEADS_PER_GROUP = 8
 _ROPE_QUANT_HEAD_DIM = 512
-_ROPE_QUANT_ROPE_DIM = 64
 _ROPE_QUANT_BLOCK = 128
 
 
-def rope_quant_unsupported_reason(
-    layer: torch.nn.Module,
-    einsum_recipe: tuple[int, int, int],
-    tma_aligned_scales: bool,
-) -> str | None:
+def rope_quant_unsupported_reason(layer: torch.nn.Module) -> str | None:
     """Why ``layer`` cannot take FlashInfer's fused inverse RoPE + FP8 output.
 
-    The kernel emits ``wo_a``'s input directly, so everything it fixes has to
-    match what the unfused ``deep_gemm_fp8_o_proj`` would have produced.
+    DSv4 always has 8 heads per ``wo_a`` group at any TP size, and the rest of
+    the kernel's fixed shape (head/RoPE dims, per-128 einsum scales, FP32 RoPE
+    cache) is what the SM100 layer uses anyway. What varies is the local head
+    count and the configs the layer also serves unquantized.
     """
-    if not has_flashinfer_dsv4_rope_quant():
-        return "FlashInfer predates DSv4 RopeQuant"
-    if layer.kv_cache_torch_dtype != torch.float8_e4m3fn:
-        return "RopeQuant needs the per-tensor FP8 KV cache"
     if layer.n_local_heads != _ROPE_QUANT_NUM_HEADS:
         # Padding fewer heads up to the kernel's fixed 128 costs more
         # attention than the fused epilogue saves.
         return f"RopeQuant needs {_ROPE_QUANT_NUM_HEADS} local query heads"
-    if layer.head_dim != _ROPE_QUANT_HEAD_DIM or (
-        layer.rope_head_dim != _ROPE_QUANT_ROPE_DIM
-    ):
-        return "RopeQuant needs 512-wide heads with a 64-dim RoPE tail"
-    if layer.n_local_heads != layer.n_local_groups * _ROPE_QUANT_HEADS_PER_GROUP:
-        return f"RopeQuant needs {_ROPE_QUANT_HEADS_PER_GROUP} heads per wo_a group"
+    if layer.kv_cache_torch_dtype != torch.float8_e4m3fn:
+        return "RopeQuant needs the per-tensor FP8 KV cache"
     if layer.wo_a.weight.dtype != torch.float8_e4m3fn:
         return "RopeQuant needs an FP8 wo_a"
-    if einsum_recipe != (1, 1, _ROPE_QUANT_BLOCK) or not tma_aligned_scales:
-        return f"RopeQuant emits per-{_ROPE_QUANT_BLOCK} scales, wo_a wants others"
-    cos_sin_cache = layer.rotary_emb.cos_sin_cache
-    if cos_sin_cache.dtype != torch.float32 or not cos_sin_cache.is_contiguous():
-        return "RopeQuant needs a contiguous FP32 cos/sin cache"
     return None
 
 
