@@ -2375,9 +2375,6 @@ class MoRIIOConnectorWorker:
         self.layer_base_addr_index = {}
         base_addr_idx = 0
 
-        hma_enabled = (
-            not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-        )
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
             if self._is_mamba_layer(layer_name):
@@ -2392,16 +2389,31 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if hma_enabled:
-                if geometry.block_len != self.block_len:
+            # HMA / hybrid models (e.g. GLM-5.2 DSA) can advertise different
+            # per-layer block_size / block_len. Transfers already use per-layer
+            # geometry; do not hard-fail on a single page default.
+            if geometry.block_size != self.block_size:
+                if geometry.block_len == self.block_len:
                     raise ValueError(
-                        "MoRIIO KV cache block length mismatch for layer "
-                        f"{layer_name}: {geometry.block_len} != {self.block_len}"
+                        "MoRIIO KV cache block size mismatch for layer "
+                        f"{layer_name}: {geometry.block_size} != {self.block_size}"
                     )
-            elif geometry.block_size != self.block_size:
-                raise ValueError(
-                    "MoRIIO KV cache block size mismatch for layer "
-                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                logger.info(
+                    "MoRIIO HMA per-layer geometry for %s: block_size=%d "
+                    "block_len=%d (page block_size=%d block_len=%d); continuing.",
+                    layer_name,
+                    geometry.block_size,
+                    geometry.block_len,
+                    self.block_size,
+                    self.block_len,
+                )
+            elif geometry.block_len != self.block_len:
+                logger.info(
+                    "MoRIIO HMA per-layer block_len for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_len,
+                    self.block_len,
                 )
             # num_blocks is advertised as a single scalar to the peer, so must it
             # be uniform
@@ -2431,6 +2443,7 @@ class MoRIIOConnectorWorker:
         # and a run that has three should not look identical in the log.
         distinct_block_lens = sorted(set(self.block_lens.values()))
         if len(distinct_block_lens) > 1:
+            self.block_len = max(distinct_block_lens)
             logger.info(
                 "MoRIIO registered %d attention layers with %d distinct block "
                 "lengths (bytes): %s; transfer sizes and strides are per layer, "
