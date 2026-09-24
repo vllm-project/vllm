@@ -1044,6 +1044,10 @@ def supports_xpu_graph() -> bool:
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
+DIRECT_REGISTERED_OPS: dict[str, Callable] = {}
+"""Python bodies passed to `direct_register_custom_op`, keyed by `"ns::op_name"`.
+`vllm.profiler.op_capture` reuses them as meta kernels."""
+
 
 def direct_register_custom_op(
     op_name: str,
@@ -1083,3 +1087,4 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+    DIRECT_REGISTERED_OPS[f"{my_lib.ns}::{op_name}"] = op_func
