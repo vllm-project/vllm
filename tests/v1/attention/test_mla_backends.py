@@ -1117,8 +1117,8 @@ def _import_flashattn_mla():
     return sys.modules[impl_cls.__module__]
 
 
-def test_flashattn_mla_xpu_gating_matches_slm_limits(monkeypatch):
-    """XPU only fits the 576-wide MLA head in SLM at block_size=64."""
+def test_flashattn_mla_xpu_gating_matches_kernel_support(monkeypatch):
+    """XPU only compiles the 576-wide MLA head at block_size=64."""
     flashattn_mla_module = _import_flashattn_mla()
     monkeypatch.setattr(flashattn_mla_module, "current_platform", _ForceXPUPlatform())
 
