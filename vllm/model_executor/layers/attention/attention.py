@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
     get_kv_quant_mode,
 )
 
@@ -291,6 +292,16 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_scheme is not None
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
+
+        # TurboQuant only supports full-attention layers; fall back to fp8 for
+        # sliding-window layers so they use TRITON_ATTN with a quantized cache.
+        if sliding_window is not None and kv_cache_dtype.startswith("turboquant_"):
+            logger.debug(
+                "Layer %s: TurboQuant does not support sliding-window; "
+                "falling back to fp8 KV cache.",
+                prefix,
+            )
+            kv_cache_dtype = "fp8"
 
         # Skip quantization for specified layers
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
@@ -657,15 +668,31 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
             )
-        else:
-            return FullAttentionSpec(
+        elif quant_mode.is_turboquant:
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            tq_cfg = TurboQuantConfig.from_cache_dtype(
+                self.kv_cache_dtype, self.head_size
+            )
+            return TQFullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                tq_slot_size=tq_cfg.slot_size_aligned,
             )
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            head_size_v=self.head_size_v,
+            dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=quant_mode,
+        )
 
 
 def get_attention_context(
