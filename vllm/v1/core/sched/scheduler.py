@@ -134,6 +134,9 @@ class Scheduler(SchedulerInterface):
             if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
+        self.adaptive_long_prefill_threshold = (
+            self.scheduler_config.long_prefill_token_threshold_adaptive
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -599,6 +602,24 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # `long_prefill_token_threshold` exists to stop a long prefill from
+        # starving other requests of the token budget. When it is the only
+        # request there is nobody to starve, so let it use the whole budget.
+        num_eligible_reqs = (
+            len(self.running) + len(self.waiting) + len(self.skipped_waiting)
+        )
+        long_prefill_token_threshold = (
+            self.scheduler_config.long_prefill_token_threshold
+            if num_eligible_reqs > 1
+            else 0
+        )
+        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            long_prefill_token_threshold = max(
+                long_prefill_token_threshold, input_budget // num_eligible_reqs
+            )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -650,8 +671,8 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            if 0 < long_prefill_token_threshold < num_new_tokens:
+                num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -1090,9 +1111,8 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
-                    threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
+                    if 0 < long_prefill_token_threshold < num_new_tokens:
+                        num_new_tokens = long_prefill_token_threshold
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -3199,8 +3219,8 @@ class Scheduler(SchedulerInterface):
             # invalid block IDs cannot be mapped back to requests.
             raise RuntimeError(
                 "A KV connector reported block-level load failures "
-                "(invalid_block_ids) on a layout with multiple KV cache "
-                "groups, where block IDs are only unique within a group. "
+                "(invalid_block_ids) which is not supported for models "
+                "with multiple KV cache groups. "
                 "Connectors must report failed requests via "
                 "KVConnectorTransferResults.failed_recving instead."
             )

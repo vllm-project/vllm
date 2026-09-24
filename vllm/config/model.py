@@ -187,6 +187,10 @@ class ModelConfig:
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    is_submodel_config: bool = field(default=False, init=False)
+    """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
+    (e.g. a multimodal model's text stack). Its architecture list is empty, so
+    deployment-level validation must not run against it."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -340,6 +344,9 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_preserve_parameter_names: list[str] = field(default_factory=list)
+    """Parameter-name globs to preserve across level-2 sleep.
+    The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
@@ -1079,7 +1086,10 @@ class ModelConfig:
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
-        if defaults := try_match_architecture_defaults(self.architectures[0]):
+        # architectures is empty for with_hf_config() submodel views.
+        if self.architectures and (
+            defaults := try_match_architecture_defaults(self.architectures[0])
+        ):
             _, (runner, task) = defaults
         # User specified value take precedence
         if self.runner != "auto":
