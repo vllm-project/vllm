@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -109,7 +109,7 @@ class ClsToken(nn.Module):
 class ViTPatchGenerator(nn.Module):
     def __init__(
         self,
-        #  config: PretrainedConfig,
+        #  config: PreTrainedConfig,
         patch_size: int,
         embed_dim: int,
         input_dims: input_dim_t,
@@ -535,7 +535,7 @@ class RadioInternVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig = None,
+        config: PreTrainedConfig = None,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -599,8 +599,7 @@ class RadioInternVisionModel(nn.Module):
         self, imgs_sizes: list[tuple[int, int]], device: torch.device
     ) -> MaskMetadata:
         """Build mask metadata from image pixel sizes. Adds num_skip to each
-        sequence length (cls/register tokens) to match patch generator output.
-        """
+        sequence length (cls/register tokens) to match patch generator output."""
         patch_size = self.patch_generator.patch_size
         num_skip = self.patch_generator.num_skip
 
@@ -613,8 +612,7 @@ class RadioInternVisionModel(nn.Module):
     ) -> MaskMetadata:
         """Build mask metadata from actual sequence lengths (already including
         cls/register tokens, i.e. patch_count + num_skip per item).
-        Use inter_image_mask_metadata() when you only have imgs_sizes.
-        """
+        Use inter_image_mask_metadata() when you only have imgs_sizes."""
         assert len(seq_lens) > 0
         cu_seqlens = torch.tensor(
             list(accumulate(seq_lens, initial=0)), dtype=torch.int32, device=device
@@ -672,7 +670,7 @@ class RadioModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

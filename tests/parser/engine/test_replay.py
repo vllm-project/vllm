@@ -78,6 +78,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             # Inkling opts out of token-id terminal matching and has typed
             # structural blocks; its replay coverage lives in test_inkling.py.
             continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal, so
+            # it does not fit this token-terminal harness; its replay coverage
+            # lives in test_granite.py.
+            continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
             raise RuntimeError(
@@ -440,8 +445,7 @@ class TestToolCallFilteringReplay:
 )
 class TestToolCallFilteringNonStreaming:
     """Non-streaming parse() with tool_choice='none' must suppress tool
-    calls and not leak special tokens into content.
-    """
+    calls and not leak special tokens into content."""
 
     def test_parse(self, parser_cls, sample, think_end, tool_start):
         tokenizer = make_mock_tokenizer(sample)
@@ -484,8 +488,7 @@ _WS_TOOL_SAMPLES = [(t[0], t[1]) for t in _TOOL_CALL_SAMPLES if "whitespace" in 
 )
 class TestToolChoiceNoneStreamingParity:
     """Streaming and non-streaming must return the same content
-    when tool_choice='none' suppresses tool calls.
-    """
+    when tool_choice='none' suppresses tool calls."""
 
     def test_content_matches(self, parser_cls, sample):
         tokenizer = make_mock_tokenizer(sample)
@@ -543,8 +546,7 @@ def _inject_drop_tokens(sample):
 
 class TestDropTokenReplay:
     """Verify unconfigured special tokens are silently dropped across
-    all parsers and chunk sizes.
-    """
+    all parsers and chunk sizes."""
 
     @pytest.mark.parametrize(
         "parser_info",
@@ -601,8 +603,7 @@ class TestDropTokenNonStreaming:
 
 class TestAdapterReferences:
     """Verify make_adapters sets reasoning/tool parser class refs on parser engine
-    parser classes so the serving layer finds them and calls adjust_request.
-    """
+    parser classes so the serving layer finds them and calls adjust_request."""
 
     @pytest.mark.parametrize(
         "parser_name",

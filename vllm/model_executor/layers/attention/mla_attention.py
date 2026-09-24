@@ -404,6 +404,24 @@ def _get_kv_b_proj_input_dtype(
     return weight_dtype
 
 
+def split_kv_b_proj(
+    kv_b_proj: nn.Module,
+    out_dtype: torch.dtype,
+    kv_lora_rank: int,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dequantize ``kv_b_proj`` and return ``W_UK [L,N,P]``, ``W_UV [L,N,V]``."""
+    weight = get_and_maybe_dequant_weights(kv_b_proj, out_dtype=out_dtype).T
+    assert weight.shape == (
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+    ), f"kv_b_proj weight {tuple(weight.shape)} vs {kv_lora_rank=} {num_heads=}"
+    weight = weight.view(kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim)
+    return weight.split([qk_nope_head_dim, v_head_dim], dim=-1)
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -582,9 +600,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
-        # MLA reads this weight directly to build W_UK/W_UV, so a backend must
-        # not relayout it at load time.
-        kv_b_proj.skip_weight_relayout = True
+        # AMX reads kv_b_proj's weight directly and never calls it live; the
+        # reference CPU MLA backend calls it but isn't perf-critical. Skip
+        # the packed-kernel dispatch either way.
+        kv_b_proj._cpu_skip_gemm_dispatch = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -1024,9 +1043,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q_pe = mqa_pe_padded
 
             if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-                mqa_ql_nope = batched_gemm_a16wfp4(
+                mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                     mqa_q_nope,
                     self.W_K,
                     self.W_K_scale,
@@ -1054,7 +1071,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_q_nope,
                     self.impl._w_uk_packed,  # type: ignore[attr-defined]
                     True,
-                    None,
+                    self.impl._w_scale,  # type: ignore[attr-defined]
                 )
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
             else:
@@ -1222,13 +1239,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return
 
-        # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-
         if self.dcp_q_replicate:
             # qrep wired here: validate unsupported decode backends once.
             assert self.q_pad_num_heads in (None, self.num_heads), (
@@ -1244,24 +1254,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "FP4/FP8 MLA BMM paths."
                 )
 
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), (
-            f"{kv_b_proj_weight.shape=}, "
-            f"{self.kv_lora_rank=}, "
-            f"{self.num_heads=}, "
-            f"{self.qk_nope_head_dim=}, "
-            f"{self.v_head_dim=}"
-        )
-        kv_b_proj_weight = kv_b_proj_weight.view(
+        W_UK, W_UV = split_kv_b_proj(
+            self.kv_b_proj,
+            act_dtype,
             self.kv_lora_rank,
             self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            self.qk_nope_head_dim,
+            self.v_head_dim,
         )
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
@@ -1400,7 +1399,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x,
                 self.impl._w_uv_packed,  # type: ignore[attr-defined]
                 True,
-                None,
+                self.impl._w_scale,  # type: ignore[attr-defined]
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
@@ -1552,7 +1551,10 @@ class _DecodeConcatQuantFP8(QuantFP8):
             scale: torch.Tensor,
             scale_ub: torch.Tensor | None = None,
         ) -> torch.Tensor:
-            decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
+            if decode_q_pe.shape[-1] == 0 and decode_ql_nope.is_contiguous():
+                decode_q0 = decode_ql_nope
+            else:
+                decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
             decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
             decode_q, _ = quant_fn(self, decode_q_flat, scale, scale_ub)
             return decode_q.view(decode_q0.shape)
@@ -1568,8 +1570,7 @@ class MLACommonBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack an inline fp32 scale pair after the
-        latent data (single-sided: ``head_size_v == 0`` for MLA).
-        """
+        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
         spec = super().customize_spec(spec)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
@@ -2470,6 +2471,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
@@ -2634,6 +2636,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                max_query_len=min(
+                    common_attn_metadata.max_query_len, self.reorder_batch_threshold
+                ),
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
             )
 

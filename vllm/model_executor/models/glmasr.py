@@ -11,7 +11,7 @@ from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
@@ -44,6 +44,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -693,13 +694,10 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -709,8 +707,8 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -739,25 +737,23 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        mm_data = dict(mm_data)
-        if "audios" in mm_data:
-            mm_data["audio"] = mm_data.pop("audios")
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
-        hf_processor_mm_kwargs = dict(
-            **hf_processor_mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
         )
-
-        return mm_data, hf_processor_mm_kwargs
 
     def _postprocess_hf_mm_data(
         self,

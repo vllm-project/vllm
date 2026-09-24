@@ -40,7 +40,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
@@ -62,8 +62,7 @@ class AttentionState(NamedTuple):
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
-    matches between the capture and runtime.
-    """
+    matches between the capture and runtime."""
 
     cg_mode: CUDAGraphMode
     num_tokens: int
@@ -91,8 +90,7 @@ def make_cudagraph_stats(
 class CreateForwardFn(Protocol):
     """Factory that prepares inputs (OUTSIDE the graph) and returns a
     forward_fn. Called with warmup=True for the warmup pass and warmup=False
-    for the captured pass.
-    """
+    for the captured pass."""
 
     def __call__(
         self,
@@ -645,8 +643,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.intermediate_tensors[k][:num_tokens] = v
 
         def create_forward_fn(
-            desc: BatchExecutionDescriptor,
-            warmup: bool,
+            desc: BatchExecutionDescriptor, warmup: bool
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
@@ -664,6 +661,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             model_inputs = {
                 "input_ids": input_buffers.input_ids[:num_tokens],
                 "positions": input_buffers.positions[:num_tokens],
+                "intermediate_tensors": None,
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
             if not self.is_first_pp_rank:
@@ -706,7 +704,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                max_query_len=desc.max_query_len,
+                max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
             )
 
@@ -777,6 +775,10 @@ def prepare_inputs_to_capture(
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
+    if full_cudagraph and max_query_len is None:
+        # Mixed graphs can replay a single prefill spanning the entire batch,
+        # even when the dummy batch distributes one token to each request.
+        max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
@@ -790,15 +792,16 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        block_tables.cp_size,
-        block_tables.cp_rank,
-        block_tables.cp_interleave,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
+    if block_tables.cp_size > 1:
+        input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            input_batch.num_reqs,
+            block_tables.cp_size,
+            block_tables.cp_rank,
+            block_tables.cp_interleave,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
@@ -955,8 +958,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
 def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
     """Extrapolate the total FULL capture cost from samples of the largest
     graphs. The first capture allocates the pool baseline; later graphs mostly
-    reuse it, so the second sample is taken as the per-graph cost.
-    """
+    reuse it, so the second sample is taken as the per-graph cost."""
     if not mem_samples:
         return 0
     first_capture = mem_samples[0]
@@ -993,8 +995,7 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
 
 def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     """Release the profiling KV cache and captured graphs while keeping model
-    weights, so the real ``initialize_kv_cache`` starts from a clean slate.
-    """
+    weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None

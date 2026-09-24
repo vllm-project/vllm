@@ -1227,7 +1227,6 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
 
 def _fp8_config(**kwargs: Any) -> Fp8Config:
     return Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
         weight_block_size=[128, 128],
         **kwargs,
@@ -1248,7 +1247,7 @@ def test_block_fp8_shared_expert_fse_is_compatible() -> None:
 def test_per_tensor_fp8_shared_expert_fse_is_incompatible() -> None:
     """Per-tensor scales are 0-D, so the shared-expert chunker cannot slice them."""
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"),
+        Fp8Config(activation_scheme="dynamic"),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )
@@ -1319,8 +1318,7 @@ def test_fp8_shared_expert_fse_allows_symmetric_ignored_layers() -> None:
 
 def test_fp8_shared_expert_fse_expands_packed_projections() -> None:
     """Both shards of a fused projection ignored is symmetric within that
-    projection, so the mismatch reported is against the routed experts.
-    """
+    projection, so the mismatch reported is against the routed experts."""
     quant_config = _fp8_config(
         ignored_layers=[
             "model.layers.0.mlp.shared_experts.gate_proj",
@@ -1344,8 +1342,7 @@ def test_fp8_shared_expert_fse_expands_packed_projections() -> None:
 
 def test_fp8_shared_expert_fse_propagates_partial_shard_exclusion() -> None:
     """Half a fused projection excluded is rejected by `is_layer_skipped`
-    itself, exactly as it is in `Fp8Config.get_quant_method`.
-    """
+    itself, exactly as it is in `Fp8Config.get_quant_method`."""
     quant_config = _fp8_config(
         ignored_layers=["model.layers.0.mlp.shared_experts.gate_proj"]
     )

@@ -176,7 +176,7 @@ class RocmAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
@@ -244,8 +244,7 @@ class RocmAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """K and V as two head groups so the native HIP kernels address each side
-        as one contiguous region (x-packed interior applied in split_kv_cache).
-        """
+        as one contiguous region (x-packed interior applied in split_kv_cache)."""
         if spec.state_content_bytes is not None:
             return spec
         assert spec.head_size == spec.head_size_v, (

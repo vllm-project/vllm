@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Implementation of Siglip2VisionModel intended to be only used
-within a vision language model.
-"""
+within a vision language model."""
 
 from collections.abc import Iterable
 
@@ -335,7 +334,7 @@ class Siglip2Encoder(nn.Module):
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
-        config: PretrainedConfig
+        config: PreTrainedConfig
 
     """
 

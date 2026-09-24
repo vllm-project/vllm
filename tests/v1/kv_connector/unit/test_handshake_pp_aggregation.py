@@ -79,11 +79,6 @@ def _run_engine_core_handshake(
         "resolve_kv_cache_block_sizes",
         lambda kv_cache_config, vllm_config: (16, 16),
     )
-    monkeypatch.setattr(
-        engine_core_module,
-        "MULTIMODAL_REGISTRY",
-        SimpleNamespace(engine_receiver_cache_from_config=lambda vllm_config: None),
-    )
     monkeypatch.setattr(engine_core_module, "freeze_gc_heap", lambda: None)
     monkeypatch.setattr(
         engine_core_module, "maybe_attach_gc_debug_callback", lambda: None
@@ -105,7 +100,11 @@ def _run_engine_core_handshake(
         speculative_config=None,
         ec_transfer_config=None,
         max_concurrent_batches=1,
-        model_config=SimpleNamespace(runner_type="generate", is_diffusion=False),
+        model_config=SimpleNamespace(
+            runner_type="generate",
+            is_diffusion=False,
+            supports_multimodal_inputs=False,
+        ),
         cache_config=SimpleNamespace(
             enable_prefix_caching=False,
             prefix_caching_hash_algo="builtin",
@@ -176,8 +175,7 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
 ) -> None:
     """Engine core always asks workers for `(pp_rank, tp_rank)`-keyed metadata,
     then unwraps to `{tp_rank: metadata}` for a connector that has not opted
-    into PP-aware handshake (single-PP producer, all `pp_rank == 0`).
-    """
+    into PP-aware handshake (single-PP producer, all `pp_rank == 0`)."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _LegacyConnector()
@@ -200,8 +198,7 @@ def test_engine_rejects_pp_producer_for_legacy_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A connector that has not opted into PP-aware handshake must not silently
-    drop metadata from `pp_rank > 0`; engine core init raises instead.
-    """
+    drop metadata from `pp_rank > 0`; engine core init raises instead."""
     connector = _LegacyConnector()
 
     with pytest.raises(ValueError, match="does not support PP-disaggregated"):
@@ -216,8 +213,7 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A PP-aware connector receives the full `(pp_rank, tp_rank)`-keyed dict
-    unchanged.
-    """
+    unchanged."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _PPAwareConnector()

@@ -23,6 +23,7 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -85,6 +86,10 @@ class EngineCoreClient(ABC):
     * SyncMPClient: ZMQ + background proc EngineCore (for LLM)
     * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
     """
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each ready engine, keyed by DP rank."""
+        return {}
 
     @staticmethod
     def make_client(
@@ -193,7 +198,10 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
+    def release_kv_cache_memory(self) -> None:
+        raise NotImplementedError
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         raise NotImplementedError
 
     def is_sleeping(self) -> bool:
@@ -248,8 +256,7 @@ class EngineCoreClient(ABC):
 
     def dp_engines_running(self) -> bool:
         """Returns True if data parallel engines are collectively in a
-        running state.
-        """
+        running state."""
         raise NotImplementedError
 
     async def commit_elastic_ep(self) -> None:
@@ -286,7 +293,10 @@ class EngineCoreClient(ABC):
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
-    async def wake_up_async(self, tags: list[str] | None = None) -> None:
+    async def release_kv_cache_memory_async(self) -> None:
+        raise NotImplementedError
+
+    async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -356,6 +366,11 @@ class InprocClient(EngineCoreClient):
             log_stats,
             executor_fail_callback=executor_fail_callback,
         )
+        # Release the executor's workers when the client is collected, as
+        # MPClient does; they hold GPU memory for the life of the process
+        # otherwise. The callback must not reference self, or self would stay
+        # reachable and the finalizer would never run.
+        self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
@@ -374,7 +389,8 @@ class InprocClient(EngineCoreClient):
             self.engine_core.abort_requests(request_ids)
 
     def shutdown(self, timeout: float | None = None) -> None:
-        self.engine_core.shutdown()
+        if self._finalizer.detach() is not None:
+            self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.engine_core.profile(is_start, profile_prefix)
@@ -398,8 +414,11 @@ class InprocClient(EngineCoreClient):
         result = self.engine_core.sleep(level, mode)
         assert result is None
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
-        self.engine_core.wake_up(tags)
+    def release_kv_cache_memory(self) -> None:
+        self.engine_core.release_kv_cache_memory()
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        return self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -446,8 +465,7 @@ class InprocClient(EngineCoreClient):
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
-    circular reference back to the client object.
-    """
+    circular reference back to the client object."""
 
     ctx: zmq.Context
     # If CoreEngineProcManager, it manages local engines;
@@ -565,6 +583,7 @@ class MPClient(EngineCoreClient):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
+        self._kv_event_sources: dict[int, KVEventsConfig] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -801,8 +820,7 @@ class MPClient(EngineCoreClient):
 
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
-        config changes (e.g. auto-fitted max_model_len) back to the frontend.
-        """
+        config changes (e.g. auto-fitted max_model_len) back to the frontend."""
         vllm_config = self.vllm_config
         response = (
             msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
@@ -853,6 +871,14 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = response.dp_stats_address
             else:
                 assert response.dp_stats_address == self.stats_update_address
+
+        if response.kv_events_config is not None:
+            self._kv_event_sources[response.data_parallel_rank] = (
+                response.kv_events_config
+            )
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        return dict(self._kv_event_sources)
 
 
 def _process_utility_output(
@@ -1024,8 +1050,11 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         self.call_utility("sleep", level, mode)
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
-        self.call_utility("wake_up", tags)
+    def release_kv_cache_memory(self) -> None:
+        self.call_utility("release_kv_cache_memory")
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        return self.call_utility("wake_up", tags)
 
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
@@ -1268,8 +1297,11 @@ class AsyncMPClient(MPClient):
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.call_utility_async("sleep", level, mode)
 
-    async def wake_up_async(self, tags: list[str] | None = None) -> None:
-        await self.call_utility_async("wake_up", tags)
+    async def release_kv_cache_memory_async(self) -> None:
+        await self.call_utility_async("release_kv_cache_memory")
+
+    async def wake_up_async(self, tags: list[str] | None = None) -> bool:
+        return await self.call_utility_async("wake_up", tags)
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
@@ -1333,8 +1365,7 @@ class AsyncMPClient(MPClient):
 
 class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
-    EngineCore. Assumes external load-balancing by default.
-    """
+    EngineCore. Assumes external load-balancing by default."""
 
     def __init__(
         self,
@@ -1518,8 +1549,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
-    EngineCore. Load-balances between multiple engine processes.
-    """
+    EngineCore. Load-balances between multiple engine processes."""
 
     def __init__(
         self,
@@ -1827,8 +1857,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         num_redundant_experts: int,
     ) -> None:
         """Prepare scale up by creating new engine cores and reconfiguring
-        existing ones.
-        """
+        existing ones."""
         self._setup_elastic_ep_reconfig_bootstrap()
 
         # Phase 1: Send reconfig messages to existing engines
@@ -1920,8 +1949,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def _commit_scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
-        reconfiguring existing engine cores.
-        """
+        reconfiguring existing engine cores."""
         cur_data_parallel_size = len(self.core_engines)
 
         self.eep_scaling_cache = ElasticScalingCache(
@@ -1936,6 +1964,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
         # Pending coordinator snapshots must use the surviving ranks too.
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
+        for rank in range(new_data_parallel_size, cur_data_parallel_size):
+            self._kv_event_sources.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [

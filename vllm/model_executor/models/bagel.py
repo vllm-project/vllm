@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -248,23 +248,20 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         hf_config = self.info.get_hf_config()
         vit_config = hf_config.vit_config
 
         # Use the configured image size
         image_size = vit_config.image_size
-        image_overrides = mm_options.get("image")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=image_size,
                 height=image_size,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 

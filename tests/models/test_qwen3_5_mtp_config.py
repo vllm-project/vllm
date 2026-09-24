@@ -5,7 +5,7 @@
 from typing import Any
 
 import pytest
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, PreTrainedConfig
 
 from vllm.config.speculative import SpeculativeConfig
 
@@ -15,19 +15,19 @@ _CHECKPOINTS = {
 }
 
 
-def _mtp_config(model_type: str) -> PretrainedConfig:
+def _mtp_config(model_type: str) -> PreTrainedConfig:
     """Create a top-level MTP configuration with mtp_num_hidden_layers."""
     kwargs: dict[str, Any] = {
         "model_type": model_type,
         "architectures": ["SomeArch"],
         "mtp_num_hidden_layers": 1,
     }
-    return PretrainedConfig(**kwargs)
+    return PreTrainedConfig(**kwargs)
 
 
 def _multimodal_wrapper_mtp_config(
     model_type: str, mtp_layers: int = 1
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     """Download a multimodal wrapper config via AutoConfig.from_pretrained
     and configure mtp_num_hidden_layers in text_config.
 
@@ -36,7 +36,7 @@ def _multimodal_wrapper_mtp_config(
     - MoE   (qwen3_5_moe): Qwen/Qwen3.6-35B-A3B
     """
     repo = _CHECKPOINTS[model_type]
-    config: PretrainedConfig = AutoConfig.from_pretrained(repo)
+    config: PreTrainedConfig = AutoConfig.from_pretrained(repo)
     text_config = config.get_text_config()
     text_config.mtp_num_hidden_layers = mtp_layers
     return config
@@ -73,8 +73,7 @@ def test_mtp_override_extracts_n_predict_from_multimodal_wrapper(
     model_type: str, expected_arch: str
 ) -> None:
     """Verify that multimodal wrapper checkpoints with mtp_num_hidden_layers
-    in text_config resolve n_predict and architecture correctly.
-    """
+    in text_config resolve n_predict and architecture correctly."""
     cfg = SpeculativeConfig.hf_config_override(
         _multimodal_wrapper_mtp_config(model_type, mtp_layers=2)
     )
@@ -94,8 +93,7 @@ def test_mtp_override_top_level_precedence_over_nested_text_config(
     model_type: str, expected_arch: str
 ) -> None:
     """Verify that an explicit top-level mtp_num_hidden_layers takes precedence
-    over a nested text_config value.
-    """
+    over a nested text_config value."""
     cfg = _multimodal_wrapper_mtp_config(model_type, mtp_layers=2)
     cfg.mtp_num_hidden_layers = 3
     overridden = SpeculativeConfig.hf_config_override(cfg)
@@ -115,8 +113,7 @@ def test_mtp_override_downloads_real_hf_hub_configs(
     model_id: str, expected_arch: str
 ) -> None:
     """Verify that unmodified real-world checkpoints downloaded via
-    AutoConfig.from_pretrained resolve n_predict=1 from text_config.
-    """
+    AutoConfig.from_pretrained resolve n_predict=1 from text_config."""
     hf_config = AutoConfig.from_pretrained(model_id)
     cfg = SpeculativeConfig.hf_config_override(hf_config)
     assert cfg.model_type == "qwen3_5_mtp"

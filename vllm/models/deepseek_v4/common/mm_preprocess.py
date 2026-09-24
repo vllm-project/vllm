@@ -22,7 +22,7 @@ reference's out-of-vocab scheme.
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -30,7 +30,7 @@ from PIL import Image, ImageOps
 from transformers import BatchFeature
 from typing_extensions import assert_never
 
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -91,8 +91,7 @@ def validate_image_sentinel_ids(tokenizer) -> None:
 
 def grid_tokens(best_height, best_width, patch_size, downsample_ratio):
     """Number of LLM tokens the aligner grid occupies (N-layout, including
-    row/align padding).
-    """
+    row/align padding)."""
     n_llm_h = math.ceil((best_height // patch_size) / downsample_ratio)
     n_llm_w = math.ceil((best_width // patch_size) / downsample_ratio)
     num_tokens = n_llm_h * (n_llm_w + 1) + 2
@@ -197,8 +196,7 @@ def load_image(
 
 def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int):
     """Builds the N-layout token types (final order) and the aligner-row order
-    for IMAGE slots.
-    """
+    for IMAGE slots."""
     compress_pad = COMPRESS_PAD_TO - 1 - start_pos % COMPRESS_PAD_TO
     pad_h = n_llm_h % 2
     rows = n_llm_h + pad_h
@@ -241,8 +239,7 @@ def build_image_block_pad_free(n_llm_h: int, n_llm_w: int):
 
 class DeepseekV4VLImageProcessor:
     """Per-image transform (the PIL-input equivalent of the reference
-    ``load_image``).
-    """
+    ``load_image``)."""
 
     def __init__(self, config: DeepseekV4Config) -> None:
         super().__init__()
@@ -378,7 +375,7 @@ class DeepseekV4VLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         return {
@@ -386,7 +383,7 @@ class DeepseekV4VLDummyInputsBuilder(
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
-                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
+                overrides=mm_options.get("image"),
             ),
         }
 

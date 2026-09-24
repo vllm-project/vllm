@@ -70,6 +70,37 @@ def test_get_raw_stream_patch():
         assert get_raw_stream is _cuda_getCurrentRawStream
 
 
+# Inductor can initialize CUDA even for CPU inputs.
+@pytest.mark.forked
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_e8m0_custom_op_fullgraph(use_v2, use_fresh_inductor_cache):
+    """E8M0 inputs must not prevent mutable custom-op decomposition."""
+    with torch.library._scoped_library("test_e8m0", "FRAGMENT") as lib:
+        lib.define("scale_(Tensor(a!) out, Tensor scale) -> ()")
+
+        @torch.library.impl(lib, "scale_", "CPU")
+        def scale_impl(out, scale):
+            out.mul_(scale.float())
+
+        @torch.library.register_fake("test_e8m0::scale_", lib=lib)
+        def scale_fake(out, scale):
+            return None
+
+        def forward(x, scale):
+            out = x.clone()
+            torch.ops.test_e8m0.scale_(out, scale)
+            return out
+
+        x = torch.randn(4, 4)
+        scale = torch.full((4,), 128, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        compiled = torch.compile(
+            forward,
+            fullgraph=True,
+            options={"enable_auto_functionalized_v2": use_v2},
+        )
+        torch.testing.assert_close(compiled(x, scale), x * 2)
+
+
 def test_copy_pass():
     vllm_config = VllmConfig()
     inductor_pass = FixFunctionalizationPass(vllm_config)
@@ -231,6 +262,21 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         ) as _,
     ):
         pass
+
+
+@pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+def test_enforce_eager_jit_warmup(enable_fault_tolerance):
+    """Enforce-eager disables JIT warmup unless fault tolerance is on.
+
+    FT fault detection runs against deadlines that in-inference Triton
+    compilation latency spikes can blow past, so warmup stays enabled.
+    """
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", enforce_eager=True),
+        parallel_config=ParallelConfig(enable_fault_tolerance=enable_fault_tolerance),
+    )
+    assert config.compilation_config.mode == CompilationMode.NONE
+    assert config.kernel_config.enable_jit_warmup == enable_fault_tolerance
 
 
 @pytest.mark.forked
@@ -539,6 +585,25 @@ def _mock_config_for_cudagraph_sizes(
     config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
     config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)
     return config
+
+
+@pytest.mark.parametrize("max_num_seqs", [100, 101])
+def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
+    max_num_seqs: int,
+) -> None:
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert max_num_seqs in compilation_config.cudagraph_capture_sizes
 
 
 @pytest.mark.parametrize(
@@ -1229,8 +1294,7 @@ def test_compile_sizes_padding_validation():
 
 def test_inductor_asserts_default_disabled(monkeypatch):
     """Test that inductor runtime asserts are disabled by default
-    (INFO logging level) on torch < 2.12.
-    """
+    (INFO logging level) on torch < 2.12."""
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
     import importlib
@@ -1248,8 +1312,7 @@ def test_inductor_asserts_default_disabled(monkeypatch):
 
 def test_inductor_asserts_enabled_in_debug(monkeypatch):
     """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
-    on torch < 2.12.
-    """
+    on torch < 2.12."""
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
 
     import importlib
@@ -1285,8 +1348,7 @@ def test_get_inductor_factors_includes_configs():
 
 def test_inductor_asserts_user_override(monkeypatch):
     """Test that explicit inductor_compile_config overrides the
-    debug-logging default.
-    """
+    debug-logging default."""
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
     import importlib

@@ -26,14 +26,14 @@ from vllm.utils.jsontree import JSONTree, json_map_leaves
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
-    from transformers.configuration_utils import PretrainedConfig
+    from transformers.configuration_utils import PreTrainedConfig
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.config import ModelConfig
     from vllm.renderers import TokenizeParams
 else:
-    PretrainedConfig = object
+    PreTrainedConfig = object
     BatchFeature = object
     ProcessorMixin = object
 
@@ -123,7 +123,7 @@ class TimingContext:
 
 
 _T = TypeVar("_T")
-_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
+_C = TypeVar("_C", bound=PreTrainedConfig, default=PreTrainedConfig)
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
@@ -148,7 +148,7 @@ class InputProcessingContext:
         return self.tokenizer
 
     @overload
-    def get_hf_config(self, /) -> PretrainedConfig: ...
+    def get_hf_config(self, /) -> PreTrainedConfig: ...
 
     @overload
     def get_hf_config(
@@ -163,7 +163,7 @@ class InputProcessingContext:
         /,
     ) -> Any:
         """Get the HuggingFace configuration
-        (`transformers.PretrainedConfig`) of the model,
+        (`transformers.PreTrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
@@ -171,9 +171,9 @@ class InputProcessingContext:
 
         """
         if typ is None:
-            from transformers.configuration_utils import PretrainedConfig
+            from transformers.configuration_utils import PreTrainedConfig
 
-            typ = PretrainedConfig
+            typ = PreTrainedConfig
 
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
@@ -321,12 +321,6 @@ class InputProcessingContext:
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
-        # vLLM needs the full untruncated sequence to keep multi-modal
-        # placeholder tokens aligned; note that the text inputs in
-        # call_hf_processor are just dummy text, not the original prompt.
-        # The original prompt is already tokenized by the renderer.
-        merged_kwargs.setdefault("truncation", False)
-
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
             merged_kwargs,
@@ -377,7 +371,7 @@ class BaseProcessingInfo:
     def get_tokenizer(self) -> TokenizerLike:
         return self.ctx.get_tokenizer()
 
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> PreTrainedConfig:
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
@@ -426,7 +420,7 @@ class BaseProcessingInfo:
     def get_data_parser(self) -> MultiModalDataParser:
         """Constructs a parser to preprocess multi-modal data items
         before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        [`_get_hf_mm_inputs`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
 
         You can support additional modalities by creating a subclass
         of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
@@ -506,7 +500,7 @@ class BaseProcessingInfo:
         """Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        [`_get_hf_mm_inputs`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 

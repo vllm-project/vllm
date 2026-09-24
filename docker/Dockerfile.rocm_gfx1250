@@ -166,7 +166,7 @@ RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
     cd ${COMMON_WORKDIR}/vllm \
     && export SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)" \
-    && bash build_rust.sh \
+    && bash tools/build_rust.sh \
     && test -x vllm/vllm-rs
 
 # -----------------------
@@ -671,7 +671,7 @@ RUN case "$(which python3)" in \
         *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --upgrade huggingface-hub[cli]
+    uv pip install --system --upgrade huggingface-hub
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version

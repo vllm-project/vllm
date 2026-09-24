@@ -114,6 +114,7 @@ def test_eviction_when_cache_is_full():
 
     # 'x' should have been evicted.
     assert "x" not in manager.cached
+    assert "x" not in manager.num_embeds_by_hash
     assert "req1" not in manager.request_cached_ids
     assert "x" in manager.get_freed_mm_hashes()
 
@@ -273,6 +274,31 @@ def test_encoder_cache_with_is_embed_mask():
     assert savings_ratio == 12.5
 
 
+def test_encoder_cache_tracks_embedding_count_by_identifier():
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_embeds(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    is_embed = torch.tensor([False, True, True, False, True, False])
+    request = MockRequestWithMask("owner", ["img1"], [len(is_embed)])
+    request.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=6, is_embed=is_embed),
+    )
+
+    manager = EncoderCacheManager(cache_size=10)
+    manager.allocate(request, 0)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 3
+
+    manager.free(request)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 3
+
+    manager.reset()
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
+
+
 def test_encoder_cache_mask_based_retrieval():
     class MockRequestWithMask(MockRequest):
         def get_num_encoder_embeds(self, input_id: int) -> int:
@@ -336,6 +362,7 @@ def test_reset_clears_all_state():
     manager.reset()
 
     assert len(manager.cached) == 0
+    assert len(manager.num_embeds_by_hash) == 0
     assert len(manager.request_cached_ids) == 0
     assert len(manager.freeable) == 0
     assert len(manager.freed) == 0
@@ -367,8 +394,7 @@ def test_free_request_with_duplicate_mm_hashes():
     """Freeing a request whose two inputs share the same mm_hash must fully
     clean up request_cached_ids. After the first free_encoder_input call,
     cached[mm_hash] becomes empty; the second call must still remove the
-    remaining input_id from request_cached_ids.
-    """
+    remaining input_id from request_cached_ids."""
     manager = EncoderCacheManager(cache_size=20)
 
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
@@ -384,8 +410,7 @@ def test_free_request_with_duplicate_mm_hashes():
 
 def test_duplicate_mm_hash_stays_referenced_until_last_free():
     """`cached` holds one reference per request, not per position, so freeing
-    the first of two occurrences must not release the entry.
-    """
+    the first of two occurrences must not release the entry."""
     manager = EncoderCacheManager(cache_size=20)
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
 
@@ -406,8 +431,7 @@ def test_duplicate_mm_hash_stays_referenced_until_last_free():
 def test_duplicate_mm_hash_is_not_evicted_before_last_use():
     """An item repeated within one request (an image carried across
     conversation turns) must not become reclaimable capacity while a later
-    occurrence still has to be spliced in, or the encoder recomputes it.
-    """
+    occurrence still has to be spliced in, or the encoder recomputes it."""
     manager = EncoderCacheManager(cache_size=8)
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
     other = MockRequest("r2", ["imgB"], [8])

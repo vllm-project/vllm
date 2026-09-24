@@ -62,8 +62,7 @@ def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     CUDA_VISIBLE_DEVICES has already been set to the desired value.
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    """
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -329,12 +328,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.data_parallel_size > 1
-        ):
-            raise ValueError("PCP does not support data parallelism on CUDA yet.")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"

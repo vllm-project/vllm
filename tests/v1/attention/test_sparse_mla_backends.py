@@ -421,7 +421,18 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    monkeypatch,
 ):
+    if (
+        batch_name == "large_q_pure_prefill"
+        and backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype == "fp8_ds_mla"
+        and tensor_parallel_size == 4
+    ):
+        monkeypatch.setattr(
+            "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
+            lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
+        )
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -774,6 +785,10 @@ def test_sparse_backend_decode_correctness(
     )
 
     with torch.inference_mode():
+        if backend_cls == FlashMLASparseBackend and kv_cache_dtype == "fp8_ds_mla":
+            from vllm.v1.worker.workspace import current_workspace_manager
+
+            current_workspace_manager().lock()
         backend_output = mock_layer.forward_impl(
             query_vllm,
             kv_c_vllm,
@@ -909,8 +924,7 @@ def test_index_group_convert_during_piecewise_capture():
     runs in the following eager break. The convert's side stream must not
     wait on ``logical_topk_ready`` there: an event recorded inside a captured
     segment is graph-local, and an eager wait on it raises
-    cudaErrorInvalidValue.
-    """
+    cudaErrorInvalidValue."""
     device = torch.device(DEVICE_TYPE)
     num_tokens, num_topk, num_requests, blocks_per_req, block_size = 8, 128, 4, 4, 16
 
@@ -1049,8 +1063,7 @@ def test_triton_convert_rejects_req_id_longer_than_token_indices():
     req_id but the output is allocated like token_indices, so a full-batch
     req_id combined with an MQA-subset token_indices wrote past the end of
     the output buffer. The wrapper must reject the length mismatch instead
-    of corrupting memory.
-    """
+    of corrupting memory."""
     device = torch.device(DEVICE_TYPE)
     num_topk_tokens = 128
     block_size = 64
@@ -1105,8 +1118,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     is active, forward_mqa only receives the leading decode tokens, but
     _forward_bf16_kv passed the full-batch req_id_per_token to the index
     conversion, making it write past the end of its output buffer. The call
-    site must slice req_id_per_token to the MQA tokens.
-    """
+    site must slice req_id_per_token to the MQA tokens."""
     device = torch.device(DEVICE_TYPE)
     num_topk_tokens = 128
     block_size = 64
@@ -1204,8 +1216,7 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
 )
 def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expected):
     """A 32K prefill needs the default workspace exactly; shrinking it would
-    push a supported request onto MQA.
-    """
+    push a supported request onto MQA."""
     assert (
         _masked_mha_workspace_fits(
             batch_size=1,
@@ -1263,8 +1274,7 @@ def test_is_masked_mha_available_model_dims(
 ):
     """The allow-list gates masked MHA per exact model geometry: the DeepSeek-V3.2,
     GLM-5 and NoPE GLM-5.3-Flash layouts on an SM100-family GPU with FA4 and an
-    unquantized KV cache, nothing else.
-    """
+    unquantized KV cache, nothing else."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as mod
 
     monkeypatch.setattr(
@@ -1653,10 +1663,12 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-# 384 is not a power of two, so it counts via the tiled atomic accumulation
-# rather than the single-tile path 128 takes.
-@pytest.mark.parametrize("num_topk_tokens", [128, 384])
-def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
+# Power-of-two, GLM's padded tile, and atomic fallback, with reused buffers.
+@pytest.mark.parametrize(
+    "num_topk_tokens,reuse_buffers",
+    [(128, False), (2176, False), (2176, True), (4224, False), (4224, True)],
+)
+def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers: bool):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
@@ -1669,8 +1681,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_requests * max_blocks_per_req, dtype=torch.int32, device=device
     ).view(num_requests, max_blocks_per_req)
 
-    # Create token indices with varying numbers of valid entries: half the row,
-    # a quarter of it, the whole row, then a single valid entry -- twice over.
+    # Include partly valid, fully valid, and empty selections for each request.
     token_indices = torch.full(
         (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
     )
@@ -1678,7 +1689,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_topk_tokens // 2,
         num_topk_tokens // 4,
         num_topk_tokens,
-        1,
+        0,
     ] * 2
     expected_valid = []
     for i in range(num_tokens):
@@ -1692,6 +1703,15 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         expected_valid, dtype=torch.int32, device=device
     )
 
+    buffers = {}
+    if reuse_buffers:
+        buffers = dict(
+            out=torch.full_like(token_indices, -99),
+            valid_counts_out=torch.full(
+                (num_tokens,), 99, dtype=torch.int32, device=device
+            ),
+        )
+
     # Test with return_valid_counts=True
     result, valid_counts = triton_convert_req_index_to_global_index(
         req_id,
@@ -1700,6 +1720,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         BLOCK_SIZE=block_size,
         NUM_TOPK_TOKENS=num_topk_tokens,
         return_valid_counts=True,
+        **buffers,
     )
 
     torch.testing.assert_close(valid_counts, expected_valid_tensor, rtol=0, atol=0)
@@ -3619,8 +3640,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     """A decode row whose top-k shard holds no local candidates (all -1) has
     undefined kernel out/lse; it must come back as (0, -inf), the identity of
     the cross-rank LSE merge, or a NaN would survive the merge even at zero
-    weight (0 * NaN = NaN).
-    """
+    weight (0 * NaN = NaN)."""
     num_tokens, num_heads, head_dim = 3, 2, 3
     q = torch.empty(num_tokens, num_heads, head_dim, device=DEVICE_TYPE)
     local_indices = torch.tensor(
@@ -3793,8 +3813,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
 def test_sparse_impl_observes_repointed_indexer_buffer():
     """The MTP proposer repoints the draft's indexer at the target model's buffer
     after the backend impl is built, so the impl must resolve the buffer per read.
-    Snapshotting it in __init__ leaves the layer reading indices nothing writes.
-    """
+    Snapshotting it in __init__ leaves the layer reading indices nothing writes."""
     impl = object.__new__(FlashInferMLASparseImpl)
     own = torch.zeros(4, 8, dtype=torch.int32)
     target = torch.ones(4, 8, dtype=torch.int32)
@@ -3810,8 +3829,7 @@ def test_sparse_impl_observes_repointed_indexer_buffer():
 
 def test_explicit_topk_buffer_supersedes_indexer():
     """Backbone skip-topk layers have no indexer, and the proposer also assigns the
-    shared buffer directly onto draft submodules.
-    """
+    shared buffer directly onto draft submodules."""
     impl = object.__new__(FlashInferMLASparseImpl)
     indexer = SimpleNamespace(
         topk_indices_buffer=torch.zeros(2, 2, dtype=torch.int32),
@@ -3826,8 +3844,7 @@ def test_explicit_topk_buffer_supersedes_indexer():
 
 def test_sparse_mla_common_impl_resolves_buffer_lazily():
     """Guards the whole SparseMLACommonImpl family at once: a backend that
-    snapshots the buffer instead silently loses MTP buffer sharing.
-    """
+    snapshots the buffer instead silently loses MTP buffer sharing."""
     assert issubclass(SparseMLACommonImpl, SharedTopkIndicesBuffer)
     assert isinstance(SparseMLACommonImpl.topk_indices_buffer, property), (
         "topk_indices_buffer must stay a lazily-resolved property"

@@ -511,6 +511,13 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_dynamic_token_w4a8_int(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
+        if not weight_quant or not input_quant:
+            return False
+        if (
+            weight_quant.type != QuantizationType.INT
+            or input_quant.type != QuantizationType.INT
+        ):
+            return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
         weight_strategy = (
@@ -574,6 +581,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         if not weight_quant or not input_quant:
+            return False
+        if (
+            weight_quant.type != QuantizationType.INT
+            or input_quant.type != QuantizationType.FLOAT
+        ):
             return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
@@ -665,8 +677,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> bool:
         """Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
         with static per-tensor INT8 input/output activation quant, applied as a float
-        fake-quant around a weight-only matmul.
-        """
+        fake-quant around a weight-only matmul."""
         is_int_pack_format = format in (
             CompressionFormat.pack_quantized.value,
             CompressionFormat.int_quantized.value,
@@ -702,8 +713,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         format: str | None,
     ) -> bool:
         """Weight N-bit INT with symmetric dynamic INT activation quant
-        via Humming kernel.
-        """
+        via Humming kernel."""
         if input_quant is None:
             return False
         is_pack_format = format == CompressionFormat.pack_quantized.value
@@ -789,6 +799,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
+                symmetric=weight_quant.symmetric,
                 input_quant=input_quant,
                 layer_name=layer_name,
                 quant_format=format,
@@ -801,6 +812,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
+                symmetric=weight_quant.symmetric,
                 input_quant=input_quant,
                 layer_name=layer_name,
                 quant_format=format,

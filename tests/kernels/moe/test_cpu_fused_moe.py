@@ -306,17 +306,28 @@ def test_cpu_fused_moe(
 
 
 @pytest.mark.skipif(
-    current_platform.get_cpu_architecture() != CpuArchEnum.ARM,
-    reason="Requires Arm CPU",
+    current_platform.get_cpu_architecture()
+    not in (CpuArchEnum.ARM, CpuArchEnum.POWERPC),
+    reason="Requires Arm or POWER CPU",
 )
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("expert_num", EXPERT_NUM)
 @pytest.mark.parametrize("hidden_size", HIDDEN_DIM)
 @pytest.mark.parametrize("intermediate_size", INTERMEDIATE_DIM)
 @pytest.mark.parametrize("use_bias", USE_BIAS)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype",
+    (
+        [torch.float32, torch.float16, torch.bfloat16]
+        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        else [torch.float32, torch.bfloat16]
+    ),
+)
 @pytest.mark.parametrize("act", ACT)
-@pytest.mark.parametrize("isa", ["neon"])
+@pytest.mark.parametrize(
+    "isa",
+    ["neon"] if current_platform.get_cpu_architecture() == CpuArchEnum.ARM else ["vsx"],
+)
 def test_cpu_fused_moe_int8(
     batch_size: int,
     expert_num: int,
@@ -386,7 +397,8 @@ def test_cpu_fused_moe_int8(
         isa,
     )
 
-    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
+    atol = rtol = 1e-1 if isa == "vsx" else 2e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
 # moe_intermediate_size not a multiple of 32, e.g. what tensor-parallel
@@ -397,8 +409,7 @@ UNALIGNED_INTERMEDIATE_DIM = 176
 class _StubMoELayer(torch.nn.Module):
     """Minimal stand-in for the real MoE layer module, exposing just what
     the unquantized CPU experts read/replace (w13_weight, w2_weight, the
-    router configuration, and optionally w13_bias/w2_bias).
-    """
+    router configuration, and optionally w13_bias/w2_bias)."""
 
     def __init__(
         self,
@@ -501,8 +512,7 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
     act: MoEActivation,
 ):
     """CPU kernels handle unaligned intermediate sizes by zero-padding the
-    weights before prepacking.
-    """
+    weights before prepacking."""
     set_random_seed(0)
     batch_size = 64
     intermediate_size = UNALIGNED_INTERMEDIATE_DIM

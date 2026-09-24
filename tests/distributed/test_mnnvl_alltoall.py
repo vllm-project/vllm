@@ -14,6 +14,7 @@ import torch
 import torch.multiprocessing as mp
 
 from vllm.distributed import get_ep_group
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -22,6 +23,8 @@ from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
+
+DEVICE = current_platform.device_type
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -160,8 +163,7 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
     class _AttnMeta:
         """Minimal placeholder so set_forward_context's
         ``attn_metadata is not None`` guard (forward_context.py:334)
-        is satisfied. The real DPMetadata is built from num_tokens_across_dp.
-        """
+        is satisfied. The real DPMetadata is built from num_tokens_across_dp."""
 
         dp_metadata = None
 
@@ -460,8 +462,7 @@ def _one_sided_workspace_grow_worker(rank, world_size):
 def test_one_sided_manager_workspace_grow(world_size):
     """A later initialize() with a larger per-token payload must grow the
     workspace and rebuild MoeAlltoAll; a later initialize() with a smaller
-    payload must no-op.
-    """
+    payload must no-op."""
     _spawn_workers(
         _one_sided_workspace_grow_worker,
         world_size,
@@ -485,7 +486,7 @@ def _args_dispatch_combine_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_ep_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 64
     tokens_per_rank = 16
@@ -626,7 +627,7 @@ def _two_sided_data_worker(rank, world_size):
     # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
     # internally and requires dp_size == ep_size.
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
     num_gpus = torch.accelerator.device_count()
 
     hidden_size = 128
@@ -771,7 +772,7 @@ def _one_sided_data_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 256
     tokens_per_rank = 32

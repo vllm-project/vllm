@@ -22,15 +22,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4.5, GLM-4.6, GLM-4.7 MTP
-model compatible with HuggingFace weights.
-"""
+model compatible with HuggingFace weights."""
 
 import typing
 from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
@@ -61,7 +60,7 @@ from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
 class SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
@@ -81,7 +80,7 @@ class SharedHead(nn.Module):
 class Glm4MoeMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,

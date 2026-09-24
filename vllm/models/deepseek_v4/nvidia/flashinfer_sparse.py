@@ -56,8 +56,7 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 def _packed_block_span(pool: torch.Tensor) -> int:
     """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
     block_size for unpacked KV, larger when packed (#44577). Raises if not
-    token-aligned.
-    """
+    token-aligned."""
     block_stride = pool.stride(0)
     token_stride = pool.stride(-2)
     if block_stride % token_stride != 0:
@@ -112,7 +111,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [256]
 
     @staticmethod
@@ -522,6 +521,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[:num_decode_tokens],
+                sparse_indices_are_storage_offsets=True,
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=sparse_topk_lens[:num_decode_tokens],
                 seq_lens=seq_lens[:num_decodes],
@@ -547,6 +547,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[num_decode_tokens:num_tokens],
+                sparse_indices_are_storage_offsets=True,
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=sparse_topk_lens[num_decode_tokens:num_tokens],
                 seq_lens=seq_lens[num_decodes:num_reqs],

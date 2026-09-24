@@ -87,6 +87,21 @@ def test_multiple_expert_groups_use_grouped_topk() -> None:
     )
 
     assert isinstance(router, GroupedTopKRouter)
+    assert not router.skip_padding
+
+
+def test_grouped_topk_padding_skip_must_be_enabled() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        skip_padding=True,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+    assert router.skip_padding
 
 
 def test_degenerate_grouped_config_with_bias_uses_topk_bias() -> None:
@@ -250,8 +265,7 @@ def assert_aiter_routing_valid(
     the Python baseline (different group selection, scoring internals),
     so numerical comparison is not meaningful. Instead we verify the
     outputs satisfy the routing contract: correct shapes, valid expert
-    IDs, non-negative weights, and proper normalization.
-    """
+    IDs, non-negative weights, and proper normalization."""
     n_tokens = topk_weights.shape[0]
 
     # Shape

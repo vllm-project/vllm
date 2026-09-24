@@ -480,8 +480,7 @@ class KVCacheCoordinator(ABC):
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
         ``num_uncached_common_prefix_tokens`` (a shared prefix that a
-        sparse-retention group has not cached yet; 0 unless hybrid).
-        """
+        sparse-retention group has not cached yet; 0 unless hybrid)."""
         pass
 
     def new_step_starts(self) -> None:

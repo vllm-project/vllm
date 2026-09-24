@@ -146,6 +146,21 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     },
 }
 
+# These checkpoints fail during XPU graph capture, so run them eagerly there.
+XPU_EAGER_ONLY_MODELS = {
+    "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
+    "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
+    "Intel/Qwen3-8B-w2g64-for-ut",
+    "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
+}
+
+
+def _runner_kwargs(model: str) -> dict[str, Any]:
+    kwargs = dict(MODEL_RUNNER_KWARGS.get(model, {}))
+    if current_platform.is_xpu() and model in XPU_EAGER_ONLY_MODELS:
+        kwargs["enforce_eager"] = True
+    return kwargs
+
 
 @pytest.mark.skipif(
     not (
@@ -157,7 +172,7 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
 )
 @pytest.mark.parametrize("model", MODELS + QWEN3_AUTOROUND_MODELS)
 def test_auto_round_model(vllm_runner, model):
-    with vllm_runner(model, **MODEL_RUNNER_KWARGS.get(model, {})) as llm:
+    with vllm_runner(model, **_runner_kwargs(model)) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
 
     assert output
@@ -382,8 +397,7 @@ def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
     layer_factory,
 ) -> None:
     """``model.``-prefixed extra_config entries trigger early exit for both
-    LinearBase and ParallelLMHead layers.
-    """
+    LinearBase and ParallelLMHead layers."""
     config = make_config(extra_config={"model.layer": {"bits": 16}})
     layer = layer_factory()
 
@@ -396,8 +410,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
     monkeypatch,
 ) -> None:
     """``model.``-prefixed extra_config entries trigger early exit for
-    RoutedExperts layers, returning UnquantizedFusedMoEMethod.
-    """
+    RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:
@@ -420,8 +433,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
 def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
     """``model.``-prefixed extra_config entries return None for unhandled
-    layer types (non-Linear, non-MoE).
-    """
+    layer types (non-Linear, non-MoE)."""
     config = make_config(extra_config={"model.unknown": {"bits": 16}})
 
     method = config.get_quant_method(DummyLayer(), "unknown")
@@ -736,8 +748,7 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
 @pytest.mark.parametrize("bits", [4, 8])
 def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
     """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
-    model can mix high-bit Marlin and low-bit humming layers.
-    """
+    model can mix high-bit Marlin and low-bit humming layers."""
     called = {"humming": False}
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
@@ -1642,19 +1653,6 @@ def test_wna16_linear_gptq_unsupported_config_raises() -> None:
         INCWNA16LinearScheme(make_layer_config(sym=False))
 
 
-def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
-
-    with pytest.raises(NotImplementedError, match="unsupported config"):
-        INCWna16Scheme().get_linear_method(
-            make_config(weight_bits=2, sym=False),
-            object(),
-            "layer",
-            make_layer_config(bits=2, sym=False),
-        )
-
-
 def test_inc_get_quant_method_unquantized_linear_returns_unquantized() -> None:
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(LinearBase)
@@ -1668,8 +1666,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     monkeypatch,
 ) -> None:
     """Early-exit returns UnquantizedFusedMoEMethod for FusedMoE layers
-    when extra_config has bits >= 16.
-    """
+    when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
     layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config

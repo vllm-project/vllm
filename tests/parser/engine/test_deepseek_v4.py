@@ -119,6 +119,35 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter("", partial=False))
         assert result == {}
 
+    def _bare(self, name: str, value: str) -> str:
+        return f'<｜DSML｜parameter name="{name}">{value}{_PARAM_CLOSE}'
+
+    def test_missing_string_attribute_keeps_literal(self):
+        """The model sometimes omits ``string``; the parameter must survive."""
+        raw = self._bare("name", "alpha")
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {"name": "alpha"}
+
+    def test_missing_string_attribute_parses_json(self):
+        raw = self._bare("count", "7") + self._bare("opts", '{"k": [1]}')
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {
+            "count": 7,
+            "opts": {"k": [1]},
+        }
+
+    def test_missing_string_attribute_alongside_annotated(self):
+        raw = self._bare("a", "x") + _param("b", "true", "42")
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {
+            "a": "x",
+            "b": "42",
+        }
+
+    def test_missing_string_attribute_partial_value(self):
+        raw = _param("a", "true", "x") + '<｜DSML｜parameter name="n">12'
+        assert json.loads(_dsml_arg_converter(raw, partial=True)) == {
+            "a": "x",
+            "n": 12,
+        }
+
     def test_invalid_json_fallback(self):
         raw = self._raw(("data", "false", "[broken"))
         result = json.loads(_dsml_arg_converter(raw, partial=False))
@@ -232,6 +261,47 @@ class TestImplicitParameterClose:
         }
 
 
+class TestMissingStringAttribute:
+    def test_non_streaming_keeps_parameter(self, mock_tokenizer, mock_request):
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f'<｜DSML｜parameter name="location">Paris{_PARAM_CLOSE}\n'
+            f"{_param('date', 'true', 'tomorrow')}\n"
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+        result = DeepSeekV4Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "location": "Paris",
+            "date": "tomorrow",
+        }
+
+    def test_streaming_keeps_parameter(self, mock_tokenizer, mock_request):
+        chunks = [
+            DSML_TOOL_START,
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
+            '<｜DSML｜parameter name="loc',
+            'ation">Par',
+            "is",
+            _PARAM_CLOSE,
+            f"\n{_param('date', 'true', 'tomorrow')}\n",
+            DSML_INVOKE_END,
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "location": "Paris",
+            "date": "tomorrow",
+        }
+
+
 # ── Bare </think> absorption and duplicate <think> absorption ─────────
 
 
@@ -334,8 +404,7 @@ class TestMissingToolCallsWrapper:
     ):
         """Text after a tool block is dropped whether or not the closing
         wrapper is present, so a missing ``</｜DSML｜tool_calls>`` does not
-        change what the client sees.
-        """
+        change what the client sees."""
         text = "pre\n" + self._ORPHAN
         if trailing_end:
             text += DSML_TOOL_END
@@ -916,8 +985,7 @@ class TestParallelUnwrapping:
 
 class TestStreamingWrapperConsistency:
     """Streamed arg deltas must stay consistent with final extraction
-    when wrapper params like 'arguments' are unwrapped.
-    """
+    when wrapper params like 'arguments' are unwrapped."""
 
     def test_streaming_wrapper_unwrap_consistency(self, mock_tokenizer, mock_request):
         tool = _make_tool("get_weather", {"location": {"type": "string"}})
@@ -1198,8 +1266,7 @@ class TestDelegatingParserLargeDelta:
     )
     def test_eos_not_leaked_when_reasoning_never_ends(self, chunk_size):
         """EOS must not leak into reasoning_content when the model never
-        emits </think> (generation ends while still in REASONING state).
-        """
+        emits </think> (generation ends while still in REASONING state)."""
         eos_text = "<｜end▁of▁sentence｜>"
         eos_id = 128801
         vocab = {
@@ -1288,8 +1355,7 @@ class TestMalformedDsmlNoise:
         self, mock_tokenizer, mock_request, wrapper
     ):
         """Like the real wrapper, a corrupted one inside ``<think>`` closes
-        the reasoning block and starts the tool call.
-        """
+        the reasoning block and starts the tool call."""
         text = f"thinking{wrapper}\n{self._INNER}"
         parser = self._parser(mock_tokenizer, thinking=True)
         reasoning, content = parser.extract_reasoning(text, mock_request)
@@ -1333,8 +1399,7 @@ class TestMalformedDsmlNoise:
         prose mention of the real wrapper: the opener starts a tool block and
         the rest of the message is dropped. That is pre-existing behavior of
         ``<｜DSML｜tool_calls>``; the variants must not differ from it either
-        way.
-        """
+        way."""
         template = "The opener looks like {} and then params follow. Done."
         text = template.format(wrapper)
         reference = template.format(DSML_TOOL_START)
@@ -1358,8 +1423,7 @@ class TestMalformedDsmlNoise:
     @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
     def test_delegating_parser_corrupted_wrapper(self, wrapper, chunk_size):
         """The serving-layer shape: reasoning and tool adapters on separate
-        engines, with the corrupted opener arriving as plain text.
-        """
+        engines, with the corrupted opener arriving as plain text."""
         tokens = _dsv4_tokens(
             reasoning="Checking the weather.",
             tool_name="get_weather",

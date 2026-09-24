@@ -14,8 +14,10 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -24,6 +26,9 @@ from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
+DEEPSEEK_V4_FIM_BEGIN = "<｜fim▁begin｜>"
+DEEPSEEK_V4_FIM_HOLE = "<｜fim▁hole｜>"
+DEEPSEEK_V4_FIM_END = "<｜fim▁end｜>"
 _PER_REQUEST_STATS = RequestStateStats(
     queued_ts=1.0,
     scheduled_ts=1.5,
@@ -61,9 +66,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
@@ -301,6 +307,179 @@ def test_completion_metrics_carries_both_timing_and_spec_decode():
     assert response.metrics.speculative_decoding.num_spec_steps == 2
 
 
+def _build_online_renderer_for_completion(
+    model_config: MockModelConfig,
+    renderer: Any | None = None,
+) -> OnlineRenderer:
+    if renderer is None:
+        renderer = MagicMock()
+        renderer.render_completion_suffix.return_value = None
+
+    return OnlineRenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+
+def _deepseek_v4_suffix_renderer(
+    model_config: MockModelConfig,
+) -> DeepseekV4Renderer:
+    return DeepseekV4Renderer(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_uses_renderer_capability():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="def fib(n):\n    return ",
+        suffix="\n\nprint(fib(10))",
+        max_tokens=64,
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert result == [{"ok": True}]
+    online_renderer.preprocess_completion.assert_awaited_once()
+    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == (
+        f"{DEEPSEEK_V4_FIM_BEGIN}def fib(n):\n    return "
+        f"{DEEPSEEK_V4_FIM_HOLE}\n\nprint(fib(10))"
+        f"{DEEPSEEK_V4_FIM_END}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_supports_text_prompt_list():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["prefix A", "prefix B"],
+        suffix=" suffix",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert result == [{"ok": True}]
+    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == [
+        f"{DEEPSEEK_V4_FIM_BEGIN}prefix A"
+        f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}",
+        f"{DEEPSEEK_V4_FIM_BEGIN}prefix B"
+        f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_renderer_without_fim_support():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(model_config)
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "FIM completion rendering" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_echo():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+        echo=True,
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "Echo is unsupported with suffix" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_prompt_embeds():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+        prompt_embeds=b"embeds",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "suffix is not supported with prompt_embeds" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("prompt", ([1, 2, 3], [[1, 2, 3]]))
+async def test_completion_suffix_rejects_token_prompt(prompt):
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=prompt,
+        suffix="suffix",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "requires text prompt input" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_completion_error_non_stream():
     """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
@@ -521,8 +700,7 @@ async def test_completion_error_stream():
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
-    so the API returns 400 instead of 500.
-    """
+    so the API returns 400 instead of 500."""
     with pytest.raises(Exception, match="json_schema.*must be provided"):
         CompletionRequest(
             model=MODEL_NAME,
@@ -585,8 +763,7 @@ def test_negative_prompt_token_ids_flat():
 def test_logprobs_minus_one_allowed():
     """logprobs=-1 means "return all logprobs". The sampling layer and the chat
     top_logprobs / prompt_logprobs validators all accept -1, so the completion
-    logprobs validator must accept it too instead of rejecting it as negative.
-    """
+    logprobs validator must accept it too instead of rejecting it as negative."""
     request = CompletionRequest(
         model=MODEL_NAME,
         prompt="Test prompt",
@@ -746,8 +923,7 @@ class TestCompletionPromptListLimit:
 @pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
 def test_non_numeric_logprobs_rejected(field_name):
     """A non-numeric logprobs value must be a clean 400 validation error, not a
-    TypeError from the mode='before' comparison (which surfaces as HTTP 500).
-    """
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
     with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
         CompletionRequest(
             model=MODEL_NAME,

@@ -718,8 +718,7 @@ class MooncakeConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1).
-        """
+        always recomputes the last token and must start from h(N-1)."""
         if self._has_mamba and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
@@ -730,8 +729,7 @@ class MooncakeConnectorScheduler:
         derive h(N) correctly.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled.
-        """
+        request is preempted and rescheduled."""
         params = request.kv_transfer_params
         if (
             params is not None
@@ -1053,15 +1051,9 @@ class MooncakeConnectorWorker:
         self.finished_recving_reqs: set[ReqId] = set()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
-        self._is_hma_required = (
-            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.transfer_groups
-            )
-        )
-        # Block IDs are only unique within a group; with HMA the scheduler
-        # tracks a single merged group, so failures are reported per request.
+        self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
+        # Block IDs are only unique within a group, so with multiple groups
+        # load failures are reported per request instead.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
@@ -1677,8 +1669,7 @@ class MooncakeConnectorWorker:
     def _bind_sender_thread_device(self) -> None:
         """ThreadPoolExecutor initializer — binds each pool thread to the
         correct CUDA device.  CUDA device selection is thread-local, so
-        without this, NVLink transfers fail for TP ranks > 0.
-        """
+        without this, NVLink transfers fail for TP ranks > 0."""
         current_platform.set_device(self.device_id)
 
     def _send_blocks(
@@ -1904,8 +1895,7 @@ class MooncakeConnectorWorker:
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """Return transfer stats collected since the last call, or None
-        if nothing has been recorded in this interval.
-        """
+        if nothing has been recorded in this interval."""
         if self.xfer_stats.is_empty():
             return None
         return self.xfer_stats.clone_and_reset()

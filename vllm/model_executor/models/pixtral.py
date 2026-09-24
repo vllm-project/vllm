@@ -14,14 +14,14 @@ from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from packaging.version import Version
-from transformers import BatchFeature, PixtralVisionConfig
+from transformers import PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
 from transformers.models.pixtral.modeling_pixtral import apply_rotary_pos_emb
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
@@ -41,7 +41,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
-    MultiModalKwargsOptionalItems,
     NestedTensors,
 )
 from vllm.multimodal.parse import (
@@ -53,7 +52,8 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalPromptUpdates,
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
     ProcessorInputs,
     PromptReplacement,
@@ -67,7 +67,6 @@ from vllm.transformers_utils.processors.pixtral import (
     MistralCommonImageProcessor,
     MistralCommonPixtralProcessor,
 )
-from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -209,35 +208,35 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
-    def get_dummy_processor_inputs(
+
+class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
+    def get_dummy_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
+        # For test_common.py only
         mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
+        builder = self.dummy_inputs
         tokenizer = self.info.get_tokenizer()
 
-        dummy_text = self.get_dummy_text(mm_counts)
+        dummy_text = builder.get_dummy_text(mm_counts)
         dummy_mm_data = (
-            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
             if mm_data is None
             else mm_data
         )
@@ -261,28 +260,24 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
-
-class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
     # The tokens are already inserted by the chat template,
     # so we just double check that they exist
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsOptionalItems,
-        mm_prompt_updates: MultiModalPromptUpdates,
+        mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
-        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
-        self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
+        self._validate_mm_kwargs(mm_res.kwargs, mm_item_counts)
+        self._validate_mm_updates(mm_res.prompt_updates, mm_item_counts)
 
         mm_placeholders = self._find_mm_placeholders(
-            prompt_ids,
-            mm_prompt_updates,
+            mm_res.prompt_ids,
+            mm_res.prompt_updates,
         )
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
-        return prompt_ids, mm_placeholders
+        return mm_res.prompt_ids, mm_placeholders
 
     def _get_mm_fields_config(
         self,
@@ -291,35 +286,17 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(images=MultiModalFieldConfig.batched("image"))
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        # Avoid padding issue
+        return hf_inputs._replace(
+            hf_kwargs=dict(hf_inputs.hf_kwargs, return_tensors=None)
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            # Avoid padding issue
-            dict(**hf_processor_mm_kwargs, return_tensors=None),
-        )
-
-        # Missing batch dimension
-        if is_list_of(outputs["input_ids"], int):
-            outputs["input_ids"] = [outputs["input_ids"]]
-
-        processed_data = outputs
-        processed_data.update(passthrough_data)
-        return processed_data
 
     def _get_prompt_updates(
         self,

@@ -50,6 +50,55 @@ class WeightlessRMSNorm(RMSNorm):
         return self._rms(x.to(torch.float32)).to(x.dtype)
 
 
+class Gemma4RMSNorm(RMSNorm):
+    """`pow(v, -0.5)` where the others write `rsqrt(v)` (HF `Gemma4RMSNorm._norm`).
+
+    Gemma 4 spells the reciprocal square root as `torch.pow(..., -0.5)` to keep
+    Torch and JAX in agreement, and -- unlike Gemma 1-3 -- its weight is *not*
+    zero-centered, so this fuses to a plain `RMSNorm`.
+    """
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, -0.5)
+
+    def forward(self, x):
+        return (self._rms(x.float()) * self.weight.float()).type_as(x)
+
+
+class PowOperatorRMSNorm(Gemma4RMSNorm):
+    """The `v ** -0.5` operator spelling of the same reciprocal square root."""
+
+    def _rms(self, x):
+        return x * (x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon) ** -0.5
+
+
+class KwargPowRMSNorm(Gemma4RMSNorm):
+    """The keyword spelling `torch.pow(v, exponent=-0.5)` of the same rsqrt."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, exponent=-0.5)
+
+
+class KwargBasePowRMSNorm(Gemma4RMSNorm):
+    """The fully functional spelling `torch.pow(input=v, exponent=-0.5)`."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(input=mean_squared, exponent=-0.5)
+
+
+class WeightlessGemma4RMSNorm(Gemma4RMSNorm):
+    """Gemma 4 with `with_scale=False`: the `pow` spelling and no scale parameter."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__(hidden, eps, weight=False)
+
+    def forward(self, x):
+        return self._rms(x.float()).type_as(x)
+
+
 class LayerNorm(RMSNorm):
     """An RMSNorm not named `*RMSNorm`, keeping the input dtype (no upcast)."""
 
@@ -83,8 +132,7 @@ class ToleranceRMSNorm(NamedEpsRMSNorm):
 
 class LiteralEpsRMSNorm(RMSNorm):
     """eps is a literal in the source, and an unrelated attribute happens to
-    hold the same value: matching on the value alone would bind to it.
-    """
+    hold the same value: matching on the value alone would bind to it."""
 
     def __init__(self, hidden: int = 16, eps: float = 1e-5):
         super().__init__(hidden, eps)
@@ -96,8 +144,7 @@ class LiteralEpsRMSNorm(RMSNorm):
 
 class AmbiguousEpsRMSNorm(nn.Module):
     """Two attributes hold the eps value, and the forward reads the second, so
-    their order cannot pick it.
-    """
+    their order cannot pick it."""
 
     def __init__(self, hidden: int = 16, eps: float = 1e-6):
         super().__init__()
@@ -158,6 +205,11 @@ class UntraceableGatedRMSNorm(RMSNorm):
         (RMSNorm, 1e-5, False),
         (GemmaRMSNorm, 1e-6, True),
         (WeightlessRMSNorm, 1e-6, False),
+        (Gemma4RMSNorm, 1e-6, False),
+        (PowOperatorRMSNorm, 1e-6, False),
+        (KwargPowRMSNorm, 1e-6, False),
+        (KwargBasePowRMSNorm, 1e-6, False),
+        (WeightlessGemma4RMSNorm, 1e-6, False),
         (LayerNorm, 1e-6, False),
         (torch.nn.RMSNorm, 1e-5, False),  # fused `F.rms_norm` op
     ],
@@ -190,6 +242,10 @@ def test_gated_rms_norm_is_not_fused(cls):
         (RMSNorm, "RMSNorm", False),
         (GemmaRMSNorm, "GemmaRMSNorm", True),
         (WeightlessRMSNorm, "RMSNorm", False),
+        (Gemma4RMSNorm, "RMSNorm", False),
+        (KwargPowRMSNorm, "RMSNorm", False),
+        (KwargBasePowRMSNorm, "RMSNorm", False),
+        (WeightlessGemma4RMSNorm, "RMSNorm", False),
     ],
 )
 def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_config):
@@ -215,6 +271,25 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
 
 
+@pytest.mark.parametrize(
+    "cls", [Gemma4RMSNorm, PowOperatorRMSNorm, KwargPowRMSNorm, KwargBasePowRMSNorm]
+)
+def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
+    """Matching `pow(v, -0.5)` is only sound if it really is the reciprocal square
+    root: the fused norm must reproduce the unfused forward, not just replace it.
+    `pow` and `rsqrt` take different paths to the same value, so compare at float32
+    tolerance rather than bit-for-bit."""
+    torch.manual_seed(0)
+    module = cls(16)
+    with torch.no_grad():
+        module.weight.copy_(torch.randn(16))
+    built = get_fuser(module, RMSNormFuser).fuse(module, "norm", default_vllm_config)
+    with torch.no_grad():
+        built.weight.copy_(module.weight)
+    x = torch.randn(4, 16)
+    torch.testing.assert_close(built(x), module(x), rtol=1e-5, atol=1e-6)
+
+
 def test_weightless_norm_has_no_hidden_size(default_vllm_config):
     """A weightless norm states no hidden size, and the model's (LM) hidden size
     would be wrong for one on a sub-dimension: Llama 4's `qk_norm` normalizes
@@ -233,8 +308,7 @@ def test_weightless_norm_has_no_hidden_size(default_vllm_config):
 
 def test_fused_rms_norm_op_default_eps(default_vllm_config):
     """`torch.nn.RMSNorm` (a single `F.rms_norm` call) matches via the fast path;
-    its default `eps=None` resolves to `finfo(dtype).eps` in `fuse`.
-    """
+    its default `eps=None` resolves to `finfo(dtype).eps` in `fuse`."""
     from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
     with torch.device("meta"):
@@ -250,8 +324,7 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
 
 def test_eps_is_derived_per_instance(default_vllm_config):
     """Two instances of the same norm class with different eps must fuse to their
-    own eps: the type-cached fuser holds only structure, not this value.
-    """
+    own eps: the type-cached fuser holds only structure, not this value."""
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = RMSNorm(16, eps=eps)
@@ -263,8 +336,7 @@ def test_eps_is_derived_per_instance(default_vllm_config):
 @pytest.mark.parametrize("cls", [NamedEpsRMSNorm, ToleranceRMSNorm])
 def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
     """The eps attribute is identified by holding the traced value, so a norm
-    stays per-instance correct whatever it names it.
-    """
+    stays per-instance correct whatever it names it."""
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = cls(16, eps=eps)
@@ -276,8 +348,7 @@ def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
 
 def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplog):
     """A literal eps is recognised as coming from no attribute, even when one
-    holds the same value, and is taken from the traced source instead.
-    """
+    holds the same value, and is taken from the traced source instead."""
     logger = "vllm.model_executor.models.transformers.fusers.rms_norm"
     with caplog.at_level("DEBUG", logger=logger), torch.device("meta"):
         module = LiteralEpsRMSNorm()
@@ -290,8 +361,7 @@ def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplo
 
 def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):
     """When several attributes hold the eps value, the one the forward actually
-    reads is identified, and they are all left as they were found.
-    """
+    reads is identified, and they are all left as they were found."""
     with torch.device("meta"):
         module = AmbiguousEpsRMSNorm(16, eps=1e-6)
         before = dict(vars(module))
@@ -308,8 +378,7 @@ def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):
 def test_fused_norm_is_gather_capable(default_vllm_config):
     """Every weighted fused norm is emitted gather-capable, so a norm on a head-sharded
     projection (OLMoE-style) self-corrects at runtime with no QKV-specific
-    plumbing. A full-width input skips the gather and equals a plain norm.
-    """
+    plumbing. A full-width input skips the gather and equals a plain norm."""
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
     from vllm.model_executor.models.transformers.fusers import rms_norm
 
@@ -331,8 +400,7 @@ def test_fused_norm_is_gather_capable(default_vllm_config):
 
 def test_gathered_norm_rejects_uneven_sharding(default_vllm_config):
     """A sharded input (narrower than the full-width weight) that does not tile
-    the weight evenly across ranks is rejected before any collective.
-    """
+    the weight evenly across ranks is rejected before any collective."""
     from vllm.model_executor.models.transformers.fusers import rms_norm
 
     norm = rms_norm.TPAwareRMSNorm(hidden_size=8, eps=1e-6)

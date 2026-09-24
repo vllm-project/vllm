@@ -10,16 +10,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing_extensions import TypedDict
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -46,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
 from vllm.transformers_utils.processors.mimo_v2_omni import (
     MiMoOmniProcessor,
@@ -55,6 +52,7 @@ from vllm.transformers_utils.processors.mimo_v2_omni import (
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -420,7 +418,7 @@ class MiMoVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        vision_cfg: PretrainedConfig,
+        vision_cfg: PreTrainedConfig,
         *,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
@@ -930,27 +928,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
-        Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
-        the singular form.
-        """
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        # Remap audios → audio (MiMoOmniProcessor uses singular param name)
-        if "audios" in mm_data:
-            mm_data = {**mm_data, "audio": mm_data["audios"]}
-            mm_data = {k: v for k, v in mm_data.items() if k != "audios"}
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        mm_data = hf_inputs.hf_data
 
         # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
         if "video_audio" in mm_data:
@@ -992,7 +977,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                             audio=va_item.audio,
                         )
                     )
-            mm_data = {**mm_data, "video_audio": va_converted}
+            mm_data["video_audio"] = va_converted
 
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -1026,15 +1011,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
                     converted.append((frames, timestamps))
 
-            mm_data = {**mm_data, "videos": converted}
+            mm_data["videos"] = converted
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs
 
     def _get_prompt_updates(
         self,
@@ -1202,33 +1181,26 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1238,7 +1210,9 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
     info=MiMoV2OmniProcessingInfo,
     dummy_inputs=MiMoV2OmniDummyInputsBuilder,
 )
-class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
+class MiMoV2OmniForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
+):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

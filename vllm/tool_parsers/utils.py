@@ -426,8 +426,7 @@ def get_json_schema_from_tools(
 
 class UnexpectedAstError(Exception):
     """Raised when the AST structure does not match the expected
-    pythonic tool call format.
-    """
+    pythonic tool call format."""
 
     pass
 

@@ -27,6 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
 )
@@ -114,8 +118,7 @@ def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
 
 class OnlineLinearBase(LinearMethodBase):
     """Shared base for online FP8 linear methods. Loads fp16/bf16 checkpoint
-    weights onto meta device and materializes them just-in-time.
-    """
+    weights onto meta device and materializes them just-in-time."""
 
     uses_meta_device: bool = True
 
@@ -159,8 +162,7 @@ class OnlineLinearBase(LinearMethodBase):
 
 class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     """Online tensorwise FP8 linear quantization.
-    Loads fp16/bf16 weights and quantizes them per-tensor during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     def __init__(self):
         super().__init__()
@@ -261,8 +263,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
 class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
     """Online blockwise FP8 linear quantization.
-    Loads fp16/bf16 weights and quantizes them per-block during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
     def __init__(self):
         super().__init__()
@@ -405,6 +406,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.fp8_linear)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -415,8 +417,10 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # if batch invariant mode is enabled dequant
-        if envs.VLLM_BATCH_INVARIANT and not isinstance(
-            self.fp8_linear, CutlassFP8ScaledMMLinearKernel
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and not isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel)
+            and not isinstance(x, QuantizedActivation)
         ):
             weight_dequant = (
                 layer.weight.to(x.dtype) * layer.weight_scale.to(x.dtype).t()
@@ -433,8 +437,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
 
 class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     """Shared base for online FP8 MoE methods. Loads fp16/bf16 checkpoint
-    weights onto meta device and materializes them just-in-time.
-    """
+    weights onto meta device and materializes them just-in-time."""
 
     # Declared here for mypy; actual values are set in __init__.
     fp8_backend: "Fp8MoeBackend"
@@ -555,8 +558,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
 
 class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online tensorwise FP8 MoE quantization.
-    Loads fp16/bf16 weights and quantizes them per-tensor during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     def __init__(
         self,
@@ -613,8 +615,7 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
 
 class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online blockwise FP8 MoE quantization.
-    Loads fp16/bf16 weights and quantizes them per-block during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
     def __init__(
         self,
@@ -736,11 +737,13 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         )
         # Reject backends whose make_fp8_moe_quant_config branch silently
         # drops per_act_token_quant / per_out_ch_quant or collapses scales:
-        # MARLIN / CPU route through fp8_w8a16_moe_quant_config; FLASHINFER_*
-        # fold scales into a per-tensor alpha (oracle/fp8.py).
+        # MARLIN / CPU route through fp8_w8a16_moe_quant_config, CPU_W8A8
+        # ignores both flags, and FLASHINFER_* fold scales into a per-tensor
+        # alpha (oracle/fp8.py).
         if self.fp8_backend in (
             Fp8MoeBackend.MARLIN,
             Fp8MoeBackend.CPU,
+            Fp8MoeBackend.CPU_W8A8,
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ):

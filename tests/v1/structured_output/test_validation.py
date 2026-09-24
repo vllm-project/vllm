@@ -29,8 +29,7 @@ class _StubModelConfig:
 def test_structured_outputs_rejected_for_diffusion_models():
     """Diffusion LLMs denoise the canvas in parallel, which is incompatible
     with the token-by-token grammar FSM. The request must fail with a clear
-    validation error instead of an FSM rejection mid-generation (#45436).
-    """
+    validation error instead of an FSM rejection mid-generation (#45436)."""
     params = SamplingParams(
         structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
     )
@@ -57,14 +56,18 @@ def test_plain_request_allowed_for_diffusion_models():
     [
         (StructuredOutputsParams(json_object=False), "json_object must be True"),
         (StructuredOutputsParams(json=""), "json cannot be an empty string"),
+        (
+            StructuredOutputsParams(structural_tag=""),
+            "structural_tag cannot be an empty string",
+        ),
     ],
 )
 def test_degenerate_structured_outputs_rejected(structured_outputs, match):
     """json_object=False and an empty json schema pass the `is not None`
     exclusivity check but resolve to no structured-output key, so they must be
-    rejected at request validation (-> 400) instead of reaching and crashing
-    the engine.
-    """
+    rejected at request validation (-> 400). Empty `structural_tag` is rejected
+    for the same reason: `json.loads("")` in `compile_grammar` would otherwise
+    raise JSONDecodeError and surface as a per-request engine error."""
     params = SamplingParams(structured_outputs=structured_outputs)
     with pytest.raises(VLLMValidationError, match=match):
         params._validate_structured_outputs(
@@ -87,8 +90,7 @@ def test_regex_with_nul_byte_rejected(regex):
     handled by xgrammar's native regex converter. It must be rejected at request
     validation in every backend mode (a clean 400), instead of reaching that
     native code or silently falling back to another backend in the default
-    'auto' mode.
-    """
+    'auto' mode."""
     params = SamplingParams(structured_outputs=StructuredOutputsParams(regex=regex))
 
     # Rejected before backend selection, so it is a 400 even in 'auto' mode
@@ -127,8 +129,7 @@ INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}
 )
 def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
     """Only `VLLMClientError` survives `AsyncLLM.generate` untouched; anything else
-    is wrapped in `EngineGenerateError` and served as a 500 instead of a 400.
-    """
+    is wrapped in `EngineGenerateError` and served as a 500 instead of a 400."""
     params = SamplingParams(structured_outputs=structured_outputs)
     with pytest.raises(VLLMClientError):
         params._validate_structured_outputs(
@@ -146,6 +147,21 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             {
                 "type": "object",
                 "properties": {"n": {"type": "integer", "multipleOf": 2}},
+            },
+            "guidance",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"n": {"type": ["number", "null"], "multipleOf": 3}},
+            },
+            "guidance",
+        ),
+        (
+            {
+                "type": ["string", "null"],
+                "pattern": "^a+$",
+                "maxLength": 2,
             },
             "guidance",
         ),

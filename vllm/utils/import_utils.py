@@ -512,6 +512,34 @@ def has_nixl_ep() -> bool:
     return _has_module("nixl_ep")
 
 
+def has_moonep() -> bool:
+    """Whether the optional `moonep` package is available."""
+    return _has_module("moonep")
+
+
+def check_moonep_system_support() -> None:
+    """Raise if the current device cannot run MoonEP.
+
+    MoonEP's symmetric-memory buffers require CUDA VMM plus NVSwitch multicast
+    (SHARP) on every EP rank; NVLink-only topologies without NVSwitch (e.g.
+    4x H100 NV6) fail deep inside ``moonep.Buffer`` otherwise.
+    """
+    if not has_moonep():
+        raise RuntimeError(
+            "MoonEP not available. Install it from "
+            "https://github.com/MoonshotAI/MoonEP."
+        )
+    from moonep._C import (  # type: ignore[import-not-found]
+        nvl_multicast_supported,
+    )
+
+    if not nvl_multicast_supported():
+        raise RuntimeError(
+            "MoonEP requires NVSwitch multicast (SHARP) support on the "
+            "current device; it is not supported on this GPU/topology."
+        )
+
+
 def is_numba_available() -> bool:
     """Whether the optional `numba` package is available."""
     return _has_module("numba")
@@ -525,6 +553,26 @@ def has_triton_kernels() -> bool:
     if is_available:
         import_triton_kernels()
     return is_available
+
+
+@cache
+def get_triton_kernels_version() -> str | None:
+    """The triton_kernels MoE-API generation ("3.5.1"/"3.6"/"3.8"), or None.
+
+    Inferred by capability since the package exposes no usable version: 3.8
+    replaced ``matmul_ogs`` with ``matmul``, and 3.5.1 predates ``SparseMatrix``.
+    """
+    if not has_triton_kernels():
+        return None
+    try:
+        import triton_kernels.matmul_ogs  # noqa: F401
+    except ImportError:
+        return "3.8"
+    try:
+        from triton_kernels.tensor import SparseMatrix  # noqa: F401
+    except ImportError:
+        return "3.5.1"
+    return "3.6"
 
 
 @cache

@@ -165,6 +165,9 @@ class SimpleCPUOffloadScheduler:
             kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
+        self.prefix_cacheable_group_ids = (
+            self.cpu_kv_cache_config.prefix_cacheable_group_ids
+        )
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
@@ -259,8 +262,7 @@ class SimpleCPUOffloadScheduler:
         gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
-        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
-        """
+        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
@@ -298,7 +300,7 @@ class SimpleCPUOffloadScheduler:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
-        for g in kv_cache_config.kv_cache_groups:
+        for g in kv_cache_config.prefix_cacheable_groups:
             spec = g.kv_cache_spec
             # Only full attention is sharded across DCP ranks; replicated specs
             # (mamba, sliding window, chunked-local) keep their own block size.
@@ -315,8 +317,7 @@ class SimpleCPUOffloadScheduler:
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
-        Called by Scheduler after kv_cache_manager is ready.
-        """
+        Called by Scheduler after kv_cache_manager is ready."""
         self._gpu_block_pool = gpu_block_pool
 
     def get_num_new_matched_tokens(
@@ -444,6 +445,9 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
+            if g not in self.prefix_cacheable_group_ids:
+                cpu_hit_blocks.append([])
+                continue
             g_block_size = self.group_block_sizes[g]
             n_take_g = cdiv(num_external_tokens, g_block_size)
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
@@ -830,6 +834,8 @@ class SimpleCPUOffloadScheduler:
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
+            if g not in self.prefix_cacheable_group_ids:
+                continue
             if len(gpu_block_ids) >= num_free:
                 break
             group_manager = self.cpu_coordinator.single_type_managers[g]
@@ -1131,8 +1137,7 @@ class SimpleCPUOffloadScheduler:
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Always returns (False, None). GPU blocks are protected by ref_cnt,
-        so the scheduler can free blocks immediately.
-        """
+        so the scheduler can free blocks immediately."""
         req_id = request.request_id
 
         # Release any temp CPU hit pin from get_num_new_matched_tokens()

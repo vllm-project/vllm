@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -14,6 +15,42 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
+    """Profiling must use serving's thread count to keep Dynamo guards valid."""
+    from torch._dynamo.testing import CompileCounter
+
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+    loading_threads = []
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(weight_transfer_config=None),
+        model_runner=SimpleNamespace(
+            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
+        ),
+        _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    original_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(2)
+        gpu_worker.Worker.load_model(worker)
+        assert loading_threads == [2]
+
+        counter = CompileCounter()
+        compiled = torch.compile(lambda x: x + 1, backend=counter, fullgraph=True)
+        x = torch.ones(2)
+        compiled(x)
+        gpu_worker.set_torch_threads_for_runtime()
+        torch.testing.assert_close(compiled(x), x + 1)
+        assert counter.frame_count == 1
+    finally:
+        torch.set_num_threads(original_threads)
+
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
@@ -49,8 +86,7 @@ def plan_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 def test_startup_plan_fingerprint_sensitivity(plan_env):
     """The fingerprint is the OOM-safety key: stable for identical inputs,
-    different for anything the profiled value depends on.
-    """
+    different for anything the profiled value depends on."""
     fp = startup_plan.compute_plan_fingerprint
     base = fp(_plan_worker().vllm_config, 0, 1)
     assert base == fp(_plan_worker().vllm_config, 0, 1)
@@ -98,8 +134,7 @@ def _snapshot(free_memory, torch_memory=0):
 
 def _profile_result(consumed, reserved_before=0, reserved_after=0):
     """A result whose free-memory readings agree with `consumed`, which
-    `memory_profiling` derives as the drop in free memory, negative when it grew.
-    """
+    `memory_profiling` derives as the drop in free memory, negative when it grew."""
     return SimpleNamespace(
         total_consumed=consumed,
         transient_peak_headroom=0,
@@ -127,8 +162,7 @@ def test_profiling_fallback_declines_when_free_memory_dropped(rocm):
 @pytest.mark.parametrize("rocm", [True], indirect=True)
 def test_profiling_fallback_replaces_a_released_measurement(rocm):
     """A negative measurement describes the rest of the device, so it is replaced
-    by this process's reservation, which the rest of the device cannot move.
-    """
+    by this process's reservation, which the rest of the device cannot move."""
     result = _profile_result(
         consumed=-RELEASED_BY_OTHERS,
         reserved_after=TORCH_RESERVED,
@@ -152,8 +186,7 @@ def test_profiling_fallback_never_returns_a_negative_amount(rocm):
 @pytest.mark.parametrize("rocm", [False], indirect=True)
 def test_profiling_fallback_declines_off_rocm(rocm):
     """Platforms that account frees eagerly keep reporting the error, so the
-    caller's assertion stays reachable there.
-    """
+    caller's assertion stays reachable there."""
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
@@ -177,8 +210,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Previous device handles are waited before the forward pass; the
-    metadata handle is left to the GroupCoordinator's reaper.
-    """
+    metadata handle is left to the GroupCoordinator's reaper."""
     import torch
 
     from vllm.sequence import IntermediateTensors
@@ -226,3 +258,32 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+def test_jit_monitor_activation_follows_enable_jit_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The post-warmup JIT monitor must stay off when JIT warmup is disabled
+    (e.g. by enforce_eager): runtime compilation is then expected, and
+    warning/erroring on it would be noise."""
+    from vllm.utils import jit_monitor
+
+    calls = []
+    monkeypatch.setattr(jit_monitor, "activate", lambda **kwargs: calls.append(kwargs))
+
+    def worker(enable_jit_warmup):
+        return SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup)
+            ),
+            observability_config=SimpleNamespace(
+                jit_monitor_mode="warn", jit_monitor_verbose=False
+            ),
+        )
+
+    gpu_worker.Worker._maybe_activate_jit_monitor(worker(True))
+    assert calls == [{"mode": "warn", "verbose": False}]
+
+    calls.clear()
+    gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
+    assert calls == []

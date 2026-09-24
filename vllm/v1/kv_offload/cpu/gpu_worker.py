@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -38,10 +39,13 @@ logger = init_logger(__name__)
 def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
+    host_memory_is_pinned: bool = True,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
-    if gpu_to_cpu:
+    # The Triton kernel dereferences CPU pointers on the GPU, which is only
+    # valid for pinned host memory.
+    if gpu_to_cpu or not host_memory_is_pinned:
         return ops.swap_blocks_batch
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
     # (e.g. ROCm host mappings) or where GPU kernels cannot directly
@@ -126,8 +130,7 @@ def compute_sub_block_ptrs(
 class CopyPlan(NamedTuple):
     """Precomputed fragment-copy template for one data ref under the canonical
     CPU layout, unrolled from the ref's mapped runs. Offsets are relative to
-    the per-block base pointers on each side.
-    """
+    the per-block base pointers on each side."""
 
     frag_offsets_src: np.ndarray
     frag_offsets_dst: np.ndarray
@@ -165,8 +168,7 @@ def _canonical_page_ids(
 ) -> np.ndarray:
     """Global canonical page ids matching compute_sub_block_ptrs' enumeration.
     These identify canonical pages consistently across ranks, so they key
-    CanonicalPageMapping.is_writer rotation.
-    """
+    CanonicalPageMapping.is_writer rotation."""
     if blocks_per_chunk == 1:
         return block_ids[:count]
     flat = (
@@ -179,8 +181,7 @@ def _canonical_block_sizes(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]], num_tensors: int
 ) -> list[int]:
     """Canonical CPU bytes per GPU block for each tensor, taken from the refs'
-    mappings. Requires every ref to carry a mapping.
-    """
+    mappings. Requires every ref to carry a mapping."""
     canonical_bytes_per_block = [0] * num_tensors
     for layer_refs in layer_refs_per_group:
         for ref in layer_refs:
@@ -193,8 +194,12 @@ def _canonical_block_sizes(
     return canonical_bytes_per_block
 
 
+# Bound registration size to avoid driver limits on large host allocations.
+MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
+
+
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    """Register row-aligned chunks, rolling back on failure."""
     if not current_platform.is_cuda_alike():
         logger.info(
             "Skipping mmap host registration on %s; cudaHostRegister is only "
@@ -204,23 +209,65 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         return
 
     rank = region.rank
+    try:
+        cudart = CudaRTLibrary()
+    except (AssertionError, AttributeError, OSError):
+        logger.warning(
+            "Could not load the CUDA runtime for host registration on rank=%d; "
+            "the offload region stays pageable",
+            rank,
+            exc_info=True,
+        )
+        return
 
     base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
-    if result.value != 0:
+    total_size = region.total_size_bytes
+    # Chunks end on block-row boundaries, which are page aligned, so neither the
+    # driver's page rounding nor any single block transfer straddles two
+    # registrations.
+    rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
+    chunk_size = rows_per_chunk * region._row_stride
+
+    # Register, drain and roll back through the same runtime handle, so a
+    # failed chunk leaves neither a pending error nor a partly pinned region.
+    addresses: list[int] = []
+    for offset in range(0, total_size, chunk_size):
+        address = base_ptr + offset
+        size = min(chunk_size, total_size - offset)
+        result = cudart.cudaHostRegister(address, size)
+        if result == 0:
+            addresses.append(address)
+            continue
+        cudart.cudaGetLastError()
         logger.warning(
-            "cudaHostRegister failed for rank=%d (code=%d) — "
-            "transfers will still work but may be slower (unpinned DMA)",
+            "cudaHostRegister failed for rank=%d at %.2f of %.2f GB (code=%d); "
+            "the offload region stays pageable",
             rank,
+            offset / 1e9,
+            total_size / 1e9,
             result,
         )
-    else:
-        logger.debug(
-            "cudaHostRegister rank=%d %.2f GB",
-            rank,
-            region.total_size_bytes / 1e9,
-        )
-        region.is_pinned = True
+        for registered in reversed(addresses):
+            unregister_result = cudart.cudaHostUnregister(registered)
+            if unregister_result != 0:
+                cudart.cudaGetLastError()
+                logger.warning(
+                    "cudaHostUnregister failed for rank=%d at %#x (code=%d); "
+                    "that chunk stays registered until the process exits",
+                    rank,
+                    registered,
+                    unregister_result,
+                )
+        return
+
+    region.pinned_addresses.extend(addresses)
+    region.is_pinned = True
+    logger.debug(
+        "cudaHostRegister rank=%d %.2f GB in %d chunk(s)",
+        rank,
+        total_size / 1e9,
+        len(addresses),
+    )
 
 
 def _new_descriptor_buffers(
@@ -251,6 +298,7 @@ class SingleDirectionOffloadingHandler:
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
+        host_memory_is_pinned: bool = True,
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -265,6 +313,8 @@ class SingleDirectionOffloadingHandler:
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
+            host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
+                kernels may dereference them directly.
 
         """
         assert len(gpu_tensors) == len(cpu_tensors)
@@ -302,7 +352,7 @@ class SingleDirectionOffloadingHandler:
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu
+            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
         )
 
         # GPU blocks may be smaller
@@ -343,8 +393,7 @@ class SingleDirectionOffloadingHandler:
         """Upper bound on the number of copy descriptors for a transfer.
 
         Exact for the direct layout. The canonical path may fill fewer:
-        writer rotation later drops the blocks this rank does not write.
-        """
+        writer rotation later drops the blocks this rank does not write."""
         num_copy_ops = 0
         for g_idx, (group_size, layer_refs) in enumerate(
             zip(group_sizes, self.layer_refs_per_group)
@@ -373,8 +422,7 @@ class SingleDirectionOffloadingHandler:
         """Fill one group's copy descriptors for the direct (worker-private)
         layout: one whole-page copy per (block, ref).
 
-        Returns (op_idx past the filled descriptors, bytes added).
-        """
+        Returns (op_idx past the filled descriptors, bytes added)."""
         num_bytes = 0
         for data_ref in self.layer_refs_per_group[g_idx]:
             t_idx = data_ref.tensor_idx
@@ -417,8 +465,7 @@ class SingleDirectionOffloadingHandler:
         scatter each block through the ref's precomputed CopyPlan, keeping
         only the blocks this rank writes.
 
-        Returns (op_idx past the filled descriptors, bytes added).
-        """
+        Returns (op_idx past the filled descriptors, bytes added)."""
         assert self._canonical_copy_plans is not None
         # Zero-copy reinterpretation for pointer arithmetic: uint64 and the
         # buffers' int64 are bit-equivalent for addresses
@@ -505,8 +552,7 @@ class SingleDirectionOffloadingHandler:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Keep only the blocks this rank writes: replicated ranks take turns
         writing shared canonical pages, keyed by the rank-consistent CPU-side
-        canonical page id.
-        """
+        canonical page id."""
         cpu_page_ids = _canonical_page_ids(
             group_dst,
             self.dst_blocks_per_chunk,
@@ -653,7 +699,7 @@ class SingleDirectionOffloadingHandler:
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
-        # CPU->GPU reads from host pinned memory, which is never written
+        # CPU->GPU reads from host memory, which is never written
         # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
         # safe and lets the driver pipeline source reads. GPU->CPU reads
         # from the live GPU KV cache, which the compute stream keeps
@@ -771,6 +817,9 @@ class CPUOffloadingWorker(OffloadingWorker):
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
+        host_memory_is_pinned = pin_memory and (
+            mmap_region is None or mmap_region.is_pinned
+        )
 
         canonical_bytes_per_block = (
             _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
@@ -820,6 +869,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             canonical_layout=canonical_layout,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -829,6 +879,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
     def submit_store(

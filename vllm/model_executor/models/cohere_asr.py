@@ -8,11 +8,11 @@ from typing import Any, ClassVar
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
@@ -50,7 +50,10 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.multimodal.processing.processor import (
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
+)
 from vllm.renderers import TokenizeParams
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processors.cohere_asr import (
@@ -664,8 +667,7 @@ class ConvSubsampling(nn.Module):
         repeat_num: int = 1,
     ) -> torch.Tensor:
         """Calculates the output length of a Tensor passed
-        through a convolution or max pooling layer
-        """
+        through a convolution or max pooling layer"""
         add_pad: float = all_paddings - kernel_size
         one: float = 1.0
         for i in range(repeat_num):
@@ -1204,10 +1206,18 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
         matrix_bd = self.rel_shift(matrix_bd)
 
-        # drops extra elements in the matrix_bd to match the matrix_ac's size
-        matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
-        matrix_bd = matrix_bd[:, :, :, : matrix_ac.size(-1)]
-        scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
+        # drops extra elements in matrix_bd to match the key sequence length
+        matrix_bd = matrix_bd[:, :, :, : k.size(-2)]
+        batch, heads, query_len, key_len = matrix_bd.shape
+        scale = 1.0 / self.s_d_k
+        scores = torch.baddbmm(
+            matrix_bd.flatten(0, 1),
+            q_with_bias_u.flatten(0, 1),
+            k.transpose(-2, -1).flatten(0, 1),
+            beta=scale,
+            alpha=scale,
+        ).view(batch, heads, query_len, key_len)
+
         return self.forward_attention(v, scores, mask)
 
 
@@ -1851,7 +1861,7 @@ class CohereASRModel(nn.Module):
 
 
 class CohereASRProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> PreTrainedConfig:
         return self.ctx.get_hf_config()
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -1934,7 +1944,7 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
         mm_processor_kwargs=None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
@@ -1962,42 +1972,29 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     ) -> list[int]:
         return [0]
 
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        mm_data = dict(mm_data)
-        mm_data["audio"] = mm_data.pop("audios")
-
-        hf_processor_mm_kwargs = dict(
-            **hf_processor_mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
         )
-
-        return mm_data, hf_processor_mm_kwargs
-
-    def _postprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
-    ) -> BatchFeature:
-        if "labels" in processed_data:
-            processed_data["input_ids"] = processed_data.pop("labels")
-
-        return processed_data
 
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalProcessingInfo:
+    ) -> MultiModalProcessingResult:
         # Dithering injects noise into the extracted features, so the
         # feature extractor is not a pure function of its input. Since the
         # processing cache assumes that processor outputs are invariant

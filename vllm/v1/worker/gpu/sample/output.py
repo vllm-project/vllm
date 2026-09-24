@@ -17,8 +17,8 @@ class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
     num_nans: torch.Tensor | None
-    num_sampled: torch.Tensor | None
-    num_rejected: torch.Tensor | None = None
+    num_sampled: torch.Tensor
+    num_rejected: torch.Tensor
     sampling_mask_tensors: SamplingMaskTensors | None = None
 
 
@@ -76,8 +76,7 @@ MAX_COMPACT_SUPPORT = 2048
 
 class SamplingMaskTensors(NamedTuple):
     """Device-side masks pending async D2H: compact ids, plus the bitmask as
-    the exact fallback for rows wider than ``max_num_kept``.
-    """
+    the exact fallback for rows wider than ``max_num_kept``."""
 
     # [num_requests, max_num_kept]
     token_ids: torch.Tensor
