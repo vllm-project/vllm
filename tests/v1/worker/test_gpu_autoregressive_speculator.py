@@ -168,6 +168,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
         enable_adaptive_verification=False,
+        skip_draft_when_k0=False,
     )
     vllm_config = SimpleNamespace(
         speculative_config=speculative_config,
@@ -436,6 +437,7 @@ def test_propose_k0_runs_prefill_without_draft_decode(monkeypatch):
     speculator.prefill_cudagraph_manager = None
     speculator.decode_cudagraph_manager = None
     speculator.use_fused_multi_step_decode = False
+    speculator.pcp_manager = None
     speculator.skip_draft_when_k0 = False
     speculator._copy_request_inputs = Mock()
     speculator._prepare_eplb_forward = Mock()

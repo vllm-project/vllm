@@ -231,6 +231,8 @@ def test_v2_sample_tokens_propagates_k0_and_hides_stale_drafts(monkeypatch):
         slot_mappings_by_layer={},
         hidden_states=torch.zeros(2, 3),
         aux_hidden_states=None,
+        dp_sync=None,
+        cudagraph_stats=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
@@ -273,12 +275,9 @@ def test_v2_sample_tokens_propagates_k0_and_hides_stale_drafts(monkeypatch):
     )
     runner.adaptive_verification = None
     runner.draft_tokens_handler = SimpleNamespace(set_draft_tokens=Mock())
+    runner.pcp_manager = None
+    runner.aux_output_connector = None
 
-    monkeypatch.setattr(
-        mrv2.pcp,
-        "maybe_restore_pcp_for_sampling",
-        lambda _, hidden_states, batch: (hidden_states, batch),
-    )
     monkeypatch.setattr(mrv2, "AsyncOutput", lambda **kwargs: kwargs)
 
     mrv2.GPUModelRunner.sample_tokens(runner, None)
