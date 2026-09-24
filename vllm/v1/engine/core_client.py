@@ -366,6 +366,11 @@ class InprocClient(EngineCoreClient):
             log_stats,
             executor_fail_callback=executor_fail_callback,
         )
+        # Release the executor's workers when the client is collected, as
+        # MPClient does; they hold GPU memory for the life of the process
+        # otherwise. The callback must not reference self, or self would stay
+        # reachable and the finalizer would never run.
+        self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
@@ -384,7 +389,8 @@ class InprocClient(EngineCoreClient):
             self.engine_core.abort_requests(request_ids)
 
     def shutdown(self, timeout: float | None = None) -> None:
-        self.engine_core.shutdown()
+        if self._finalizer.detach() is not None:
+            self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.engine_core.profile(is_start, profile_prefix)
