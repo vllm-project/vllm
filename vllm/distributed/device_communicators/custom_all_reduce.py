@@ -616,6 +616,9 @@ class CustomAllreduce:
     ) -> _ReduceScatterBackend | None:
         if self.disabled or not current_platform.is_cuda():
             return None
+        # The size gates below would switch backends per batch.
+        if self.batch_invariant:
+            return None
         if self.world_size == 16 and not self.mnnvl_only:
             return None
         inp_size = inp.nbytes
