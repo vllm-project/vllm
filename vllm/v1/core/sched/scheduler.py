@@ -134,6 +134,9 @@ class Scheduler(SchedulerInterface):
             if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
+        self.adaptive_long_prefill_threshold = (
+            self.scheduler_config.long_prefill_token_threshold_adaptive
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -602,11 +605,20 @@ class Scheduler(SchedulerInterface):
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
+        num_eligible_reqs = (
+            len(self.running) + len(self.waiting) + len(self.skipped_waiting)
+        )
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if len(self.running) + len(self.waiting) + len(self.skipped_waiting) > 1
+            if num_eligible_reqs > 1
             else 0
         )
+        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            long_prefill_token_threshold = max(
+                long_prefill_token_threshold, input_budget // num_eligible_reqs
+            )
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -3207,8 +3219,8 @@ class Scheduler(SchedulerInterface):
             # invalid block IDs cannot be mapped back to requests.
             raise RuntimeError(
                 "A KV connector reported block-level load failures "
-                "(invalid_block_ids) on a layout with multiple KV cache "
-                "groups, where block IDs are only unique within a group. "
+                "(invalid_block_ids) which is not supported for models "
+                "with multiple KV cache groups. "
                 "Connectors must report failed requests via "
                 "KVConnectorTransferResults.failed_recving instead."
             )
