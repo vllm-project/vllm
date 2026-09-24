@@ -32,10 +32,11 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
-    GenerateResponse,
-    GenerateResponseChoice,
-    GenerateResponseStreamChoice,
     GenerateStreamResponse,
+    GenerateTokensChoice,
+    GenerateTokensResponse,
+    GenerateTokensStreamChoice,
+    GenerateTokensStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.parser import Parser
@@ -169,10 +170,10 @@ def _make_stream_chunk(
     metrics: PerRequestMetrics | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
-    return GenerateStreamResponse(
+    return GenerateTokensStreamResponse(
         request_id=request_id,
         choices=[
-            GenerateResponseStreamChoice(
+            GenerateTokensStreamChoice(
                 index=index,
                 token_ids=token_ids,
                 finish_reason=finish_reason,
@@ -189,7 +190,7 @@ def _make_usage_chunk(
     request_id: str = "test-req",
 ) -> GenerateStreamResponse:
     """Build a usage only final SSE chunk (empty choices)."""
-    return GenerateStreamResponse(
+    return GenerateTokensStreamResponse(
         request_id=request_id,
         choices=[],
         usage=UsageInfo(
@@ -995,10 +996,10 @@ class TestDerenderChatStreamHarmony:
         content = "".join(d.content or "" for d in deltas)
 
         batch_choices = await harmony_derenderer.derender_chat(
-            GenerateResponse(
+            GenerateTokensResponse(
                 request_id="test-harmony-batch",
                 choices=[
-                    GenerateResponseChoice(
+                    GenerateTokensChoice(
                         index=0, token_ids=output_ids, finish_reason="stop"
                     )
                 ],
@@ -1271,10 +1272,10 @@ class TestServingDerenderStreamValidation:
         )
 
         serving = self._make_serving(parser_configured=False)
-        two_choices = GenerateStreamResponse(
+        two_choices = GenerateTokensStreamResponse(
             request_id="t",
             choices=[
-                GenerateResponseStreamChoice(index=i, token_ids=[1]) for i in range(2)
+                GenerateTokensStreamChoice(index=i, token_ids=[1]) for i in range(2)
             ],
         )
         request = DerenderChatStreamRequest(

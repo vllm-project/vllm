@@ -541,3 +541,181 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     completions_res = completions_data["choices"][0]["message"]["content"]
 
     assert generate_res == completions_res
+
+
+def _chat_prompt_token_ids(tokenizer, messages) -> list[int]:
+    return tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=False,  # default with Qwen3
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
+
+
+def _text_mode_payload(token_ids, **sampling_params) -> dict:
+    return {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": {"max_tokens": 24, "temperature": 0.0, **sampling_params},
+        "output_mode": "text",
+        "stream": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+async def test_text_mode_matches_chat_completions(client, tokenizer, messages):
+    token_ids = _chat_prompt_token_ids(tokenizer, messages)
+
+    resp = await client.post(GEN_ENDPOINT, json=_text_mode_payload(token_ids))
+    resp.raise_for_status()
+    data = resp.json()
+    assert data["output_mode"] == "text"
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 24,
+        "temperature": 0.0,
+        "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    chat_resp = await client.post("/v1/chat/completions", json=payload)
+    chat_content = chat_resp.json()["choices"][0]["message"]["content"]
+
+    assert data["choices"][0]["text"] == chat_content
+    assert data["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
+    token_ids = _chat_prompt_token_ids(tokenizer, messages)
+    payload = _text_mode_payload(token_ids)
+
+    non_stream = await client.post(GEN_ENDPOINT, json=payload)
+    non_stream.raise_for_status()
+
+    chunks = []
+    async with client.stream(
+        "POST", GEN_ENDPOINT, json={**payload, "stream": True}
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunks.append(json.loads(line[len("data: ") :]))
+
+    assert {chunk["output_mode"] for chunk in chunks} == {"text"}
+    assert chunks[-1]["choices"][0]["finish_reason"] is not None
+    streamed_text = "".join(chunk["choices"][0]["text"] for chunk in chunks)
+    assert streamed_text == non_stream.json()["choices"][0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        pytest.param(
+            {"sampling_params": {"detokenize": False}}, "detokenize", id="no-detok"
+        ),
+        pytest.param({"output_mode": "derender"}, "output_mode", id="unsupported"),
+    ],
+)
+async def test_text_mode_invalid_requests_return_400(client, overrides, expected):
+    payload = {
+        **_text_mode_payload([1, 2, 3], max_tokens=5),
+        **overrides,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+
+    assert resp.status_code == 400
+    assert expected in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="--tokens-only is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
+async def test_text_mode_rejected_when_tokens_only(client):
+    """Without a tokenizer the detokenizer returns "", so the request must
+    fail instead of answering 200 with empty text."""
+    resp = await client.post(GEN_ENDPOINT, json=_text_mode_payload([1, 2, 3]))
+    assert resp.status_code == 400
+    assert "requires a tokenizer" in resp.json()["error"]["message"]
+
+    payload = {**_text_mode_payload([1, 2, 3]), "output_mode": "tokens"}
+    payload["sampling_params"]["detokenize"] = False
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+async def test_text_mode_stream_delivers_abort_finish_chunk(
+    client, tokenizer, messages
+):
+    """The final output after /abort_requests has no new token IDs, so it
+    reaches a text stream only because text mode emits finish-only chunks."""
+    payload = {
+        **_text_mode_payload(
+            _chat_prompt_token_ids(tokenizer, messages),
+            max_tokens=900,
+            ignore_eos=True,
+        ),
+        "stream": True,
+        "request_id": "text-abort-e2e",
+    }
+
+    chunks = []
+    aborted = False
+    async with client.stream("POST", GEN_ENDPOINT, json=payload) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line[len("data: ") :])
+            chunks.append(chunk)
+            if not aborted and chunk["choices"] and chunk["choices"][0]["text"]:
+                abort = await client.post(
+                    "/abort_requests",
+                    json={"request_ids": [chunk["request_id"]]},
+                )
+                assert abort.status_code == 200
+                aborted = True
+
+    assert aborted
+    assert {chunk["output_mode"] for chunk in chunks} == {"text"}
+    final_choice = chunks[-1]["choices"][0]
+    assert final_choice["finish_reason"] == "abort"
+    generated = sum(len(chunk["choices"][0]["token_ids"] or []) for chunk in chunks)
+    assert generated < 900
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend aborts all requests when request_ids is missing",
+)
+async def test_abort_requests_is_served_without_tokens_only(client):
+    resp = await client.post(
+        "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
+    )
+    assert resp.status_code == 200
+
+    resp = await client.post("/abort_requests", json={})
+    assert resp.status_code == 400
