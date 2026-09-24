@@ -2992,7 +2992,7 @@ class NixlBaseConnectorWorker:
                 req_id,
                 count,
             )
-            self._reqs_to_process.discard(req_id)
+            self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 

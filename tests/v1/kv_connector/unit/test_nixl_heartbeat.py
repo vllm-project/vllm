@@ -201,6 +201,29 @@ def test_reaper_reclaims_expired_leases_behind_heartbeated_head(monkeypatch):
     assert w._reqs_to_process == {"A"}
     assert w.xfer_stats.record_kv_expired_req.call_count == 2
 
+    # now == expires is expired (now >= expires): A is due at 100.
+    done_eq: set[str] = set()
+    w._reap_expired_send_leases(100.0, done_eq)
+    assert done_eq == {"A"}
+    assert not w._reqs_to_send
+    assert not w._reqs_to_process
+    assert w.xfer_stats.record_kv_expired_req.call_count == 3
+
+
+def test_reaper_reclaims_when_now_equals_expiry():
+    """The reaper must reclaim on the now == expires boundary."""
+    w = _worker_stub()
+    w._reqs_to_process.add("eq")
+    w._reqs_to_send = {"eq": 50.0}
+
+    done: set[str] = set()
+    w._reap_expired_send_leases(50.0, done)
+
+    assert done == {"eq"}
+    assert not w._reqs_to_send
+    assert not w._reqs_to_process
+    w.xfer_stats.record_kv_expired_req.assert_called_once()
+
 
 def test_reaper_reclaims_shorter_lease_behind_later_deadline():
     """A later-inserted longer TTL must not block an earlier-expiring entry.
