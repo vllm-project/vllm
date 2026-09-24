@@ -68,7 +68,7 @@ class CPUMLABackend(MLACommonBackend):
         return [16]
 
     @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
+    def supports_block_size(cls, block_size: int | None, kv_cache_spec=None) -> bool:
         return block_size is None or block_size == 16
 
     @staticmethod
