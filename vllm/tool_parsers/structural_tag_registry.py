@@ -30,6 +30,7 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
@@ -101,17 +102,11 @@ def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
     return False
 
 
-def _any_tool_strict(
-    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
-) -> bool:
-    return any(_tool_is_strict(tool) for tool in tools)
-
-
 def _with_tool_strict(
     tool: ChatCompletionToolsParam | ResponsesTool,
     strict: bool,
 ) -> ChatCompletionToolsParam | ResponsesTool:
-    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    """Return a copy of ``tool`` with ``strict`` set, leaving the request alone."""
     if isinstance(tool, FunctionTool):
         return tool.model_copy(update={"strict": strict})
     if isinstance(tool, ChatCompletionToolsParam):
@@ -121,21 +116,23 @@ def _with_tool_strict(
     return tool
 
 
-def _resolve_tool_strictness(
+def resolve_tool_strictness(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
     tool_choice: ToolChoice,
     strict_level: ToolStrictLevel,
 ) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
-    """Decide whether a structural tag applies and pin each tool's ``strict``.
+    """Resolve whether structural tags apply and pin each tool's strictness.
 
     A tool without an explicit ``strict`` is treated as non-strict: its call
     envelope is still constrained, but its arguments stay free unless the
     server level is PARAMETER. ``None`` means no structural tag.
     """
+    if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+        return None
     if (
         tool_choice == "auto"
         and strict_level == ToolStrictLevel.AUTO
-        and not _any_tool_strict(tools)
+        and not any(_tool_is_strict(tool) for tool in tools)
     ):
         return None
     return [
@@ -152,14 +149,9 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
 ) -> StructuralTag | None:
-    """Build a structural tag with xgrammar's builtin model templates."""
+    """Build a structural tag from tools with strictness already resolved."""
     if not tools or tool_choice == "none":
-        return None
-
-    tools = _resolve_tool_strictness(tools, tool_choice, strict_level)
-    if tools is None:
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
