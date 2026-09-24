@@ -62,6 +62,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -283,7 +284,7 @@ class DeepseekV2MLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        x = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 

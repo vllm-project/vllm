@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -174,10 +176,18 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Only static per-tensor activation quantization is supported for external
-        quantization."""
-        if self.config.activation_quant_key == kFp8StaticTensorSym:
-            return kFp8StaticTensorSym
+        """Return the activation quant key this kernel can consume pre-quantized.
+
+        Supports static and some dynamic quantization schemes where fused
+        activation+quantization kernels exist in _FUSED_ACT_QUANT registry.
+        """
+        key = self.config.activation_quant_key
+        # Per-tensor quantization (static)
+        if key in (kFp8StaticTensorSym):
+            return key
+        # Per-block dynamic quantization (e.g., DeepSeek block FP8)
+        if key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
+            return key
         return None
 
     @staticmethod

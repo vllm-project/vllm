@@ -74,6 +74,7 @@ llama3_8b_fp8 = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         rms_quant_fusion=n_layers * 2,
         act_quant_fusion=n_layers,
+        manual_act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
@@ -85,6 +86,7 @@ llama3_8b_fp4 = ModelFusionInfo(
     model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
     matches=lambda n_layers: Matches(
         act_quant_fusion=n_layers,
+        manual_act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
@@ -102,6 +104,7 @@ llama4_scout_fp8 = ModelFusionInfo(
     hf_overrides=lambda n_layers: {"text_config": {"num_hidden_layers": n_layers}},
     matches=lambda n_layers: Matches(
         rms_quant_fusion=n_layers,
+        manual_act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2,
         sequence_parallel=n_layers * 2,
@@ -113,6 +116,7 @@ llama4_scout_fp4 = ModelFusionInfo(
     model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-NVFP4",
     hf_overrides=lambda n_layers: {"text_config": {"num_hidden_layers": n_layers}},
     matches=lambda n_layers: Matches(
+        manual_act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2,
         sequence_parallel=n_layers * 2,
@@ -143,12 +147,26 @@ qwen3_a3b_fp8 = ModelFusionInfo(
     ),
 )
 
+qwen2_fp8 = ModelFusionInfo(
+    model_name="neuralmagic/Qwen2-1.5B-Instruct-FP8",
+    matches=lambda n_layers: Matches(
+        rms_quant_fusion=n_layers * 2,
+        act_quant_fusion=n_layers,
+        manual_act_quant_fusion=n_layers,
+        attn_quant_fusion=n_layers,
+        ar_rms_fusion=n_layers * 2 + 1,
+        sequence_parallel=n_layers * 2 + 1,
+        async_tp=n_layers * 4,
+    ),
+)
+
 deepseek_coder_v2_lite_fp8 = ModelFusionInfo(
     model_name="RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8",
     matches=lambda n_layers: Matches(
         # first_k_dense_replace=1; MoE hides most rms+quant sites
         rms_quant_fusion=1,
         act_quant_fusion=min(1, n_layers),  # dense layers only
+        manual_act_quant_fusion=min(1, n_layers),
         # MLA attn + static FP8 quant
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
@@ -166,6 +184,7 @@ deepseek_v3_fp8 = ModelFusionInfo(
         rms_quant_fusion=n_layers * 2 + min(3, n_layers),  # add for 3 dense layers
         # silu+block quant
         act_quant_fusion=min(3, n_layers),  # dense layers only
+        manual_act_quant_fusion=min(3, n_layers),
         # MLA attn + per-group FP8 quant
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
@@ -180,6 +199,7 @@ deepseek_r1_fp4 = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         rms_quant_fusion=0,
         act_quant_fusion=min(3, n_layers),
+        manual_act_quant_fusion=0,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
     ),

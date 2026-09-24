@@ -17,6 +17,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -35,8 +37,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
+logger = init_logger(__name__)
+
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+
+# Counter for tracking manual fusion activations (for testing/debugging)
+_manual_fusion_count: int = 0
 
 
 def _silu_and_mul_fp8_static(
@@ -96,6 +103,13 @@ def _silu_and_mul_fp8_dynamic_128(
 ) -> QuantizedActivation:
     """SiluAndMul + FP8 dynamic per-group (group=128) quantization."""
     return _silu_and_mul_fp8_dynamic_block(x, linear, 128, kFp8Dynamic128Sym)
+
+
+def _silu_and_mul_fp8_dynamic_64(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """SiluAndMul + FP8 dynamic per-group (group=64) quantization."""
+    return _silu_and_mul_fp8_dynamic_block(x, linear, 64, kFp8Dynamic64Sym)
 
 
 def _silu_and_mul_nvfp4_dynamic(
@@ -184,9 +198,11 @@ if current_platform.is_cuda() and current_platform.has_device_capability(90):
         _relu_squared_static_fp8_quant_supported
     )
 
-# Add CUDA-specific entries for dynamic block quantization
+# Add CUDA-specific entries for dynamic quantization
 if current_platform.is_cuda_alike():
+    # Per-block dynamic quantization (e.g., DeepSeek block FP8)
     _FUSED_ACT_QUANT[(SiluAndMul, kFp8Dynamic128Sym)] = _silu_and_mul_fp8_dynamic_128
+    _FUSED_ACT_QUANT[(SiluAndMul, kFp8Dynamic64Sym)] = _silu_and_mul_fp8_dynamic_64
 
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
@@ -203,11 +219,25 @@ def maybe_fused_act_quant(
     Returns a QuantizedActivation when a fused kernel matches the activation and
     the consumer's effective input quantization key, else the plain activation.
     """
+    raise ValueError("maybe_fused_act_quant")
+    global _manual_fusion_count
     key = get_input_quant_key(linear)
     if key is not None:
         registry_key = (type(act_fn), key)
         producer = _FUSED_ACT_QUANT.get(registry_key)
         support = _FUSED_ACT_QUANT_SUPPORT.get(registry_key)
         if producer is not None and (support is None or support(act_fn, x, linear)):
+            _manual_fusion_count += 1
             return producer(x, linear)
     return act_fn(x)
+
+
+def get_manual_fusion_count() -> int:
+    """Return the current manual fusion count (for testing)."""
+    return _manual_fusion_count
+
+
+def reset_manual_fusion_count() -> None:
+    """Reset the manual fusion count (for testing)."""
+    global _manual_fusion_count
+    _manual_fusion_count = 0

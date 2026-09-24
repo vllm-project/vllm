@@ -30,6 +30,7 @@ from .models import (
     llama3_8b_fp8,
     llama4_scout_fp4,
     llama4_scout_fp8,
+    qwen2_fp8,
     qwen3_a3b_fp8,
 )
 
@@ -38,6 +39,7 @@ from .models import (
     "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
     [
         (*llama3_8b_fp8, False),
+        (*qwen2_fp8, False),
         (*qwen3_a3b_fp8, False),
         (*qwen3_a3b_fp8, True),
         (*deepseek_coder_v2_lite_fp8, False),
@@ -102,7 +104,9 @@ def test_tp1_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+
+    kernel_config = {"enable_flashinfer_autotune": False}
+    model_kwargs["kernel_config"] = kernel_config
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -121,6 +125,7 @@ def test_tp1_fp8_fusions(
         "rms_quant_fusion",
         "norm_rope_fusion",
         "attn_quant_fusion",
+        "manual_act_quant_fusion",
     ]
 
     if use_aiter:
@@ -167,11 +172,7 @@ def test_tp1_fp4_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
-    if nvfp4_kernel_exposes_input_quant_key():
-        pytest.skip(
-            "NVFP4 kernel exposes input_quant_key; manual fusion fires "
-            "instead of compiler pass-based fusion"
-        )
+    use_manual_fusion = nvfp4_kernel_exposes_input_quant_key()
 
     matches = matches_fn(n_layers)
 
@@ -193,6 +194,8 @@ def test_tp1_fp4_fusions(
     )
 
     matches_check = ["attn_quant_fusion", "norm_rope_fusion"]
+    if use_manual_fusion:
+        matches_check.append("manual_act_quant_fusion")
 
     run_e2e_fusion_test(
         model_name,

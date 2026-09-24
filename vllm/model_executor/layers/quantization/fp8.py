@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -380,6 +383,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # method (not exported with the weights), so restore it here too.
             if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
                 self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+            # Expose input quant key for manual activation+quant fusion
+            expose_input_quant_key(layer, self.fp8_linear)
             return
 
         if self.use_marlin:
@@ -391,6 +396,8 @@ class Fp8LinearMethod(LinearMethodBase):
             if hasattr(self.fp8_linear, "marlin_input_dtype"):
                 self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
             self.fp8_linear.process_weights_after_loading(layer)
+            # Expose input quant key for manual activation+quant fusion
+            expose_input_quant_key(layer, self.fp8_linear)
             return
 
         input_scale = None
@@ -428,6 +435,8 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         self.fp8_linear.process_weights_after_loading(layer)
+        # Expose input quant key for manual activation+quant fusion
+        expose_input_quant_key(layer, self.fp8_linear)
 
     def apply(
         self,

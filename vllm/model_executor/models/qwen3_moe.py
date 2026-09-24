@@ -119,6 +119,9 @@ class Qwen3MoeMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        # Currently won't fuse in this model, but we keep
+        # the maybe_fused_act_quant call here for consistency
+        # and future reference.
         out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         out, _ = self.down_proj(out)
 
