@@ -27,9 +27,9 @@ def _vit_mrope_setup_kernel(
 ):
     """Build triton_mrope's (3, N, half_rot) cos/sin t/h/w planes in one
     launch: compute each token's (t, h, w) position arithmetically and the
-    rotation in fp32 from the per-axis inv_freq. Each axis's values sit at
-    its mrope section columns of its own plane; other columns are zero (the
-    kernel's per-axis masks read only the section columns)."""
+    rotation in fp32 from the per-axis inv_freq. Only each axis's mrope
+    section columns are written; the rest is left uninitialized (the
+    consumer's per-axis masked loads read only the section columns)."""
     pid = tl.program_id(0)
     tok = pid * BLOCK_N + tl.arange(0, BLOCK_N)
     tok_mask = tok < num_tokens
@@ -58,7 +58,6 @@ def _vit_mrope_setup_kernel(
 
     d = tl.arange(0, BLOCK_D)
     half_rot = half_t + half_h + half_w
-    m2 = tok_mask[:, None] & (d < half_rot)[None, :]
     row = (tok * half_rot)[:, None] + d[None, :]
     plane = num_tokens * half_rot
 
@@ -67,32 +66,23 @@ def _vit_mrope_setup_kernel(
     in_t = d < half_t
     inv_t = tl.load(inv_freq_t_ptr + d, mask=in_t, other=0.0)
     freq = tpos.to(tl.float32)[:, None] * inv_t[None, :]
-    tl.store(cos_out_ptr + row, tl.where(in_t[None, :], tl.cos(freq), 0.0), mask=m2)
-    tl.store(sin_out_ptr + row, tl.where(in_t[None, :], tl.sin(freq), 0.0), mask=m2)
+    mask = tok_mask[:, None] & in_t[None, :]
+    tl.store(cos_out_ptr + row, tl.cos(freq), mask=mask)
+    tl.store(sin_out_ptr + row, tl.sin(freq), mask=mask)
 
     in_h = (d >= half_t) & (d < half_t + half_h)
     inv_h = tl.load(inv_freq_h_ptr + d - half_t, mask=in_h, other=0.0)
     freq = hpos.to(tl.float32)[:, None] * inv_h[None, :]
-    tl.store(
-        cos_out_ptr + plane + row, tl.where(in_h[None, :], tl.cos(freq), 0.0), mask=m2
-    )
-    tl.store(
-        sin_out_ptr + plane + row, tl.where(in_h[None, :], tl.sin(freq), 0.0), mask=m2
-    )
+    mask = tok_mask[:, None] & in_h[None, :]
+    tl.store(cos_out_ptr + plane + row, tl.cos(freq), mask=mask)
+    tl.store(sin_out_ptr + plane + row, tl.sin(freq), mask=mask)
 
     in_w = (d >= half_t + half_h) & (d < half_rot)
     inv_w = tl.load(inv_freq_w_ptr + d - half_t - half_h, mask=in_w, other=0.0)
     freq = wpos.to(tl.float32)[:, None] * inv_w[None, :]
-    tl.store(
-        cos_out_ptr + 2 * plane + row,
-        tl.where(in_w[None, :], tl.cos(freq), 0.0),
-        mask=m2,
-    )
-    tl.store(
-        sin_out_ptr + 2 * plane + row,
-        tl.where(in_w[None, :], tl.sin(freq), 0.0),
-        mask=m2,
-    )
+    mask = tok_mask[:, None] & in_w[None, :]
+    tl.store(cos_out_ptr + 2 * plane + row, tl.cos(freq), mask=mask)
+    tl.store(sin_out_ptr + 2 * plane + row, tl.sin(freq), mask=mask)
 
 
 def vit_mrope_setup(
