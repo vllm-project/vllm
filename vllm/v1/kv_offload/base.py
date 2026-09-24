@@ -408,7 +408,7 @@ class OffloadingManager(ABC):
         """Return collected metrics since last call, or None if disabled."""
         return None
 
-    def config_info(self) -> Mapping[str, str | int | float | bool]:
+    def config_info(self) -> Sequence[Mapping[str, str | int | float | bool]]:
         """Return static config facts to publish as info metric labels.
 
         The scheduler reads this once, after the manager is built, so the
@@ -417,13 +417,21 @@ class OffloadingManager(ABC):
         Prometheus: a declared name that is absent here becomes an empty label
         value, and a name added here that the spec did not declare is dropped.
 
+        An implementation fills every declared name on every call, and gives
+        the string "None" to a value the configuration does not set. A test of
+        the implementation should assert that the names here match the
+        declaration of the spec, because the runtime check reads the declaration
+        of every tier together and cannot see one unfilled name.
+
         Returns:
-            Mapping of label name to value. The frontend renders each value
-            with str(), so a value must be a scalar that msgpack carries, not
-            an enum or an object. Empty by default.
+            One mapping of label name to value for each tier, which gives one
+            series of the info metric. A manager of one tier returns exactly one
+            mapping. The frontend renders each value with str(), so a value must
+            be a scalar that msgpack carries, not an enum or an object. The
+            default reports one tier with no fact.
 
         """
-        return {}
+        return [{}]
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""

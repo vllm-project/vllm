@@ -112,6 +112,20 @@ vllm serve <model> \
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 
+## Info Metric Labels
+
+The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and always sets it to 1. The labels hold static facts of the offloading configuration, so a user reads the resolved numbers instead of the launch flags. The gauge appears from the first scheduler step, so an idle engine exposes no series. Each engine reports its own configuration, and not the instance total.
+
+The gauge holds one series for each tier, and the `tier` label tells the series apart. Two tiers of one type therefore stay apart.
+
+| Label | Meaning | Notes |
+| --- | --- | --- |
+| `tier` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
+
+The spec declares the label names in the API server process, and the manager of each tier fills the values in the engine process. The names of every tier bind once, at the declaration. A label that one tier owns reads empty on the series of every other tier. No in-tree tier publishes a fact of its own yet, so `tier` is the only label today.
+
+A tier adds a label with `config_info_keys()` and `config_info()` of its manager class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
+
 ## Custom Eviction Policies
 
 `eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.

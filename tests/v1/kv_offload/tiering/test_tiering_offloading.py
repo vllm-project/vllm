@@ -1518,10 +1518,11 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-def test_tiering_manager_prefixes_the_config_info_of_every_secondary_tier():
-    """A secondary tier cannot know its own index, so the manager gives it one.
-    The index separates two tiers of one type. No in-tree tier publishes a fact
-    yet, so the primary tier adds nothing here."""
+def test_tiering_manager_reports_one_config_info_series_for_each_tier():
+    """The info metric holds one series for each tier, and the tier label tells
+    the series apart. A tier cannot know its own index, so the manager adds the
+    label. A tier fills the names it owns only. No in-tree primary tier
+    publishes a fact yet, so its series carries the tier label only."""
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
@@ -1539,17 +1540,84 @@ def test_tiering_manager_prefixes_the_config_info_of_every_secondary_tier():
         secondary_tiers=secondary_tiers,
     )
 
-    assert manager.config_info() == {
-        "tier1_test_metrics_path": "/mnt/test_metrics",
-        "tier2_test_metrics_path": "/mnt/test_metrics",
-    }
+    assert manager.config_info() == [
+        {"tier": "0:primary"},
+        {"tier": "1:test_metrics", "path": "/mnt/test_metrics"},
+        {"tier": "2:test_metrics", "path": "/mnt/test_metrics"},
+    ]
+
+
+def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
+    """A tiering manager runs with no secondary tier, and the info metric then
+    holds the primary series alone. The series still carries the tier label, so
+    the frontend publishes one series and not a bare metric."""
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[],
+    )
+
+    assert manager.config_info() == [{"tier": "0:primary"}]
+
+
+def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
+    """This manager holds one primary tier, so two mappings would give two
+    series with one tier label. If the two mappings agree on every declared
+    name, the frontend cache then collapses them into one series and warns
+    about nothing. The unpack fails at engine start instead."""
+
+    class _TwoMappingPrimary(CPUPrimaryTierOffloadingManager):
+        def config_info(self):
+            return [{"path": "/a"}, {"path": "/b"}]
+
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=_TwoMappingPrimary(num_chunks=5, mmap_region=mock_region),
+        secondary_tiers=[],
+    )
+
+    with pytest.raises(ValueError):
+        manager.config_info()
+
+
+def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
+    """The manager adds the tier label to a copy. A tier that returns a stored
+    mapping must not gain a foreign key that outlives the call."""
+
+    class _StoredInfoTier(MetricsSecondaryTierManager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.info: dict[str, str] = {"path": "/mnt/a"}
+
+        def config_info(self):
+            return self.info
+
+    mock_region = _mock_mmap_region(5)
+    tier = _StoredInfoTier(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="test_metrics",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[tier],
+    )
+
+    manager.config_info()
+
+    assert tier.info == {"path": "/mnt/a"}
 
 
 def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     """The spec declares the info label names in the API-server process, and
     the manager fills the values in the engine process. A drift between the two
     empties every declared label and drops every filled value, so this pins
-    both sides to the same literal names."""
+    both sides to the same literal names. The frontend reads a value by name,
+    so the order of the names does not have to agree."""
     tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
@@ -1573,8 +1641,12 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     ):
         keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
 
-    assert keys == ("tier1_test_metrics_path", "tier2_test_metrics_path")
-    assert keys == tuple(manager.config_info())
+    assert keys == ("tier", "path")
+    filled: set[str] = set()
+    for info in manager.config_info():
+        assert set(info) <= set(keys)
+        filled |= set(info)
+    assert filled == set(keys)
 
 
 def test_tiering_spec_passes_each_tier_its_own_config():

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,7 +29,9 @@ _INFO_METRIC_HELP = (
     "Static configuration of the KV offload managers of this engine instance. "
     "The configured offloading spec declares the label names, and each manager "
     "fills the values, so a series appears from the first scheduler step of its "
-    "engine. Each engine reports its own configuration, not the instance total."
+    "engine. One series appears for each offload tier, and the tier label tells "
+    "the series apart. Each engine reports its own configuration, not the "
+    "instance total."
 )
 
 
@@ -180,8 +182,8 @@ class _StatsKey:
     TYPES = "types"
     # Maps metric name -> {label values tuple -> observed value (number or list)}
     DATA = "data"
-    # Maps info metric label name -> label value. None until a manager reports
-    # it, and an empty dict when a manager reports no fact.
+    # One mapping of info metric label name -> label value for each tier. None
+    # until a manager reports it, and one empty mapping for no fact.
     INFO = "info"
 
 
@@ -194,7 +196,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         {
             _StatsKey.TYPES: {name: _MetricType.*, ...},
             _StatsKey.DATA:  {name: {labelvalues: value, ...}, ...},
-            _StatsKey.INFO:  {labelname: labelvalue, ...} | None,
+            _StatsKey.INFO:  [{labelname: labelvalue, ...}, ...] | None,
         }
 
     This structure is self-describing: it survives IPC serialization
@@ -206,10 +208,10 @@ class OffloadingConnectorStats(KVConnectorStats):
     observed samples per-label-tuple. Unlabeled metrics use ``()`` as their
     labelvalues tuple.
 
-    ``INFO`` holds static config facts, which the scheduler sends once per
-    process. It stays out of ``DATA``, because its label names are known only
-    when the payload arrives. It holds label names, not metric names, so a tier
-    that accesses its own metrics walks ``metric_sections()``.
+    ``INFO`` holds the static config facts of each tier, which the scheduler
+    sends once per process. It stays out of ``DATA``, because its label names
+    are known only when the payload arrives. It holds label names, not metric
+    names, so a tier that accesses its own metrics walks ``metric_sections()``.
     """
 
     def __post_init__(self):
@@ -243,13 +245,14 @@ class OffloadingConnectorStats(KVConnectorStats):
         if other.is_empty():
             return self
         assert isinstance(other, OffloadingConnectorStats)
-        # The scheduler payload carries the info and merges into the worker
-        # payload (v1/core/sched/scheduler.py), so the info must survive the
-        # merge in this direction. The scheduler sends it once, so a later
+        # The scheduler payload merges into the worker payload
+        # (v1/core/sched/scheduler.py), so the info must survive the merge in
+        # this direction to reach the Prometheus frontend. reduce() drops it, so
+        # it never reaches a log line. The scheduler sends it once, so a later
         # payload with no info must not clear it.
         other_info = other.data.get(_StatsKey.INFO)
         if other_info is not None:
-            self.data[_StatsKey.INFO] = other_info
+            self.data[_StatsKey.INFO] = [dict(tier_info) for tier_info in other_info]
         other_types = other._types
         other_values = other._values
         for key, other_label_values in other_values.items():
@@ -337,17 +340,17 @@ class OffloadingConnectorStats(KVConnectorStats):
         gauge_values = self._values.setdefault(gauge_name, {})
         gauge_values[labelvalues] = gauge_value
 
-    def set_info(self, info: Mapping[str, str | int | float | bool]) -> None:
+    def set_info(self, info: Sequence[Mapping[str, str | int | float | bool]]) -> None:
         """Put the static config facts of this engine on the stats payload.
 
         Args:
-            info: Mapping of info metric label name to label value, as
-                OffloadingManager.config_info() returns it. An empty mapping
-                still yields the metric, with an empty value on every label
-                the spec declared.
+            info: One mapping of info metric label name to label value for each
+                tier, as OffloadingManager.config_info() returns it. An empty
+                mapping still gives one series, with an empty value on every
+                label the spec declared.
 
         """
-        self.data[_StatsKey.INFO] = dict(info)
+        self.data[_StatsKey.INFO] = [dict(tier_info) for tier_info in info]
 
     def observe_histogram(
         self,
@@ -540,35 +543,44 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                     observation
                 )
 
-    def _observe_info(self, info: dict[str, Any], engine_idx: int) -> None:
-        """Publish the static config facts of one engine.
+    def _observe_info(self, info: Sequence[dict[str, Any]], engine_idx: int) -> None:
+        """Publish the static config facts of one engine, one series per tier.
 
         The spec declares the label names, so a payload only fills them. A
-        declared name that the payload omits gets an empty value. A payload
+        declared name that no tier fills reads empty on every series. A payload
         name that the spec did not declare is dropped. Either gap logs once.
 
+        The check covers the payload as a whole, and not one tier, because the
+        declaration holds the names of every tier. A name that one tier owns
+        reads empty on the other tiers by design. A tier that leaves a name of
+        its own unfilled therefore stays hidden here.
+
         Args:
-            info: Mapping of label name to label value, as
+            info: One mapping of label name to label value for each tier, as
                 OffloadingManager.config_info() returns it.
             engine_idx: Index of the reporting engine.
 
         """
-        empty = tuple(key for key in self._info_keys if key not in info)
-        dropped = tuple(key for key in info if key not in self._info_keys)
-        if empty or dropped:
+        filled: dict[str, None] = {}
+        for tier_info in info:
+            filled.update(dict.fromkeys(tier_info))
+            labelvalues = tuple(str(tier_info.get(key, "")) for key in self._info_keys)
+            self._set_gauge(KV_OFFLOAD_CONFIG_INFO, 1, labelvalues, engine_idx)
+
+        never_filled = tuple(key for key in self._info_keys if key not in filled)
+        dropped = tuple(key for key in filled if key not in self._info_keys)
+        if never_filled or dropped:
             logger.warning_once(
                 "%s: spec %s and the manager of engine %d disagree on the KV "
-                "offload config labels. Declared but not filled, so empty: %s. "
-                "Filled but not declared, so dropped: %s.",
+                "offload config labels. Declared, and no tier filled them, so "
+                "empty on every series: %s. Filled, and the spec did not "
+                "declare them, so dropped: %s.",
                 KV_OFFLOAD_CONFIG_INFO,
                 self._spec_cls.__name__,
                 engine_idx,
-                empty,
+                never_filled,
                 dropped,
             )
-
-        labelvalues = tuple(str(info.get(key, "")) for key in self._info_keys)
-        self._set_gauge(KV_OFFLOAD_CONFIG_INFO, 1, labelvalues, engine_idx)
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """Observe transfer statistics."""
