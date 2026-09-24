@@ -121,6 +121,7 @@ class AnthropicOutputConfig(BaseModel):
 AnthropicDisabledThinkingEffort = Literal[
     "none", "minimal", "low", "medium", "high", "xhigh", "max"
 ]
+AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
 
 
 class AnthropicThinkingConfig(BaseModel):

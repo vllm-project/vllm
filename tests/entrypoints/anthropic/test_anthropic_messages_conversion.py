@@ -15,8 +15,9 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 import json
 from argparse import Namespace
 from http import HTTPStatus
+from types import SimpleNamespace
 from typing import Annotated
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -1661,3 +1662,50 @@ class TestThinkingConfig:
         assert result.reasoning_effort == "high"
         assert result.include_reasoning is True
         assert result.thinking_token_budget is None
+
+
+class TestProbeDisabledThinkingEffort:
+    """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
+
+    @staticmethod
+    async def _probe(render):
+        obj = MagicMock(spec=AnthropicServingMessages)
+        obj.online_renderer = MagicMock()
+        obj.online_renderer.render_chat = AsyncMock(
+            side_effect=lambda req: ([], [render(req.reasoning_effort)])
+        )
+        obj._extract_prompt_components = lambda engine_input: SimpleNamespace(
+            token_ids=engine_input, text=None
+        )
+        obj._render_probe_prompt = (
+            AnthropicServingMessages._render_probe_prompt.__get__(obj)
+        )
+        return await AnthropicServingMessages._probe_disabled_thinking_effort(obj)
+
+    @staticmethod
+    def _reject_none(effort):
+        """Harmony (gpt-oss) raises on ``none``."""
+        if effort == "none":
+            raise ValueError(f"unsupported {effort=}")
+        return [1]
+
+    @staticmethod
+    def _none_as_max(effort):
+        """GLM-5.3 treats efforts other than low/high as max."""
+        return [1, {"low": 0, "high": 1}.get(effort, 2)]
+
+    @pytest.mark.asyncio
+    async def test_template_honors_none(self):
+        assert await self._probe(lambda effort: [1, int(effort == "none")]) == "none"
+
+    @pytest.mark.asyncio
+    async def test_template_ignores_effort(self):
+        assert await self._probe(lambda effort: [1]) == "low"
+
+    @pytest.mark.asyncio
+    async def test_template_renders_none_as_thinking_effort(self):
+        assert await self._probe(self._none_as_max) == "low"
+
+    @pytest.mark.asyncio
+    async def test_renderer_rejects_none(self):
+        assert await self._probe(self._reject_none) == "low"

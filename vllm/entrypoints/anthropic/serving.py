@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, get_args
 
 import jinja2
 from fastapi import Request
@@ -23,6 +23,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensResponse,
     AnthropicDelta,
     AnthropicDisabledThinkingEffort,
+    AnthropicDisabledThinkingEffortOption,
     AnthropicError,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
@@ -118,7 +119,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
+        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
     ):
         super().__init__(
             engine_client=engine_client,
@@ -142,7 +143,53 @@ class AnthropicServingMessages(OpenAIServingChat):
             "tool_calls": "tool_use",
         }
         self._merge_inline_system = self._detect_merge_inline_system(chat_template)
-        self._disabled_thinking_effort = disabled_thinking_effort
+        # Resolved lazily from the renderer when "auto".
+        self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
+            None if disabled_thinking_effort == "auto" else disabled_thinking_effort
+        )
+
+    async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
+        if self._disabled_thinking_effort is None:
+            self._disabled_thinking_effort = (
+                await self._probe_disabled_thinking_effort()
+            )
+            logger.info(
+                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                self._disabled_thinking_effort,
+            )
+        return self._disabled_thinking_effort
+
+    async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
+        """Pick ``low`` if the renderer rejects or ignores ``none``.
+
+        ``none`` is ignored when it renders the same prompt as a thinking
+        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
+        """
+        none_prompt = await self._render_probe_prompt("none")
+        if none_prompt is None:
+            return "low"
+        for effort in get_args(AnthropicDisabledThinkingEffort)[1:]:
+            if await self._render_probe_prompt(effort) == none_prompt:
+                return "low"
+        return "none"
+
+    async def _render_probe_prompt(
+        self, effort: AnthropicDisabledThinkingEffort
+    ) -> tuple[list[int] | None, str | None] | None:
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hi"}],
+            reasoning_effort=effort,
+        )
+        try:
+            result = await self.online_renderer.render_chat(request)
+        except Exception:
+            logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
+            return None
+        if isinstance(result, ErrorResponse):
+            return None
+        _, (engine_input,) = result
+        components = self._extract_prompt_components(engine_input)
+        return components.token_ids, components.text
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
@@ -634,10 +681,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
+        if request.thinking is not None and request.thinking.type == "disabled":
+            disabled_thinking_effort = await self._get_disabled_thinking_effort()
         chat_req = self._convert_anthropic_to_openai_request(
             request,
             merge_inline_system=self._merge_inline_system,
-            disabled_thinking_effort=self._disabled_thinking_effort,
+            disabled_thinking_effort=disabled_thinking_effort,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
@@ -1041,7 +1091,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         chat_req = self._convert_anthropic_to_openai_request(
             request,
             merge_inline_system=self._merge_inline_system,
-            disabled_thinking_effort=self._disabled_thinking_effort,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
