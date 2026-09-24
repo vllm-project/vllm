@@ -350,13 +350,16 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             a2_scale = self.quant_config.a2_scale
             assert a2_scale is not None
 
-            self._g1_alphas = (w1_scale * a1_scale).squeeze()
-            self._g2_alphas = (w2_scale * a2_scale).squeeze()
-            self._g1_scale_c = (
-                self._g1_alphas / self.quant_config.a2_scale
-                if moe_config.is_act_and_mul
-                else torch.ones_like(self._g1_alphas) / self.quant_config.a2_scale
+            from vllm.model_executor.layers.quantization.utils.fp8_processing import (
+                compute_fp8_moe_trtllm_scales,
             )
+
+            scales = compute_fp8_moe_trtllm_scales(
+                w1_scale, w2_scale, a1_scale, a2_scale, moe_config.is_act_and_mul
+            )
+            self._g1_alphas = scales["_g1_alphas"]
+            self._g2_alphas = scales["_g2_alphas"]
+            self._g1_scale_c = scales["_g1_scale_c"]
 
     @staticmethod
     def _supports_quant_scheme(

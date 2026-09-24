@@ -74,10 +74,19 @@ def deep_gemm_fp8_o_proj(
             if hasattr(wo_a, "weight_scale")
             else wo_a.weight_scale_inv
         )
+        grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
+        grouped_weight_scale = weight_scale.view(
+            n_groups, o_lora_rank // einsum_recipe[1], -1
+        )
+        # SM90 DeepGEMM consumes legacy FP32 scales.  The checkpoint stores
+        # these scales as E8M0 FP8; SM100's TMA path can consume its packed
+        # representation directly, but SM90 cannot.
+        if not tma_aligned_scales:
+            grouped_weight_scale = grouped_weight_scale.float()
         fp8_einsum(
             "bhr,hdr->bhd",
             (o_proj_input, o_scale),
-            (wo_a.weight, weight_scale),
+            (grouped_weight, grouped_weight_scale),
             z,
             recipe=einsum_recipe,
         )

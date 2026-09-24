@@ -29,11 +29,23 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight.data  # [N, K]
+        weight, weight_scale = self.process_reload_tensors(
+            layer, layer.weight.data, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del layer
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
 
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        weight_scale = weight_scale[:N, :scale_k].contiguous()
 
         # Dequantize MXFP8 -> BF16 ONCE here, at load time, so apply_weights runs
         # a plain BF16 linear with no per-step dequant -- i.e. run as if from a
@@ -46,8 +58,7 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
 
         if envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        return weight, weight_scale
 
     def apply_weights(
         self,

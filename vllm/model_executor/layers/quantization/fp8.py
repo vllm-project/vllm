@@ -42,6 +42,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.fp8_processing import (
+    Fp8MoEProcessingPlan,
+    Fp8MoEWeights,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
@@ -83,6 +87,7 @@ from vllm.utils.deep_gemm import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.reload.trace import ReloadState
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -367,6 +372,197 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+
+    def create_reload_state(self, layer: torch.nn.Module, key: str) -> "ReloadState":
+        """Build an opt-in state before observing checkpoint-format cold load."""
+        from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+            AiterFp8BlockScaledMMKernel,
+            AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+            AiterPerTokenFp8ScaledMMLinearKernel,
+            AiterPreshuffledFp8BlockScaledMMKernel,
+            AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+            B12xFp8BlockScaledMMKernel,
+            B12xTensorFP8ScaledMMLinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+            CPUFp8BlockScaledMMKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+            CutlassFp8BlockScaledMMKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+            DeepGemmFp8BlockScaledMMKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+            FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+            FlashInferFP8ScaledMMLinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+            HummingFP8ScaledMMLinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+            BlockWiseTorchFP8ScaledMMLinearKernel,
+            ChannelWiseTorchFP8ScaledMMLinearKernel,
+            PerTensorTorchFP8ScaledMMLinearKernel,
+            RowWiseTorchFP8ScaledMMLinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+            ROCmFP8ScaledMMLinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+            TritonFp8BlockScaledMMKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+            XPUFp8BlockScaledMMKernel,
+            XPUW8A8FP8LinearKernel,
+            XPUW8A16FP8LinearKernel,
+        )
+        from vllm.model_executor.model_loader.reload.fp8 import (
+            AiterBlockFP8LinearReloadPolicy,
+            AiterTensorFP8LinearReloadPolicy,
+            B12xBlockFP8LinearReloadPolicy,
+            B12xTensorFP8LinearReloadPolicy,
+            BlockFP8LinearReloadPolicy,
+            CPUBlockFP8LinearReloadPolicy,
+            DeepGEMMReloadPolicy,
+            HummingFP8LinearReloadPolicy,
+            MarlinFP8LinearReloadPolicy,
+            TensorFP8LinearReloadPolicy,
+            XPUBlockFP8LinearReloadPolicy,
+            XPUTensorFP8LinearReloadPolicy,
+        )
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+
+        kernel = self.fp8_linear
+        if isinstance(kernel, FlashInferFp8DeepGEMMDynamicBlockScaledKernel):
+            kernel = kernel.fallback
+        if (
+            not self.quant_config.is_checkpoint_fp8_serialized
+            or is_weights_pre_processed()
+        ):
+            raise NotImplementedError(
+                "FP8 linear reload tracing requires checkpoint-format FP8 weights"
+            )
+        if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+            scale = "weight_scale_inv" if self.block_quant else "weight_scale"
+            humming_roles: tuple[str, ...] = ("weight", scale)
+            runtime_names: dict[str, str | None] = {scale: "weight_scale"}
+            if self.act_q_static:
+                humming_roles += ("input_scale",)
+                runtime_names["input_scale"] = None
+            if getattr(layer, "bias", None) is not None:
+                humming_roles += ("bias",)
+            return ReloadState(
+                key=key,
+                module=layer,
+                roles=humming_roles,
+                policy=HummingFP8LinearReloadPolicy(block_quant=self.block_quant),
+                runtime_names=runtime_names,
+            )
+        if isinstance(kernel, MarlinFP8ScaledMMLinearKernel):
+            marlin_roles: tuple[str, ...] = (
+                "weight",
+                "weight_scale_inv" if self.block_quant else "weight_scale",
+            )
+            if self.act_q_static:
+                marlin_roles += ("input_scale",)
+            if getattr(layer, "bias", None) is not None:
+                marlin_roles += ("bias",)
+            return ReloadState(
+                key=key,
+                module=layer,
+                roles=marlin_roles,
+                policy=MarlinFP8LinearReloadPolicy(block_quant=self.block_quant),
+                runtime_names={"input_scale": None} if self.act_q_static else {},
+            )
+        if not self.block_quant:
+            if type(kernel) not in (
+                CutlassFP8ScaledMMLinearKernel,
+                FlashInferFP8ScaledMMLinearKernel,
+                PerTensorTorchFP8ScaledMMLinearKernel,
+                ChannelWiseTorchFP8ScaledMMLinearKernel,
+                RowWiseTorchFP8ScaledMMLinearKernel,
+                XPUW8A8FP8LinearKernel,
+                XPUW8A16FP8LinearKernel,
+                ROCmFP8ScaledMMLinearKernel,
+                AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+                AiterPerTokenFp8ScaledMMLinearKernel,
+                AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+                B12xTensorFP8ScaledMMLinearKernel,
+            ):
+                raise NotImplementedError(
+                    f"Tensor FP8 reload does not support {type(kernel).__name__}"
+                )
+            tensor_roles: tuple[str, ...] = ("weight", "weight_scale")
+            if self.act_q_static:
+                tensor_roles += ("input_scale",)
+            if getattr(layer, "bias", None) is not None:
+                tensor_roles += ("bias",)
+            tensor_policy: TensorFP8LinearReloadPolicy
+            if type(kernel) is B12xTensorFP8ScaledMMLinearKernel:
+                if not self.act_q_static:
+                    raise NotImplementedError(
+                        "B12x tensor FP8 reload requires static activation scales"
+                    )
+                tensor_policy = B12xTensorFP8LinearReloadPolicy()
+            elif type(kernel) in (XPUW8A8FP8LinearKernel, XPUW8A16FP8LinearKernel):
+                tensor_policy = XPUTensorFP8LinearReloadPolicy(
+                    weight_only=type(kernel) is XPUW8A16FP8LinearKernel
+                )
+            elif type(kernel) is AiterHipbMMPerTokenFp8ScaledMMLinearKernel:
+                tensor_policy = AiterTensorFP8LinearReloadPolicy(layout="hipbmm")
+            elif type(kernel) is AiterPreshuffledPerTokenFp8ScaledMMLinearKernel:
+                tensor_policy = AiterTensorFP8LinearReloadPolicy(layout="preshuffled")
+            elif type(kernel) is AiterPerTokenFp8ScaledMMLinearKernel:
+                tensor_policy = AiterTensorFP8LinearReloadPolicy(layout="plain")
+            else:
+                tensor_policy = TensorFP8LinearReloadPolicy(
+                    cutlass_padding=type(kernel) is CutlassFP8ScaledMMLinearKernel
+                )
+            return ReloadState(
+                key=key,
+                module=layer,
+                roles=tensor_roles,
+                policy=tensor_policy,
+            )
+        assert self.weight_block_size is not None
+        roles: tuple[str, ...] = ("weight", "weight_scale_inv")
+        if getattr(layer, "bias", None) is not None:
+            roles += ("bias",)
+        policy: DeepGEMMReloadPolicy | BlockFP8LinearReloadPolicy
+        if isinstance(kernel, DeepGemmFp8BlockScaledMMKernel):
+            policy = DeepGEMMReloadPolicy(
+                pairs=(("weight", "weight_scale_inv"),),
+                block_shape=tuple(self.weight_block_size),
+                is_bmm=getattr(layer, "is_bmm", False),
+                bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
+            )
+        elif type(kernel) is B12xFp8BlockScaledMMKernel:
+            policy = B12xBlockFP8LinearReloadPolicy()
+        elif type(kernel) is XPUFp8BlockScaledMMKernel:
+            policy = XPUBlockFP8LinearReloadPolicy()
+        elif type(kernel) is CPUFp8BlockScaledMMKernel:
+            policy = CPUBlockFP8LinearReloadPolicy()
+        elif type(kernel) in (
+            AiterFp8BlockScaledMMKernel,
+            AiterPreshuffledFp8BlockScaledMMKernel,
+        ):
+            policy = AiterBlockFP8LinearReloadPolicy(
+                preshuffled=type(kernel) is AiterPreshuffledFp8BlockScaledMMKernel
+            )
+        elif type(kernel) in (
+            CutlassFp8BlockScaledMMKernel,
+            TritonFp8BlockScaledMMKernel,
+            BlockWiseTorchFP8ScaledMMLinearKernel,
+        ):
+            policy = BlockFP8LinearReloadPolicy()
+        else:
+            raise NotImplementedError(
+                f"FP8 linear reload tracing does not support {type(kernel).__name__}"
+            )
+        return ReloadState(key=key, module=layer, roles=roles, policy=policy)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
@@ -675,6 +871,145 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def create_reload_state(self, layer: RoutedExperts, key: str) -> "ReloadState":
+        """Build an FP8 expert state with a per-round placement plan."""
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        from vllm.model_executor.model_loader.reload.fp8 import (
+            CutlassMoEReloadPolicy,
+            DeepGEMMReloadPolicy,
+            HummingMoEReloadPolicy,
+            MarlinMoEReloadPolicy,
+            PlainMoEReloadPolicy,
+            PlannedMoEReloadPolicy,
+        )
+        from vllm.model_executor.model_loader.reload.moe import RoutedExpertsReloadPlan
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+
+        if (
+            not self.quant_config.is_checkpoint_fp8_serialized
+            or self.moe.has_bias
+            or layer.expert_map_manager.num_fused_shared_experts
+            or (
+                current_platform.is_fp8_fnuz()
+                and self.fp8_backend
+                not in (
+                    Fp8MoeBackend.TRITON,
+                    Fp8MoeBackend.BATCHED_TRITON,
+                    Fp8MoeBackend.AITER,
+                )
+            )
+            or is_weights_pre_processed()
+            or self.weight_scale_refine is not None
+        ):
+            raise NotImplementedError(
+                "FP8 MoE reload tracing requires offline FP8, no bias or fused "
+                "shared experts, and an unrefined checkpoint block grid"
+            )
+        s13 = f"w13_{self.weight_scale_name}"
+        s2 = f"w2_{self.weight_scale_name}"
+        roles: tuple[str, ...] = ("w13_weight", "w2_weight", s13, s2)
+        policy: (
+            DeepGEMMReloadPolicy
+            | CutlassMoEReloadPolicy
+            | PlainMoEReloadPolicy
+            | PlannedMoEReloadPolicy
+        )
+        if self.fp8_backend in (
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+        ):
+            if not self.block_quant or self.weight_block_size is None:
+                raise NotImplementedError("DeepGEMM reload requires block FP8")
+            policy = DeepGEMMReloadPolicy(
+                pairs=(("w13_weight", s13), ("w2_weight", s2)),
+                block_shape=tuple(self.weight_block_size),
+            )
+        elif self.fp8_backend in (
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.CPU,
+            Fp8MoeBackend.XPU,
+            Fp8MoeBackend.AITER,
+            Fp8MoeBackend.HPC,
+            Fp8MoeBackend.HUMMING,
+        ):
+            if (
+                self.fp8_backend == Fp8MoeBackend.HPC
+                and not self.block_quant
+                and self.quant_config.activation_scheme != "static"
+            ):
+                raise NotImplementedError(
+                    "HPC per-tensor reload requires static input scales"
+                )
+            if not self.block_quant and self.quant_config.activation_scheme == "static":
+                if (
+                    self.moe.moe_parallel_config.enable_eplb
+                    and self.moe.moe_parallel_config.ep_size > 1
+                ):
+                    raise NotImplementedError(
+                        "Static activation-scale EPLB reload requires single-rank "
+                        "EP until activation-scale collectives are coordinated"
+                    )
+                roles += ("w13_input_scale", "w2_input_scale")
+            if self.fp8_backend in (
+                Fp8MoeBackend.TRITON,
+                Fp8MoeBackend.BATCHED_TRITON,
+                Fp8MoeBackend.VLLM_CUTLASS,
+                Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+                Fp8MoeBackend.CPU,
+                Fp8MoeBackend.HPC,
+                Fp8MoeBackend.AITER,
+                Fp8MoeBackend.XPU,
+            ):
+                policy = PlannedMoEReloadPolicy()
+            else:
+                policy_cls = {
+                    Fp8MoeBackend.MARLIN: MarlinMoEReloadPolicy,
+                    Fp8MoeBackend.HUMMING: HummingMoEReloadPolicy,
+                }.get(self.fp8_backend, PlainMoEReloadPolicy)
+                policy = policy_cls(
+                    block_quant=self.block_quant,
+                    is_act_and_mul=self.moe.is_act_and_mul,
+                    shard_size=layer.intermediate_size_per_partition,
+                    num_experts=layer.local_num_experts,
+                )
+        elif self.fp8_backend in (
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+        ):
+            if not self.block_quant:
+                if self.quant_config.activation_scheme != "static":
+                    raise NotImplementedError(
+                        "FlashInfer per-tensor reload requires static input scales"
+                    )
+                if (
+                    self.moe.moe_parallel_config.enable_eplb
+                    and self.moe.moe_parallel_config.ep_size > 1
+                ):
+                    raise NotImplementedError(
+                        "Eager FlashInfer per-tensor EPLB reload requires single-rank "
+                        "EP until activation-scale collectives are coordinated"
+                    )
+                roles += ("w13_input_scale", "w2_input_scale")
+            if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+                policy = CutlassMoEReloadPolicy()
+            else:
+                policy = PlannedMoEReloadPolicy()
+        else:
+            raise NotImplementedError(
+                f"FP8 MoE reload tracing does not support {self.fp8_backend}"
+            )
+        return ReloadState(
+            key=key,
+            module=layer,
+            roles=roles,
+            policy=policy,
+            expert_plan=RoutedExpertsReloadPlan(),
+        )
+
     def _setup_kernel(
         self,
         layer: RoutedExperts,
@@ -719,10 +1054,98 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
 
+    def _create_processing_plan(
+        self, layer: RoutedExperts
+    ) -> Fp8MoEProcessingPlan | None:
+        """Capture structural decisions before cold conversion changes layout."""
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+        backend: Literal[
+            "deep_gemm",
+            "flashinfer_cutlass",
+            "flashinfer_trtllm",
+            "triton",
+            "vllm_cutlass",
+            "hpc",
+            "cpu",
+            "aiter",
+            "xpu",
+        ]
+        if self.fp8_backend in (Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM):
+            backend = "deep_gemm"
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            backend = "flashinfer_cutlass"
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            backend = "flashinfer_trtllm"
+        elif self.fp8_backend in (Fp8MoeBackend.TRITON, Fp8MoeBackend.BATCHED_TRITON):
+            backend = "triton"
+        elif self.fp8_backend in (
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+        ):
+            backend = "vllm_cutlass"
+        elif self.fp8_backend == Fp8MoeBackend.HPC:
+            backend = "hpc"
+        elif self.fp8_backend == Fp8MoeBackend.CPU:
+            backend = "cpu"
+        elif self.fp8_backend == Fp8MoeBackend.AITER:
+            backend = "aiter"
+        elif self.fp8_backend == Fp8MoeBackend.XPU:
+            backend = "xpu"
+        else:
+            return None
+        return Fp8MoEProcessingPlan(
+            backend=backend,
+            block_shape=tuple(layer.weight_block_size) if self.block_quant else None,
+            is_act_and_mul=self.moe.is_act_and_mul,
+            is_gated=layer.activation.is_gated,
+            shard_size=layer.intermediate_size_per_partition,
+            num_experts=layer.local_num_experts,
+            static_input=self.quant_config.activation_scheme == "static",
+            enable_eplb=layer.moe_config.moe_parallel_config.enable_eplb,
+            use_e8m0=is_deep_gemm_e8m0_used() if backend == "deep_gemm" else False,
+            fnuz=current_platform.is_fp8_fnuz(),
+        )
+
+    def _install_processed_weights(
+        self, layer: RoutedExperts, weights: Fp8MoEWeights
+    ) -> None:
+        """Cold-only installation; reload copies into existing runtime targets."""
+        for name, value in (
+            ("w13_weight", weights.w13),
+            ("w2_weight", weights.w2),
+            (f"w13_{self.weight_scale_name}", weights.w13_scale),
+            (f"w2_{self.weight_scale_name}", weights.w2_scale),
+            ("w13_input_scale", weights.w13_input_scale),
+            ("w2_input_scale", weights.w2_input_scale),
+        ):
+            replace_parameter(layer, name, value)
+        if (
+            self.processing_plan.backend in ("flashinfer_cutlass", "flashinfer_trtllm")
+            and not self.block_quant
+        ):
+            layer.moe_config.intermediate_size_per_partition = weights.w2.shape[-1]
+        self._init_moe_kernel(layer)
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
             # Weights are already in kernel format; rebuild the kernel only.
             self._init_moe_kernel(layer)
+            return
+
+        plan = self._create_processing_plan(layer)
+        if plan is not None:
+            self.processing_plan = plan
+            weights = Fp8MoEWeights(
+                layer.w13_weight,
+                layer.w2_weight,
+                getattr(layer, f"w13_{self.weight_scale_name}"),
+                getattr(layer, f"w2_{self.weight_scale_name}"),
+                layer.w13_input_scale,
+                layer.w2_input_scale,
+            )
+            self._install_processed_weights(layer, plan.process(weights))
             return
 
         # Allow for accessing weights and scales in standard way.

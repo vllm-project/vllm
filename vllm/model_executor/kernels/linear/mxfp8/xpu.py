@@ -33,12 +33,23 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         # transposed contiguous buffer as a .t() view so that:
         #   - dequantization consumers still see the checkpoint shape
         #   - apply_weights recovers the oneDNN layout via .t() at zero cost
-        weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
-        scale_kn = weight_scale.data.t().contiguous()
-        replace_parameter(layer, "weight_scale", scale_kn.t())
+        _, scale = self.process_reload_tensors(
+            layer, layer.weight.data, layer.weight_scale.data
+        )
+        replace_parameter(layer, "weight_scale", scale)
 
         if getattr(layer, "is_bmm", False):
-            self._prepare_bmm_params(layer, scale_kn)
+            self._prepare_bmm_params(layer, scale.t())
+
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del layer
+        scale_kn = weight_scale.view(torch.float8_e8m0fnu).t().contiguous()
+        return weight, scale_kn.t()
 
     def _prepare_bmm_params(
         self, layer: torch.nn.Module, scale_kn: torch.Tensor

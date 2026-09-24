@@ -8,6 +8,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
+    process_fp8_weight_block_strategy,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -82,26 +83,44 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer):
-        super().process_weights_after_loading(layer)
         params = self._get_layer_params(layer)
         assert layer.weight_block_size is not None
 
         is_bmm = getattr(layer, "is_bmm", False)
-
-        if self.is_deep_gemm_supported:
-            dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
-                wq=params.weight,
-                ws=params.block_scale,
-                quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=self.use_deep_gemm_e8m0,
-                is_bmm=is_bmm,
-                bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
-            )
-            replace_parameter(layer, params.WEIGHT, dg_weight)
-            replace_parameter(layer, params.block_scale_attr, dg_weight_scale)
+        weight, scale = self.prepare_weights(
+            params.weight,
+            params.block_scale,
+            tuple(layer.weight_block_size),
+            is_bmm=is_bmm,
+            bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
+        )
+        replace_parameter(layer, params.WEIGHT, weight)
+        replace_parameter(layer, params.block_scale_attr, scale)
         # bmm layers bypass this kernel and run through fp8_einsum.
         if not is_bmm:
             layer.deep_gemm_warmup_provider = self
+
+    def prepare_weights(
+        self,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        block_shape: tuple[int, ...],
+        *,
+        is_bmm: bool = False,
+        bmm_batch_size: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Consume fresh checkpoint inputs; do not install parameters or state."""
+        weight, scale = process_fp8_weight_block_strategy(weight, scale)
+        if self.is_deep_gemm_supported:
+            weight, scale = deepgemm_post_process_fp8_weight_block(
+                wq=weight,
+                ws=scale,
+                quant_block_shape=block_shape,
+                use_e8m0=self.use_deep_gemm_e8m0,
+                is_bmm=is_bmm,
+                bmm_batch_size=bmm_batch_size,
+            )
+        return weight, scale
 
     def get_deep_gemm_warmup_weights(
         self, layer: torch.nn.Module

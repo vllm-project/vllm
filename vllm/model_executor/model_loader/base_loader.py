@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -65,6 +66,8 @@ class BaseModelLoader(ABC):
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
+                # Construct modules, parameters, and quantization methods before
+                # loading checkpoint values or running post-load processing.
                 model = self.create_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
@@ -72,7 +75,24 @@ class BaseModelLoader(ABC):
                 )
 
             logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            transfer_config = vllm_config.weight_transfer_config
+            trace = None
+            if transfer_config is not None and transfer_config.reload_mode == "trace":
+                from vllm.model_executor.model_loader.reload.integration import (
+                    create_model_reload_tracer,
+                )
+
+                # Register per-layer reload states in the pre-load layout;
+                # runtime tensor/kernel/config bindings are captured after PWAL.
+                trace = create_model_reload_tracer(
+                    model,
+                    frozen_parameter_names=model_config.sleep_preserve_parameter_names,
+                )
+            # Temporarily wrap loaders to capture cold-load metadata and ordinary
+            # shard slots; RoutedExperts slots use each reload's expert mapping.
+            with trace.observe() if trace is not None else nullcontext():
+                # Populate parameters with the actual checkpoint weights.
+                self.load_weights(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -88,7 +108,17 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
+            # Cold-load PWAL converts loaded weights into the runtime layout.
+            logger.info("Starting cold-load post-processing")
             process_weights_after_loading(model, model_config, target_device)
+            logger.info("Finished cold-load post-processing")
+            if trace is not None:
+                # Bind the resulting runtime tensors, kernels, and quant configs.
+                logger.info("Binding model reload tracer runtime state")
+                trace.bind_runtime()
+                logger.info("Bound model reload tracer runtime state")
+                # Expose the bound tracer to subsequent reload requests.
+                model._reload_tracer = trace
 
         return model.eval()
 

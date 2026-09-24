@@ -166,8 +166,18 @@ def process_weights_after_loading(
                 if quant_method.requires_device_loading
                 else nullcontext()
             )
+            logger.info(
+                "Starting quantization post-processing for %s (%s)",
+                name or "<root>",
+                type(quant_method).__name__,
+            )
             with loading_context:
                 quant_method.process_weights_after_loading(module)
+            logger.info(
+                "Finished quantization post-processing for %s (%s)",
+                name or "<root>",
+                type(quant_method).__name__,
+            )
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
             # global rank in BasevLLMParameter.__init__. Re-reconcile their TP

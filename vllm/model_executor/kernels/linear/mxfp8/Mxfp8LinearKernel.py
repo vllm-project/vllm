@@ -58,6 +58,17 @@ class Mxfp8LinearKernel(ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
 
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert checkpoint-layout tensors to this kernel's runtime layout."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support tensor-only reload"
+        )
+
     @abstractmethod
     def apply_weights(
         self,

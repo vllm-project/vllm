@@ -9,8 +9,8 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 import pickle
 import threading
 import time
-from contextlib import nullcontext
-from unittest.mock import MagicMock
+from contextlib import contextmanager, nullcontext
+from unittest.mock import MagicMock, call
 
 import pybase64 as base64
 import pytest
@@ -119,6 +119,220 @@ def create_mock_vllm_config(
     vllm_config.parallel_config = create_mock_parallel_config(rank, world_size, dp_rank)
     vllm_config.model_config = MagicMock()
     return vllm_config
+
+
+@pytest.mark.parametrize("backend", ["nccl", "ipc"])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_checkpoint_transport_trace_finishes_before_transport_finish(backend, preserve):
+    """Real lifecycle selection must release a completed layer before finish RPC."""
+    from vllm.model_executor.model_loader.reload.integration import (
+        create_model_reload_tracer,
+    )
+    from vllm.model_executor.model_loader.reload.trace import ReloadError
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+    model.weight.weight_loader = default_weight_loader
+    trace = create_model_reload_tracer(model)
+    with trace.observe():
+        model.weight.weight_loader(model.weight, torch.ones(2))
+    trace.bind_runtime()
+    model._reload_tracer = trace
+    engine_cls = (
+        NCCLWeightTransferEngine if backend == "nccl" else IPCWeightTransferEngine
+    )
+    engine = engine_cls(
+        WeightTransferConfig(
+            backend=backend, reload_mode="trace", preserve_checkpoint=preserve
+        ),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    original = model.weight
+    with pytest.raises(ReloadError, match="active START"):
+        engine.update_weights({})
+    assert not trace.failed
+    for value in (2.0, 3.0):
+        engine.start_weight_update()
+        model.weight.weight_loader(model.weight, torch.full((2,), value))
+        state = trace.states[""]
+        assert state.complete
+        assert bool(state.checkpoint) == preserve
+        torch.testing.assert_close(model.weight, torch.full((2,), value))
+        engine.finish_weight_update()
+        assert model.weight is original
+        assert model.weight.weight_loader is default_weight_loader
+        assert not trace.active
+    engine.shutdown()
+
+
+@pytest.mark.parametrize("backend", ["nccl", "ipc"])
+def test_checkpoint_transport_trace_rejects_missing_cold_capture(backend):
+    from vllm.model_executor.model_loader.reload.trace import ReloadError
+
+    engine_cls = (
+        NCCLWeightTransferEngine if backend == "nccl" else IPCWeightTransferEngine
+    )
+    engine = engine_cls(
+        WeightTransferConfig(backend=backend, reload_mode="trace"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        torch.nn.Module(),
+    )
+    with pytest.raises(ReloadError, match="cold loading"):
+        engine.start_weight_update()
+
+
+@pytest.mark.parametrize("backend", ["nccl", "ipc"])
+def test_checkpoint_transport_defaults_to_layerwise(backend, monkeypatch):
+    import vllm.model_executor.model_loader.reload as reload
+
+    start, finish = MagicMock(), MagicMock()
+    monkeypatch.setattr(reload, "initialize_layerwise_reload", start)
+    monkeypatch.setattr(reload, "finalize_layerwise_reload", finish)
+    model = torch.nn.Module()
+    engine_cls = (
+        NCCLWeightTransferEngine if backend == "nccl" else IPCWeightTransferEngine
+    )
+    engine = engine_cls(
+        WeightTransferConfig(backend=backend),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    engine.start_weight_update()
+    engine.finish_weight_update()
+    start.assert_called_once_with(model)
+    finish.assert_called_once_with(model, engine.model_config)
+
+
+@pytest.mark.parametrize("backend", ["nccl", "ipc"])
+def test_checkpoint_transport_parse_failure_aborts_trace(backend):
+    """Even failures before invoking a parameter loader must restore wrappers."""
+    from vllm.model_executor.model_loader.reload.integration import (
+        create_model_reload_tracer,
+    )
+    from vllm.model_executor.model_loader.reload.trace import ReloadError
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+    model.weight.weight_loader = default_weight_loader
+    trace = create_model_reload_tracer(model)
+    with trace.observe():
+        model.weight.weight_loader(model.weight, torch.ones(2))
+    trace.bind_runtime()
+    model._reload_tracer = trace
+    engine_cls = (
+        NCCLWeightTransferEngine if backend == "nccl" else IPCWeightTransferEngine
+    )
+    engine = engine_cls(
+        WeightTransferConfig(backend=backend, reload_mode="trace"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    engine.start_weight_update()
+    with pytest.raises(ValueError, match="Invalid update_info"):
+        engine.update_weights({"invalid_field": True})
+    assert trace.failed and not trace.active
+    assert model.weight.weight_loader is default_weight_loader
+    with pytest.raises(ReloadError, match="failed"):
+        engine.start_weight_update()
+
+
+def test_checkpoint_transport_ipc_releases_import_on_incomplete_finish():
+    from vllm.model_executor.model_loader.reload.trace import ReloadError
+
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc", reload_mode="trace"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        torch.nn.Module(),
+    )
+    engine._packed_importer = MagicMock()
+    with pytest.raises(ReloadError, match="cold loading"):
+        engine.finish_weight_update()
+    engine._packed_importer.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_checkpoint_transport_nccl_uses_one_load_stream(monkeypatch, fail):
+    """Conversion must see earlier shards; receive buffers outlive loader reads."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl
+
+    load_stream = MagicMock()
+    receive_streams = [MagicMock(), MagicMock()]
+    active_stream = load_stream
+    seen = []
+
+    @contextmanager
+    def stream_context(stream):
+        nonlocal active_stream
+        previous, active_stream = active_stream, stream
+        try:
+            yield
+        finally:
+            active_stream = previous
+
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *args: active_stream)
+    monkeypatch.setattr(torch.cuda, "stream", stream_context)
+
+    def consume(*, post_unpack_func, **kwargs):
+        for stream in receive_streams:
+            with stream_context(stream):
+                post_unpack_func([("weight", torch.ones(1))])
+
+    monkeypatch.setattr(nccl, "packed_nccl_broadcast_consumer", consume)
+    model = torch.nn.Module()
+
+    def load(weights):
+        seen.append(active_stream)
+        if fail:
+            raise RuntimeError("loader failed")
+
+    model.load_weights = load
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl", reload_mode="trace"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    engine.packed = True
+    engine.model_update_group = MagicMock()
+    info = NCCLWeightTransferUpdateInfo(
+        names=["weight"], dtype_names=["float32"], shapes=[[1]]
+    )
+    if fail:
+        with pytest.raises(RuntimeError, match="loader failed"):
+            engine.receive_weights(info)
+    else:
+        engine.receive_weights(info)
+    count = 1 if fail else 2
+    assert all(stream is load_stream for stream in seen)
+    assert len(seen) == count
+    assert load_stream.wait_stream.call_count == count
+    load_stream.wait_stream.assert_has_calls(
+        [call(stream) for stream in receive_streams[:count]]
+    )
+    for stream in receive_streams[:count]:
+        stream.wait_stream.assert_called_once_with(load_stream)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"backend": "sparse_nccl", "reload_mode": "trace"},
+        {"backend": "sharded_rdt", "reload_mode": "trace"},
+        {"preserve_checkpoint": True},
+        {"reload_mode": "invalid"},
+    ],
+)
+def test_checkpoint_reload_config_rejects_unsupported_modes(kwargs):
+    with pytest.raises(ValueError):
+        WeightTransferConfig(**kwargs)
 
 
 # --- Unit Tests: NCCLWeightTransferUpdateInfo Validation ---

@@ -153,7 +153,9 @@ def algos_owned_by(config_name: str) -> tuple[str, ...]:
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
-    """Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints."""
+    """
+    Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints.
+    """
 
     def __init__(self, quant_config: "ModelOptQuantConfigBase"):
         super().__init__(quant_config)
@@ -176,7 +178,8 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self.exclude_modules: list[str] = exclude_modules
 
     def is_layer_excluded(self, prefix: str) -> bool:
-        """Check if a layer should be excluded from quantization.
+        """
+        Check if a layer should be excluded from quantization.
 
         Handles both exact matching (for fused layers) and ModelOpt wildcard matching.
 
@@ -469,10 +472,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale.
-
     Args:
         quant_config: The ModelOpt quantization config.
-
     """
 
     def __init__(
@@ -817,11 +818,10 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
-    """MoE Method for FP4 Quantization.
-
+    """
+    MoE Method for FP4 Quantization.
     Args:
         quant_config: NVFP4 Quant Config
-
     """
 
     supports_pre_processed_weights = True
@@ -851,7 +851,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
-        """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
+        """
+        FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
+        """
         return True
 
     def create_weights(
@@ -971,7 +973,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
+        """
+        Convert NVFP4 MoE weights into kernel format and setup the kernel.
+        """
         if is_weights_pre_processed():
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
                 raise RuntimeError(
@@ -1890,7 +1894,29 @@ class QuantKeyScheme:
         raise NotImplementedError
 
     def process(self, layer, role) -> None:
-        pass
+        values = dict(layer.named_parameters(recurse=False))
+        converted = self.process_tensors(
+            values, role, logical_widths=tuple(getattr(layer, "logical_widths", ()))
+        )
+        for name in values.keys() - converted.keys():
+            delattr(layer, name)
+        for name, tensor in converted.items():
+            if tensor is not values.get(name):
+                setattr(layer, name, Parameter(tensor, requires_grad=False))
+
+    def process_tensors(self, values, role, *, logical_widths=()):
+        """Convert loader-layout tensors without modifying a live module.
+
+        Each invocation receives fresh canonical inputs, not the previous
+        invocation's outputs. Scheme instances are shared across layers.
+        """
+        raise NotImplementedError
+
+    def process_reload(self, layer, role) -> None:
+        """Apply an audited tensor conversion to existing runtime storage."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support reload processing"
+        )
 
     @staticmethod
     def reject(role) -> None:
@@ -1956,7 +1982,7 @@ class KNvfp4Static(QuantKeyScheme):
             init=float("nan"),
         )
 
-    def process(self, layer, role) -> None:
+    def process_tensors(self, values, role, *, logical_widths=()):
         if role is not WEIGHT:
             self.reject(role)
         # Sanity-check: weight_scale must have been overwritten by the weight
@@ -1964,16 +1990,15 @@ class KNvfp4Static(QuantKeyScheme):
         # means the FP4 weights were never actually loaded (e.g. the
         # checkpoint stores this layer as BF16 and the weight loader silently
         # skipped it).
-        if torch.isnan(layer.weight_scale.float()).any():
+        if torch.isnan(values["weight_scale"].float()).any():
             raise RuntimeError(
-                f"NVFP4 weight_scale for layer "
-                f"{getattr(layer, 'name', repr(layer))!r} was never loaded "
+                "NVFP4 weight_scale was never loaded "
                 "(still NaN). The checkpoint likely stores this layer as "
                 "BF16 (not FP4). Fix: pass quant_config=None when "
                 "constructing this layer, or add it to the quantization "
                 "ignore list."
             )
-        if torch.unique(layer.weight_scale_2).numel() != 1:
+        if torch.unique(values["weight_scale_2"]).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global weight scale differs across "
                 "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
@@ -1981,9 +2006,9 @@ class KNvfp4Static(QuantKeyScheme):
                 "global NVFP4 scale for fused weights."
             )
         # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
-        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
-        del layer.weight_scale_2
+        result = dict(values)
+        result["weight_global_scale"] = result.pop("weight_scale_2").max().float()
+        return result
 
 
 class KNvfp4Dynamic(QuantKeyScheme):
@@ -2004,23 +2029,20 @@ class KNvfp4Dynamic(QuantKeyScheme):
             wl,
         )
 
-    def process(self, layer, role) -> None:
+    def process_tensors(self, values, role, *, logical_widths=()):
         if role is not ACT:
             self.reject(role)
-        if torch.unique(layer.input_scale).numel() != 1:
+        if torch.unique(values["input_scale"]).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global input scale differs across "
                 "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
                 "likely reduce accuracy. Consider a checkpoint with the same "
                 "global NVFP4 scale for fused weights."
             )
-        input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        layer.input_global_scale_inv = Parameter(
-            (1.0 / layer.input_global_scale).to(torch.float32),
-            requires_grad=False,
-        )
-        del layer.input_scale
+        result = dict(values)
+        result["input_global_scale"] = result.pop("input_scale").max().float()
+        result["input_global_scale_inv"] = result["input_global_scale"].reciprocal()
+        return result
 
 
 class KFp8StaticTensor(QuantKeyScheme):
@@ -2065,32 +2087,37 @@ class KFp8StaticTensor(QuantKeyScheme):
             self.reject(role)
 
     def process(self, layer, role) -> None:
+        super().process(layer, role)
         if role is WEIGHT:
-            weight = layer.weight
-            max_w_scale = layer.weight_scale.max()
-            if not (layer.weight_scale == layer.weight_scale[0]).all():
+            layer.weight.input_dim = 0
+            layer.weight.output_dim = 1
+
+    def process_tensors(self, values, role, *, logical_widths=()):
+        result = dict(values)
+        if role is WEIGHT:
+            weight = values["weight"]
+            scale = values["weight_scale"]
+            max_w_scale = scale.max()
+            if not (scale == scale[0]).all():
                 max_w_scale, weight = requantize_with_max_scale(
-                    layer.weight, layer.weight_scale, layer.logical_widths
+                    weight, scale, list(logical_widths)
                 )
             # Transposed here rather than in the kernel: ModelOpt maps each
             # fp8 key to exactly one kernel, so the layout is key-determined.
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-            # The plain Parameter drops ModelWeightParameter's dim attributes;
-            # restore them for the transposed layout, which Humming reads.
-            layer.weight.input_dim = 0
-            layer.weight.output_dim = 1
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+            result["weight"] = weight.t()
+            result["weight_scale"] = max_w_scale
         elif role is ACT:
-            if torch.unique(layer.input_scale).numel() != 1:
+            if torch.unique(values["input_scale"]).numel() != 1:
                 logger.warning_once(
                     "In FP8 linear, the static input scale differs across "
                     "parallel layers (e.g. q_proj, k_proj, v_proj). Collapsing "
                     "them to the max will likely reduce accuracy. Consider a "
                     "checkpoint with the same input scale for fused weights."
                 )
-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+            result["input_scale"] = values["input_scale"].max()
         else:
             self.reject(role)
+        return result
 
 
 class KFp8StaticChannel(QuantKeyScheme):
@@ -2123,14 +2150,13 @@ class KFp8StaticChannel(QuantKeyScheme):
             init=FP8_SCALE_SENTINEL,
         )
 
-    def process(self, layer, role) -> None:
+    def process_tensors(self, values, role, *, logical_widths=()):
         if role is not WEIGHT:
             self.reject(role)
         weight, weight_scale, _ = process_fp8_weight_channel_strategy(
-            layer.weight, layer.weight_scale.data
+            values["weight"], values["weight_scale"]
         )
-        layer.weight = Parameter(weight, requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        return {**values, "weight": weight.t(), "weight_scale": weight_scale}
 
 
 class KFp8Block128(QuantKeyScheme):
@@ -2176,18 +2202,21 @@ class KFp8Block128(QuantKeyScheme):
         )
         layer.weight_block_size = [128, 128]
 
-    def process(self, layer, role) -> None:
+    def process_tensors(self, values, role, *, logical_widths=()):
         if role is not WEIGHT:
             self.reject(role)
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
-        s = layer.weight_scale
+        s = values["weight_scale"]
         if s.dim() == 4:
             s = s.squeeze(1).squeeze(-1)  # [ob,1,ib,1] -> [ob,ib]
         elif s.dim() != 2:
             raise ValueError(
                 f"Unexpected FP8_PB_WO weight_scale shape {tuple(s.shape)}"
             )
-        layer.weight_scale = Parameter(s.contiguous(), requires_grad=False)
+        return {
+            **values,
+            "weight": values["weight"].detach(),
+            "weight_scale": s.contiguous(),
+        }
 
 
 class KMxfp8Static(QuantKeyScheme):
@@ -2262,6 +2291,19 @@ class KMxfp8Static(QuantKeyScheme):
         assert layer.weight_scale.ndim == 2
         assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE
 
+    def process_tensors(self, values, role, *, logical_widths=()):
+        if role is not WEIGHT:
+            self.reject(role)
+        weight, scale = values["weight"], values["weight_scale"]
+        if (
+            weight.ndim != 2
+            or weight.dtype != MXFP8_VALUE_DTYPE
+            or scale.ndim != 2
+            or scale.dtype != MXFP8_SCALE_DTYPE
+        ):
+            raise ValueError("Expected canonical 2D MXFP8 weight and E8M0 scales")
+        return dict(values)
+
 
 class KDynamicNoParam(QuantKeyScheme):
     """Dynamic activation with no stored scale (W8A8): quantized at runtime in
@@ -2274,9 +2316,10 @@ class KDynamicNoParam(QuantKeyScheme):
             self.reject(role)
         # dynamic -> nothing stored
 
-    def process(self, layer, role) -> None:
+    def process_tensors(self, values, role, *, logical_widths=()):
         if role is not ACT:
             self.reject(role)
+        return dict(values)
 
 
 SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
@@ -2293,7 +2336,7 @@ SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
 
 
 def maybe_fuse_global_scales(layer) -> None:
-    """Alpha = input_global_scale * weight_global_scale, presence-gated.
+    """alpha = input_global_scale * weight_global_scale, presence-gated.
 
     W4A4 has both -> computed; W4A16 has no input_global_scale -> skipped.
     """
@@ -2302,6 +2345,16 @@ def maybe_fuse_global_scales(layer) -> None:
             layer.input_global_scale * layer.weight_global_scale,
             requires_grad=False,
         )
+
+
+def maybe_fuse_global_scales_from_values(
+    values: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Fuse converted global scales without touching a live layer."""
+    if "weight_global_scale" in values and "input_global_scale" in values:
+        values = dict(values)
+        values["alpha"] = values["input_global_scale"] * values["weight_global_scale"]
+    return values
 
 
 def select_linear_kernel(
@@ -2361,6 +2414,21 @@ class FormatScheme:
     def post_process(self, layer) -> None:
         """Run after the key schemes' ``process``, before the kernel's."""
 
+    def prepare_for_reload(self, layer) -> None:
+        """Restore runtime-owned state to the loadable representation."""
+
+    def process_reload(self, layer) -> None:
+        """Convert freshly loaded values into the runtime representation."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support reload processing"
+        )
+
+    def process_reload_tensors(
+        self, layer, values: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Convert reload tensors without mutating the live module."""
+        return values
+
     def apply(self, layer, x, bias, kernel_apply):
         """Wrap the kernel's forward. ``kernel_apply(layer, x, bias) -> Tensor``.
 
@@ -2399,6 +2467,17 @@ class _Fp8PbWoPartialBlock(FormatScheme):
         padded[:out].copy_(w.data)
         layer.weight = Parameter(padded, requires_grad=False)
 
+    def process_reload_tensors(self, layer, values):
+        values = dict(values)
+        weight = values["weight"]
+        logical = weight.shape[0]
+        pad = (-logical) % 128
+        if pad:
+            padded = weight.new_zeros(logical + pad, weight.shape[1])
+            padded[:logical].copy_(weight)
+            values["weight"] = padded
+        return values
+
     def apply(self, layer, x, bias, kernel_apply):
         logical = getattr(layer, "_pbwo_logical_out", None)
         if logical is None:  # width was block-aligned: nothing to trim
@@ -2436,8 +2515,82 @@ class _DropInputScale(FormatScheme):
             )
         del layer.input_scale
 
+    def process_reload_tensors(self, layer, values):
+        values = dict(values)
+        values.pop("input_scale", None)
+        return values
+
 
 _DROP_INPUT_SCALE = _DropInputScale()
+
+
+@dataclass
+class ModelOptProcessingPlan:
+    """Compose format, quantization-key, and kernel processing."""
+
+    fmt: FormatScheme
+    wkey: QuantKeyScheme
+    akey: QuantKeyScheme | None
+    kernel: Any
+
+    def process_cold(self, layer) -> None:
+        self.fmt.pre_process(layer)
+        self.wkey.process(layer, WEIGHT)
+        if self.akey is not None:
+            self.akey.process(layer, ACT)
+        maybe_fuse_global_scales(layer)
+        self.fmt.post_process(layer)
+
+    def prepare_for_reload(self, layer) -> None:
+        self.fmt.prepare_for_reload(layer)
+        prepare = getattr(self.kernel, "prepare_for_reload", None)
+        if prepare is None:
+            raise NotImplementedError(
+                f"{type(self.kernel).__name__} does not support reload preparation"
+            )
+        prepare(layer)
+
+    def process_reload(self, layer) -> None:
+        self.fmt.process_reload(layer)
+        self.wkey.process_reload(layer, WEIGHT)
+        if self.akey is not None:
+            self.akey.process_reload(layer, ACT)
+        maybe_fuse_global_scales(layer)
+        process = getattr(self.kernel, "process_reload", None)
+        if process is None:
+            raise NotImplementedError(
+                f"{type(self.kernel).__name__} does not support reload processing"
+            )
+        process(layer)
+
+    def process_reload_tensors(
+        self, layer, values: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Replay the audited cold-load transformations on fresh tensors."""
+        values = self.wkey.process_tensors(
+            values,
+            WEIGHT,
+            logical_widths=tuple(getattr(layer, "logical_widths", ())),
+        )
+        if self.akey is not None:
+            values = self.akey.process_tensors(values, ACT)
+        values = maybe_fuse_global_scales_from_values(values)
+        values = self.fmt.process_reload_tensors(layer, values)
+        if self.kernel is None:
+            raise RuntimeError("ModelOpt processing plan has no kernel")
+        process = getattr(self.kernel, "process_reload_tensors", None)
+        if process is None:
+            raise NotImplementedError(
+                f"{type(self.kernel).__name__} does not support tensor reload"
+            )
+        if "weight" not in values or "weight_scale" not in values:
+            raise RuntimeError("ModelOpt reload requires weight and weight_scale")
+        values["weight"], values["weight_scale"] = process(
+            layer,
+            values["weight"],
+            values["weight_scale"],
+        )
+        return values
 
 
 @register_weight_loader_v2_supported_method
@@ -2463,6 +2616,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.fmt = format_scheme or FormatScheme()
         self.wkey = SCHEME_FOR[spec.weight]
         self.akey = None if spec.activation is None else SCHEME_FOR[spec.activation]
+        self.processing_plan: ModelOptProcessingPlan | None = None
         # Only the fp8/mxfp8 kernels read input_dtype; nvfp4 ignores it. During
         # real serving model_config is always set; fall back defensively when
         # there is no config context (bare unit-test dispatch).
@@ -2482,15 +2636,39 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
+        # TODO(Isotr0py): support fp8/mxfp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
-        return isinstance(w, QuantKey) and (
-            w.dtype == FP4_DTYPE
-            or (
-                w == kMxfp8Static
-                and self.kernel is not None
-                and self.kernel.supports_pre_processed_weights
+        return isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
+
+    def create_reload_state(self, layer, key: str):
+        from vllm.model_executor.model_loader.reload.fp8 import (
+            ModelOptLinearReloadPolicy,
+        )
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+
+        fp8_weights = (
+            kFp8StaticTensorSym,
+            kFp8StaticTokenSym,
+            kFp8Static128BlockSym,
+            kFp8DynamicTokenSym,
+            kFp8Dynamic128Sym,
+            kMxfp8Static,
+        )
+        if self.spec.weight not in fp8_weights:
+            raise NotImplementedError(
+                f"{key}: ModelOpt {self.spec.weight} reload policy is not implemented"
             )
+        roles = tuple(name for name, _ in layer.named_parameters(recurse=False))
+        return ReloadState(
+            key=key,
+            module=layer,
+            roles=roles,
+            policy=ModelOptLinearReloadPolicy(
+                # create_reload_state runs before create_weights selects the
+                # kernel. Capture this method explicitly and resolve the plan
+                # after cold PWAL has created it.
+                processing_plan_getter=lambda: self.processing_plan,
+            ),
         )
 
     def create_weights(
@@ -2528,23 +2706,26 @@ class ModelOptLinearMethod(LinearMethodBase):
             rt,
             weight_shape=self.fmt.kernel_weight_shape(layer),
         )
+        self.processing_plan = ModelOptProcessingPlan(
+            fmt=self.fmt,
+            wkey=self.wkey,
+            akey=self.akey,
+            kernel=self.kernel,
+        )
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
-        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
-            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
         if is_weights_pre_processed():
-            if not self.supports_pre_processed_weights:
-                raise RuntimeError(
-                    f"{type(self.kernel).__name__} cannot use pre-processed weights"
-                )
             return
-        self.fmt.pre_process(layer)
-        self.wkey.process(layer, WEIGHT)
-        if self.akey:
-            self.akey.process(layer, ACT)
-        maybe_fuse_global_scales(layer)
-        self.fmt.post_process(layer)
+        if not hasattr(self, "processing_plan") or self.processing_plan is None:
+            self.processing_plan = ModelOptProcessingPlan(
+                fmt=self.fmt,
+                wkey=self.wkey,
+                akey=self.akey,
+                kernel=self.kernel,
+            )
+        assert self.processing_plan is not None
+        self.processing_plan.process_cold(layer)
         layer.is_w4a16_nvfp4 = (
             self.spec.weight == kNvfp4Static and self.spec.activation is None
         )
@@ -2569,6 +2750,9 @@ class ModelOptLinearMethod(LinearMethodBase):
                 persistent=False,
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
+        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
+            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
+            self.processing_plan.kernel = self.kernel
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):

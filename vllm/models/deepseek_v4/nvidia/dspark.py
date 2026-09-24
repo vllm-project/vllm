@@ -569,6 +569,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
 
+    def create_reload_state(self, key: str):
+        from vllm.model_executor.model_loader.reload.model import (
+            create_deepseek_model_reload_state,
+        )
+
+        return create_deepseek_model_reload_state(self, key)
+
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
 

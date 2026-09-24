@@ -1751,8 +1751,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     if is_pp_missing_parameter(name, self):
                         continue
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
+                    param = params_dict[name]
+                    param.weight_loader(param, narrow_weight)
                     loaded_params.add(name)
                     continue
                 else:
@@ -2027,8 +2027,18 @@ class DeepseekV4ForCausalLM(
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
+        logger.info("DeepSeek V4: finalizing MegaMoE weights")
         self.model.finalize_mega_moe_weights()
+        logger.info("DeepSeek V4: finalizing mHC broadcast weights")
         self.model.finalize_mhc_broadcast_weights()
+        logger.info("DeepSeek V4: finished model post-load processing")
+
+    def create_reload_state(self, key: str):
+        from vllm.model_executor.model_loader.reload.model import (
+            create_deepseek_model_reload_state,
+        )
+
+        return create_deepseek_model_reload_state(self, key)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

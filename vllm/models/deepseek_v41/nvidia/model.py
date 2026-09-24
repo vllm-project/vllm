@@ -1336,5 +1336,12 @@ class DeepseekV41LLMForCausalLM(
         self.model.finalize_mhc_broadcast_weights()
         self.model.finalize_mega_attn_weights()
 
+    def create_reload_state(self, key: str):
+        from vllm.model_executor.model_loader.reload.model import (
+            create_deepseek_model_reload_state,
+        )
+
+        return create_deepseek_model_reload_state(self, key)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

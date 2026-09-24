@@ -472,3 +472,8 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
         )
+
+
+# Kept as a compatibility alias for reload policy dispatch while the kernel
+# naming transition is completed.
+AiterPreshuffledFp8BlockScaledMMKernel = AiterFp8BlockScaledMMKernel
