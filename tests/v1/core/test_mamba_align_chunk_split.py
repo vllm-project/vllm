@@ -392,3 +392,10 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail stop ({tail_stop})"
         )
+
+
+def test_explicit_checkpoint_stops_prefill_chunk() -> None:
+    (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
+    request.mamba_checkpoint_position = 800
+
+    assert _split(request, 1600, use_eagle=False) == 800
