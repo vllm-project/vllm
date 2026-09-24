@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
@@ -822,20 +823,39 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
-            rocm_sparse_attn_prefill(
-                q=q,
-                kv=kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1]),
-                indices=None,
-                topk_length=None,
-                scale=self.scale,
-                head_dim=q.shape[-1],
-                nope_head_dim=self.kv_lora_rank,
-                rope_head_dim=q.shape[-1] - self.kv_lora_rank,
-                attn_sink=triton_sinks,
-                output=output,
-                ragged_indices=attn_metadata.paged_kv_indices,
-                ragged_indptr=attn_metadata.paged_kv_indptr,
-            )
+            # Decode rows sort first, so the phases are contiguous slices.
+            kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            if num_decode_tokens > 0:
+                rocm_sparse_attn_decode_bf16(
+                    q=q[:num_decode_tokens],
+                    kv=kv,
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output[:num_decode_tokens],
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr[
+                        : num_decode_tokens + 1
+                    ],
+                )
+            if num_decode_tokens < num_tokens:
+                rocm_sparse_attn_prefill(
+                    q=q[num_decode_tokens:],
+                    kv=kv,
+                    indices=None,
+                    topk_length=None,
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output[num_decode_tokens:],
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr[num_decode_tokens:],
+                )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
 

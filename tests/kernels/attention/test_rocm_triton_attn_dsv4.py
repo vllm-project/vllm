@@ -505,6 +505,131 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+NOPE_ONLY_HEAD_DIM = 512
+
+
+def _nope_only_ragged_inputs(
+    kv_lens: list[int], num_heads: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build a GLM-like 512+0 NoPE decode batch with ragged KV segments."""
+    num_kv = 4096
+    kv = (
+        torch.randn(num_kv, NOPE_ONLY_HEAD_DIM, dtype=torch.bfloat16, device=device)
+        * 0.125
+    )
+    q = (
+        torch.randn(
+            len(kv_lens),
+            num_heads,
+            NOPE_ONLY_HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    rows = [torch.randperm(num_kv)[:length].tolist() for length in kv_lens]
+    indices, indptr = _ragged_from_rows(rows, device)
+    return q, kv, indices, indptr
+
+
+# Lengths below the split count leave splits empty; non-multiples force a tail.
+_NOPE_ONLY_KV_LENS = [0, 1, 3, 37, 129, 2048]
+
+
+@requires_split_decode_arch
+@pytest.mark.parametrize("num_splits", [2, 4, 8, 32])
+@pytest.mark.parametrize("with_sink", [True, False])
+@torch.inference_mode()
+def test_sparse_attn_decode_bf16_split_k_matches_ragged(
+    num_splits: int, with_sink: bool
+) -> None:
+    """Split-K decode must reproduce the single-workgroup ragged kernel."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_bf16_triton,
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_heads = 16
+    q, kv, indices, indptr = _nope_only_ragged_inputs(
+        _NOPE_ONLY_KV_LENS, num_heads, device
+    )
+    attn_sink = (
+        torch.randn(num_heads, dtype=torch.float32, device=device)
+        if with_sink
+        else None
+    )
+    scale = NOPE_ONLY_HEAD_DIM**-0.5
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+    )
+    actual = _rocm_sparse_attn_decode_ragged_bf16_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+        num_splits=num_splits,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_sparse_attn_decode_bf16_writes_caller_output() -> None:
+    """The decode entry point writes the ragged result into the caller's out."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+        rocm_sparse_attn_decode_bf16,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_heads = 16
+    q, kv, indices, indptr = _nope_only_ragged_inputs(
+        _NOPE_ONLY_KV_LENS, num_heads, device
+    )
+    attn_sink = torch.randn(num_heads, dtype=torch.float32, device=device)
+    scale = NOPE_ONLY_HEAD_DIM**-0.5
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+    )
+    output = torch.empty_like(expected)
+    rocm_sparse_attn_decode_bf16(
+        q=q,
+        kv=kv.unsqueeze(1),
+        scale=scale,
+        head_dim=NOPE_ONLY_HEAD_DIM,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+        attn_sink=attn_sink,
+        output=output,
+        ragged_indices=indices,
+        ragged_indptr=indptr,
+    )
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],
@@ -905,6 +1030,7 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     assert mod._decode_gfx950_num_splits(1, 1, 128, 8192) == 32
     assert mod._decode_gfx950_num_splits(17, 1, 128, 32) == 4
     assert mod._decode_gfx950_num_splits(512, 1, 128, 7812) == 1
+    assert mod._decode_gfx950_num_splits(4, 1, 2048.0, 0.0, 32) == 32
 
 
 @requires_split_decode_arch
