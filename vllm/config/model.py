@@ -55,7 +55,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
 
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
@@ -105,7 +105,7 @@ PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
     "processed_logits",
     "processed_logprobs",
 )
-HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
+HfOverrides = dict[str, Any] | Callable[[PreTrainedConfig], PreTrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
@@ -183,9 +183,9 @@ class ModelConfig:
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
     leading to inconsistent results."""
-    hf_config: PretrainedConfig = field(init=False)
+    hf_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
-    hf_text_config: PretrainedConfig = field(init=False)
+    hf_text_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
     is_submodel_config: bool = field(default=False, init=False)
     """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
@@ -483,7 +483,7 @@ class ModelConfig:
 
     def _update_nested(
         self,
-        target: PretrainedConfig | dict[str, Any],
+        target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
         """Recursively updates a config or dict with nested updates."""
@@ -511,15 +511,15 @@ class ModelConfig:
 
     def _apply_dict_overrides(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
         """Apply dict overrides, handling both nested configs and dict values."""
-        from transformers import PretrainedConfig
+        from transformers import PreTrainedConfig
 
         for key, value in overrides.items():
             attr = getattr(config, key, None)
-            if attr is not None and isinstance(attr, PretrainedConfig):
+            if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
                 self._update_nested(attr, value)
             else:
@@ -2417,7 +2417,7 @@ def _resolve_auto_dtype(
 
 def _get_and_verify_dtype(
     model_id: str,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     dtype: str | torch.dtype,
     *,
     is_pooling_model: bool,
@@ -2464,7 +2464,7 @@ def _get_and_verify_dtype(
 
 
 def _get_head_dtype(
-    config: PretrainedConfig, dtype: torch.dtype, runner_type: str
+    config: PreTrainedConfig, dtype: torch.dtype, runner_type: str
 ) -> torch.dtype:
     head_dtype: str | torch.dtype | None = getattr(config, "head_dtype", None)
 
@@ -2488,7 +2488,7 @@ def _get_head_dtype(
 
 
 def _get_and_verify_max_len(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     model_arch_config: ModelArchitectureConfig,
     tokenizer_config: dict | None,
     max_model_len: int | None,
