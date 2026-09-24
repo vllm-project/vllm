@@ -1329,12 +1329,42 @@ class BuildFlashinferMixedSparseIndicesKernel(
         SWA_TOTAL_WIDTH: tl.constexpr = SWA_INDEX_WIDTH + IMAGE_WIDTH
 
         if token_idx < NUM_DECODE_TOKENS:
+            # A decode row wider than the window is DSpark's non-causal block:
+            # the block-anchored window of context followed by the whole block,
+            # contiguous from column 0. The kernel treats every entry of its
+            # active ranges as a key -- the first min(WINDOW_SIZE, pos + 1)
+            # columns and [WINDOW_SIZE, sparse_topk_lens) -- so -1 must not
+            # appear in either. Fill the causal window with the first visible
+            # entries and put the rest from column WINDOW_SIZE on.
+            NONCAUSAL: tl.constexpr = SWA_INDEX_WIDTH > WINDOW_SIZE
+            tl.static_assert(not NONCAUSAL or DECODE_COMPRESSED_TOPK == 0)
+            if NONCAUSAL:
+                req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+                query_start = tl.load(query_start_loc_ptr + req_idx)
+                query_len = tl.load(query_start_loc_ptr + req_idx + 1) - query_start
+                context_len = tl.load(seq_lens_ptr + req_idx) - query_len
+                window_len = tl.minimum(
+                    context_len + token_idx - query_start + 1, WINDOW_SIZE
+                )
+                spill_len = (
+                    tl.minimum(context_len, WINDOW_SIZE) + query_len - window_len
+                )
             for i in range(0, SWA_TOTAL_WIDTH, WINDOW_BLOCK_SIZE):
                 offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
                 mask = offset < SWA_TOTAL_WIDTH
+                src = offset
+                src_mask = offset < SWA_INDEX_WIDTH
+                if NONCAUSAL:
+                    spill = offset >= WINDOW_SIZE
+                    src = tl.where(spill, offset - WINDOW_SIZE + window_len, offset)
+                    src_mask = tl.where(
+                        spill,
+                        offset < WINDOW_SIZE + spill_len,
+                        offset < window_len,
+                    )
                 values = tl.load(
-                    decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
-                    mask=offset < SWA_INDEX_WIDTH,
+                    decode_swa_indices_ptr + token_idx * decode_swa_stride + src,
+                    mask=src_mask,
                     other=-1,
                 )
                 values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
@@ -1395,7 +1425,12 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 else:
                     compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
 
-            tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + compressed_len)
+            if NONCAUSAL:
+                tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + spill_len)
+            else:
+                tl.store(
+                    sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + compressed_len
+                )
             return
 
         prefill_idx = token_idx - NUM_DECODE_TOKENS

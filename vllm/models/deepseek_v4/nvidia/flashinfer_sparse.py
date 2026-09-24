@@ -237,15 +237,14 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
-        reason: str | None
-        if vllm_config.attention_config.use_non_causal:
-            # RopeQuant derives RoPE positions from seq_lens; the non-causal
-            # DSpark draft clamps its positions at max_model_len independently.
-            reason = "RopeQuant derives positions from seq_lens"
-        else:
-            reason = rope_quant_unsupported_reason(
-                self, self._einsum_recipe, self._tma_aligned_scales
-            )
+        # RopeQuant derives each query's RoPE position as seq_len - q_len + i,
+        # which matches `positions` for DSpark's non-causal draft block too,
+        # since every call passes the real per-request seq_lens. The one
+        # exception is a draft block running past max_model_len, whose clamped
+        # positions it does not reproduce; that only costs those drafts.
+        reason = rope_quant_unsupported_reason(
+            self, self._einsum_recipe, self._tma_aligned_scales
+        )
         self._fuse_rope_quant = reason is None
         if reason is None:
             logger.info_once(
