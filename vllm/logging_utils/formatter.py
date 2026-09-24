@@ -11,7 +11,7 @@ class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
     def __init__(self, fmt, datefmt=None, style="%"):
-        super().__init__(fmt, datefmt, style)
+        super().__init__(fmt, datefmt, style, defaults={"request_id": "-"})
 
         self.use_relpath = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         if self.use_relpath:

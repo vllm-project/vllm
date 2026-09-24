@@ -74,6 +74,18 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     assert formatter.datefmt == _DATE_FORMAT
 
 
+def test_newline_formatter_defaults_missing_request_id():
+    formatter = NewLineFormatter("%(request_id)s %(message)s")
+    ordinary_record = logging.makeLogRecord({"msg": "ordinary log"})
+    request_record = logging.makeLogRecord(
+        {"msg": "request log", "request_id": "external-123"}
+    )
+
+    assert formatter.format(ordinary_record) == "- ordinary log"
+    assert not hasattr(ordinary_record, "request_id")
+    assert formatter.format(request_record) == "external-123 request log"
+
+
 def test_use_color_force_color(monkeypatch):
     """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
     explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
