@@ -101,8 +101,10 @@ class OnlineDerenderer:
         self._derender_completion_async = make_async(
             self._derender_completion, executor=renderer._executor
         )
-        # Replay is O(n) per chunk (unlike the O(delta) detok-only paths),
-        # so it must not run on the event loop either.
+        self._detokenize_delta_async = make_async(
+            self._detokenize_delta, executor=renderer._executor
+        )
+        # Replay is O(n) per chunk, so it must not run on the event loop.
         self._derender_chat_stream_parsed_async = make_async(
             self._derender_chat_stream_parsed, executor=renderer._executor
         )
@@ -362,7 +364,7 @@ class OnlineDerenderer:
 
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
-            new_text, updated_state = self._detokenize_delta(
+            new_text, updated_state = await self._detokenize_delta_async(
                 tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
             )
 
@@ -716,7 +718,7 @@ class OnlineDerenderer:
 
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
-            new_text, updated_state = self._detokenize_delta(
+            new_text, updated_state = await self._detokenize_delta_async(
                 tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
             )
             stream_choices.append(
