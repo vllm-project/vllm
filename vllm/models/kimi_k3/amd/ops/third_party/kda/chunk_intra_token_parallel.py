@@ -12,7 +12,7 @@
 
 import torch
 
-from vllm.third_party.flash_linear_attention.ops.op import exp2
+from vllm.third_party.flash_linear_attention.ops.op import exp2, make_tensor_descriptor
 from vllm.triton_utils import tl, triton
 
 
@@ -108,20 +108,16 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
 
     # g: [B, T, HV, K], beta: [B, T, HV]
-    p_g = tl.make_block_ptr(
-        g + i_t * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-    )
-    p_beta = tl.make_block_ptr(beta + i_t * HV, (HV,), (1,), (i_hg * BH,), (BH,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_beta = tl.load(p_beta, boundary_check=(0,)).to(tl.float32)
+    desc_g = make_tensor_descriptor(g + i_t * HV * K, [HV, K], [K, 1], [BH, BK])
+    desc_beta = make_tensor_descriptor(beta + i_t * HV, [HV], [1], [BH])
+    b_g = desc_g.load([i_hg * BH, 0]).to(tl.float32)
+    b_beta = desc_beta.load([i_hg * BH]).to(tl.float32)
     b_k *= b_beta[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
         b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-        p_gj = tl.make_block_ptr(
-            g + j * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-        )
-        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
+        desc_gj = make_tensor_descriptor(g + j * HV * K, [HV, K], [K, 1], [BH, BK])
+        b_gj = desc_gj.load([i_hg * BH, 0]).to(tl.float32)
 
         b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
