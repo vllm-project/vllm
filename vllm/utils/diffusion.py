@@ -94,6 +94,18 @@ def validate_diffusion_sampling_params(
             params.max_tokens = min(params.max_tokens or expected_len, expected_len)
         params.ignore_eos = True
 
+    constrained = extra.get("diffusion_constrained")
+    if constrained is not None:
+        check(
+            isinstance(constrained, (bool, int)) and constrained in (0, 1),
+            "diffusion_constrained must be a boolean (or 0/1).",
+        )
+    if constrained:
+        check(
+            bool(params.logprob_token_ids),
+            "diffusion_constrained needs logprob_token_ids: they are the allowed set.",
+        )
+
     check(
         bool(async_scheduling)
         or width is None

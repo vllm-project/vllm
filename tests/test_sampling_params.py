@@ -145,6 +145,29 @@ def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
         _verify_diffusion(SamplingParams(extra_args=extra_args))
 
 
+@pytest.mark.parametrize("flag", [True, 1])
+def test_diffusion_constrained_needs_logprob_token_ids(flag):
+    bad = SamplingParams(extra_args={"diffusion_constrained": flag})
+    with pytest.raises(VLLMValidationError, match="needs logprob_token_ids"):
+        _verify_diffusion(bad)
+
+    ok = SamplingParams(
+        logprob_token_ids=[3, 5], extra_args={"diffusion_constrained": flag}
+    )
+    _verify_diffusion(ok)
+
+    # An unset or false flag needs no ids.
+    _verify_diffusion(SamplingParams(extra_args={"diffusion_constrained": False}))
+    _verify_diffusion(SamplingParams(extra_args={"diffusion_constrained": 0}))
+
+
+@pytest.mark.parametrize("value", ["yes", 2, [1]])
+def test_diffusion_constrained_must_be_a_bool(value):
+    params = SamplingParams(extra_args={"diffusion_constrained": value})
+    with pytest.raises(VLLMValidationError, match="must be a boolean"):
+        _verify_diffusion(params)
+
+
 def test_diffusion_seed_canvas_must_fill_the_canvas():
     params = SamplingParams(extra_args={"diffusion_seed_canvas": [0] * 7})
     with pytest.raises(VLLMValidationError, match="exactly 8 ids, got 7"):

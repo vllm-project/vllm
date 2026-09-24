@@ -8,9 +8,11 @@ import pytest
 import torch
 
 from vllm.model_executor.models.diffusion_gemma import (
+    _MASKED_LOGIT,
     DiffusionGemmaRequestStates,
     _compiled_sample_step,
     _concat_logprob_stashes,
+    _mask_rows_to_allowed,
 )
 from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
@@ -317,3 +319,50 @@ def test_read_emits_at_convergence_while_generation_waits_for_commit(width, step
     sampled, counts = _denoise_once(states, [0], width=width)
     assert counts.tolist() == [width]
     assert torch.equal(sampled[0], states.argmax_canvas[0, :width].int())
+
+
+def test_batch_allowed_needs_one_shared_set():
+    states = _states()
+    states.constrained[0] = (1, 2, 3)
+    states.constrained[1] = (4, 5)
+
+    # Mixed sets, or a slot with no set, fall back to per-row masking.
+    assert states.batch_allowed([0, 1]) is None
+    assert states.batch_allowed([0, 2]) is None
+    assert states.batch_allowed([]) is None
+
+    shared = states.batch_allowed([0])
+    assert shared.tolist() == [1, 2, 3]
+    assert shared.dtype == torch.int64
+    assert states.batch_allowed([0, 0]) is shared
+    assert states.allowed_tensor((1, 2, 3)) is shared
+
+
+def test_mask_rows_to_allowed_masks_only_constrained_rows():
+    logits = torch.randn(5, VOCAB, device="cuda")
+    before = logits.clone()
+    first = torch.tensor([3, 7], device="cuda")
+    third = torch.tensor([0], device="cuda")
+
+    out = _mask_rows_to_allowed(logits, [0, 2, 3], [2, 1, 2], [first, None, third])
+
+    assert out is not logits
+    assert torch.equal(logits, before)
+    # Masked columns hold the finite sentinel, so entropy stays finite.
+    kept = out > _MASKED_LOGIT
+    assert torch.isfinite(out).all()
+    assert kept[0:2].sum(dim=1).tolist() == [2, 2]
+    assert kept[0:2][:, first].all()
+    assert torch.equal(out[0:2][:, first], before[0:2][:, first])
+    assert torch.equal(out[2], before[2])
+    assert kept[3:5].sum(dim=1).tolist() == [1, 1]
+    assert torch.equal(out[3:5][:, third], before[3:5][:, third])
+    # The masked row's softmax is the distribution renormalized over the set.
+    torch.testing.assert_close(
+        out[0].softmax(dim=-1)[first], before[0, first].softmax(dim=-1)
+    )
+
+
+def test_mask_rows_to_allowed_is_a_no_op_without_constrained_rows():
+    logits = torch.randn(3, VOCAB, device="cuda")
+    assert _mask_rows_to_allowed(logits, [0, 1], [1, 2], [None, None]) is logits
