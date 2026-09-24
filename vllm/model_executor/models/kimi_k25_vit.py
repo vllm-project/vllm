@@ -227,18 +227,12 @@ class MoonVision3dPatchEmbed(nn.Module):
         return self.pos_emb(x, grid_thws)
 
     def _proj(self, x: torch.Tensor) -> torch.Tensor:
-        # MIOpen conv2d intermittently fails under load on ROCm; use aiter Triton.
-        if current_platform.is_rocm() and x.dtype in (torch.float16, torch.bfloat16):
-            from aiter.ops.triton.conv.conv2d import conv2d
-
-            return conv2d(
-                x,
-                self.proj.weight,
-                self.proj.bias,
-                stride=self.patch_size,
-                layout="nchw",
-            )
-        return self.proj(x)
+        weight = self.proj.weight.view(self.proj.out_channels, -1)
+        return F.linear(
+            x.view(x.size(0), weight.size(1)),
+            weight,
+            self.proj.bias,
+        ).view(x.size(0), self.proj.out_channels, 1, 1)
 
 
 class Rope2DPosEmbRepeated(nn.Module):
