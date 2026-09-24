@@ -168,9 +168,7 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _aiter_gather_kv_b_proj():
-    """Load the fused chunked-context gather requires gather_kv_b_proj.
-    falls back to _compute_prefill_context.
-    """
+    """Load AITER's gather_kv_b_proj if it exists in build"""
     try:
         from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
     except ImportError:
@@ -739,6 +737,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             None
             if num_gpu_blocks is None
             else num_gpu_blocks * kv_cache_spec.page_size_bytes
+        )
+        self._fused_gather_possible = (
+            _aiter_gather_kv_b_proj() is not None
+            and self._kv_cache_dtype_str != "fp8_ds_mla"
+            and self.dcp_world_size == 1
         )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
@@ -1521,8 +1524,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     ) -> list[torch.Tensor] | None:
         """Flatten each context chunk's block table into per-token KV indices.
 
-        gather_kv_b_proj addresses its KV buffer one token per entry, so it
-        needs flat indices rather than block ids.
+        Built here so the expansion runs once per step instead of once per
+        MLA layer.
         """
         prefill = attn_metadata.prefill
         if prefill is None or prefill.chunked_context is None:
@@ -1564,9 +1567,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
-        attn_metadata.context_chunk_kv_indices = self._build_context_chunk_kv_indices(
-            attn_metadata
-        )
+        if self._fused_gather_possible:
+            attn_metadata.context_chunk_kv_indices = (
+                self._build_context_chunk_kv_indices(attn_metadata)
+            )
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata
@@ -1619,10 +1623,7 @@ def _expand_page_indices_kernel(
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
-    if HAS_START_OFFSETS:
-        start = tl.load(start_offsets + req_idx)
-    else:
-        start = 0
+    start = tl.load(start_offsets + req_idx) if HAS_START_OFFSETS else 0
 
     offset = tl.arange(0, BLOCK_SIZE)
     for i in tl.range(0, num_tokens, BLOCK_SIZE):
@@ -1973,8 +1974,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:
-        """Build [k_nope | k_pe] broadcasting k_pe over the heads.
-        falls back to the generic copies for other shapes."""
+        """Build [k_nope | k_pe] with one kernel, fall back to the base copies."""
         if not (
             self._use_fused_mla_kv_concat
             and k_nope.dim() == 3
@@ -2003,6 +2003,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         weight = getattr(self.kv_b_proj, "weight", None)
         return (
             self.kv_cache_dtype != "fp8_ds_mla"
+            and self.kv_lora_rank == 512
             and prefill_metadata.q_data_type != current_platform.fp8_dtype()
             and q.dtype in (torch.bfloat16, torch.float16)
             and _aiter_gather_kv_b_proj() is not None
@@ -2054,10 +2055,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: AiterMLAMetadata,
+        attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
     ):
         """Attend the cached prefix, gathering and expanding it in one kernel"""
+        assert isinstance(attn_metadata, AiterMLAMetadata)
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
 
