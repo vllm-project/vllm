@@ -5,7 +5,7 @@
 from typing import Any
 
 import pytest
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, PreTrainedConfig
 
 from vllm.config.speculative import SpeculativeConfig
 
@@ -15,19 +15,19 @@ _CHECKPOINTS = {
 }
 
 
-def _mtp_config(model_type: str) -> PretrainedConfig:
+def _mtp_config(model_type: str) -> PreTrainedConfig:
     """Create a top-level MTP configuration with mtp_num_hidden_layers."""
     kwargs: dict[str, Any] = {
         "model_type": model_type,
         "architectures": ["SomeArch"],
         "mtp_num_hidden_layers": 1,
     }
-    return PretrainedConfig(**kwargs)
+    return PreTrainedConfig(**kwargs)
 
 
 def _multimodal_wrapper_mtp_config(
     model_type: str, mtp_layers: int = 1
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     """Download a multimodal wrapper config via AutoConfig.from_pretrained
     and configure mtp_num_hidden_layers in text_config.
 
@@ -36,7 +36,7 @@ def _multimodal_wrapper_mtp_config(
     - MoE   (qwen3_5_moe): Qwen/Qwen3.6-35B-A3B
     """
     repo = _CHECKPOINTS[model_type]
-    config: PretrainedConfig = AutoConfig.from_pretrained(repo)
+    config: PreTrainedConfig = AutoConfig.from_pretrained(repo)
     text_config = config.get_text_config()
     text_config.mtp_num_hidden_layers = mtp_layers
     return config
