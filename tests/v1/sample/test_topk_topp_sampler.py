@@ -25,7 +25,7 @@ def _flashinfer_topk_topp_supported() -> bool:
 
     Mirrors the gate in `TopKTopPSampler.__init__`: CUDA + flashinfer
     importable + GPU compute capability supported by the FlashInfer
-    backend + more than 16 SMs.
+    backend.
     """
     if not current_platform.is_cuda():
         return False
@@ -38,10 +38,7 @@ def _flashinfer_topk_topp_supported() -> bool:
     capability = current_platform.get_device_capability()
     if capability is None:
         return False
-    return FlashInferBackend.supports_compute_capability(capability) and (
-        current_platform.num_compute_units(torch.accelerator.current_device_index())
-        > 16
-    )
+    return FlashInferBackend.supports_compute_capability(capability)
 
 
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
