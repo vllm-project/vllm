@@ -229,15 +229,6 @@ class HiSparseHostPool:
             self.backing, self.registered = allocate_pinned_host_pool(size)
         return self.backing
 
-    def abort_startup_cleanup(self) -> None:
-        """Drop host-tensor references before aborting shared mmap startup."""
-        self.backing = None
-        self.registered = None
-        if self.shared_region is not None:
-            region = self.shared_region
-            self.shared_region = None
-            region.abort_startup_cleanup()
-
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
     """Whether replicated MLA host KV can share one local mmap."""
