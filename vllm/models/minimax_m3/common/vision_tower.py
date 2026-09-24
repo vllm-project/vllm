@@ -29,6 +29,7 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 
 # Initial sizes of the per-axis RoPE cos/sin tables. 512 covers the t bound
 # (500-frame processor cap / temporal_patch_size=2) and 4096 covers h/w
@@ -509,9 +510,17 @@ class MiniMaxVLVisionTransformer(nn.Module):
         cu = [0]
         for t, h, w in grid_thw:
             cu.append(cu[-1] + t * h * w)
-        grids = torch.tensor(grid_thw, dtype=torch.int32, device=device)
-        cu_seqlens = torch.tensor(cu, dtype=torch.int32, device=device)
         n = cu[-1]
+        g = len(grid_thw)
+        # grid_thw is per-request host metadata, so one H2D is unavoidable;
+        # pack cu_seqlens and grids into a single pinned async copy.
+        buf = async_tensor_h2d(
+            cu + [d for grid in grid_thw for d in grid],
+            device=device,
+            dtype=torch.int32,
+        )
+        cu_seqlens = buf[: g + 1]
+        grids = buf[g + 1 :].view(g, 3)
 
         cos = torch.empty(3, n, self.half_rot_dim, device=device, dtype=torch.float32)
         sin = torch.empty(3, n, self.half_rot_dim, device=device, dtype=torch.float32)
