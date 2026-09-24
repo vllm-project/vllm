@@ -506,6 +506,44 @@ def test_event_metadata_skips_non_full_attention_group(
     assert events[0].block_size == 0
 
 
+@pytest.mark.parametrize("secondary_removal_in_same_batch", [False, True])
+def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
+    secondary_removal_in_same_batch,
+):
+    """A removal must not drop the payload a later store in the same batch
+    still needs, and must still drop it once no residency is left."""
+    tracker = _tracker()
+    group_config = _group_config(block_size=64, blocks_per_chunk=2)
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=256)
+    key = _record_chunks(tracker, req, group_config, num_chunks=2)[1]
+    secondary_removal = _removed_event([key], ownership="kvcr")
+
+    batch = [
+        _removed_event([key]),
+        _stored_event([key], ownership="kvcr", removal_expected=True),
+    ]
+    if secondary_removal_in_same_batch:
+        batch.append(secondary_removal)
+    events = list(tracker.take_events(batch))
+    if not secondary_removal_in_same_batch:
+        events += tracker.take_events([secondary_removal])
+    removed, stored, final_removal = events
+
+    hashes = [_wire_hash(_hash(2)), _wire_hash(_hash(3))]
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == hashes
+    assert stored.block_size == 64
+    assert stored.token_ids == list(range(129, 257))
+    assert stored.parent_block_hash == _wire_hash(_hash(1))
+    assert stored.block_hashes == hashes
+    assert stored.ownership == "kvcr"
+    assert final_removal.block_hashes == hashes
+
+    # Nothing holds a residency now, so the payload is gone.
+    [after_eviction] = tracker.take_events([_stored_event([key], ownership="kvcr")])
+    assert after_eviction.block_size == 0
+
+
 def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     tracker = _tracker()
     block_hashes = [_hash(0), _hash(1)]
