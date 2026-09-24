@@ -41,9 +41,10 @@ def _triton_mrope_forward(
     # and supports cos and sin cache with shape (3, num_tokens, rotary_dim // 2)
     # instead of (3, bsz, seq_len, head_dim), also supports interleaved rotary
     pid = tl.program_id(0)
-    # locate start address
-    q_ptr = q_ptr + pid * q_token_stride
-    k_ptr = k_ptr + pid * k_token_stride
+    # locate start address (int64: num_tokens * row_stride exceeds 2^31 for
+    # worst-case ViT forwards, e.g. MiniMax M3 packs ~768k patches/item)
+    q_ptr = q_ptr + pid.to(tl.int64) * q_token_stride
+    k_ptr = k_ptr + pid.to(tl.int64) * k_token_stride
 
     # ####################################################################
     # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
