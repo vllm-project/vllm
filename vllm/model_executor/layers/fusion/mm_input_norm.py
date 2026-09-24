@@ -127,28 +127,26 @@ def fused_mm_input_norm_triton(
 
 
 class NormParams(NamedTuple):
-    """Resolved image-processing parameters."""
+    """Resolved per-channel affine parameters (flags already folded in)."""
 
-    do_rescale: bool
-    do_normalize: bool
     image_mean: list[float]
     image_std: list[float]
     rescale_factor: float
 
-
-def _is_identity_params(params: NormParams) -> bool:
-    """Whether ``weight = rescale/std`` and ``bias = -mean/std`` are
-    numerically the identity transform (mirrors ``torch.allclose``'s default
-    fp32 tolerances)."""
-    return all(
-        math.isclose(params.rescale_factor / s, 1.0, rel_tol=1e-5, abs_tol=1e-8)
-        and math.isclose(m / s, 0.0, abs_tol=1e-8)
-        for m, s in zip(params.image_mean, params.image_std)
-    )
+    @property
+    def is_identity(self) -> bool:
+        """Whether ``weight = rescale/std`` and ``bias = -mean/std`` are
+        numerically the identity transform (mirrors ``torch.allclose``'s
+        default fp32 tolerances)."""
+        return all(
+            math.isclose(self.rescale_factor / s, 1.0, rel_tol=1e-5, abs_tol=1e-8)
+            and math.isclose(m / s, 0.0, abs_tol=1e-8)
+            for m, s in zip(self.image_mean, self.image_std)
+        )
 
 
 def _load_norm_params(model_config: ModelConfig) -> NormParams:
-    """Load ``(do_rescale, do_normalize, image_mean, image_std,
+    """Resolve the per-channel affine parameters ``(image_mean, image_std,
     rescale_factor)`` from the processor config, falling back to the image
     processor object."""
     model = model_config.model
@@ -175,10 +173,12 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     assert rescale_factor is not None, "rescale_factor is still None after resolution."
     assert image_mean is not None, "image_mean is still None after resolution."
     assert image_std is not None, "image_std is still None after resolution."
+    assert len(image_mean) == len(image_std), (
+        f"image_mean and image_std have different lengths: "
+        f"{len(image_mean)} vs {len(image_std)}"
+    )
 
     return NormParams(
-        do_rescale=do_rescale,
-        do_normalize=do_normalize,
         image_mean=[float(v) for v in image_mean],
         image_std=[float(v) for v in image_std],
         rescale_factor=float(rescale_factor),
@@ -236,11 +236,9 @@ class FusedMMInputNorm(CustomOp):
     ):
         super().__init__()
 
-        assert len(image_mean) == channel, (
-            f"image_mean has {len(image_mean)} entries but channel={channel}"
-        )
-        assert len(image_std) == channel, (
-            f"image_std has {len(image_std)} entries but channel={channel}"
+        assert len(image_mean) == len(image_std) == channel, (
+            f"image_mean/image_std must have {channel} entries, "
+            f"got {len(image_mean)} / {len(image_std)}"
         )
         assert rescale_factor != 0.0, "rescale_factor must be non-zero"
 
@@ -353,24 +351,15 @@ def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
 
     params = _load_norm_params(model_config)
 
-    # If no processing is needed, only the dtype cast is required.
-    if not params.do_rescale and not params.do_normalize:
-        return IdentityInputNorm()
-
-    channel = len(params.image_mean)
-    assert len(params.image_std) == channel, (
-        f"image_mean and image_std have different lengths: "
-        f"{channel} vs {len(params.image_std)}"
-    )
-
-    # A config can request rescale/normalise and still be numerically
-    # the identity transform; skip the kernel in that case.
-    if _is_identity_params(params):
+    # Flags off are already defaulted to identity values by
+    # ``_load_norm_params``; this also catches configs that request
+    # rescale/normalise but are numerically the identity transform.
+    if params.is_identity:
         return IdentityInputNorm()
 
     return FusedMMInputNorm(
         image_mean=params.image_mean,
         image_std=params.image_std,
         rescale_factor=params.rescale_factor,
-        channel=channel,
+        channel=len(params.image_mean),
     )

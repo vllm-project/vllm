@@ -10,7 +10,6 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     IdentityInputNorm,
     NormParams,
-    _is_identity_params,
     fused_mm_input_norm_triton,
 )
 from vllm.platforms import current_platform
@@ -396,12 +395,8 @@ class TestFusedMMInputNormConstruction:
 
     def test_is_identity_params(self):
         """The numeric-identity check mirrors the old allclose detection."""
-        assert _is_identity_params(
-            NormParams(True, True, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0)
-        )
-        assert not _is_identity_params(
-            NormParams(True, True, _RGB_MEAN, _RGB_STD, _RGB_RESCALE)
-        )
+        assert NormParams([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0).is_identity
+        assert not NormParams(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).is_identity
 
     @pytest.mark.parametrize(
         ("image_mean", "image_std", "rescale_factor"),
