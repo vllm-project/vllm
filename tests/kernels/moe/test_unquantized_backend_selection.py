@@ -706,7 +706,15 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
 @skipif_not_cuda_rocm
 @pytest.mark.parametrize(
-    "moe_backend", ["humming", "marlin", "rdna3", "rdna3_int4_int8"]
+    "moe_backend",
+    [
+        "humming",
+        "marlin",
+        "flashinfer_b12x",
+        "deep_gemm",
+        "rdna3",
+        "rdna3_int4_int8",
+    ],
 )
 def test_quantization_only_backend_falls_back_to_auto(moe_backend):
     """A quantization-only --moe-backend also reaches the unquantized MoE
@@ -819,3 +827,47 @@ def test_flashinfer_cutedsl_sm90_backend_parallel_fallback(
             return
         selected_backend, _ = select_unquantized_moe_backend(moe_config=moe_config)
     assert selected_backend == expected
+
+
+@pytest.mark.parametrize(
+    "quant_backend",
+    [
+        "humming",
+        "marlin",
+        "flashinfer_b12x",
+        "deep_gemm",
+        "rdna3",
+        "rdna3_int4_int8",
+    ],
+)
+def test_quantization_only_backend_fallback_cpu_mock(quant_backend):
+    """Quantization-only backends (like 'humming', 'marlin', 'flashinfer_b12x',
+    'deep_gemm') should fall through to 'auto' backend selection for unquantized
+    layers (e.g. MTP draft MoE layers or modules excluded via
+    modules_to_not_convert) instead of raising ValueError.
+    """
+    with (
+        patch.object(current_platform, "is_cuda", return_value=False),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch(
+            "vllm.model_executor.layers.fused_moe.oracle.unquantized.logger.info_once"
+        ) as mock_log,
+    ):
+        moe_config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+        moe_config.moe_backend = quant_backend
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.CPU
+        assert experts_cls is not None
+        mock_log.assert_any_call(
+            "moe_backend='%s' is quantization-only; using 'auto' for this "
+            "unquantized MoE layer.",
+            quant_backend,
+        )
