@@ -581,7 +581,7 @@ def max_decode_query_len(vllm_config: "VllmConfig") -> int:
     threshold and the code that mirrors the builders' decode/prefill split all
     read this, so they cannot drift apart.
     """
-    speculative_config = vllm_config.speculative_config
+    speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is None or speculative_config.num_speculative_tokens is None:
         return 1
     num_speculative_tokens = speculative_config.num_speculative_tokens
