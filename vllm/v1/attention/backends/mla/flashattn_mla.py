@@ -271,8 +271,8 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
-    can_return_lse_for_decode: bool = not current_platform.is_xpu()
-    supports_dcp: bool = True
+    can_return_lse_for_decode: bool = True
+    supports_dcp: bool = not current_platform.is_xpu()
 
     def __init__(
         self,
@@ -325,11 +325,9 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FlashAttnMLA V1 with FP8 KV cache not yet supported"
             )
 
-        if current_platform.is_xpu() and self.num_heads > 8:
+        if current_platform.is_xpu() and self.dcp_world_size > 1:
             raise NotImplementedError(
-                f"FlashAttnMLA on XPU supports at most 8 query heads per "
-                f"rank at head_size=576 (got num_heads={self.num_heads}); "
-                f"increase tensor parallel size."
+                "FlashAttnMLA on XPU does not support decode context parallelism"
             )
 
     def forward_mqa(
