@@ -7,7 +7,11 @@ steps:
     if: build.env("TORCH_NIGHTLY") == "1"
     soft_fail: true
     allow_dependency_failure: true
-    timeout_in_minutes: 15
+    # The script waits for every other job before reporting, so this has to
+    # outlast the build rather than the report. A full torch-nightly run is
+    # ~13h (build 90830 took 12h40m); the script's own deadline is 13h, and
+    # this leaves it room to send the callback afterwards.
+    timeout_in_minutes: 840
     device: cpu-small
     commands:
       - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
