@@ -179,6 +179,7 @@ class CustomAllreduce:
         self.mnnvl_multimem_rs_local_ptr = 0
         self.mnnvl_multimem_rs_multicast_ptr = 0
         self.mnnvl_only = False
+        self.batch_invariant = envs.VLLM_BATCH_INVARIANT
 
         if not custom_ar:
             # disable because of missing custom allreduce library
@@ -504,7 +505,7 @@ class CustomAllreduce:
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
         if self.world_size == 2 or self.fully_connected:
-            return inp_size < self.max_size
+            return self.batch_invariant or inp_size < self.max_size
         return False
 
     def all_reduce(
@@ -518,13 +519,25 @@ class CustomAllreduce:
         """
         if out is None:
             out = torch.empty_like(inp)
+        chunk_numel = self.max_size // inp.element_size()
+        if inp.numel() <= chunk_numel:
+            self._all_reduce_chunk(inp, out, registered)
+            return out
+        flat_inp, flat_out = inp.view(-1), out.view(-1)
+        for start in range(0, flat_inp.numel(), chunk_numel):
+            end = start + chunk_numel
+            self._all_reduce_chunk(flat_inp[start:end], flat_out[start:end], registered)
+        return out
+
+    def _all_reduce_chunk(
+        self, inp: torch.Tensor, out: torch.Tensor, registered: bool
+    ) -> None:
         if registered:
             ops.all_reduce(self._ptr, inp, out, 0, 0)
         else:
             ops.all_reduce(
                 self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size
             )
-        return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
         """The main allreduce API that provides support for cuda graph."""
