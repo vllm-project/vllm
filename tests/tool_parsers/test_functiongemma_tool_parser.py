@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -193,7 +194,7 @@ class TestExtractToolCallsStreaming:
             previous_text = current_text
 
         assert name == "get-weather"
-        assert "".join(args_parts) == '{"city": "Paris"}'
+        assert json.loads("".join(args_parts)) == {"city": "Paris"}
 
 
 if __name__ == "__main__":
