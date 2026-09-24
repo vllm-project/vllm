@@ -932,11 +932,6 @@ class DeepseekV4Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1536
         self.compress_ratio = compress_ratio
         self.use_fp4_kv = dsa_indexer_uses_fp4(vllm_config)
-        if self.use_fp4_kv and current_platform.is_rocm():
-            raise NotImplementedError(
-                "indexer_kv_dtype='mxfp4' on ROCm is implemented for DeepSeek "
-                "V4.1 only."
-            )
         logger.info_once(
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",

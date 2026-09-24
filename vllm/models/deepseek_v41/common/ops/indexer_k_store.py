@@ -13,19 +13,12 @@ compressor state cache: the latent already stands for a whole group, so only
 group-boundary tokens ``(position + 1) % compress_ratio == 0`` produce a key.
 """
 
-from typing import TYPE_CHECKING
-
 import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from . import MXFP4_BLOCK_SIZE, _fp32x2_to_fp4x2
-
-if TYPE_CHECKING:
-    from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-        RocmPagedMxfp4CacheLayout,
-    )
 
 # ROCm tiled ("SHUFFLE") indexer K value layout, mirroring
 # indexer_k_quant_and_cache_triton's defaults: 16 positions x 16 bytes.
@@ -43,7 +36,6 @@ def indexer_k_norm_rope_store(
     kv_slot_mapping: torch.Tensor,
     compress_ratio: int,
     use_fp4_cache: bool,
-    mxfp4_layout: "RocmPagedMxfp4CacheLayout | None" = None,
 ) -> None:
     """k_norm → RoPE → quant → paged store for indexer keys.
 
@@ -60,8 +52,6 @@ def indexer_k_norm_rope_store(
         compress_ratio: group size; keys are emitted at group boundaries.
         use_fp4_cache: MXFP4 (2 nibbles/byte + ue8m0 per 32) when True, else
             per-token FP8 with a single fp32 scale.
-        mxfp4_layout: ROCm MXFP4 only: the page order aiter's paged MXFP4
-            MQA-logits kernel reads, from ``rocm_paged_mxfp4_cache_layout``.
 
     """
     num_tokens = kv_slot_mapping.numel()
@@ -85,25 +75,21 @@ def indexer_k_norm_rope_store(
     # deepgemm_fp8_paged_mqa_logits(Preshuffle=True) on decode both select it
     # from ``block_size > 1``, matching the v4.0 writer
     # (indexer_k_quant_and_cache_triton). Writing row-major here would hand
-    # both readers permuted key bytes. The MXFP4 cache is read straight into
-    # the matrix core by aiter's paged MXFP4 MQA-logits kernel, so it is
-    # stored in that kernel's dot-operand order instead.
+    # both readers permuted key bytes.
     block_size = k_cache.shape[1]
     shuffle = current_platform.is_rocm() and block_size > 1
-    if shuffle and use_fp4_cache:
-        if mxfp4_layout is None or block_size % mxfp4_layout.n_per_tile != 0:
-            raise ValueError(
-                f"ROCm MXFP4 indexer K cache needs a page layout ({mxfp4_layout}) "
-                f"whose MFMA N divides block_size ({block_size})."
+    if shuffle:
+        if use_fp4_cache:
+            raise NotImplementedError(
+                "MXFP4 indexer K cache has no tiled ROCm layout; "
+                "the ROCm readers only implement the FP8 one."
             )
-    elif shuffle and (
-        block_size % _BLOCK_TILE_SIZE != 0 or head_dim % _HEAD_TILE_SIZE != 0
-    ):
-        raise ValueError(
-            f"ROCm tiled indexer K cache needs block_size "
-            f"({block_size}) % {_BLOCK_TILE_SIZE} == 0 and head_dim "
-            f"({head_dim}) % {_HEAD_TILE_SIZE} == 0."
-        )
+        if block_size % _BLOCK_TILE_SIZE != 0 or head_dim % _HEAD_TILE_SIZE != 0:
+            raise ValueError(
+                f"ROCm tiled indexer K cache needs block_size "
+                f"({block_size}) % {_BLOCK_TILE_SIZE} == 0 and head_dim "
+                f"({head_dim}) % {_HEAD_TILE_SIZE} == 0."
+            )
 
     launch_kwargs = {"launch_pdl": False} if current_platform.is_cuda() else {}
     _indexer_k_norm_rope_quant_store_kernel[(num_tokens,)](
@@ -128,9 +114,6 @@ def indexer_k_norm_rope_store(
         SHUFFLE=shuffle,
         BLOCK_TILE_SIZE=_BLOCK_TILE_SIZE,
         HEAD_TILE_SIZE=_HEAD_TILE_SIZE,
-        N_PER_TILE=mxfp4_layout.n_per_tile if mxfp4_layout else 0,
-        D_PER_TILE=mxfp4_layout.d_per_tile if mxfp4_layout else 0,
-        SCALE_LANES=mxfp4_layout.scale_lanes if mxfp4_layout else 0,
         num_warps=1,
         **launch_kwargs,
     )
@@ -159,9 +142,6 @@ def _indexer_k_norm_rope_quant_store_kernel(
     SHUFFLE: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
-    N_PER_TILE: tl.constexpr,
-    D_PER_TILE: tl.constexpr,
-    SCALE_LANES: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
@@ -252,35 +232,8 @@ def _indexer_k_norm_rope_quant_store_kernel(
         )  # (N_BLOCKS, HALF_BLOCK) uint8
         packed_flat = tl.reshape(packed, (TOKEN_STRIDE,))
 
-        if SHUFFLE:
-            # aiter's preshuffle_cache order. Each run of N_PER_TILE tokens is
-            # [D_PER_TILE-byte chunk of K, token, byte]; its scales are
-            # [scale % SCALE_LANES, token, scale // SCALE_LANES].
-            S_HI: tl.constexpr = SCALE_DIM // SCALE_LANES
-            tl.static_assert(SCALE_LANES * S_HI == SCALE_DIM)
-            tl.static_assert(TOKEN_STRIDE % D_PER_TILE == 0)
-            group = kv_pos_in_block // N_PER_TILE
-            lane = kv_pos_in_block % N_PER_TILE
-            byte = tl.arange(0, TOKEN_STRIDE)
-            value_offset = (
-                group * (N_PER_TILE * TOKEN_STRIDE)
-                + byte // D_PER_TILE * (N_PER_TILE * D_PER_TILE)
-                + lane * D_PER_TILE
-                + byte % D_PER_TILE
-            )
-            scale_idx = tl.arange(0, SCALE_DIM)
-            scale_offset = (
-                kv_cache_block_size * TOKEN_STRIDE
-                + group * (N_PER_TILE * SCALE_DIM)
-                + scale_idx % SCALE_LANES * (N_PER_TILE * S_HI)
-                + lane * S_HI
-                + scale_idx // SCALE_LANES
-            )
-            tl.store(cache_block_ptr + value_offset, packed_flat)
-            tl.store(cache_block_ptr + scale_offset, ue8m0)
-        else:
-            tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
-            tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)
+        tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
+        tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)
     else:
         # Per-token FP8 (single 128-wide block) with one float32 scale.
         result = tl.interleave(new_even, new_odd)  # [HEAD_SIZE] fp32

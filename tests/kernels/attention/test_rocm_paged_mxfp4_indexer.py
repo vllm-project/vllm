@@ -21,7 +21,6 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
 from vllm.config import CUDAGraphMode
-from vllm.models.deepseek_v41.common.ops import indexer_k_norm_rope_store
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
@@ -109,7 +108,7 @@ class _Case:
         self.offsets = [0]
         for n in seq_lens:
             self.offsets.append(self.offsets[-1] + n)
-        # block_size 1 keeps the writer's natural order
+        # the same keys in natural order, one entry per page
         self.natural = {
             r: torch.zeros(self.offsets[-1], 1, WIDTH, dtype=torch.uint8, device=DEVICE)
             for r in (1, 2)
@@ -122,28 +121,27 @@ class _Case:
             k_pre = torch.randn(n, HEAD_DIM, device=DEVICE).to(torch.bfloat16)
             pos = torch.arange(n, device=DEVICE)
             for ratio, cache in self.cache.items():
-                layout = ops.rocm_paged_mxfp4_cache_layout(
-                    HEADS, HEAD_DIM, cache.shape[1]
-                )
                 comp = pos // ratio
                 boundary = (pos + 1) % ratio == 0
                 entries = cache.shape[1]
                 page = self.block_table[req, comp // entries].long()
                 slot = torch.where(boundary, page * entries + comp % entries, -1)
                 nat = torch.where(boundary, self.offsets[req] + comp, -1)
-                for dst, slots in ((cache, slot), (self.natural[ratio], nat)):
-                    indexer_k_norm_rope_store(
-                        k_pre,
-                        pos,
-                        cos_sin,
-                        norm,
-                        1e-6,
-                        dst,
-                        slots,
-                        ratio,
-                        True,
-                        mxfp4_layout=layout,
-                    )
+                ops.rocm_mxfp4_indexer_k_store(
+                    k_pre,
+                    pos,
+                    cos_sin,
+                    norm,
+                    1e-6,
+                    cache,
+                    slot,
+                    ratio,
+                    True,
+                    num_heads=HEADS,
+                )
+                ops._aiter_cache().indexer_k_norm_rope_mxfp4_cache(
+                    k_pre, pos, cos_sin, norm, 1e-6, self.natural[ratio], nat, ratio
+                )
 
     def keys(self, ratio, req, n):
         nat = self.natural[ratio][self.offsets[req] : self.offsets[req] + n, 0]

@@ -13,7 +13,7 @@ import functools
 import importlib
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -49,11 +49,18 @@ MXFP4_BLOCK_SIZE = 32
 # to storage below that, and buffer loads and stores take 32-bit offsets.
 MAX_LOGITS_BYTES = 2**31 - 1
 _AITER_MODULE = "aiter.ops.triton.attention.pa_mqa_logits_mxfp4"
+# The key writer and the query quantizer, next to the kernel that reads them.
+_AITER_CACHE_MODULE = "aiter.ops.triton.attention.pa_mqa_logits_mxfp4_cache"
 
 
 @functools.cache
 def _aiter():
     return importlib.import_module(_AITER_MODULE)
+
+
+@functools.cache
+def _aiter_cache():
+    return importlib.import_module(_AITER_CACHE_MODULE)
 
 
 @functools.cache
@@ -71,20 +78,30 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
     if "row_ends" not in params or "query_start_loc" not in params:
         return (
             "aiter's paged MXFP4 MQA-logits kernel predates its row_ends / "
-            "query_start_loc API; vLLM needs ROCm/aiter "
-            "cagri/gluon_paged_mxfp4_mqa_logits at b2a2fa441 or later"
+            "query_start_loc API"
         )
     if not callable(getattr(pa, "cache_format", None)):
         return (
             "aiter's paged MXFP4 module has no cache_format(), which vLLM reads "
             "the indexer K page layout from"
         )
+    try:
+        cache_ops = _aiter_cache()
+    except ImportError as e:
+        return f"aiter's paged MXFP4 cache-prep ops are unavailable ({e})"
+    if not all(
+        callable(getattr(cache_ops, name, None))
+        for name in ("indexer_k_norm_rope_mxfp4_cache", "indexer_q_rope_mxfp4_quant")
+    ):
+        return (
+            f"aiter's paged MXFP4 cache-prep ops are missing from {_AITER_CACHE_MODULE}"
+        )
     return None
 
 
-@dataclass(frozen=True)
-class RocmPagedMxfp4CacheLayout:
-    """The byte order of an indexer K page, as the kernel reads it.
+class RocmPagedMxfp4CacheLayout(NamedTuple):
+    """The byte order of an indexer K page, as the kernel reads it, and the
+    shuffle pattern aiter's K cache op writes it with.
 
     Each run of ``n_per_tile`` tokens stores its values as ``[K chunk of
     d_per_tile bytes, token, byte]`` and its e8m0 scales as
@@ -96,8 +113,8 @@ class RocmPagedMxfp4CacheLayout:
     scale_lanes: int
 
 
-# The scale order the K writer implements: aiter's mode 1, a lane's scales
-# innermost. cache_format does not report the order or the lane split yet.
+# The scale order the kernel reads: aiter's mode 1, a lane's scales innermost.
+# cache_format does not report the order or the lane split yet.
 _SCALE_ORDER = 1
 _WAVE_SIZE = 64
 
@@ -110,8 +127,8 @@ def rocm_paged_mxfp4_cache_layout(
     reads it, so a change there cannot reach the writer unchecked.
 
     Raises:
-        ValueError: aiter rejects the page size, or describes an order the K
-            writer does not implement.
+        ValueError: aiter rejects the page size, or describes an order this
+            layout cannot express.
 
     """
     fmt = _aiter().cache_format(num_heads, head_dim, page_entries)
@@ -131,10 +148,68 @@ def rocm_paged_mxfp4_cache_layout(
     ):
         raise ValueError(
             f"aiter's cache_format() returned {fmt!r} for {num_heads} heads of "
-            f"{head_dim} in {page_entries}-entry pages, a K page order the ROCm "
-            "MXFP4 indexer writer does not implement"
+            f"{head_dim} in {page_entries}-entry pages, a K page order "
+            "RocmPagedMxfp4CacheLayout cannot express"
         )
     return RocmPagedMxfp4CacheLayout(n_per_tile, d_per_tile, scale_lanes)
+
+
+def rocm_mxfp4_indexer_k_store(
+    k_pre: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    use_fp4_cache: bool,
+    *,
+    num_heads: int,
+) -> None:
+    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
+    writes the key in the order its MQA-logits kernel reads with ``num_heads``
+    query heads."""
+    assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
+    layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
+    _aiter_cache().indexer_k_norm_rope_mxfp4_cache(
+        k_pre,
+        positions,
+        cos_sin_cache,
+        rms_norm_weight,
+        rms_norm_eps,
+        k_cache,
+        kv_slot_mapping,
+        compress_ratio,
+        shuffle=layout,
+    )
+
+
+def rocm_mxfp4_indexer_q_quant(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    use_fp4: bool = True,
+    weights_out_dtype: torch.dtype = torch.float32,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
+    ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
+    weights)."""
+    assert use_fp4 and weights_out_dtype == torch.float32, (
+        "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
+    )
+    q_packed, q_scale, weights_out = _aiter_cache().indexer_q_rope_mxfp4_quant(
+        positions,
+        index_q,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+    )
+    return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
 
 
 def rocm_mxfp4_decode_schedule_words(

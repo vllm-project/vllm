@@ -35,14 +35,11 @@ from vllm.models.deepseek_v41.common.ops import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
-    from vllm.model_executor.layers.rocm_paged_mxfp4_sparse_mqa_indexer import (
+    from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
         RocmSparseMQAIndexer,
     )
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
-    )
-    from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-        RocmPagedMxfp4CacheLayout,
     )
 
 from vllm.config import (
@@ -1159,16 +1156,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         vllm_config = get_current_vllm_config()
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
-        # aiter's paged MXFP4 MQA-logits kernel reads this cache in place.
+        # aiter's paged MXFP4 kernels write this cache and read it in place.
         self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
             vllm_config
         )
-        # The kernel's page order depends on the page size, which is final only
-        # once the cache is bound.
-        self.mxfp4_layout: RocmPagedMxfp4CacheLayout | None = None
-        if self.rocm_mxfp4:
-            hf_config = vllm_config.model_config.hf_text_config
-            self.index_geometry = (hf_config.index_n_heads, hf_config.index_head_dim)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -1177,14 +1168,6 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
-        if self.rocm_mxfp4:
-            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-                rocm_paged_mxfp4_cache_layout,
-            )
-
-            self.mxfp4_layout = rocm_paged_mxfp4_cache_layout(
-                *self.index_geometry, self.kv_cache.shape[1]
-            )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
@@ -1330,6 +1313,17 @@ class DeepseekV4Indexer(nn.Module):
             )
             self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_cache = k_cache
+        # ROCm MXFP4 swaps in aiter's K store and Q quant, which write in its
+        # paged MXFP4 MQA-logits kernel's order, and layers that score with it.
+        self._k_store = indexer_k_norm_rope_store
+        self._q_rope_quant = fused_indexer_q_rope_quant
+        mqa_cls: type[SparseMQAIndexer | RocmSparseMQAIndexer] = SparseMQAIndexer
+        attn_cls = SparseAttnIndexer
+        if k_cache.rocm_mxfp4:
+            from vllm.model_executor.layers import rocm_paged_mxfp4_indexer as rocm
+
+            self._k_store, self._q_rope_quant = rocm.rocm_mxfp4_indexer_ops(self.n_head)
+            mqa_cls, attn_cls = rocm.RocmSparseMQAIndexer, rocm.RocmSparseAttnIndexer
 
         # Candidate consumers can score only the candidate blocks (opt-in);
         # the candidate source and pre-candidate indexers stay dense.
@@ -1338,9 +1332,6 @@ class DeepseekV4Indexer(nn.Module):
             and candidate_block_buffer is not None
             and not candidate_write
         )
-        # The fused Q kernel writes the per-head weights in the dtype the
-        # scoring kernels take, so no cast runs per step.
-        self.indexer_weights_dtype = torch.float32
         self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:
             if not self.use_fp4_kv:
@@ -1350,34 +1341,17 @@ class DeepseekV4Indexer(nn.Module):
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
-            if current_platform.is_rocm():
-                from vllm.model_executor.layers import (
-                    rocm_paged_mxfp4_sparse_mqa_indexer as rocm_mqa,
-                )
-
-                self.indexer_op = rocm_mqa.RocmSparseMQAIndexer(
-                    self.k_cache,
-                    self.topk_tokens,
-                    self.head_dim,
-                    self.max_model_len,
-                    topk_indices_buffer,
-                    candidate_block_buffer,
-                    candidate_block_size,
-                )
-                self.indexer_weights_dtype = rocm_mqa.RocmSparseMQAIndexer.weights_dtype
-            else:
-                self.indexer_op = SparseMQAIndexer(
-                    self.k_cache,
-                    self.topk_tokens,
-                    self.head_dim,
-                    self.max_total_seq_len,
-                    topk_indices_buffer,
-                    candidate_block_buffer,
-                    candidate_block_size,
-                )
-                self.indexer_weights_dtype = SparseMQAIndexer.weights_dtype
+            self.indexer_op = mqa_cls(
+                self.k_cache,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_total_seq_len,
+                topk_indices_buffer,
+                candidate_block_buffer,
+                candidate_block_size,
+            )
         else:
-            self.indexer_op = SparseAttnIndexer(
+            self.indexer_op = attn_cls(
                 self.k_cache,
                 self.quant_block_size,
                 self.scale_fmt,
@@ -1393,6 +1367,11 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_block_size=candidate_block_size,
                 candidate_write=candidate_write,
             )
+        # The fused Q kernel writes the per-head weights in the dtype the
+        # scoring kernels take, so no cast runs per step.
+        self.indexer_weights_dtype = (
+            mqa_cls.weights_dtype if use_sparse_logits else torch.float32
+        )
 
     def _produce_k(
         self,
@@ -1416,7 +1395,7 @@ class DeepseekV4Indexer(nn.Module):
         # non-boundary tokens hold garbage latent and are skipped by the
         # store kernel.
         k_pre, _ = self.wk(latent)
-        indexer_k_norm_rope_store(
+        self._k_store(
             k_pre,
             positions,
             rotary_emb.cos_sin_cache,
@@ -1426,7 +1405,6 @@ class DeepseekV4Indexer(nn.Module):
             indexer_metadata.slot_mapping,
             self.compress_ratio,
             self.use_fp4_kv,
-            mxfp4_layout=self.k_cache.mxfp4_layout,
         )
 
     def forward(
@@ -1472,7 +1450,7 @@ class DeepseekV4Indexer(nn.Module):
 
         q = self._wq_b_proj(qr, qr_scale)
         q = q.view(-1, self.n_head, self.head_dim)
-        q_quant, weights = fused_indexer_q_rope_quant(
+        q_quant, weights = self._q_rope_quant(
             positions,
             q,
             rotary_emb.cos_sin_cache,

@@ -212,3 +212,24 @@ def test_cache_layout_from_aiter_fails_closed(monkeypatch, fmt, layout):
     else:
         found = build(32, 128, 128)
         assert (found.n_per_tile, found.d_per_tile, found.scale_lanes) == layout
+
+
+def test_unsupported_without_aiter_cache_ops(monkeypatch):
+    """The key writer and the query quantizer live in aiter now: an aiter
+    without them stops the MXFP4 indexer at startup instead of mid-step."""
+    import vllm.platforms.rocm as rocm_platform
+
+    def logits(*, row_ends=None, query_start_loc=None):
+        pass
+
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: True)
+    monkeypatch.setattr(
+        ops,
+        "_aiter",
+        lambda: types.SimpleNamespace(
+            paged_mxfp4_mqa_logits=logits, cache_format=lambda *a: {}
+        ),
+    )
+    monkeypatch.setattr(ops, "_aiter_cache", lambda: types.SimpleNamespace())
+    reason = ops.rocm_mxfp4_indexer_unsupported_reason.__wrapped__()
+    assert reason is not None and "cache-prep" in reason
