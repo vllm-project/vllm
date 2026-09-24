@@ -406,13 +406,14 @@ class Worker(WorkerBase):
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_index
 
-                tp_pp_world_size = (
+                tp_pcp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.prefill_context_parallel_size
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
+                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -550,6 +551,11 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+        # Preserve parallel weight loading, then use serving's thread count
+        # for profiling and compilation so Dynamo's global-state guards remain
+        # valid when requests arrive.
+        set_torch_threads_for_runtime()
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
@@ -610,12 +616,10 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
-        # XPU stays excluded (see #39977).
         cudagraph_memory_estimate = 0
         if (
-            current_platform.is_cuda_alike()
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -838,9 +842,12 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.use_v2_model_runner:  # noqa: SIM102
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                # A workspace resize after capture frees what the graphs point at.
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -974,10 +981,6 @@ class Worker(WorkerBase):
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
-
-        # Startup is done; steady-state serving gets no benefit from torch
-        # intra-op parallelism.
-        set_torch_threads_for_runtime()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
