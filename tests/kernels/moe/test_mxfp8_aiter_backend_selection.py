@@ -10,9 +10,11 @@ aiter runtime is disabled.
 """
 
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.platforms import current_platform
 
@@ -136,6 +138,28 @@ def test_is_supported_config(present, ep_size, supported, reason_substr):
         assert reason_substr in reason
 
 
+def test_gate_mode_capability_is_required():
+    with (
+        _gfx950(),
+        _aiter_moe_enabled(True),
+        patch.object(
+            rocm_aiter_ops,
+            "fused_moe_supports_gate_mode",
+            return_value=False,
+        ),
+    ):
+        ok, reason = AiterMxfp8Experts.is_supported_config(
+            AiterMxfp8Experts,
+            _config(),
+            kMxfp8Static,
+            kMxfp8Dynamic,
+            FusedMoEActivationFormat.Standard,
+        )
+
+    assert not ok
+    assert "does not support current device" in reason
+
+
 def test_explicit_moe_backend_aiter():
     """--moe-backend aiter: returns FlyDSL when usable (TP or EP), else a clear
     ValueError when the aiter MoE runtime is disabled."""
@@ -154,6 +178,54 @@ def test_explicit_moe_backend_aiter():
         pytest.raises(ValueError, match="does not support current device"),
     ):
         _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
+
+
+@pytest.mark.parametrize(
+    "activation",
+    (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE),
+)
+def test_apply_forwards_activation_and_interleaved_gate_mode(activation):
+    from aiter import ActivationType
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    experts = object.__new__(AiterMxfp8Experts)
+    experts.quant_config = SimpleNamespace(gemm1_clamp_limit=None)
+    experts.w1_scale_val = None
+    experts.w2_scale_val = None
+    captured = {}
+
+    def fake_fused_moe(hidden_states, *_args, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(hidden_states)
+
+    hidden = torch.zeros((2, 8), dtype=torch.bfloat16)
+    output = torch.empty_like(hidden)
+    with patch.object(rocm_aiter_ops, "fused_moe", side_effect=fake_fused_moe):
+        experts.apply(
+            output=output,
+            hidden_states=hidden,
+            w1=torch.empty(1),
+            w2=torch.empty(1),
+            topk_weights=torch.ones((2, 2)),
+            topk_ids=torch.zeros((2, 2), dtype=torch.int64),
+            activation=activation,
+            global_num_experts=8,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=torch.empty(0),
+            workspace2=torch.empty(0),
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+
+    expected_activation = (
+        ActivationType.Silu.value
+        if activation == MoEActivation.SILU
+        else ActivationType.Swiglu.value
+    )
+    assert captured["activation_method"] == expected_activation
+    assert captured["gate_mode"] == GateMode.INTERLEAVE.value
 
 
 def test_gfx950_picks_aiter():
