@@ -1462,6 +1462,43 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_handshake_mla_target_reads_draft_head_slice_block_outermost(
+        self, default_vllm_config, dist_init
+    ):
+        """With a block-outermost layout (BLHNC) one page holds every layer of a
+        block, so the region stride is the page, not the region's block_len. The
+        draft head slice must still land inside the draft layer of each page."""
+        tp_rank = 3
+        worker, meta, mla_len, draft_len = self._mla_target_with_gqa_draft(
+            tp_size=8, tp_rank=tp_rank, remote_tp_size=1
+        )
+        remote_draft_len = meta.block_lens[1]
+        local_page = mla_len + draft_len
+        remote_page = mla_len + remote_draft_len
+        remote_page_base = 0x100000
+        num_blocks = 3
+
+        worker.kv_cache_layout = "BLHNC"
+        worker.block_stride_per_layer = [local_page, local_page]
+        worker.num_blocks = num_blocks
+        worker.dst_num_blocks[worker.engine_id] = num_blocks
+        meta.kv_cache_layout = "BLHNC"
+        meta.num_blocks = num_blocks
+        meta.kv_caches_base_addr = [remote_page_base, remote_page_base + mla_len]
+        meta.block_strides = [remote_page, remote_page]
+        worker.add_remote_agent(meta, remote_tp_size=1)
+
+        plan = worker.tp_mappings[FakeNixlConnectorWorker.REMOTE_ENGINE_ID]
+        pages = [remote_page_base + b * remote_page for b in range(num_blocks)]
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+            *([page, mla_len, 0] for page in pages),
+            *([page + mla_len + tp_rank * draft_len, draft_len, 0] for page in pages),
+        ]
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
     def test_handshake_mla_target_rejects_unsharded_draft_block(
         self, default_vllm_config, dist_init
     ):
