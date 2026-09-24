@@ -52,7 +52,9 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         torch.set_num_threads(original_threads)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs the CUDA allocator")
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="needs the CUDA allocator"
+)
 def test_scoped_max_split_keeps_freed_large_blocks_releasable():
     """A small allocation made after a large buffer is freed must not pin the
     buffer's segment: the profiling run (determine_available_memory) grows
@@ -62,18 +64,18 @@ def test_scoped_max_split_keeps_freed_large_blocks_releasable():
     small = 2 * 1024 * 1024  # large pool, so it is served by splitting cached blocks
 
     def reserved_while_small_is_live(scope) -> int:
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         with scope:
             buf = torch.empty(large, dtype=torch.uint8, device="cuda")
             del buf
             tensor = torch.empty(small, dtype=torch.uint8, device="cuda")
-            torch.cuda.empty_cache()
-            reserved = torch.cuda.memory_reserved()
+            torch.accelerator.empty_cache()
+            reserved = torch.accelerator.memory_reserved()
             del tensor
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         return reserved
 
-    baseline = torch.cuda.memory_reserved()
+    baseline = torch.accelerator.memory_reserved()
     # Without the limit the small tensor is split off the freed block and pins it.
     assert reserved_while_small_is_live(nullcontext()) - baseline >= large
     scoped = gpu_worker.Worker._scoped_allocator_max_split(
