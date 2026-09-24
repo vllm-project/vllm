@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy.typing as npt
 import torch
@@ -11,9 +11,7 @@ from transformers import BatchFeature
 from transformers.video_utils import VideoMetadata
 
 from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
+    MultiModalDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
@@ -32,9 +30,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoBackend,
+    VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
@@ -281,7 +281,7 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         video_size = self.info.get_video_size_with_most_features()
@@ -291,14 +291,14 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
-                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=video_size.width,
                 height=video_size.height,
                 num_frames=num_frames,
                 num_videos=mm_counts.get("video", 0),
-                overrides=cast(VideoDummyOptions | None, mm_options.get("video")),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -306,18 +306,21 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
 class MiniMaxM3VLMultiModalProcessor(
     BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data = dict(mm_data)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+
         # With ``video_needs_metadata=True`` each video arrives as a
         # ``(frames, metadata)`` tuple. Split the frames back out and forward the
         # metadata as ``VideoMetadata`` so the processor emits timestamps.
-        videos = cast(list | None, mm_data.get("videos"))
+        videos = cast(list | None, hf_data.get("videos"))
         video_metadata: list[VideoMetadata] | None = None
         if videos:
             frames_only = []
@@ -337,17 +340,23 @@ class MiniMaxM3VLMultiModalProcessor(
                 # stays consistent with _get_prompt_updates.
                 meta.setdefault("total_num_frames", len(frames))
                 video_metadata.append(VideoMetadata(**meta))
-            mm_data["videos"] = frames_only
+            hf_data["videos"] = frames_only
 
-        # Override the video processor's default do_resize=False (set for a
-        # pre-resized pipeline) to True for vLLM's raw-frame inputs.
-        merged = dict(do_resize=True, **mm_kwargs, **tok_kwargs)
-        data = dict(text=prompt, **mm_data)
         if video_metadata is not None:
-            data["video_metadata"] = video_metadata
+            hf_data["video_metadata"] = video_metadata
+
+        return hf_inputs
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override the video processor's default for vLLM's raw-frame inputs.
+        merged = dict(do_resize=True, **hf_kwargs)
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            data,
+            self.info.get_hf_processor(**hf_kwargs),
+            hf_data,
             merged,
         )
 
@@ -475,13 +484,7 @@ class MiniMaxM3VideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv",
-            "pyav",
-            "torchcodec",
-            "pynvvideocodec",
-            "deepstream",
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(

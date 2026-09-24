@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.entrypoints.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
@@ -53,13 +54,9 @@ def _load_reference_case(case_id: int):
 
 def _render_reference_case(case_id: int, **kwargs):
     messages, tools = _load_reference_case(case_id)
-    conversation, _, _ = parse_chat_messages(
-        messages,
-        _model_config(),
-        content_format="string",
-    )
+    # Preserve content blocks for encoding without fetching fixture media.
     return _tokenizer().apply_chat_template(
-        conversation=conversation,
+        conversation=messages,
         messages=messages,
         tools=tools,
         tokenize=False,
@@ -111,6 +108,94 @@ def test_deepseek_v4_explicitly_disables_thinking(kwargs):
     )
 
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+
+
+@pytest.mark.parametrize(
+    ("enable_thinking", "thinking_token"),
+    [(False, "</think>"), (True, "<think>")],
+)
+def test_deepseek_v4_appends_assistant_transition_after_trailing_system(
+    enable_thinking, thinking_token
+):
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "system", "content": "Be concise."},
+        ],
+        tokenize=False,
+        enable_thinking=enable_thinking,
+        reasoning_effort="low",
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜>You are helpful."
+        f"<｜User｜>What is 2+2?Be concise.<｜Assistant｜>{thinking_token}"
+    )
+
+
+def test_deepseek_v4_does_not_transition_after_mid_conversation_system():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "What is 3+3?"},
+            {"role": "assistant", "content": "6"},
+            {"role": "system", "content": "Answer in French."},
+            {"role": "user", "content": "What is 5+5?"},
+        ],
+        tokenize=False,
+        enable_thinking=False,
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>What is 3+3?"
+        "<｜Assistant｜></think>6<｜end▁of▁sentence｜>"
+        "Answer in French.<｜User｜>What is 5+5?"
+        "<｜Assistant｜></think>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("enable_thinking", "expected"),
+    [
+        (
+            False,
+            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
+            "<｜end▁of▁sentence｜>",
+        ),
+        (
+            True,
+            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
+            "<｜end▁of▁sentence｜>",
+        ),
+    ],
+)
+def test_deepseek_v4_transitions_from_system_to_assistant(enable_thinking, expected):
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "system", "content": "rules"},
+            {
+                "role": "assistant",
+                "reasoning": "reason",
+                "content": "answer",
+            },
+        ],
+        tokenize=False,
+        enable_thinking=enable_thinking,
+        reasoning_effort="low",
+    )
+
+    assert prompt == expected
+
+
+def test_deepseek_v4_unknown_role_raises_value_error():
+    # Invalid roles are client errors: they must surface as ValueError
+    # (mapped to HTTP 400 by the OpenAI serving layer), not
+    # NotImplementedError (mapped to HTTP 501).
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        _tokenizer().apply_chat_template(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            tokenize=False,
+        )
 
 
 def test_deepseek_v4_uses_v4_tool_prompt_from_request_tools():
@@ -308,6 +393,7 @@ def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():
         (2, {"thinking": True, "reasoning_effort": "low"}),
         (3, {"thinking": True, "reasoning_effort": "low"}),
         (4, {"thinking": False}),
+        (5, {"thinking": False}),
     ],
 )
 def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
@@ -315,3 +401,230 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def test_deepseek_v4_rejects_empty_developer_content():
+    with pytest.raises(ValueError):
+        _tokenizer().apply_chat_template(
+            [{"role": "developer", "content": ""}],
+            tokenize=False,
+            enable_thinking=True,
+            reasoning_effort="low",
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"thinking_mode": "bogus"},
+        {"thinking_mode": "thinking", "reasoning_effort": "turbo"},
+    ],
+)
+def test_deepseek_v4_encode_messages_rejects_invalid_arguments(kwargs):
+    from vllm.tokenizers.deepseek_v4_encoding import encode_messages
+
+    with pytest.raises(ValueError):
+        encode_messages([{"role": "user", "content": "Hello"}], **kwargs)
+
+
+def test_deepseek_v4_image_blocks_become_placeholders():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first:"},
+                    {"type": "image_url", "image_url": {"url": "file:///a.png"}},
+                    {"type": "text", "text": "second:"},
+                    {"type": "image", "source": {"data": "AAAA"}},
+                ],
+            }
+        ],
+        tokenize=False,
+        thinking=False,
+    )
+
+    assert (
+        "<｜User｜>first:\n\n<｜deepseek_image｜>\n\n"
+        "second:\n\n<｜deepseek_image｜>" in prompt
+    )
+
+
+def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
+    """The borrowed sentinel ids must line up with the reserved
+    ``<|place_holder_mm_span_XXXX|>`` tokens in the tokenizer."""
+    from vllm.models.deepseek_v4.common.mm_preprocess import (
+        IMAGE_SENTINEL_BASE_ID,
+        IMAGE_SENTINEL_TOKEN_NAMES,
+        image_sentinel_mask,
+        validate_image_sentinel_ids,
+    )
+
+    class FakeTokenizer:
+        def __init__(self, offset: int = 0) -> None:
+            self.offset = offset
+
+        def convert_tokens_to_ids(self, token: str) -> int:
+            return (
+                IMAGE_SENTINEL_BASE_ID
+                + self.offset
+                + (IMAGE_SENTINEL_TOKEN_NAMES.index(token))
+            )
+
+    validate_image_sentinel_ids(FakeTokenizer())  # no raise
+    with pytest.raises(ValueError, match="sentinel"):
+        validate_image_sentinel_ids(FakeTokenizer(offset=1))
+
+    ids = torch.tensor(
+        [
+            1,
+            IMAGE_SENTINEL_BASE_ID,
+            IMAGE_SENTINEL_BASE_ID + 4,
+            IMAGE_SENTINEL_BASE_ID + 5,
+            129264,
+        ]
+    )
+    assert image_sentinel_mask(ids).tolist() == [False, True, True, False, False]
+
+
+def _request_tools():
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+
+
+def _encode_reference(messages):
+    from vllm.tokenizers.deepseek_v4_encoding import encode_messages
+
+    return encode_messages(messages, thinking_mode="thinking", reasoning_effort="low")
+
+
+def test_deepseek_v4_attaches_request_tools_to_existing_system_message():
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Weather in Paris?"},
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{**messages[0], "tools": _request_tools()}, messages[1]]
+    )
+    assert prompt == expected
+    assert prompt.startswith("<｜begin▁of▁sentence｜>You are helpful.\n\n## Tools")
+    assert prompt.count("## Tools") == 1
+
+
+def test_deepseek_v4_synthetic_system_only_when_no_system_message():
+    """Without a system message, request tools still get a synthetic leading
+    system entry."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{"role": "system", "tools": _request_tools()}, messages[0]]
+    )
+    assert prompt == expected
+    assert prompt.startswith("<｜begin▁of▁sentence｜>\n\n## Tools")
+
+
+def test_deepseek_v4_request_tools_override_system_message_tools():
+    message_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "message_level_tool",
+                "description": "Should not be rendered",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    system_message = {
+        "role": "system",
+        "content": "You are helpful.",
+        "tools": message_tools,
+    }
+    user_message = {"role": "user", "content": "Weather in Paris?"}
+
+    prompt = _tokenizer().apply_chat_template(
+        [system_message, user_message],
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{**system_message, "tools": _request_tools()}, user_message]
+    )
+    assert prompt == expected
+    assert '"name": "get_weather"' in prompt
+    assert "message_level_tool" not in prompt
+
+
+def test_deepseek_v4_attaches_request_tools_to_first_system_message_only():
+    """Only the first system message, at any index, gets the request tools."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "system", "content": "First system."},
+        {"role": "system", "content": "Second system."},
+        {"role": "user", "content": "Weather in Paris?"},
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [
+            messages[0],
+            {**messages[1], "tools": _request_tools()},
+            messages[2],
+            messages[3],
+        ]
+    )
+    assert prompt == expected
+    assert "First system.\n\n## Tools" in prompt
+    assert prompt.count("## Tools") == 1
+
+
+def test_deepseek_v4_request_tools_do_not_mutate_caller_messages():
+    import copy
+
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Weather in Paris?"},
+    ]
+    snapshot = copy.deepcopy(messages)
+
+    _tokenizer().apply_chat_template(messages, tools=_request_tools(), tokenize=False)
+
+    assert messages == snapshot

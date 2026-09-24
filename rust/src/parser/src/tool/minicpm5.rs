@@ -10,11 +10,14 @@ use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::tool::Tool;
 
 const FUNCTION_START: &str = "<function";
+/// The chat template puts one newline before each `<function>` block, so that
+/// newline is protocol framing rather than assistant text.
+const FRAMED_FUNCTION_START: &str = "\n<function";
 const FUNCTION_END: &str = "</function>";
 const PARAM_START: &str = "<param";
 const PARAM_END: &str = "</param>";
@@ -191,11 +194,7 @@ fn normalize_tokenizer_artifacts(chunk: &str) -> Cow<'_, str> {
     if !chunk.contains(TOKENIZER_SPACE) && !chunk.contains(TOKENIZER_NEWLINE) {
         return Cow::Borrowed(chunk);
     }
-    Cow::Owned(
-        chunk
-            .replace(TOKENIZER_SPACE, " ")
-            .replace(TOKENIZER_NEWLINE, "\n"),
-    )
+    Cow::Owned(chunk.replace(TOKENIZER_SPACE, " ").replace(TOKENIZER_NEWLINE, "\n"))
 }
 
 /// Parse a MiniCPM5 event for the current parser mode.
@@ -204,7 +203,12 @@ fn parse_next_minicpm5_event(
     mode: &mut MiniCpm5Mode,
 ) -> ModalResult<MiniCpm5Event> {
     match mode {
-        MiniCpm5Mode::Text => alt((function_start_event, safe_text_event)).parse_next(input),
+        MiniCpm5Mode::Text => alt((
+            literal(FRAMED_FUNCTION_START).value(MiniCpm5Event::FunctionStart),
+            function_start_event,
+            safe_text_event,
+        ))
+        .parse_next(input),
         MiniCpm5Mode::Function { end_marker_scan } => function_event(input, end_marker_scan),
     }
 }
@@ -216,7 +220,8 @@ fn function_start_event(input: &mut MiniCpm5Input<'_>) -> ModalResult<MiniCpm5Ev
 
 /// Parse a safe text run before the next MiniCPM5 marker.
 fn safe_text_event(input: &mut MiniCpm5Input<'_>) -> ModalResult<MiniCpm5Event> {
-    safe_text_len(input, FUNCTION_START).map(|len| MiniCpm5Event::Text { len })
+    safe_text_len_mul(input, &[FRAMED_FUNCTION_START, FUNCTION_START])
+        .map(|len| MiniCpm5Event::Text { len })
 }
 
 /// Parse a complete MiniCPM5 function block once its end marker arrives.
@@ -375,7 +380,10 @@ mod tests {
         let output = parser
             .parse_complete(&format!(
                 "Let me check. {}",
-                build_tool_call("get_weather", &[("location", "上海"), ("date", "2026-07-28")])
+                build_tool_call(
+                    "get_weather",
+                    &[("location", "上海"), ("date", "2026-07-28")]
+                )
             ))
             .unwrap();
 
@@ -391,9 +399,7 @@ mod tests {
     #[test]
     fn minicpm5_parse_complete_extracts_zero_arg_call() {
         let mut parser = MiniCpm5ToolParser::new(&test_tools());
-        let output = parser
-            .parse_complete("<function name=\"get_weather\"></function>")
-            .unwrap();
+        let output = parser.parse_complete("<function name=\"get_weather\"></function>").unwrap();
 
         assert_eq!(output.calls().len(), 1);
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
@@ -495,7 +501,10 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(parsed_arguments(&output, 0), json!({ "location": "北\n京" }));
+        assert_eq!(
+            parsed_arguments(&output, 0),
+            json!({ "location": "北\n京" })
+        );
     }
 
     #[test]
@@ -535,7 +544,10 @@ mod tests {
     fn minicpm5_parse_complete_trims_non_cdata_values() {
         let mut parser = MiniCpm5ToolParser::new(&test_tools());
         let output = parser
-            .parse_complete(&build_tool_call("get_weather", &[("location", "\n  Tokyo  \n")]))
+            .parse_complete(&build_tool_call(
+                "get_weather",
+                &[("location", "\n  Tokyo  \n")],
+            ))
             .unwrap();
 
         assert_eq!(parsed_arguments(&output, 0), json!({ "location": "Tokyo" }));
@@ -603,7 +615,9 @@ mod tests {
         let mut output = ToolParserOutput::default();
         output.append(
             parser
-                .parse_chunk("<function name=\"get_weather\"><param name=\"location\">SF</param></func")
+                .parse_chunk(
+                    "<function name=\"get_weather\"><param name=\"location\">SF</param></func",
+                )
                 .unwrap(),
         );
 
@@ -620,14 +634,16 @@ mod tests {
 
     #[test]
     fn minicpm5_streaming_handles_cdata_split_across_chunks() {
-        let text =
-            "<function name=\"echo\"><param name=\"text\"><![CDATA[chunky value]]></param></function>";
+        let text = "<function name=\"echo\"><param name=\"text\"><![CDATA[chunky value]]></param></function>";
         let chunks = split_by_chars(text, 7);
         let mut parser = MiniCpm5ToolParser::new(&test_tools());
 
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(parsed_arguments(&output, 0), json!({ "text": "chunky value" }));
+        assert_eq!(
+            parsed_arguments(&output, 0),
+            json!({ "text": "chunky value" })
+        );
     }
 
     #[test]
@@ -666,7 +682,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(parsed_arguments(&output, 0), json!({ "text": "a</param>b" }));
+        assert_eq!(
+            parsed_arguments(&output, 0),
+            json!({ "text": "a</param>b" })
+        );
     }
 
     #[test]
@@ -728,5 +747,13 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_report_string().starts_with("tool parser parsing failed:"));
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        crate::tool::tests::assert_tool_framing_preserves_body_whitespace::<MiniCpm5ToolParser>(
+            "\n",
+            r#"<function name="get_weather"><param name="location">Shanghai</param></function>"#,
+        );
     }
 }

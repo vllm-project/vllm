@@ -16,8 +16,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 class MambaBase(AttentionLayerBase):
-    """
-    Base class for Mamba-like layers which support the v1 engine.
+    """Base class for Mamba-like layers which support the v1 engine.
     Inherit from this class if you implement a custom layer.
     """
 
@@ -44,8 +43,7 @@ class MambaBase(AttentionLayerBase):
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
-        """
-        Defines the shape of the state.
+        """Defines the shape of the state.
         For mamba layers this is usually a (conv_state, ssm_state) tuple.
         In this case, returns (conv_state_shape, ssm_state_shape).
         """
@@ -55,6 +53,10 @@ class MambaBase(AttentionLayerBase):
     @abstractmethod
     def mamba_type(self) -> MambaAttentionBackendEnum:
         pass
+
+    @property
+    def is_kv_cache_tp_replicated(self) -> bool:
+        return False
 
     @abstractmethod
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
@@ -70,11 +72,14 @@ class MambaBase(AttentionLayerBase):
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
+            tp_replicated=self.is_kv_cache_tp_replicated,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
+            # RecoverSSM verifies the whole window off one checkpoint, so it
+            # never writes the baseline's per-draft-token state slots.
             num_speculative_blocks=(
-                vllm_config.speculative_config.num_speculative_tokens
-                if vllm_config.speculative_config
-                else 0
+                0
+                if vllm_config.cache_config.use_kda_recoverssm
+                else vllm_config.num_speculative_tokens
             ),
         )
 

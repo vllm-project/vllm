@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -26,6 +26,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
@@ -82,19 +83,16 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -106,6 +104,8 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
         hf_processor: NVLMProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -125,6 +125,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 feature_size = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -138,14 +139,18 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
 
             repl = hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
-            return PromptUpdateDetails.select_text(
-                repl.full + "\n", hf_processor.ctx_image_token
+            # `repl.full` ends in the special `</Image>` token, so there is
+            # no BPE merge across the boundary with the newline
+            newline_ids = cached_encode(tokenizer, "\n", add_special_tokens=False)
+
+            return PromptUpdateDetails.select_token_id(
+                repl.full + newline_ids, hf_processor.ctx_image_token_id
             )
 
         # See note in dummy data regarding why we have the extra newline
         return PromptReplacement(
             modality="image",
-            target="<image>\n",
+            target=cached_encode(tokenizer, "<image>\n", add_special_tokens=False),
             replacement=get_replacement_nvlm,
         )
 

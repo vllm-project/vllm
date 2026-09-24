@@ -28,7 +28,6 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -44,6 +43,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultimodalEmbedder,
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
+    Gemma4VideoInputs,
     _get_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -176,10 +176,7 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
-        if (
-            isinstance(video_opts, VideoDummyOptions)
-            and video_opts.num_frames is not None
-        ):
+        if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
@@ -265,22 +262,16 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.audio_tower = None
 
         # ---- Encoder-free vision embedder ----
-        self.vision_embedder = (
-            Gemma4UnifiedVisionEmbedder(
-                config.vision_config,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "vision_embedder"),
-            )
-            if config.vision_config is not None
-            else None
+        if config.vision_config is None:
+            raise ValueError("Gemma4 Unified requires a vision configuration")
+        self.vision_embedder = Gemma4UnifiedVisionEmbedder(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_embedder"),
         )
-        self.embed_vision = (
-            Gemma4MultimodalEmbedder(
-                config.vision_config,
-                config.text_config,
-            )
-            if config.vision_config is not None
-            else None
+        self.embed_vision = Gemma4MultimodalEmbedder(
+            config.vision_config,
+            config.text_config,
         )
 
         # ---- Encoder-free audio embedder ----
@@ -382,7 +373,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
     def _process_video_input(
         self,
-        video_input: dict[str, torch.Tensor],
+        video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
         """Project video frames to LM space, one frame at a time.
 
@@ -429,6 +420,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             audio_input["input_features_mask"],
         )
 
+        assert self.embed_audio is not None
         target_dtype = self.embed_audio.embedding_projection.weight.dtype
         audio_features = self.embed_audio(input_features.to(target_dtype))
         per_audio: list[torch.Tensor] = []

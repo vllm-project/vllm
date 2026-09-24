@@ -13,7 +13,13 @@ from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
-ProfilerKind = Literal["torch", "cuda"]
+ProfilerKind = Literal["torch", "cuda", "proton"]
+TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
+ProtonBackend = Literal["cupti"]
+ProtonContext = Literal["shadow", "python"]
+ProtonData = Literal["tree", "trace"]
+ProtonHook = Literal["triton"]
+ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
 
 
 def _is_uri_path(path: str) -> bool:
@@ -38,12 +44,48 @@ class ProfilerConfig:
     """Which profiler to use. Defaults to None. Options are:
 
     - 'torch': Use PyTorch profiler.
-    - 'cuda': Use CUDA profiler."""
+    - 'cuda': Use CUDA profiler.
+    - 'proton': Use Triton Proton profiler."""
 
     torch_profiler_dir: str = ""
     """Directory to save torch profiler traces. Both AsyncLLM's CPU traces and
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
+
+    torch_profiler_activities: list[TorchProfilerActivity] | None = Field(
+        default=None, min_length=1
+    )
+    """Activities recorded by workers using the torch profiler. When unset,
+    each worker uses its platform default: CPU; CPU and CUDA; or CPU and XPU."""
+
+    proton_profiler_dir: str = ""
+    """Directory to save Triton Proton profiles. Each worker writes a
+    separate rank-qualified file."""
+
+    proton_context: ProtonContext = "shadow"
+    """Proton context source. ``shadow`` records explicit scopes with low
+    overhead; ``python`` records Python call stacks."""
+
+    proton_data: ProtonData = "tree"
+    """Proton output type. ``tree`` produces Hatchet data and ``trace``
+    produces a Chrome trace."""
+
+    proton_backend: ProtonBackend | None = None
+    """Proton GPU backend. ``None`` lets Proton select CUPTI automatically."""
+
+    proton_mode: str | None = None
+    """Optional backend-specific Proton mode string, such as ``pcsampling``."""
+
+    proton_hook: ProtonHook | None = None
+    """Optional Proton hook. Use ``triton`` to add Triton launch metadata."""
+
+    proton_output_format: ProtonOutputFormat | None = None
+    """Optional format passed to Proton when finalizing a profile. ``None``
+    uses the default format for ``proton_data``."""
+
+    proton_graph_attribution: bool = False
+    """Observe CUDA graph capture so replayed kernels can be attributed.
+    Requires Triton >= 3.7 and ``proton_data='tree'``."""
 
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default
@@ -116,8 +158,7 @@ class ProfilerConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -136,24 +177,95 @@ class ProfilerConfig:
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
-        if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
+        activities = self.torch_profiler_activities
+        if activities is not None:
+            if self.profiler != "torch":
+                raise ValueError(
+                    "torch_profiler_activities is only applicable when profiler "
+                    "is set to 'torch'"
+                )
+            if len(activities) != len(set(activities)):
+                raise ValueError(
+                    "torch_profiler_activities must not contain duplicates"
+                )
+        records_cpu_activity = activities is None or "CPU" in activities
+        if (
+            self.profiler == "torch"
+            and has_delay_or_limit
+            and not self.ignore_frontend
+            and records_cpu_activity
+        ):
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
             )
 
-        profiler_dir = self.torch_profiler_dir
-        if profiler_dir and self.profiler != "torch":
+        torch_profiler_dir = self.torch_profiler_dir
+        if torch_profiler_dir and self.profiler != "torch":
             raise ValueError(
                 "torch_profiler_dir is only applicable when profiler is set to 'torch'"
             )
-        if self.profiler == "torch" and not profiler_dir:
+        if self.profiler == "torch" and not torch_profiler_dir:
             raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
 
         # Support any URI scheme (gs://, s3://, hdfs://, etc.)
         # These paths should not be converted to absolute paths
-        if profiler_dir and not _is_uri_path(profiler_dir):
-            self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
+        if torch_profiler_dir and not _is_uri_path(torch_profiler_dir):
+            self.torch_profiler_dir = os.path.abspath(
+                os.path.expanduser(torch_profiler_dir)
+            )
+
+        proton_profiler_dir = self.proton_profiler_dir
+        non_default_proton_options = [
+            name
+            for name, value, default in (
+                ("proton_profiler_dir", proton_profiler_dir, ""),
+                ("proton_context", self.proton_context, "shadow"),
+                ("proton_data", self.proton_data, "tree"),
+                ("proton_backend", self.proton_backend, None),
+                ("proton_mode", self.proton_mode, None),
+                ("proton_hook", self.proton_hook, None),
+                ("proton_output_format", self.proton_output_format, None),
+                ("proton_graph_attribution", self.proton_graph_attribution, False),
+            )
+            if value != default
+        ]
+        if self.profiler != "proton" and non_default_proton_options:
+            options = ", ".join(non_default_proton_options)
+            raise ValueError(
+                f"{options} only applicable when profiler is set to 'proton'"
+            )
+        if self.profiler == "proton" and not proton_profiler_dir:
+            raise ValueError(
+                "proton_profiler_dir must be set when profiler is 'proton'"
+            )
+        if proton_profiler_dir:
+            if _is_uri_path(proton_profiler_dir):
+                raise ValueError("proton_profiler_dir must be a local directory")
+            self.proton_profiler_dir = os.path.abspath(
+                os.path.expanduser(proton_profiler_dir)
+            )
+
+        if self.profiler == "proton":
+            output_format = self.proton_output_format
+            if self.proton_graph_attribution and self.proton_data != "tree":
+                raise ValueError("proton_graph_attribution requires proton_data='tree'")
+            if (
+                self.proton_graph_attribution
+                and self.proton_mode
+                and self.proton_mode.split(":", 1)[0].lower() == "periodic_flushing"
+            ):
+                raise ValueError(
+                    "proton_graph_attribution is incompatible with periodic_flushing: "
+                    "both manage Proton data phases."
+                )
+            if output_format == "chrome_trace" and self.proton_data != "trace":
+                raise ValueError("chrome_trace output requires proton_data='trace'")
+            if (
+                output_format in ("hatchet", "hatchet_msgpack")
+                and self.proton_data != "tree"
+            ):
+                raise ValueError(f"{output_format} output requires proton_data='tree'")
 
         if self.capture_torch_profiler and self.profiler != "torch":
             raise ValueError(

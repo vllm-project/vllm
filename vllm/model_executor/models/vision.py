@@ -9,7 +9,6 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
@@ -89,9 +88,7 @@ def _get_vit_attn_backend(
     *,
     attn_backend_override: AttentionBackendEnum | None = None,
 ) -> AttentionBackendEnum:
-    """
-    Get the available attention backend for Vision Transformer.
-    """
+    """Get the available attention backend for Vision Transformer."""
     return current_platform.get_vit_attn_backend(
         head_size,
         dtype,
@@ -103,9 +100,7 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
 ) -> AttentionBackendEnum:
-    """
-    Get the attention backend for Vision Transformer.
-    """
+    """Get the attention backend for Vision Transformer."""
     mm_cfg = get_multimodal_config()
     attn_backend_override = (
         mm_cfg.mm_encoder_attn_backend if mm_cfg is not None else None
@@ -143,9 +138,7 @@ def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
 
 
 def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
-    """
-    Get the tensor parallel type for Vision Transformer.
-    """
+    """Get the tensor parallel type for Vision Transformer."""
     mm_cfg = get_multimodal_config()
     can_split = (
         num_heads % get_tensor_model_parallel_world_size() == 0
@@ -236,6 +229,7 @@ def resolve_visual_encoder_outputs(
             concatenated with the other select_layers along the last dimension.
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
+
     """
     if select_layers is None:
         if not isinstance(encoder_outputs, torch.Tensor):
@@ -303,10 +297,11 @@ def run_dp_sharded_vision_model(
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
+
     Returns:
         torch.Tensor: Output image embeddings
-    """
 
+    """
     num_chunks = image_input.shape[0]
     mp_world_size = get_tensor_model_parallel_world_size()
     num_chunks_per_rank = (num_chunks + mp_world_size - 1) // mp_world_size
@@ -330,8 +325,7 @@ def get_load_balance_assignment(
     sizes: list[int],
     num_gpus: int = 2,
 ) -> tuple[list[int], list[int], list[int]]:
-    """
-    Generate load balancing assignment and metadata
+    """Generate load balancing assignment and metadata
     for distributing data across GPUs.
     The load is determined by the total image sizes,
     not the number of images.
@@ -355,7 +349,6 @@ def get_load_balance_assignment(
         ```
 
     """
-
     n_samples = len(sizes)
 
     # Handle edge cases
@@ -415,6 +408,7 @@ def run_dp_sharded_mrope_vision_model(
                    Different rope types have different dimension to do ViT.
                    "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
                    "rope_2d" for 2D rope (e.g., Kimi-VL)
+
     Returns:
         torch.Tensor: Output image embeddings
 
@@ -487,6 +481,7 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+    embed_dtype = next(vision_model.parameters()).dtype
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
@@ -501,7 +496,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local = torch.empty(
                 (0, embed_dim_reduction_factor, out_dim),
                 device=pixel_values.device,
-                dtype=pixel_values.dtype,
+                dtype=embed_dtype,
             )
     else:
         if pixel_values_local.shape[0] > 0:
@@ -511,7 +506,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local = torch.empty(
                 (0, vision_model.out_hidden_size),
                 device=pixel_values.device,
-                dtype=pixel_values.dtype,
+                dtype=embed_dtype,
             )
 
     # Pad the output based on max_len_per_rank
@@ -586,8 +581,7 @@ def run_dp_sharded_mrope_vision_model(
 
 
 class FusedInputNorm(nn.Module):
-    """
-    Module that applies rescaling and normalization to input images.
+    """Module that applies rescaling and normalization to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
     """
 
@@ -632,13 +626,9 @@ class FusedInputNorm(nn.Module):
             bias = -image_mean_tensor / image_std_tensor
             self.register_buffer("weight", weight)
             self.register_buffer("bias", bias)
-            self.register_buffer("running_mean", torch.zeros_like(image_mean_tensor))
-            self.register_buffer("running_var", torch.ones_like(image_mean_tensor))
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
-            self.register_buffer("running_mean", None)
-            self.register_buffer("running_var", None)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -723,14 +713,30 @@ class FusedInputNorm(nn.Module):
         patches, size = grid_thw.shape
         patch_size = size // self.channel
 
-        grid_thw = grid_thw.view(patches, self.channel, patch_size)
-        grid_thw = F.batch_norm(
-            grid_thw.to(self.dtype),
-            running_mean=self.running_mean,
-            running_var=self.running_var,
-            weight=self.weight,
-            bias=self.bias,
-            training=False,
-            eps=0.0,
+        # On XPU, fuse the whole rescale + normalize into a single custom
+        # kernel. The eager path below materializes an fp32 intermediate and
+        # then casts back, which adds device-side compute that cancels the
+        # bandwidth saving of transferring uint8 pixel_values. The fused
+        # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        if (
+            current_platform.is_xpu()
+            and grid_thw.dtype == torch.uint8
+            and self.weight.dtype == torch.float32
+        ):
+            return torch.ops.vllm.xpu_fused_input_norm(
+                grid_thw, self.weight, self.bias, visual_dtype
+            )
+
+        # Apply the per-channel affine transform directly instead of via
+        # F.batch_norm. batch_norm dispatches to cuDNN, whose batch-norm
+        # kernels cap the batch dimension near the CUDA grid limit (~65535);
+        # here that dimension is the number of patches, which grows unbounded
+        # with image resolution and batch size and overflows the cap on large
+        # image-heavy requests (CUDNN_STATUS_INTERNAL_ERROR). The plain
+        # broadcasted multiply-add is numerically identical and has no such
+        # limit.
+        x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
+        x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
+            1, self.channel, 1
         )
-        return grid_thw.view(patches, size).to(visual_dtype)
+        return x.view(patches, size).to(visual_dtype)

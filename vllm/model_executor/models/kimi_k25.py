@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Kimi-K2.5 Model Implementation for vLLM.
+"""Kimi-K2.5 Model Implementation for vLLM.
 
 Kimi-K2.5 extends Kimi-K2 with vision support.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
@@ -15,7 +14,7 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -90,8 +89,7 @@ class MaxImageTokenMeta:
 
 
 class KimiK25MediaPixelInputs(TensorSchema):
-    """
-    Media input schema for K2-VL model.
+    """Media input schema for K2-VL model.
 
     Dimensions:
         - np: Number of patches (flattened from all media items)
@@ -218,7 +216,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         # TODO: Support mm_options for vision_chunk to allow user configuration
         dummy_items = self.get_dummy_mm_items()
@@ -257,17 +255,6 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             ),
             grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path because vision chunk
-        # is not considered
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _get_prompt_updates(
         self,
@@ -605,6 +592,7 @@ class KimiK25ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
 

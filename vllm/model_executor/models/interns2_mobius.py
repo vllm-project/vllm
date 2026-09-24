@@ -17,7 +17,10 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -43,7 +46,7 @@ from .qwen3_5 import (
     Qwen3_5RMSNorm,
 )
 from .qwen3_5_mtp import Qwen3_5MoeMTP
-from .qwen3_next import Qwen3NextAttention, _all_gather_hidden_and_residual
+from .qwen3_next import Qwen3NextAttention
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
@@ -93,11 +96,9 @@ class InternS2MobiusMetaMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         self.experts = FusedMoEFactory(
@@ -127,17 +128,10 @@ class InternS2MobiusMetaMoeBlock(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        if self.experts.is_internal_router:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=hidden_states,
-            )
-        else:
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=hidden_states,
+        )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -240,11 +234,6 @@ class InternS2MobiusDecoderLayer(nn.Module):
         meta_mlp: nn.ModuleList,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[-1]
-        input_is_sequence_parallel = (
-            self.use_attn_reduce_scatter_for_moe
-            and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
-        )
 
         if residual is None:
             residual = hidden_states
@@ -252,7 +241,7 @@ class InternS2MobiusDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if input_is_sequence_parallel:
+        if self.use_attn_reduce_scatter_for_moe:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[:full_num_tokens]
 
@@ -273,8 +262,6 @@ class InternS2MobiusDecoderLayer(nn.Module):
             sp_pad = (-hidden_states.shape[0]) % tp_world_size
             hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
             hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
-            if not input_is_sequence_parallel:
-                residual = sequence_parallel_chunk(residual)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         block_idx = self.layer_idx % self.num_blocks
@@ -350,6 +337,10 @@ class InternS2MobiusModel(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    @property
+    def use_sequence_parallel(self) -> bool:
+        return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -370,36 +361,21 @@ class InternS2MobiusModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
+        if self.use_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
+
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if (
-                hidden_states.shape[0] != full_num_tokens
-                and not layer.use_attn_reduce_scatter_for_moe
-            ):
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
                 meta_mlp=self.meta_mlp,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
-                0
-            ] != full_num_tokens:
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
             self._maybe_add_hidden_state(
                 aux_hidden_states,
                 layer_idx + 1,
@@ -411,14 +387,19 @@ class InternS2MobiusModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        if hidden_states.shape[0] != full_num_tokens:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                full_num_tokens,
-                self.config.hidden_size,
-            )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if self.use_sequence_parallel:
+            if aux_hidden_states:
+                hidden_size = hidden_states.shape[-1]
+                hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
+                hidden_states, *aux_hidden_states = hidden_states.split(
+                    hidden_size, dim=-1
+                )
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -450,15 +431,14 @@ class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=self.quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -497,7 +477,7 @@ class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGenera
         if getattr(config, "image_token_index", None) is None:
             config.image_token_index = config.image_token_id
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config

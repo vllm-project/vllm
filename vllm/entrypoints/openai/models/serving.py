@@ -7,18 +7,18 @@ from http import HTTPStatus
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
     ModelCard,
     ModelList,
     ModelPermission,
 )
-from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -289,6 +289,7 @@ class OpenAIServingModels:
             LoRARequest if found and loaded successfully.
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
+
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded

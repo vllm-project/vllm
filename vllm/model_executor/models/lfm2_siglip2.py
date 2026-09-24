@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -37,9 +38,10 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Linear(
-            in_features=config.num_channels * self.patch_size * self.patch_size,
-            out_features=self.embed_dim,
+        self.patch_embedding = ReplicatedLinear(
+            input_size=config.num_channels * self.patch_size * self.patch_size,
+            output_size=self.embed_dim,
+            return_bias=False,
         )
         self.num_patches = config.num_patches
         self.position_embedding_size = int(self.num_patches**0.5)
@@ -59,6 +61,7 @@ class Siglip2VisionEmbeddings(nn.Module):
 
         Returns:
             (1, total_tokens, embed_dim) packed embeddings.
+
         """
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
@@ -111,6 +114,7 @@ class Siglip2VisionEmbeddings(nn.Module):
         Returns:
             (total_tokens, embed_dim) packed positional embeddings, concatenated
             in the same order as `lengths_list`.
+
         """
         assert spatial_shapes.device.type == "cpu"
 
@@ -153,7 +157,7 @@ class Siglip2VisionEmbeddings(nn.Module):
 
 
 class Siglip2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -302,11 +306,11 @@ class Siglip2EncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
-            cu_seqlens: Cumulative sequence lengths tensor.
-            max_seqlen: Maximum sequence length.
+        """Args:
+        hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
+        cu_seqlens: Cumulative sequence lengths tensor.
+        max_seqlen: Maximum sequence length.
+
         """
         residual = hidden_states
 
@@ -326,12 +330,12 @@ class Siglip2EncoderLayer(nn.Module):
 
 
 class Siglip2Encoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers`
+    """Transformer encoder consisting of `config.num_hidden_layers`
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
         config: PretrainedConfig
+
     """
 
     def __init__(
@@ -428,8 +432,7 @@ class Siglip2VisionTransformer(nn.Module):
         max_seqlen: torch.Tensor,
         select_layers: list[int] | None = None,
     ) -> torch.Tensor:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
+        r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
             Tensor containing the spatial dimensions (height, width)
         of the input images.
         select_layers (`list[int]` or `None`, defaults to `None`):
@@ -482,6 +485,10 @@ class Siglip2Model(torch.nn.Module):
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
+        if self.vision_model.post_layernorm is None:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"vision_model.post_layernorm.": None}
+            )
 
     def forward(
         self,
@@ -494,10 +501,15 @@ class Siglip2Model(torch.nn.Module):
         """Forward pass through the vision model.
 
         Args:
+            pixel_values_packed: Packed pixel values for all images.
+            spatial_shapes: Per-image spatial dimensions.
+            cu_seqlens: Cumulative sequence lengths of the packed images.
+            max_seqlen: Longest image sequence in the batch.
             select_layers: Layer indices to select hidden states from.
                 Supports negative indices (e.g., [-2] for second-to-last).
                 If None, returns the last layer output with post_layernorm.
                 Multiple layers can be selected and will be concatenated.
+
         """
         return self.vision_model(
             pixel_values_packed=pixel_values_packed,
@@ -508,10 +520,7 @@ class Siglip2Model(torch.nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.vision_model.post_layernorm is None:
-            skip_prefixes.append("vision_model.post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         # Drop layers omitted by num_hidden_layers_override.
         layer_count = len(self.vision_model.encoder.layers)

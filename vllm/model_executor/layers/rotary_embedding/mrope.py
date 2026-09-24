@@ -7,6 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import RotaryEmbeddingBase
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
@@ -178,8 +179,12 @@ def triton_mrope(
             (T/H/W positions with multimodal inputs)
         mrope_section: [t, h, w]
         head_size: int
+        rotary_dim: Number of leading dimensions rotary is applied to.
+        mrope_interleaved: Whether the T/H/W sections are interleaved rather
+            than concatenated.
         is_neox_style: Whether rotary pairs use split-half (NeoX) or
             adjacent (GPT-J) layout.
+
     """
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
@@ -226,12 +231,70 @@ def triton_mrope(
 def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
     """Apply interleaved MRoPE to 3D rotary embeddings.
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-    interleaved [THTHWHTHW...TT], preserving frequency continuity.
+    interleaved [THWTHWTHW...TT], preserving frequency continuity.
     """
-    x_t = x[0].clone()
-    x_t[..., 1 : mrope_section[1] * 3 : 3] = x[1, ..., 1 : mrope_section[1] * 3 : 3]
-    x_t[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
-    return x_t
+    channels = torch.arange(x.shape[-1], device=x.device)
+    is_height = (channels % 3 == 1) & (channels < mrope_section[1] * 3)
+    is_width = (channels % 3 == 2) & (channels < mrope_section[2] * 3)
+
+    result = torch.where(is_height, x[1], x[0])
+    return torch.where(is_width, x[2], result)
+
+
+def _mrope_apply(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> None:
+    cos_sin = cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    query_out, key_out = triton_mrope(
+        query,
+        key,
+        cos,
+        sin,
+        [mrope_section_t, mrope_section_h, mrope_section_w],
+        head_size,
+        rotary_dim,
+        mrope_interleaved,
+        is_neox_style,
+    )
+    if query_out.data_ptr() != query.data_ptr():
+        query.copy_(query_out.view_as(query))
+    if key_out.data_ptr() != key.data_ptr():
+        key.copy_(key_out.view_as(key))
+
+
+def _mrope_apply_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mrope",
+    op_func=_mrope_apply,
+    mutates_args=["query", "key"],
+    fake_impl=_mrope_apply_fake,
+)
 
 
 class MRotaryEmbedding(RotaryEmbeddingBase):
@@ -250,21 +313,28 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # YaRN parameters.
         *,
         scaling_factor: float | None = None,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
         if self.scaling_factor is not None:
             # Get n-d magnitude scaling corrected for interpolation
-            self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+            if attention_factor is not None:
+                self.mscale = float(attention_factor)
+            elif mscale and mscale_all_dim:
+                self.mscale = float(
+                    yarn_get_mscale(self.scaling_factor, mscale)
+                    / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+                )
+            else:
+                self.mscale = float(yarn_get_mscale(self.scaling_factor))
         else:
             self.mscale = 1.0
 
@@ -311,6 +381,8 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 [3, num_tokens] (T/H/W positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            offsets: Optional per-token position offsets added to positions.
+
         """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
@@ -411,6 +483,35 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if positions.ndim == 2:
+            assert key is not None
+            assert self.mrope_section
+            query_shape = query.shape
+            key_shape = key.shape
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            torch.ops.vllm.mrope(
+                positions,
+                query,
+                key,
+                cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_section[0],
+                self.mrope_section[1],
+                self.mrope_section[2],
+                self.mrope_interleaved,
+                self.is_neox_style,
+            )
+            return query.reshape(query_shape), key.reshape(key_shape)
+        return super().forward_hip(positions, query, key)
+
     def forward_cpu(
         self,
         positions: torch.Tensor,
@@ -419,6 +520,15 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_cuda(positions, query, key, offsets)
 
     @staticmethod
     def get_next_input_positions(

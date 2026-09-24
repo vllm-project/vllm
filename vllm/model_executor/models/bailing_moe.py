@@ -41,7 +41,10 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -243,11 +246,12 @@ class BailingMoE(nn.Module):
         else:
             self.router_dtype = torch.bfloat16
 
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             self.hidden_size,
             self.num_experts,
-            bias=False,
-            dtype=self.router_dtype,
+            out_dtype=self.router_dtype,
+            params_dtype=self.router_dtype,
+            prefix=f"{prefix}.gate",
         )
 
         if getattr(config, "moe_router_enable_expert_bias", False):
@@ -312,7 +316,7 @@ class BailingMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_size)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states.to(self.router_dtype))
+        router_logits, _ = self.gate(hidden_states)
         router_logits = router_logits.to(hidden_states.dtype)
 
         final_hidden_states = self.experts(
@@ -509,15 +513,14 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if self.tie_word_embeddings:
-                self.lm_head = self.model.word_embeddings
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.word_embeddings)
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
@@ -558,10 +561,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(self._normalize_lm_head(weights))
 
 

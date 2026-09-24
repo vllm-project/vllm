@@ -2,7 +2,7 @@ group: Attention
 depends_on: 
   - image-build
 steps:
-- label: V1 attention (H100-MI300)
+- label: ":nvidia: (H100) V1 Attention Shard %N"
   key: v1-attention-h100-mi300
   timeout_in_minutes: 85
   device: h100
@@ -16,6 +16,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      label: ":amd: (MI300) V1 Attention Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 125
@@ -30,7 +31,7 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
 
-- label: V1 attention (B200)
+- label: ":nvidia: (B200) V1 Attention Shard %N"
   key: v1-attention-b200
   timeout_in_minutes: 80
   device: b200-k8s

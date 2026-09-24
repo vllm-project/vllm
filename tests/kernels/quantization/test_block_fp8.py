@@ -14,6 +14,10 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+    B12xFp8BlockScaledMMKernel,
+    _run_b12x_fp8_block_scaled_mm,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -23,6 +27,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_tma_aligned_size,
+    is_deep_gemm_e8m0_used,
     per_block_cast_to_fp8,
     should_use_deepgemm_for_fp8_linear,
 )
@@ -157,11 +162,16 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
+@pytest.mark.parametrize(
+    # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
+    # threshold (m <= 64); 1026 crosses multiple 128-row SF atoms.
+    "M",
+    [32, 65, 66, 67, 1026],
+)
 @torch.inference_mode()
-def test_w8a8_block_fp8_cutlass_matmul():
+def test_w8a8_block_fp8_cutlass_matmul(M):
     # Test simple case where weight.shape % 128 != 0,
     # like in DSV3 kv_a_proj_with_mqa
-    M = 32
     N = 576
     K = 7168
     block_size = [128, 128]
@@ -287,7 +297,11 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     A_fp8, As_fp8 = per_token_group_quant_fp8(
         A_fp32, block_size[1], column_major_scales=True, tma_aligned_scales=True
     )
-    B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)
+    B_fp8, Bs_fp8 = per_block_cast_to_fp8(
+        B_fp32,
+        block_size=block_size,
+        use_ue8m0=is_deep_gemm_e8m0_used(),
+    )
 
     As = As_fp8.to(torch.float32)
     Bs = Bs_fp8.to(torch.float32)
@@ -353,3 +367,56 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.bfloat16) - ref_out.to(torch.bfloat16))
     ) / torch.mean(torch.abs(ref_out.to(torch.bfloat16)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.parametrize(
+    "M,N,K",
+    [(1, 128, 256), (8, 256, 512), (129, 256, 256), (2, 4096, 4096)],
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_b12x_matmul(M, N, K):
+    supported, reason = B12xFp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    torch.manual_seed(M)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    A_bf16 = (torch.rand(M, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    B_bf16 = (torch.rand(N, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    A_fp8, As = per_token_group_quant_fp8(A_bf16, 128, use_ue8m0=False)
+    B_fp8, Bs = per_block_cast_to_fp8(
+        B_bf16,
+        block_size=[128, 128],
+        use_ue8m0=False,
+    )
+    As = As.float()
+    Bs = Bs.float()
+
+    ref_out = native_w8a8_block_matmul(
+        A_fp8,
+        B_fp8,
+        As,
+        Bs,
+        [128, 128],
+        torch.bfloat16,
+    )
+    out = _run_b12x_fp8_block_scaled_mm(
+        A_fp8,
+        B_fp8,
+        As,
+        Bs,
+        torch.bfloat16,
+    )
+
+    rel_diff = torch.mean(torch.abs(out.float() - ref_out.float())) / torch.mean(
+        torch.abs(ref_out.float())
+    )
+    cosine = torch.nn.functional.cosine_similarity(
+        out.float().flatten(),
+        ref_out.float().flatten(),
+        dim=0,
+    )
+    # Four-way split-K uses atomic BF16 reductions, so nondeterministic atomic
+    # ordering can flap an output between adjacent BF16 values one ULP apart.
+    assert rel_diff < 0.003
+    assert cosine >= 0.99999

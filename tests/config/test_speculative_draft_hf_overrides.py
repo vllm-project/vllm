@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for SpeculativeConfig.compose_draft_hf_overrides.
+"""Tests for draft config overrides used by SpeculativeConfig.
 
 Callable ``hf_overrides`` on the target model config (e.g. the
 ``dummy_hf_overrides`` shrink used by ``tests/models/test_initialization.py``)
@@ -12,10 +12,12 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+from unittest.mock import MagicMock, patch
 
 import pytest
 from transformers import PretrainedConfig
 
+from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
 
@@ -43,6 +45,91 @@ def test_dict_overrides_are_not_forwarded_to_draft():
 def test_none_overrides_fall_back_to_arch_mapping():
     composed = SpeculativeConfig.compose_draft_hf_overrides(None)
     assert composed is SpeculativeConfig.hf_config_override
+
+
+def _make_speculative_config(
+    hf_kwargs: dict, architecture: str, **speculative_kwargs
+) -> SpeculativeConfig:
+    hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
+    draft = MagicMock(
+        hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
+    )
+    draft.registry.inspect_model_cls.return_value = (None, architecture)
+    target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
+    target.hf_config.model_type = hf_kwargs["model_type"]
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft):
+        return SpeculativeConfig(
+            model="draft",
+            **speculative_kwargs,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("hf_kwargs", "n_predict", "architecture"),
+    [
+        (
+            dict(
+                model_type="deepseek_v4",
+                num_nextn_predict_layers=3,
+                dspark_block_size=5,
+            ),
+            3,
+            "DSparkDraftModel",
+        ),
+        (
+            dict(
+                model_type="deepseek_v41",
+                num_nextn_predict_layers=3,
+                dspark_block_size=5,
+            ),
+            3,
+            "DSparkV41DraftModel",
+        ),
+        (
+            dict(
+                model_type="gemma4_text",
+                architectures=["Gemma4DSparkModel"],
+                block_size=5,
+            ),
+            None,
+            "Gemma4DSparkModel",
+        ),
+    ],
+)
+@pytest.mark.parametrize("speculative_kwargs", [{"num_speculative_tokens": 5}, {}])
+def test_dspark_width_is_independent_of_mtp_stages(
+    hf_kwargs, n_predict, architecture, speculative_kwargs
+):
+    config = _make_speculative_config(
+        hf_kwargs, architecture, method="dspark", **speculative_kwargs
+    )
+
+    assert config.num_speculative_tokens == 5
+    assert getattr(config.draft_model_config.hf_config, "n_predict", None) == n_predict
+    assert config.draft_model_config.hf_config.architectures == [architecture]
+
+
+@pytest.mark.cpu_test
+def test_mtp_stages_are_independent_of_dspark_width():
+    hf_kwargs = dict(
+        model_type="deepseek_v4", num_nextn_predict_layers=3, dspark_block_size=5
+    )
+    config = _make_speculative_config(
+        hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=6
+    )
+
+    assert config.num_speculative_tokens == 6
+    assert config.draft_model_config.hf_config.n_predict == 3
+    assert config.draft_model_config.hf_config.architectures == ["DeepSeekV4MTPModel"]
+
+    with pytest.raises(ValueError, match="must be divisible by n_predict=3"):
+        _make_speculative_config(
+            hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=5
+        )
 
 
 @pytest.mark.cpu_test
@@ -86,7 +173,7 @@ def test_arch_mapping_applies_before_callable_override():
 
 
 @pytest.mark.cpu_test
-def test_inkling_override_exposes_only_first_mtp_depth():
+def test_inkling_override_exposes_all_mtp_depths():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
         model_type="inkling_model",
@@ -107,7 +194,9 @@ def test_inkling_override_exposes_only_first_mtp_depth():
     assert out is text_config
     assert out.model_type == "inkling_mtp"
     assert out.architectures == ["InklingMTPModel"]
-    assert out.n_predict == 1
+    # Multi-module MTP: every checkpoint depth is exposed (module i drafts
+    # speculative token i), no longer clamped to the first depth.
+    assert out.n_predict == 8
     assert out.num_nextn_predict_layers == 8
     assert out.chain_hidden_post_norm is False
     assert out.local_layer_ids == [0, 2, 4]
@@ -132,3 +221,52 @@ def test_composed_override_is_picklable():
 
     out = composed(_make_hf_config())
     assert out.num_hidden_layers == 1
+
+
+def _make_mtp_speculative_config(
+    override: bool | None,
+    checkpoint_value: bool,
+) -> SpeculativeConfig:
+    draft_hf_config = _make_hf_config(
+        architectures=["Qwen4ExpMTP"],
+        model_type="qwen4_exp_mtp",
+        n_predict=1,
+        index_share_for_mtp_iteration=checkpoint_value,
+    )
+    draft_model_config = MagicMock(
+        model="draft",
+        hf_config=draft_hf_config,
+        architectures=draft_hf_config.architectures,
+        max_model_len=128,
+    )
+    target_model_config = MagicMock(
+        model="target",
+        max_model_len=128,
+        quantization=None,
+        hf_overrides={},
+    )
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+        return SpeculativeConfig(
+            model="draft",
+            method="mtp",
+            num_speculative_tokens=1,
+            index_share_for_mtp_iteration=override,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("override", "checkpoint_value", "expected"),
+    [(None, True, True), (False, True, False), (True, False, True)],
+)
+def test_mtp_index_share_override(
+    override: bool | None, checkpoint_value: bool, expected: bool
+):
+    speculative_config = _make_mtp_speculative_config(override, checkpoint_value)
+    assert (
+        speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
+        is expected
+    )

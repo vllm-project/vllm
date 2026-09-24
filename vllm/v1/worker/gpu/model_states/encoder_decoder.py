@@ -27,9 +27,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         encoder_seq_lens = self.encoder_seq_lens.get(kv_cache_group_id)
         if encoder_seq_lens is None:
@@ -43,7 +41,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
 
 class EncoderDecoderModelState(ModelState):
     """ModelState for cross-attention encoder-decoder models
-    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    (Whisper, CohereASR, NemotronParse, ...)
     """
 
     def __init__(
@@ -54,6 +52,10 @@ class EncoderDecoderModelState(ModelState):
         device: torch.device,
     ) -> None:
         assert encoder_cache is not None
+        if vllm_config.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
         super().__init__(vllm_config, model, encoder_cache, device)
 
         self.max_encoder_len = getattr(
@@ -67,7 +69,7 @@ class EncoderDecoderModelState(ModelState):
 
         self.encoder_outputs: list[torch.Tensor] = []
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
@@ -86,7 +88,8 @@ class EncoderDecoderModelState(ModelState):
             # so execute_mm_encoder preserves request order; use its return value
             # directly. No need to store in encoder_cache: cross-attention K/V are
             # written to the KV cache on the first step; decode steps use the cache.
-            self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            with self.encoder_runner.timed_encoder_operation(encoder_inputs.keys()):
+                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []
@@ -111,7 +114,9 @@ class EncoderDecoderModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding

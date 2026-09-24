@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 def get_mem_info_wrapper(
     device: int | str | torch.device | None = None,
 ) -> tuple[int, int]:
-    """
-    Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+    """Get memory info for a device, matching `torch.accelerator.get_memory_info`.
 
     Args:
         device: Device specification. Can be:
@@ -43,6 +42,7 @@ def get_mem_info_wrapper(
 
     Returns:
         Tuple[int, int]: (free_memory, total_memory) in bytes
+
     """
     # Handle None - use current device
     if device is None:
@@ -113,6 +113,7 @@ class XPUPlatform(Platform):
     supported_quantization: list[str] = [
         "awq",
         "gptq",
+        "moe_wna16",
         "auto_awq",
         "auto_gptq",
         "inc",
@@ -133,6 +134,10 @@ class XPUPlatform(Platform):
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def get_attn_backend_cls(
@@ -156,6 +161,25 @@ class XPUPlatform(Platform):
             return AttentionBackendEnum.TRITON_MLA.get_path()
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_batch_invariant:
+            # Flash Attention on XPU has not been validated for batch
+            # invariance. Honor an explicit Flash Attention request;
+            # otherwise fall back to Triton Attention, which implements
+            # batch-invariant kernels.
+            if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                logger.warning_once(
+                    "Using Flash Attention on XPU with batch invariance "
+                    "enabled because it was explicitly requested. This "
+                    "backend has not been validated for batch invariance "
+                    "on XPU and may produce non-deterministic results "
+                    "across batch sizes."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
+                "backend on XPU, which implements batch-invariant kernels."
+            )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
@@ -232,9 +256,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.xpu.set_device(device)
 
     @classmethod
@@ -279,6 +301,27 @@ class XPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
+
+        if envs.VLLM_BATCH_INVARIANT:
+            model_config = vllm_config.model_config
+            if model_config is not None and (
+                model_config.quantization is not None
+                or vllm_config.quant_config is not None
+            ):
+                raise ValueError(
+                    "XPU batch invariance currently supports only unquantized "
+                    f"models; got quantization={model_config.quantization!r}. "
+                    "Use an unquantized model or disable VLLM_BATCH_INVARIANT."
+                )
+
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if cache_dtype not in ("auto", "float16", "bfloat16"):
+                raise ValueError(
+                    "XPU batch invariance currently does not support quantized "
+                    f"KV caches; got kv_cache_dtype={cache_dtype!r}. "
+                    "Use an unquantized KV cache dtype or disable "
+                    "VLLM_BATCH_INVARIANT."
+                )
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -325,6 +368,30 @@ class XPUPlatform(Platform):
                         feature_name,
                     )
                     setattr(pass_config, flag, False)
+
+        # UVA-offloaded weights are host USM allocations, which Inductor's
+        # static Triton launcher rejects ("Pointer argument doesn't reference
+        # XPU device memory"). Fall back to Triton's own launcher. Remove once
+        # the released torch contains pytorch/pytorch#188240, which relaxes
+        # that check to any memory type known by the driver.
+        offload_config = vllm_config.offload_config
+        uva_offloading = offload_config.offload_backend == "uva" or (
+            offload_config.offload_backend == "auto"
+            and offload_config.prefetch.offload_group_size == 0
+            and offload_config.uva.cpu_offload_gb > 0
+        )
+        if (
+            uva_offloading
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            compilation_config.inductor_compile_config.setdefault(
+                "use_static_cuda_launcher", False
+            )
+            logger.info_once(
+                "Disabling Inductor's static Triton launcher because UVA "
+                "weight offloading is enabled."
+            )
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -462,7 +529,7 @@ class XPUPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        return IrOpPriorityConfig.with_default(default)
+        return IrOpPriorityConfig.with_default(default, gelu_and_mul_sparse=["native"])
 
     @classmethod
     def device_count(cls) -> int:

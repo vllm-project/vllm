@@ -48,7 +48,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -93,7 +92,7 @@ def _replace_or_register_parameter(
 def _convert_awq_to_standard_format(
     layer: torch.nn.Module,
     w_q_name: str,
-    w_zp_name: str,
+    w_zp_name: str | None,
     size_bits: int,
 ) -> None:
     """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
@@ -101,6 +100,7 @@ def _convert_awq_to_standard_format(
     AWQ packs qweight along the output dim with a non-standard bit order.
     This converts to standard bit order and repacks qweight along the input
     dim, matching the format expected by the MPLinearKernel framework.
+    If w_zp_name is None (symmetric quantization), only the weight is converted.
     """
     pack_factor = 32 // size_bits
     mask = (1 << size_bits) - 1
@@ -138,6 +138,9 @@ def _convert_awq_to_standard_format(
         weight_loader=_noop_loader,
     )
     setattr(layer, w_q_name, new_param)
+
+    if w_zp_name is None:
+        return
 
     # --- Convert qzeros: fix AWQ bit ordering and repack
     # AWQ qzeros: (G, N // pack) packed along dim 1, AWQ bit order
@@ -358,31 +361,6 @@ class AutoAWQConfig(QuantizationConfig):
 
         return None
 
-    @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
-        # Extract data from quant config.
-        quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits")
-        group_size = quant_config.get("group_size")
-        zero_point = quant_config.get("zero_point")
-
-        if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
-            return False
-
-        if quant_method != "awq":
-            return False
-
-        # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or zero_point is None:
-            return False
-
-        if num_bits not in cls.TYPE_MAP:
-            return False
-
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
-        )
-
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_to_not_convert:
             self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
@@ -418,6 +396,7 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AWQ Marlin quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
@@ -464,7 +443,6 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
             act_type=params_dtype if self.input_dtype is None else self.input_dtype,
             group_size=self.quant_config.group_size,
             zero_points=self.quant_config.zero_point,
-            has_g_idx=False,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -583,11 +561,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             }
         )
 
-        intermediate_size_full = extra_weight_attrs.pop(
-            "intermediate_size_full", intermediate_size_per_partition
-        )
-        self.is_k_full = intermediate_size_per_partition == intermediate_size_full
-
         w13_qweight = Parameter(
             torch.empty(
                 num_experts,
@@ -668,9 +641,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
-        device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
@@ -697,10 +667,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2,
             w13_scale,
             w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,
@@ -721,14 +687,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
         replace_parameter(layer, "w13_scales", w13_scale)
         replace_parameter(layer, "w2_scales", w2_scale)
-        _replace_or_register_parameter(
-            layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices
-        )
-        _replace_or_register_parameter(
-            layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices
-        )
-        _replace_or_register_parameter(layer, "w13_g_idx", w13_g_idx)
-        _replace_or_register_parameter(layer, "w2_g_idx", w2_g_idx)
         _replace_or_register_parameter(layer, "w13_qzeros", w13_qzeros)
         _replace_or_register_parameter(layer, "w2_qzeros", w2_qzeros)
         _replace_or_register_parameter(
@@ -744,24 +702,18 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            is_k_full=self.is_k_full,
-            w13_g_idx=getattr(layer, "w13_g_idx", None),
-            w2_g_idx=getattr(layer, "w2_g_idx", None),
-            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
-            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 
@@ -928,6 +880,7 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
 
     Args:
         quant_config: The AWQ quantization config.
+
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

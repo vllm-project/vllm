@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for MNNVL AllToAll operations.
+"""Tests for MNNVL AllToAll operations.
 
 Requires: docker run ... --cap-add=SYS_PTRACE ...
 Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
@@ -15,6 +14,7 @@ import torch
 import torch.multiprocessing as mp
 
 from vllm.distributed import get_ep_group
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -23,6 +23,8 @@ from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
+
+DEVICE = current_platform.device_type
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,6 +89,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
                  Otherwise use tp=world_size (default for EP-based tests).
         dp_port: Separate port for the DP master (only used when dp_size is set).
         err_queue: Queue for propagating tracebacks to the parent process.
+
     """
     try:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -115,6 +118,7 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
     Args:
         port: Port for torch.distributed init.
         dp_port: Separate port for the DP master group init.
+
     """
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
@@ -342,6 +346,8 @@ def _one_sided_lifecycle_worker(rank, world_size):
         top_k=2,
         num_experts=world_size * 8,
         hidden_size=4096,
+        x_bytes_per_token=4096 * 2,
+        x_sf_bytes_per_token=0,
     )
 
     # Initialize
@@ -409,12 +415,12 @@ def _one_sided_workspace_grow_worker(rank, world_size):
         hidden_size=4096,
     )
     nvfp4_kwargs = dict(
-        dispatch_dtype_bytes_per_elem=0,
-        dispatch_scale_bytes_per_token=base_kwargs["hidden_size"] // 16,
+        x_bytes_per_token=base_kwargs["hidden_size"] // 2,
+        x_sf_bytes_per_token=base_kwargs["hidden_size"] // 16,
     )
     bf16_kwargs = dict(
-        dispatch_dtype_bytes_per_elem=2,
-        dispatch_scale_bytes_per_token=0,
+        x_bytes_per_token=base_kwargs["hidden_size"] * 2,
+        x_sf_bytes_per_token=0,
     )
 
     # First init: NVFP4-like (hidden_bytes = hidden // 2 + hidden // 16).
@@ -480,7 +486,7 @@ def _args_dispatch_combine_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_ep_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 64
     tokens_per_rank = 16
@@ -621,7 +627,7 @@ def _two_sided_data_worker(rank, world_size):
     # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
     # internally and requires dp_size == ep_size.
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
     num_gpus = torch.accelerator.device_count()
 
     hidden_size = 128
@@ -766,7 +772,7 @@ def _one_sided_data_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 256
     tokens_per_rank = 32
@@ -780,11 +786,12 @@ def _one_sided_data_worker(rank, world_size):
         top_k=experts_per_token,
         num_experts=num_experts,
         hidden_size=hidden_size,
-        # Account for the fp8 block-scale payload (a1q_scale: hidden//16 bytes
+        x_bytes_per_token=hidden_size // 2,
+        # Account for the fp8 block-scale payload (x_sf: hidden//16 bytes
         # per token) that is dispatched alongside the nvfp4 hidden states.
         # Without this the dispatch region is under-reserved and the combine
         # payload overflows the per-rank workspace.
-        dispatch_scale_bytes_per_token=hidden_size // 16,
+        x_sf_bytes_per_token=hidden_size // 16,
     )
     assert manager.initialized
     assert manager.moe_alltoall is not None
@@ -798,17 +805,17 @@ def _one_sided_data_worker(rank, world_size):
 
             # Create test data with raw tensors matching the nvfp4 payload
             # sizes the workspace was allocated for:
-            #   a1q: (tokens, hidden_size // 2) — nvfp4 hidden states
-            #   a1q_scale: (tokens, hidden_size // 16) — fp8 scaling factors
+            #   x: (tokens, hidden_size // 2) — nvfp4 hidden states
+            #   x_sf: (tokens, hidden_size // 16) — fp8 scaling factors
             torch.manual_seed(rank + 42)
-            a1q = torch.randint(
+            x = torch.randint(
                 0,
                 256,
                 (tokens_per_rank, hidden_size // 2),
                 device=device,
                 dtype=torch.uint8,
             )
-            a1q_scale = torch.randint(
+            x_sf = torch.randint(
                 0,
                 256,
                 (tokens_per_rank, hidden_size // 16),
@@ -830,15 +837,16 @@ def _one_sided_data_worker(rank, world_size):
             )
 
             # --- One-sided dispatch ---
-            payloads = [a1q, a1q_scale, topk_ids, topk_weights]
+            payloads = [x, x_sf, topk_ids, topk_weights]
             recv_payloads = manager.moe_alltoall.dispatch(
                 token_selected_experts=topk_ids,
                 input_payloads=payloads,
                 runtime_max_tokens_per_rank=runtime_max_tokens,
             )
             assert len(recv_payloads) == 4
-            recv_a1q, recv_scale, recv_ids, recv_weights = recv_payloads
-            assert recv_a1q.numel() > 0
+            recv_x, recv_x_sf, recv_ids, recv_weights = recv_payloads
+            assert recv_x.numel() > 0
+            assert recv_x_sf.numel() > 0
             assert recv_ids.numel() > 0
 
             # --- Round-trip exact verification ---

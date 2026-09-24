@@ -25,6 +25,7 @@ import torch
 from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
+from vllm.config.multimodal import MultiModalDummyOptions
 
 
 class MockAudioFlamingo3Config(PretrainedConfig):
@@ -105,9 +106,9 @@ def test_audio_chunk_counting(mock_ctx):
     audio_2 = np.zeros(75 * sr)
 
     mm_data = {"audio": [audio_1, audio_2]}
-    prompt = "<|user|>Listen.<|end|>"
 
-    processed = processor._call_hf_processor(prompt, mm_data, {}, {})
+    mm_items = processor.info.parse_mm_data(mm_data, validate=False)
+    processed = processor._apply_hf_processor_main(mm_items, {})
 
     chunk_counts = processed["chunk_counts"]
 
@@ -127,7 +128,7 @@ def test_dummy_data_generation(mock_ctx):
     builder = AudioFlamingo3DummyInputsBuilder(info)
 
     mm_counts = {"audio": 2}
-    dummy_data = builder.get_dummy_mm_data(100, mm_counts, {})
+    dummy_data = builder.get_dummy_mm_data(100, mm_counts, MultiModalDummyOptions())
 
     assert "audio" in dummy_data
     assert len(dummy_data["audio"]) == 2

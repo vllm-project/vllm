@@ -9,12 +9,14 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, CUDAGraphMode
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn_decode,
 )
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
+    MiniMaxM3SparseMetadata,
     MiniMaxM3SparseMetadataBuilder,
     MiniMaxM3SparseTritonImpl,
     select_main_backend_and_impl_cls,
@@ -22,6 +24,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 from vllm.models.minimax_m3.nvidia import (
     sparse_attention_msa as sparse_attention_msa_module,
 )
+from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     MSACutlassDecodePlanCache,
     msa_cutlass_sparse_decode,
@@ -314,6 +317,83 @@ def test_msa_cutlass_plan_cache_keys_query_len(
     assert first.plan is repeated.plan
     assert different.plan is not first.plan
     assert built_query_lens == [1, 2]
+
+
+def test_query_fp8_stays_valid_when_cutlass_plan_appears_on_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vllm.envs as envs
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    envs.disable_envs_cache()
+
+    num_tokens = 16
+    layer_name = "model.layers.0.self_attn.attn"
+    seq_lens = torch.full((num_tokens,), 257, dtype=torch.int32, device="cuda")
+    block_table = torch.zeros(num_tokens, 3, dtype=torch.int32, device="cuda")
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
+    decode = MiniMaxM3SparseMSADecodeMetadata(
+        seq_lens=seq_lens,
+        block_table=block_table,
+        decode_query_len=1,
+        msa_cutlass=None,
+    )
+    metadata = MiniMaxM3SparseMetadata(
+        seq_lens=seq_lens,
+        max_seq_len=257,
+        slot_mapping=slot_mapping,
+        num_actual_tokens=num_tokens,
+        num_decodes=num_tokens,
+        num_decode_tokens=num_tokens,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={layer_name: metadata},
+        slot_mapping={},
+        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+    )
+
+    impl = object.__new__(MiniMaxM3SparseMSAImpl)
+    impl.use_cutlass_decode = True
+    attention = SimpleNamespace(impl=impl, q_size=HEAD_DIM)
+    qkv = torch.empty(num_tokens, HEAD_DIM, device="cuda")
+    observed_ptrs: list[int] = []
+
+    @eager_break_during_capture
+    def run_attention(query_fp8: torch.Tensor | None) -> None:
+        if impl.should_use_msa_decode(layer_name):
+            assert query_fp8 is not None
+            observed_ptrs.append(query_fp8.data_ptr())
+
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream), override_forward_context(forward_context):
+        capture = BreakableCUDAGraphCapture()
+        with capture:
+            query_fp8 = MiniMaxM3SparseAttention._allocate_query_fp8(attention, qkv)
+            if query_fp8 is not None:
+                query_fp8.zero_()
+            run_attention(query_fp8)
+            qkv.zero_()
+
+        assert capture.num_graphs == 2
+        assert capture.num_eager_breaks == 1
+        assert observed_ptrs == []
+
+        decode.msa_cutlass = object()  # type: ignore[assignment]
+        for _ in range(3):
+            capture.replay()
+        stream.synchronize()
+
+    assert len(observed_ptrs) == 3
+    assert len(set(observed_ptrs)) == 1
 
 
 def _make_topk(

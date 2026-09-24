@@ -5,6 +5,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from vllm.config import VllmConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.logger import init_logger
 from vllm.v1.request import Request
@@ -63,7 +64,14 @@ class EncoderCacheManager:
             make space when needed.
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
+
     """
+
+    @classmethod
+    def create_manager(
+        cls, *, cache_size: int, vllm_config: "VllmConfig"
+    ) -> "EncoderCacheManager":
+        return cls(cache_size=cache_size)
 
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
@@ -106,6 +114,7 @@ class EncoderCacheManager:
 
         Returns:
             True if the encoder output for this input is already cached
+
         """
         mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
@@ -155,6 +164,7 @@ class EncoderCacheManager:
 
         Note: This method does not allocate physical memory for the encoder
         output but only the state of EncoderCacheManager.
+
         """
         num_embeds = request.get_num_encoder_embeds(input_id)
 
@@ -191,8 +201,8 @@ class EncoderCacheManager:
 
         Note:
             This method assumes can_allocate() returned True for the same input.
-        """
 
+        """
         mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
@@ -215,7 +225,7 @@ class EncoderCacheManager:
         return self.request_cached_ids.get(request.request_id, set())
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
-        """Free the request's reference to the encoder input (`mm_data`)
+        """Free the request's reference to the encoder input (`mm_data`).
 
         When the reference set for the corresponding `mm_hash` becomes empty,
         the entry is appended to `freeable` and `num_freeable_slots` is
@@ -234,6 +244,17 @@ class EncoderCacheManager:
                 del self.request_cached_ids[req_id]
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
+            return
+        # `cached` counts referencing requests, not positions, so one request
+        # that repeats an item (an image carried across conversation turns) has
+        # a single reference covering every occurrence. Hold it until the last
+        # occurrence is freed: dropping it at the first makes the entry
+        # evictable while the request still needs it, and the encoder then
+        # recomputes an item it already has.
+        if any(
+            request.mm_features[other_id].identifier == mm_hash
+            for other_id in self.request_cached_ids.get(req_id, ())
+        ):
             return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:
@@ -261,8 +282,11 @@ class EncoderCacheManager:
             call to be used by the scheduler to notify workers about which
             encoder outputs can be removed from their caches. The internal
             list is cleared after this call.
+
         """
-        freed = self.freed
+        # An entry evicted early in the scheduling pass can be allocated again
+        # later in the same pass. Keep its worker-side tensor in that case.
+        freed = [mm_hash for mm_hash in self.freed if mm_hash not in self.cached]
         self.freed = []
         return freed
 
@@ -287,8 +311,8 @@ def compute_mm_encoder_budget(
             from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
             from the input sequence.
-    """
 
+    """
     if not mm_max_toks_per_item:
         logger.warning(
             "All non-text modalities supported by the model have been "

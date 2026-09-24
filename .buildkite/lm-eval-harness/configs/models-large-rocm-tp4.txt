@@ -1,0 +1,2 @@
+Qwen3-235B-A22B-Instruct-2507-FP8.yaml
+DeepSeek-V4-Flash-MXFP4.yaml
