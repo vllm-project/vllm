@@ -4,6 +4,8 @@ from typing import Any
 
 from transformers import PretrainedConfig
 
+from vllm.transformers_utils.configs.deepseek_v4 import missing_config_field_error
+
 
 class DeepseekV41Config(PretrainedConfig):
     """DeepSeek V4.1 config.
@@ -60,3 +62,7 @@ class DeepseekV41Config(PretrainedConfig):
         self.vision_max_n_token = vision_config.get("max_image_tokens", 1024)
         self.vision_min_pixels = vision_config.get("min_pixels", 295936)
         self.vision_max_wh_ratio = vision_config.get("max_wh_ratio")
+
+    def __getattr__(self, name: str) -> Any:
+        # Same contract as DeepseekV4Config.
+        raise missing_config_field_error(self.model_type, name)
