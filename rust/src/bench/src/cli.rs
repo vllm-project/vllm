@@ -176,7 +176,7 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub tokenizer: Option<String>,
 
-    /// Tokenizer mode (auto, hf, slow, mistral). Accepted for Python CLI
+    /// Tokenizer mode (auto, hf, mistral). Accepted for Python CLI
     /// compatibility; non-auto values are ignored with a warning.
     #[arg(long, default_value = "auto")]
     pub tokenizer_mode: String,
