@@ -12,7 +12,12 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
@@ -73,8 +78,11 @@ class TorchCompileWithNoGuardsWrapper:
         compile_prefix: str = "",
         is_encoder: bool = False,
     ) -> None:
+        from vllm.compilation.backends import model_tag
+
         self.compiled = False
-        self._compile_prefix = compile_prefix
+        # Keep the model tag so reset_compile_wrapper reuses the same cache dir.
+        self._compile_prefix = compile_prefix or model_tag
         self._is_encoder = is_encoder
 
         vllm_config = get_current_vllm_config()
@@ -335,8 +343,9 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_config.local_cache_dir = ""
 
     model.__class__.forward.__code__ = model.original_code_object()
-    TorchCompileWithNoGuardsWrapper.__init__(
-        model,
-        compile_prefix=model._compile_prefix,
-        is_encoder=model._is_encoder,
-    )
+    with set_current_vllm_config(model.vllm_config):
+        TorchCompileWithNoGuardsWrapper.__init__(
+            model,
+            compile_prefix=model._compile_prefix,
+            is_encoder=model._is_encoder,
+        )
