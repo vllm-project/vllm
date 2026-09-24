@@ -568,28 +568,82 @@ def _dcp_partial_tail_store(
     )
 
 
-def test_partial_tail_store_keeps_only_the_longest_boundary_under_dcp():
+def test_partial_tail_store_covers_every_boundary_in_one_handoff():
     # At request end the "align" manager offers the last full recurrent block
-    # (48) next to the prompt tail (56). At dcp == 1 the former is always a
-    # full-attention block multiple and gets filtered; under DCP it is not,
-    # and a single-boundary assumption would take the engine core down. Only
-    # the tail is stored: a consumer probes from its own prompt end downwards
-    # and reaches the tail first, and a second pair would copy block 12 twice.
+    # (48) next to the prompt tail (56); under DCP 48 is not a full-attention
+    # block multiple, so the partial path owns it too. A consumer that diverges
+    # in (48, 56) can only resume from the state at 48, so both are stored,
+    # longest first: the order a consumer's descending probe reads them in.
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     jobs = _dcp_partial_tail_store(
         scheduler, [(1, 24, 48), (1, 25, 56)], recurrent_blocks=[0, 0, 24, 25]
     )
 
     # 48 is also a recurrent chunk boundary, so the aligned path stores that
-    # row on its own; the partial path contributes exactly one pair, at 56.
-    [aligned, pair] = jobs.values()
+    # row on its own; the partial path contributes one pair per boundary.
+    [aligned, *pairs] = jobs.values()
     assert aligned.src_spec.block_ids.tolist() == [24]
     assert aligned.src_spec.group_sizes == [0, 1]
-    assert pair.src_spec.block_ids.tolist() == [12, 25]
-    assert pair.src_spec.block_indices == [1, 3]
-    assert {get_offload_block_hash(k) for k in scheduler._jobs[max(jobs)].keys} == {
-        b"h13"
-    }
+    assert [pair.src_spec.block_ids.tolist() for pair in pairs] == [
+        [12, 25],
+        [12, 24],
+    ]
+    assert [pair.src_spec.block_indices for pair in pairs] == [[1, 3], [1, 2]]
+
+
+def test_partial_tail_store_covers_retained_segments_longest_first():
+    # Under a prefix_cache_retention_interval the hand-off carries one
+    # boundary per retained segment inside the trailing full-attention block;
+    # each becomes a restorable pair, in the order a consumer probes them.
+    scheduler = _make_dcp_shaped_hybrid_scheduler()
+    jobs = _dcp_partial_tail_store(
+        scheduler,
+        [(1, 23, 40), (1, 24, 48), (1, 25, 56)],
+        recurrent_blocks=[0, 0, 24, 25],
+    )
+
+    pairs = [job for job in jobs.values() if len(job.src_spec.block_ids) == 2]
+    assert [pair.src_spec.block_ids.tolist() for pair in pairs] == [
+        [12, 25],
+        [12, 24],
+        [12, 23],
+    ]
+    assert [pair.src_spec.block_indices for pair in pairs] == [
+        [1, 3],
+        [1, 2],
+        [1, 2],
+    ]
+
+
+def test_partial_tail_store_one_boundary_failing_does_not_cost_the_others():
+    # The pool refuses the longest pair; the shorter one is still stored and
+    # the failure is counted once.
+    scheduler = _make_dcp_shaped_hybrid_scheduler()
+    _make_dcp_shaped_request(scheduler, num_tokens=60)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 0, 24, 25]
+
+    def prepare_store(keys, req_context):
+        if {get_offload_block_hash(k) for k in keys} == {b"h13"} and len(keys) == 2:
+            return None
+        return generate_store_output(keys)
+
+    scheduler.manager.prepare_store.side_effect = prepare_store
+    jobs = scheduler._build_partial_tail_store_jobs(
+        SimpleNamespace(
+            kv_connector_block_state=KVConnectorBlockState(
+                req_ids=set(),
+                resolve_block_ids={}.__getitem__,
+                boundary_state_offloads={"req": [(1, 24, 48), (1, 25, 56)]},
+            )
+        )
+    )
+
+    pairs = [job for job in jobs.values() if len(job.src_spec.block_ids) == 2]
+    assert [pair.src_spec.block_ids.tolist() for pair in pairs] == [[12, 24]]
+    stats = scheduler._connector_stats.reduce()
+    assert stats[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
 
 
 @pytest.mark.parametrize(

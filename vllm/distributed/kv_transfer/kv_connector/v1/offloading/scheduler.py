@@ -1367,109 +1367,131 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(req_id)
             assert req_status is not None
             # A hand-off drains every recurrent "align" manager for the step, so
-            # besides the prompt tail it can carry the last full recurrent block
-            # when that is not a full-attention block multiple (it always is at
-            # dcp == 1). Only the longest boundary is the tail a consumer's
-            # descending probe reaches first; storing a shorter one would cost
-            # a second copy of the same full-attention block.
-            boundary = max(boundary for _, _, boundary in entries)
-            entries = [entry for entry in entries if entry[2] == boundary]
-            req = req_status.req
-            group_states = {
-                group.group_idx: state
-                for group, state in zip(
-                    self.config.kv_group_configs, req_status.group_states
+            # besides the prompt tail it carries every other boundary the KV
+            # cache manager retained inside the trailing full-attention block:
+            # the last full recurrent block, or one per retained segment under
+            # a prefix_cache_retention_interval. Each is a state a consumer
+            # diverging before the tail can resume from, so store each of them,
+            # longest first -- the order a consumer's descending probe reads.
+            boundaries = sorted({boundary for _, _, boundary in entries}, reverse=True)
+            for boundary in boundaries:
+                self._build_partial_tail_store_job(
+                    req_status,
+                    boundary,
+                    [entry for entry in entries if entry[2] == boundary],
+                    store_jobs,
                 )
-            }
-            max_boundary = min(
-                req.num_prompt_tokens,
-                req_status.max_offload_tokens or req.num_prompt_tokens,
-            )
-            assert boundary > 0
-            assert boundary % self.config.tokens_per_hash == 0
-            assert boundary <= max_boundary
-
-            cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
-            assert self._cow_source_groups.issubset(cow_blocks)
-
-            assert boundary % self._partial_tail_block_size != 0
-            # The block holding the state that ends at `boundary`, in each
-            # group's own block size; recurrent groups supply the CoW block from
-            # the hand-off instead. A boundary on a group's block edge ends the
-            # previous block, not the next one.
-            group_block_idx = [
-                (boundary - 1) // group.tokens_per_block
-                for group in self.config.kv_group_configs
-            ]
-            if any(
-                group.group_idx not in self._cow_source_groups
-                and group_block_idx[config_idx]
-                >= len(group_states[group.group_idx].block_ids)
-                for config_idx, group in enumerate(self.config.kv_group_configs)
-            ):
-                continue
-            keys = [
-                self._make_boundary_key(
-                    req, group.group_idx, boundary, req_status.req_context
-                )
-                for group in self.config.kv_group_configs
-            ]
-            block_ids = [
-                cow_blocks[group.group_idx]
-                if group.group_idx in self._cow_source_groups
-                else group_states[group.group_idx].block_ids[
-                    group_block_idx[config_idx]
-                ]
-                for config_idx, group in enumerate(self.config.kv_group_configs)
-            ]
-            assert all(block_id != 0 for block_id in block_ids)
-
-            store_output = self.manager.prepare_store(keys, req_status.req_context)
-            if store_output is None:
-                self._connector_stats.increase_counter(
-                    _ConnectorMetricName.ALLOCATION_FAILURE
-                )
-                continue
-            if not store_output.keys_to_store:
-                continue
-
-            for group_config, key in zip(self.config.kv_group_configs, keys):
-                if key in store_output.keys_to_store:
-                    self._events_tracker.record_partial_store(
-                        req, group_config, boundary, key
-                    )
-
-            group_by_key = {key: idx for idx, key in enumerate(keys)}
-            accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
-            group_sizes = [0] * len(self.config.kv_group_configs)
-            block_indices = [0] * len(self.config.kv_group_configs)
-            for config_idx in accepted_groups:
-                group_sizes[config_idx] = 1
-                block_indices[config_idx] = group_block_idx[config_idx]
-            source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
-
-            job_id = self._generate_job_id()
-            req_status.transfer_jobs.add(job_id)
-            for block_id in source_blocks:
-                self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
-            self._jobs[job_id] = TransferJobStatus(
-                req_id=req_id,
-                pending_count=self.config.num_workers,
-                keys=set(store_output.keys_to_store),
-                is_store=True,
-                fenced_block_ids=source_blocks,
-            )
-            store_jobs[job_id] = TransferJob(
-                req_id=req_id,
-                src_spec=GPULoadStoreSpec(
-                    source_blocks,
-                    group_sizes=group_sizes,
-                    block_indices=block_indices,
-                ),
-                dst_spec=store_output.store_spec,
-            )
 
         return store_jobs
+
+    def _build_partial_tail_store_job(
+        self,
+        req_status: RequestOffloadState,
+        boundary: int,
+        entries: list[tuple[int, int, int]],
+        store_jobs: dict[int, TransferJob],
+    ) -> None:
+        """Store the sub-block state every group holds at ``boundary`` under
+        that boundary's hash key.
+
+        ``entries`` are this boundary's ``(group_idx, block_id, boundary)``
+        hand-offs. Adds at most one job to ``store_jobs``.
+        """
+        req = req_status.req
+        req_id = req.request_id
+        group_states = {
+            group.group_idx: state
+            for group, state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            )
+        }
+        max_boundary = min(
+            req.num_prompt_tokens,
+            req_status.max_offload_tokens or req.num_prompt_tokens,
+        )
+        assert boundary > 0
+        assert boundary % self.config.tokens_per_hash == 0
+        assert boundary <= max_boundary
+        assert boundary % self._partial_tail_block_size != 0
+
+        cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
+        # Every "align" manager shares one block size (resolve_mamba_align_size),
+        # so each retains and hands off the same boundaries.
+        assert self._cow_source_groups.issubset(cow_blocks)
+
+        # The block holding the state that ends at `boundary`, in each group's
+        # own block size; recurrent groups supply the CoW block from the
+        # hand-off instead. A boundary on a group's block edge ends the
+        # previous block, not the next one.
+        group_block_idx = [
+            (boundary - 1) // group.tokens_per_block
+            for group in self.config.kv_group_configs
+        ]
+        if any(
+            group.group_idx not in self._cow_source_groups
+            and group_block_idx[config_idx]
+            >= len(group_states[group.group_idx].block_ids)
+            for config_idx, group in enumerate(self.config.kv_group_configs)
+        ):
+            return
+        keys = [
+            self._make_boundary_key(
+                req, group.group_idx, boundary, req_status.req_context
+            )
+            for group in self.config.kv_group_configs
+        ]
+        block_ids = [
+            cow_blocks[group.group_idx]
+            if group.group_idx in self._cow_source_groups
+            else group_states[group.group_idx].block_ids[group_block_idx[config_idx]]
+            for config_idx, group in enumerate(self.config.kv_group_configs)
+        ]
+        assert all(block_id != 0 for block_id in block_ids)
+
+        store_output = self.manager.prepare_store(keys, req_status.req_context)
+        if store_output is None:
+            self._connector_stats.increase_counter(
+                _ConnectorMetricName.ALLOCATION_FAILURE
+            )
+            return
+        if not store_output.keys_to_store:
+            return
+
+        for group_config, key in zip(self.config.kv_group_configs, keys):
+            if key in store_output.keys_to_store:
+                self._events_tracker.record_partial_store(
+                    req, group_config, boundary, key
+                )
+
+        group_by_key = {key: idx for idx, key in enumerate(keys)}
+        accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
+        group_sizes = [0] * len(self.config.kv_group_configs)
+        block_indices = [0] * len(self.config.kv_group_configs)
+        for config_idx in accepted_groups:
+            group_sizes[config_idx] = 1
+            block_indices[config_idx] = group_block_idx[config_idx]
+        source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
+
+        job_id = self._generate_job_id()
+        req_status.transfer_jobs.add(job_id)
+        for block_id in source_blocks:
+            self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
+        self._jobs[job_id] = TransferJobStatus(
+            req_id=req_id,
+            pending_count=self.config.num_workers,
+            keys=set(store_output.keys_to_store),
+            is_store=True,
+            fenced_block_ids=source_blocks,
+        )
+        store_jobs[job_id] = TransferJob(
+            req_id=req_id,
+            src_spec=GPULoadStoreSpec(
+                source_blocks,
+                group_sizes=group_sizes,
+                block_indices=block_indices,
+            ),
+            dst_spec=store_output.store_spec,
+        )
 
     def _reachable_store_block_mask(
         self,
