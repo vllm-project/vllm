@@ -395,11 +395,23 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # For efficient conv state memory access. The C++ causal_conv1d
-        # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
-        # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
-        if torch.cpu._is_avx512_bf16_supported():
-            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+        # NIXL's Mamba descriptors require DS conv state storage. Select it
+        # before cache shapes are created, while preserving an explicit layout.
+        conv_state_layout_env = "VLLM_SSM_CONV_STATE_LAYOUT"
+        if conv_state_layout_env not in os.environ:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            uses_nixl = kv_transfer_config is not None and any(
+                kv_transfer_config.has_connector(name)
+                for name in (
+                    "NixlConnector",
+                    "NixlPullConnector",
+                    "NixlPushConnector",
+                )
+            )
+            if uses_nixl:
+                os.environ[conv_state_layout_env] = "DS"
+            elif torch.cpu._is_avx512_bf16_supported():
+                os.environ[conv_state_layout_env] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
@@ -498,11 +510,11 @@ class CpuPlatform(Platform):
             return
 
         # reconcile attention and mamba page sizes
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
 
-        cls._align_hybrid_block_size(vllm_config, backend_cls)
+        cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
