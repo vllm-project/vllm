@@ -123,8 +123,8 @@ def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
     method.input_dtype = None
-    method.experts_cls = None
-    method.moe = SimpleNamespace(w13_num_shards=2)
+    method.experts_cls = None  # type: ignore[assignment]  # Weight creation does not select experts.
+    method.moe = SimpleNamespace(w13_num_shards=2)  # type: ignore[assignment]
     layer = torch.nn.Module()
 
     method.create_weights(
@@ -170,7 +170,7 @@ def test_routed_experts_loads_per_expert_biases():
         ("w1", torch.tensor([1.0, 2.0, 3.0, 4.0])),
         ("w3", torch.tensor([5.0, 6.0, 7.0, 8.0])),
     ):
-        assert RoutedExperts.weight_loader(
+        assert RoutedExperts.weight_loader(  # type: ignore[call-overload]
             loader,
             w13_bias,
             loaded,
@@ -180,7 +180,7 @@ def test_routed_experts_loads_per_expert_biases():
             return_success=True,
         )
 
-    assert RoutedExperts.weight_loader(
+    assert RoutedExperts.weight_loader(  # type: ignore[call-overload]
         loader,
         w2_bias,
         torch.tensor([9.0, 10.0, 11.0, 12.0]),

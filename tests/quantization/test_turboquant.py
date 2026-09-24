@@ -300,7 +300,7 @@ class TestTurboQuantKVCacheSpec:
 
         # The layer builds an unpacked spec; the worker's spec-collection
         # loop applies TQ slot packing via the backend's customize_spec hook.
-        spec = Attention.get_kv_cache_spec(layer, vllm_config)
+        spec = Attention.get_kv_cache_spec(layer, vllm_config)  # type: ignore[arg-type]
         assert isinstance(spec, FullAttentionSpec)
         assert spec.kv_quant_mode.is_turboquant
         assert spec.state_content_bytes is None

@@ -3,7 +3,10 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.reasoning.utils import DeltaMessage, run_reasoning_extraction
+from tests.reasoning.utils import (
+    DeltaMessage,
+    run_reasoning_extraction,
+)
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "granite"

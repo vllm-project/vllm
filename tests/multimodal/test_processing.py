@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -863,7 +865,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     ],
 )
 def test_budget_caps_prevent_dummy_input_validation_failure(
-    model_id, user_limit, supported_limit
+    model_id, user_limit, supported_limit, monkeypatch
 ):
     limit_mm_per_prompt = {"image": user_limit}
 
@@ -873,7 +875,9 @@ def test_budget_caps_prevent_dummy_input_validation_failure(
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    processor.info.get_supported_mm_limits = lambda: {"image": supported_limit}
+    monkeypatch.setattr(
+        processor.info, "get_supported_mm_limits", lambda: {"image": supported_limit}
+    )
 
     # This is what budget.py uses to derive mm_counts
     allowed = processor.info.allowed_mm_limits
@@ -931,7 +935,7 @@ def test_hf_processor_init_kwargs(
     )
 
     processor = ctx.get_hf_processor(
-        DummyProcessor,  # type: ignore[arg-type]
+        DummyProcessor,
         **inference_kwargs,
     )
     assert processor.a == expected_kwargs["a"]
@@ -962,7 +966,7 @@ def test_hf_processor_call_kwargs(
         tokenizer=None,
     )
 
-    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
+    processor = ctx.get_hf_processor(DummyProcessor)
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
@@ -1289,7 +1293,10 @@ def test_processor_inputs_hashes_scope_kwargs_by_modality():
             "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
         }
     )
-    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+    mm_uuid_items: dict[str, Sequence[str | None]] = {
+        "image": ["image-uuid"],
+        "video": ["video-uuid"],
+    }
 
     def get_hashes(video_frames: int, image_size: int, video_size: int):
         return ProcessorInputs(
@@ -1382,11 +1389,9 @@ def test_dummy_inputs_scheduler_budget(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
     )
-    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
-
-    kwargs = {}
+    scheduler_config = None
     if chunked_prefill is not None:
-        kwargs["scheduler_config"] = SchedulerConfig(
+        scheduler_config = SchedulerConfig(
             max_model_len=max_model_len,
             is_encoder_decoder=False,
             max_num_batched_tokens=8192,
@@ -1394,5 +1399,8 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
 
-    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    with patch.object(processor, "apply", return_value={"prompt_token_ids": [7]}):
+        result = processor.get_dummy_mm_inputs(
+            {"image": 1}, scheduler_config=scheduler_config
+        )
     assert len(result["prompt_token_ids"]) == expected_seq_len

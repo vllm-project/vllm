@@ -101,7 +101,7 @@ def test_nemotron_v3_reasoning(
     output = tokenizer.tokenize(param_dict["output"])
     model_output = [tokenizer.convert_tokens_to_string([token]) for token in output]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        tokenizer
+        tokenizer  # type: ignore[arg-type]
     )
 
     reasoning, content = run_reasoning_extraction(
@@ -116,7 +116,7 @@ def test_nemotron_v3_without_thinking_moves_into_content(
     tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -140,7 +140,7 @@ def test_nemotron_v3_force_nonempty_content_moves_into_content(
     tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -164,7 +164,7 @@ def test_nemotron_v3_force_nonempty_keeps_real_content(
     # When real content follows the closing tag nothing is promoted: the
     # content after </think> is returned as-is and reasoning stays separate.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -186,7 +186,7 @@ def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
     tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
