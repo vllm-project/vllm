@@ -602,3 +602,59 @@ def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
     actual = llm.generate(prompt, sampling_params)
 
     assert expected[0].outputs[0].text == actual[0].outputs[0].text
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="CUDA pinned backup preparation"
+)
+@create_new_process_for_each_test("fork")
+def test_prepared_sleep_backups_copy_current_weights(monkeypatch):
+    """Preparation moves allocation only; sleep still copies current weights."""
+    import weakref
+
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.full((1024 * 1024,), 7, dtype=torch.uint8, device="cuda")
+    torch.accelerator.synchronize()
+    weight_data = [d for d in allocator.pointer_to_data.values() if d.tag == "weights"]
+    budget = sum(1 << (d.handle[1] - 1).bit_length() for d in weight_data)
+    original_empty = torch.empty
+    prepared_refs = []
+
+    def track_empty(*args, **kwargs):
+        tensor = original_empty(*args, **kwargs)
+        if kwargs.get("device") == "cpu":
+            assert tensor.is_pinned()
+            prepared_refs.append(weakref.ref(tensor))
+        return tensor
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "empty", track_empty)
+        assert allocator._prepare_sleep_backups(budget) == budget
+    assert prepared_refs
+    assert all(d.cpu_backup_tensor is None for d in weight_data)
+    before = mapped_usage(allocator)
+    weights.fill_(19)
+    torch.accelerator.synchronize()
+
+    def reject_cpu_allocation(*args, **kwargs):
+        if kwargs.get("device") == "cpu":
+            pytest.fail("sleep allocated a CPU backup after successful preparation")
+        return original_empty(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "empty", reject_cpu_allocation)
+        allocator.sleep(offload_tags=("weights",))
+    assert mapped_usage(allocator) == 0
+    assert not allocator._prepared_sleep_backups
+    allocator.wake_up()
+    assert mapped_usage(allocator) == before
+    assert torch.all(weights == 19)
+    assert all(ref() is None for ref in prepared_refs)
+
+    # Preparation is one-shot; normal sleep/wake must remain correct afterward.
+    weights.fill_(23)
+    torch.accelerator.synchronize()
+    allocator.sleep(offload_tags=("weights",))
+    allocator.wake_up()
+    assert torch.all(weights == 23)

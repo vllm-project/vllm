@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
+    VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES: int = 0
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
@@ -744,6 +745,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the nccl
     # library file in the locations specified by `LD_LIBRARY_PATH`
     "LD_LIBRARY_PATH": lambda: os.environ.get("LD_LIBRARY_PATH", None),
+    # Per-worker conservative rounded host capacity for first sleep; opt-in.
+    "VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES": lambda: int(
+        os.environ.get("VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES", "0")
+    ),
     # flag to control the chunk size (in MB) for sleeping memory allocations under ROCm
     "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")

@@ -132,6 +132,10 @@ class CuMemAllocator:
 
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
+        # Uninitialized host capacity, never a valid weight backup until sleep.
+        self._prepared_sleep_backups: dict[
+            int, tuple[AllocationData, HandleType, torch.Tensor]
+        ] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
         # Creating strong references to the two callbacks here to prevent
@@ -158,6 +162,7 @@ class CuMemAllocator:
         the pluggable allocator wrappers alive while MemPool destructors run.
         This is safe to call more than once.
         """
+        self._clear_prepared_sleep_backups()
         if not self.allocator_and_pools:
             return
 
@@ -183,6 +188,8 @@ class CuMemAllocator:
         """Internal method to store the allocation data
         when memory is allocated in the memory pool.
         """
+        if self.current_tag == "weights":
+            self._clear_prepared_sleep_backups()
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag
@@ -200,6 +207,8 @@ class CuMemAllocator:
         when memory is freed in the memory pool.
         """
         data = self.pointer_to_data.pop(ptr)
+        if data.tag == "weights":
+            self._clear_prepared_sleep_backups()
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
         if data.is_asleep and current_platform.is_rocm():
@@ -224,6 +233,67 @@ class CuMemAllocator:
         )
         return data.handle
 
+    def _clear_prepared_sleep_backups(self) -> None:
+        # Dropping these references does not flush PyTorch's host cache.
+        self._prepared_sleep_backups.clear()
+
+    def _prepare_sleep_backups(self, max_bytes: int) -> int:
+        """Prepare one-shot host capacity for weight offload, without copying.
+
+        Return the conservative rounded capacity in bytes, or zero on fallback.
+        The budget is per allocator, not a process-wide pinned-memory limit.
+        """
+        self._clear_prepared_sleep_backups()
+        if max_bytes <= 0 or not PIN_MEMORY:
+            return 0
+        weights = {
+            ptr: data
+            for ptr, data in self.pointer_to_data.items()
+            if data.tag == "weights"
+        }
+        if any(
+            d.is_asleep or d.cpu_backup_tensor is not None for d in weights.values()
+        ):
+            return 0
+        # PyTorch's host allocator rounds eligible requests to powers of two;
+        # requests above its rounding/cache thresholds use their exact size.
+        # Always rounding upward is conservative under either policy.
+        capacity = sum(
+            1 << (data.handle[1] - 1).bit_length()
+            for data in weights.values()
+            if data.handle[1] > 0
+        )
+        if capacity > max_bytes:
+            logger.info(
+                "Skipping sleep backup preparation: rounded capacity %d bytes "
+                "exceeds budget %d bytes",
+                capacity,
+                max_bytes,
+            )
+            return 0
+        try:
+            for ptr, data in weights.items():
+                self._prepared_sleep_backups[ptr] = (
+                    data,
+                    data.handle,
+                    torch.empty(
+                        data.handle[1], dtype=torch.uint8, device="cpu", pin_memory=True
+                    ),
+                )
+        except (torch.OutOfMemoryError, MemoryError):
+            self._clear_prepared_sleep_backups()
+            logger.warning(
+                "Sleep backup preparation ran out of memory; using normal sleep"
+            )
+            return 0
+        except BaseException:
+            # Unknown CUDA errors may indicate a poisoned device context. Do
+            # not disguise them as an optional host-capacity failure.
+            self._clear_prepared_sleep_backups()
+            raise
+        logger.info("Prepared sleep backup capacity: %d bytes", capacity)
+        return capacity
+
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -243,35 +313,63 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        if self._prepared_sleep_backups:
+            weights = {
+                ptr: data
+                for ptr, data in self.pointer_to_data.items()
+                if data.tag == "weights"
+            }
+            prepared = self._prepared_sleep_backups
+            if (
+                "weights" not in offload_tags
+                or weights.keys() != prepared.keys()
+                or any(
+                    data is not prepared[ptr][0]
+                    or data.handle != prepared[ptr][1]
+                    or data.is_asleep
+                    or data.cpu_backup_tensor is not None
+                    for ptr, data in weights.items()
+                )
+            ):
+                self._clear_prepared_sleep_backups()
+
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
 
-        for ptr, data in self.pointer_to_data.items():
-            if data.is_asleep:
-                requests_offload = data.tag in offload_tags
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
-                    has_policy_conflict = True
-                continue
-            handle = data.handle
-            total_bytes += handle[1]
-            if data.tag in offload_tags:
-                backup_bytes += handle[1]
-                size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device="cpu",
-                    pin_memory=PIN_MEMORY,
-                )
-                cpu_ptr = cpu_backup_tensor.data_ptr()
-                libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
-                data.cpu_backup_tensor = cpu_backup_tensor
-            try:
-                unmap_and_release(handle)
-            finally:
-                data.is_asleep = True
+        try:
+            for ptr, data in self.pointer_to_data.items():
+                if data.is_asleep:
+                    requests_offload = data.tag in offload_tags
+                    was_offloaded = data.cpu_backup_tensor is not None
+                    if requests_offload != was_offloaded:
+                        has_policy_conflict = True
+                    continue
+                handle = data.handle
+                total_bytes += handle[1]
+                if data.tag in offload_tags:
+                    backup_bytes += handle[1]
+                    size_in_bytes = handle[1]
+                    prepared_backup = self._prepared_sleep_backups.pop(ptr, None)
+                    if prepared_backup is not None:
+                        cpu_backup_tensor = prepared_backup[2]
+                        del prepared_backup
+                    else:
+                        cpu_backup_tensor = torch.empty(
+                            size_in_bytes,
+                            dtype=torch.uint8,
+                            device="cpu",
+                            pin_memory=PIN_MEMORY,
+                        )
+                    cpu_ptr = cpu_backup_tensor.data_ptr()
+                    libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
+                    data.cpu_backup_tensor = cpu_backup_tensor
+                try:
+                    unmap_and_release(handle)
+                finally:
+                    data.is_asleep = True
+        finally:
+            self._clear_prepared_sleep_backups()
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -296,6 +394,7 @@ class CuMemAllocator:
         if isinstance(tags, str):
             tags = (tags,)
 
+        self._clear_prepared_sleep_backups()
         discarded_bytes = 0
         has_policy_conflict = False
         for data in self.pointer_to_data.values():
