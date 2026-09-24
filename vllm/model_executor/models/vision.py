@@ -8,7 +8,6 @@ from collections.abc import Callable
 from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
-import torch.nn as nn
 from transformers import PreTrainedConfig
 
 from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
