@@ -363,7 +363,6 @@ class ModernBertPooler(SequencePooler):
             dtype=head_dtype,
         )
 
-        # Keep the model's head layers even when output activation is disabled.
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             head_dtype=head_dtype,
