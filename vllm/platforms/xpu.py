@@ -337,6 +337,16 @@ class XPUPlatform(Platform):
                 "disabling cudagraph_mode."
             )
 
+        if (
+            vllm_config.model_config is not None
+            and vllm_config.model_config.enable_sleep_mode
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning_once(
+                "XPU Graph is not compatible with sleep mode, disabling cudagraph_mode."
+            )
+
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
 
