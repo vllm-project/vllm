@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use expect_test::{ExpectFile, expect, expect_file};
 use serde_json::Value;
+use thiserror_ext::AsReport as _;
 
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
@@ -763,4 +764,21 @@ fn last_developer_omits_generation_prompt_when_disabled() {
     let rendered = render_request(&request);
 
     expect!["<｜begin▁of▁sentence｜><｜User｜>latest instruction"].assert_eq(&rendered);
+}
+
+#[test]
+fn custom_roles_are_rejected_as_request_errors() {
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::custom("root", "identity"),
+            ChatMessage::user("hello"),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
+
+    assert!(error.is_request_validation_error());
+    expect!["chat role `root` is not supported by this chat renderer"]
+        .assert_eq(&error.to_report_string());
 }
