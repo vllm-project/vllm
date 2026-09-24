@@ -4,7 +4,7 @@ from collections.abc import Iterator, Sequence
 from typing import cast
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
@@ -121,7 +121,7 @@ class ColBERTQueryEmbeddingProcessor(
         tokenizer,
         content_ids: list[int],
     ) -> TokensPrompt:
-        """[CLS] [DocumentMarker] <tokens> [SEP]"""
+        """[CLS] [DocumentMarker] <tokens> [SEP]."""
         _, document_marker_id = self._resolve_marker_ids(tokenizer)
 
         content_ids = content_ids[: self.max_model_len - 3]

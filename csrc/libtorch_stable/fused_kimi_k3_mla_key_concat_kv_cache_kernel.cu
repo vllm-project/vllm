@@ -35,8 +35,9 @@
  *
  *   fp8_ds_mla (fused_kimi_k3_mla_key_concat_ds_mla_insert):
  *     - full key concat (bf16), and cache insert in DeepSeek's 656-byte
- *       block-scaled layout (NoPE fp8 in 4 tiles of 128 with per-tile dynamic
- *       scales, RoPE bf16), bit-compatible with concat_and_cache_ds_mla_kernel.
+ *       block-scaled layout (NoPE fp8 in 4 tiles of 128 with per-tile
+ *       power-of-two scales, RoPE bf16), bit-compatible with
+ *       concat_and_cache_ds_mla_kernel.
  *
  * Both use Programmatic Dependent Launch (PDL) to overlap the tail of the
  * producing GEMMs on sm_90+, and are structured after
@@ -68,7 +69,6 @@
   #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
 #include <cuda_runtime.h>
-#include <cfloat>
 #include <type_traits>
 
 #ifdef USE_ROCM
@@ -102,15 +102,18 @@ constexpr int kQkHeadDim = kQkNopeHeadDim + kQkRopeHeadDim;  // 192
 constexpr int kVHeadDim = 128;                               // V
 constexpr int kCacheEntry = kKvLoraRank + kQkRopeHeadDim;    // 576
 constexpr int kVecElems = 8;  // 8 bf16 == one uint4 load / one uint2 fp8 store
+// Max token count for the decode epilogue's 3-warps-per-row split; larger
+// batches have enough rows for one warp per row.
+constexpr int kDecodeRowSplitMaxTokens = 64;
 
 #if defined(USE_ROCM) && defined(__gfx942__)
 constexpr float kFp8Max = 224.0f;
 #else
 constexpr float kFp8Max = 448.0f;
 #endif
-// Divisor for fp8_ds_mla per-tile dynamic scales (matches cache_kernels.cu).
-// fp8_ds_mla 656B entry: [0,512) NoPE fp8 (4 tiles of 128), [512,528) 4 fp32
-// tile scales, [528,656) RoPE 64 bf16.
+// Divisor for fp8_ds_mla per-tile power-of-two scales (matches
+// cache_kernels.cu). fp8_ds_mla 656B entry: [0,512) NoPE fp8 (4 tiles of 128),
+// [512,528) 4 fp32 tile scales, [528,656) RoPE 64 bf16.
 constexpr float kFp8ScaleDivisor = kFp8Max;
 
 // Copy 8 source elements (one uint4 of bf16/fp16) to `dst`. FP8=false stores a
@@ -299,14 +302,18 @@ __device__ __forceinline__ void writePrefillQuery(
 // Concat + store a 576-wide latent: dst[e] = [a512 | b64], e in [0, 576). Used
 // for the decode query mqa_q = [ql_nope | q_pe] and the plain latent cache
 // entry [kv_c | k_pe]. FP8 packs to E4M3 (dst_elem_size 1); bf16 stores uint4.
+// A single warp passes (laneId, 32); a row split across W warps passes
+// (part * 32 + laneId, W * 32). __restrict__ lets the compiler batch loads
+// ahead of stores past the byte-typed dst.
 template <typename scalar_t, bool FP8, bool APPLY_ROPE = false>
-__device__ __forceinline__ void writeLatent576(void* dst, const scalar_t* a512,
-                                               const scalar_t* b64, int laneId,
-                                               int dst_elem_size,
-                                               float scale_inv,
-                                               const float* cos_sin = nullptr) {
+__device__ __forceinline__ void writeLatent576(
+    void* __restrict__ dst, const scalar_t* __restrict__ a512,
+    const scalar_t* __restrict__ b64, int lane, int lane_stride,
+    int dst_elem_size, float scale_inv,
+    const float* __restrict__ cos_sin = nullptr) {
   auto* d = reinterpret_cast<uint8_t*>(dst);
-  for (int e = laneId * kVecElems; e < kCacheEntry; e += 32 * kVecElems) {
+  for (int e = lane * kVecElems; e < kCacheEntry;
+       e += lane_stride * kVecElems) {
     if (e < kKvLoraRank) {
       copyChunk8<scalar_t, FP8>(d + e * dst_elem_size, a512 + e, scale_inv);
     } else {
@@ -318,7 +325,7 @@ __device__ __forceinline__ void writeLatent576(void* dst, const scalar_t* a512,
 }
 
 // Write [kv_c | k_pe] into the fp8_ds_mla 656B entry using one warp: NoPE 512
-// as fp8 in 4 tiles of 128 (per-tile dynamic absmax scale, 4 fp32 scales at
+// as fp8 in 4 tiles of 128 (per-tile power-of-two scale, 4 fp32 scales at
 // [512,528)), RoPE 64 as bf16 at [528,656). Bit-compatible with
 // concat_and_cache_ds_mla_kernel.
 template <typename scalar_t, bool APPLY_ROPE = false>
@@ -342,7 +349,8 @@ __device__ __forceinline__ void writeDsMlaCache(
   for (int offset = 4; offset > 0; offset /= 2) {
     max_abs = fmaxf(max_abs, VLLM_SHFL_XOR_SYNC_WIDTH(max_abs, offset, 8));
   }
-  float const tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+  float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, 1e-4f);
+  tile_scale = exp2f(ceilf(log2f(tile_scale)));
   if ((laneId & 7) == 0) {
     reinterpret_cast<float*>(row)[kKvLoraRank / 4 + tile] = tile_scale;
   }
@@ -428,7 +436,7 @@ __global__ void fusedKimiK3MLAKeyConcatKVCacheInsertKernel(
                       (slot_id % cache_block_size) * cache_token_stride;
       writeLatent576<scalar_t, false, APPLY_ROPE>(
           row, kv_c + tokenIdx * kv_c_tok_stride,
-          k_pe + tokenIdx * k_pe_tok_stride, laneId, sizeof(scalar_t), 1.0f,
+          k_pe + tokenIdx * k_pe_tok_stride, laneId, 32, sizeof(scalar_t), 1.0f,
           rope_cache);
     }
   }
@@ -512,7 +520,7 @@ __global__ void fusedKimiK3MLAQKVQuantKVCacheFp8Kernel(
                      (slot_id % cache_block_size) * cache_token_stride;
       writeLatent576<scalar_t, true, APPLY_ROPE>(
           row, kv_c + tokenIdx * kv_c_tok_stride,
-          k_pe + tokenIdx * k_pe_tok_stride, laneId, 1, ksi, rope_cache);
+          k_pe + tokenIdx * k_pe_tok_stride, laneId, 32, 1, ksi, rope_cache);
     }
   }
 
@@ -591,7 +599,7 @@ __global__ void fusedKimiK3MLAKVConcatPackKernel(
 // ds_mla variant: concat full key (bf16) + fp8_ds_mla latent cache insert
 //
 // Cache entry (656 bytes), matching concat_and_cache_ds_mla_kernel:
-//   [0, 512)   NoPE 512 vals as fp8, 4 tiles of 128, each dynamically scaled
+//   [0, 512)   NoPE 512 vals as fp8, 4 tiles of 128, power-of-two scaled
 //   [512, 528) 4 fp32 per-tile scales
 //   [528, 656) RoPE 64 vals as bf16 (unquantized)
 // The cache slot uses one warp: lane L quantizes NoPE elems [L*16, L*16+16)
@@ -660,8 +668,20 @@ __global__ void fusedKimiK3MLAKeyConcatDsMlaInsertKernel(
 // Decode epilogue: concat mqa_q = [ql_nope | q_pe] (576) + latent cache insert,
 // run right before forward_mqa. Q_FP8 quantizes mqa_q; KV_FP8 quantizes the
 // plain per-tensor cache. (ds_mla cache uses the separate kernel below.)
+//
+// SPLIT warps cooperate on each 576-wide row: decode batches have too few
+// rows to hide the load->store latency with one warp per row, so batches up
+// to kDecodeRowSplitMaxTokens launch SPLIT=3 (one 8-element chunk per lane).
+//
+// Only ql_nope / q_pe come from the producing GEMM chain, so everything else
+// (slot_mapping, scales, rope table, cache-row inputs) is read before the
+// grid-dependency wait, and the cache-slot warps skip the wait entirely.
+// The dependent-launch trigger stays at the end of the kernel: it releases
+// the consuming FMHA's grid-dependency wait, so it must not fire before this
+// kernel's stores to mqa_q are issued.
 // ────────────────────────────────────────────────────────────────────────────
-template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE>
+template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE,
+          int SPLIT = 1>
 __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
     const scalar_t* __restrict__ ql_nope, int64_t const qn_tok_stride,
     int64_t const qn_head_stride, const scalar_t* __restrict__ q_pe,
@@ -683,13 +703,13 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
   int const laneId = threadIdx.x % 32;
   int const globalWarpIdx = blockIdx.x * warpsPerBlock + threadIdx.x / 32;
   int const slotsPerToken = num_heads + 1;
-  int const tokenIdx = globalWarpIdx / slotsPerToken;
-  int const slotIdx = globalWarpIdx % slotsPerToken;
+  int const globalSlotIdx = globalWarpIdx / SPLIT;
+  int const part = globalWarpIdx % SPLIT;
+  int const tokenIdx = globalSlotIdx / slotsPerToken;
+  int const slotIdx = globalSlotIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
-
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaGridDependencySynchronize();
-#endif
+  int const lane = part * 32 + laneId;
+  constexpr int kLaneStride = SPLIT * 32;
 
   const float* rope_cache = nullptr;
   if constexpr (APPLY_ROPE) {
@@ -698,12 +718,18 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
 
   if (slotIdx < num_heads) {
     float const qsi = Q_FP8 ? __ldg(q_scale_inv) : 1.0f;
-    writeLatent576<scalar_t, Q_FP8, APPLY_ROPE>(
+    uint8_t* const dst =
         reinterpret_cast<uint8_t*>(mqa_q) +
-            (tokenIdx * mq_tok_stride + slotIdx * mq_head_stride) * kMqElem,
-        ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride,
-        q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride, laneId,
-        kMqElem, qsi, rope_cache);
+        (tokenIdx * mq_tok_stride + slotIdx * mq_head_stride) * kMqElem;
+    const scalar_t* const nope_src =
+        ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride;
+    const scalar_t* const pe_src =
+        q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride;
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaGridDependencySynchronize();
+#endif
+    writeLatent576<scalar_t, Q_FP8, APPLY_ROPE>(
+        dst, nope_src, pe_src, lane, kLaneStride, kMqElem, qsi, rope_cache);
   } else {
     int64_t const slot_id = slot_mapping[tokenIdx];
     if (slot_id >= 0) {
@@ -714,7 +740,7 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
                slot_id % cache_block_size * cache_token_stride) *
                   kCacheElem,
           kv_c + tokenIdx * kv_c_tok_stride, k_pe + tokenIdx * k_pe_tok_stride,
-          laneId, kCacheElem, ksi, rope_cache);
+          lane, kLaneStride, kCacheElem, ksi, rope_cache);
     }
   }
 
@@ -760,7 +786,7 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
         mqa_q + tokenIdx * mq_tok_stride + slotIdx * mq_head_stride,
         ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride,
         q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride, laneId,
-        sizeof(scalar_t), 1.0f, rope_cache);
+        32, sizeof(scalar_t), 1.0f, rope_cache);
   } else {
     int64_t const slot_id = slot_mapping[tokenIdx];
     if (slot_id >= 0) {
@@ -1367,9 +1393,9 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
+        auto launch = [&](auto kernel, int row_split) {
+          kk3::launchPdlSlots(
+              kernel, num_tokens, (num_heads + 1) * row_split, 1, 0, stream,
               reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
               ql_nope.stride(0), ql_nope.stride(1),
               reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
@@ -1388,12 +1414,32 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
                                cos_sin_cache.value().const_data_ptr())
                          : nullptr);
         };
+        // Split decode-sized rows across 3 warps (see the kernel comment).
+        bool const split_rows = num_tokens <= kk3::kDecodeRowSplitMaxTokens;
         if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
-                                                               false, true>);
+          if (split_rows) {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, true, 3>,
+                3);
+          } else {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, true>,
+                1);
+          }
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
-                                                               false, false>);
+          if (split_rows) {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, false, 3>,
+                3);
+          } else {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, false>,
+                1);
+          }
         }
       });
 }
@@ -1442,9 +1488,9 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
+        auto launch = [&](auto kernel, int row_split) {
+          kk3::launchPdlSlots(
+              kernel, num_tokens, (num_heads + 1) * row_split, 1, 0, stream,
               reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
               ql_nope.stride(0), ql_nope.stride(1),
               reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
@@ -1464,12 +1510,29 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
                                cos_sin_cache.value().const_data_ptr())
                          : nullptr);
         };
+        // Split decode-sized rows across 3 warps (see the kernel comment).
+        bool const split_rows = num_tokens <= kk3::kDecodeRowSplitMaxTokens;
         if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
-                                                               true, true>);
+          if (split_rows) {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                                 true, true, 3>,
+                   3);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                                 true, true>,
+                   1);
+          }
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
-                                                               true, false>);
+          if (split_rows) {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                              true, false, 3>,
+                3);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                                 true, false>,
+                   1);
+          }
         }
       });
 }

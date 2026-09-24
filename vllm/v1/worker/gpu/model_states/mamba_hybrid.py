@@ -9,10 +9,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionMetadataBuilder,
+    ShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -24,7 +28,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
+    get_mamba_group_ids,
+    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
+    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -36,16 +43,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         return {"is_prefilling": self.is_prefilling[:num_reqs]}
 
     def get_extra_attn_kwargs(
-        self,
-        attn_metadata_builder: Any,
-        num_reqs: int,
+        self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
@@ -53,6 +56,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
                 Mamba2AttentionMetadataBuilder,
                 GDNAttentionMetadataBuilder,
                 ShortConvAttentionMetadataBuilder,
+                PleShortConvAttentionMetadataBuilder,
             ),
         ):
             return {}
@@ -102,6 +106,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
+            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -117,17 +122,16 @@ class MambaHybridModelState(DefaultModelState):
         self, kv_cache_config: KVCacheConfig
     ) -> tuple[list[int], MambaSpec]:
         if self._mamba_spec is None:
-            group_ids: list[int] = []
-            specs: list[MambaSpec] = []
-            for i, group in enumerate(kv_cache_config.kv_cache_groups):
-                spec = group.kv_cache_spec
-                if isinstance(spec, MambaSpec):
-                    group_ids.append(i)
-                    specs.append(spec)
-            assert specs, "no mamba layers in the model"
-            assert all(specs[0] == s for s in specs)
-            self._mamba_group_ids = group_ids
-            self._mamba_spec = specs[0]
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec = next(iter(mamba_groups))
+            assert all(
+                spec.block_size == mamba_spec.block_size
+                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
+                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
+                for spec in mamba_groups
+            ), "all mamba groups must share cache scheduling parameters"
+            self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
+            self._mamba_spec = mamba_spec
         return self._mamba_group_ids, self._mamba_spec
 
     def _ensure_align_ctx(
@@ -136,8 +140,14 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
+        if self._mamba_state_copy_funcs is None:
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_types = {spec.mamba_type for spec in mamba_groups}
+            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+            validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+            self._mamba_state_copy_funcs = copy_funcs
+        copy_funcs = self._mamba_state_copy_funcs
         if self._mamba_ctx is None:
-            copy_funcs = self.model.get_mamba_state_copy_func()
             # Both SD and DS conv layouts support a >0 spec-decode shift: the
             # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
             # ``token_bias = num_accepted - 1`` window shift per conv layout
@@ -146,7 +156,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
-                num_state_types=len(copy_funcs),
+                copy_funcs=copy_funcs,
                 device=self.device,
                 make_buffer=lambda n, dtype: CpuGpuBuffer(
                     n, dtype=dtype, device=self.device
@@ -161,7 +171,7 @@ class MambaHybridModelState(DefaultModelState):
             ctx.initialize_from_forward_context(
                 kv_cache_config,
                 forward_context,
-                self.model.get_mamba_state_copy_func(),
+                copy_funcs,
                 [block_tables[gid] for gid in mamba_group_ids],
             )
         return ctx
@@ -224,7 +234,11 @@ class MambaHybridModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
+        assert model_specific_attn_metadata is None
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -232,7 +246,11 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        # Prefer the promised bound: a capture dummy's measured max is its even
+        # split, not the length the graph must replay.
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
@@ -260,10 +278,11 @@ class MambaHybridModelState(DefaultModelState):
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
-                # A row is a spec-decode row only when its whole prompt is already
-                # computed, i.e. exactly one non-draft (decode) token is scheduled.
-                is_decode = (
-                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                # Test request state, not num_scheduled_tokens == draft_count+1:
+                # adaptive rewrites num_scheduled_tokens to an even split, so that
+                # equality rarely holds and would demote every verify row to decode.
+                is_decode = (~input_batch.is_prefilling_np) & (
+                    input_batch.num_scheduled_tokens > 0
                 )
                 spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
@@ -308,15 +327,14 @@ class MambaHybridModelState(DefaultModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            positions=input_batch.positions,
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
-                attn_metadata,
-                attn_groups,
-                for_capture=for_capture,
+                attn_metadata, attn_groups, for_capture=for_capture
             )
         return attn_metadata
 

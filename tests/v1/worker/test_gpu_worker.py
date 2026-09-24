@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -13,6 +15,42 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
+    """Profiling must use serving's thread count to keep Dynamo guards valid."""
+    from torch._dynamo.testing import CompileCounter
+
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+    loading_threads = []
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(weight_transfer_config=None),
+        model_runner=SimpleNamespace(
+            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
+        ),
+        _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    original_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(2)
+        gpu_worker.Worker.load_model(worker)
+        assert loading_threads == [2]
+
+        counter = CompileCounter()
+        compiled = torch.compile(lambda x: x + 1, backend=counter, fullgraph=True)
+        x = torch.ones(2)
+        compiled(x)
+        gpu_worker.set_torch_threads_for_runtime()
+        torch.testing.assert_close(compiled(x), x + 1)
+        assert counter.frame_count == 1
+    finally:
+        torch.set_num_threads(original_threads)
+
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
@@ -152,3 +190,100 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
+
+
+class _OrderedHandle:
+    """Send handle that logs when it is waited."""
+
+    def __init__(self, log: list[str], name: str):
+        self.log = log
+        self.name = name
+
+    def is_completed(self) -> bool:
+        return True
+
+    def wait(self) -> None:
+        self.log.append(f"wait:{self.name}")
+
+
+def test_execute_model_waits_previous_pp_send_before_forward(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Previous device handles are waited before the forward pass; the
+    metadata handle is left to the GroupCoordinator's reaper."""
+    import torch
+
+    from vllm.sequence import IntermediateTensors
+
+    log: list[str] = []
+    previous_tensor_send = _OrderedHandle(log, "prev-tensor")
+    metadata_handle = _OrderedHandle(log, "meta")
+    tensor_handle = _OrderedHandle(log, "tensor")
+
+    def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
+        log.append("isend")
+        return [metadata_handle, tensor_handle]
+
+    pp_group = SimpleNamespace(
+        is_first_rank=True,
+        is_last_rank=False,
+        isend_tensor_dict=isend_tensor_dict,
+    )
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp_group)
+    monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: SimpleNamespace())
+
+    def run_model(scheduler_output, intermediate_tensors):
+        log.append("forward")
+        return IntermediateTensors({"hidden_states": torch.zeros(1)})
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                pass_config=SimpleNamespace(enable_sp=False)
+            ),
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2, distributed_executor_backend="mp"
+            ),
+        ),
+        use_v2_model_runner=False,
+        model_runner=SimpleNamespace(execute_model=run_model),
+        annotate_profile=lambda scheduler_output: nullcontext(),
+        _pp_send_work=[previous_tensor_send],
+    )
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
+    )
+
+    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
+
+    assert log == ["wait:prev-tensor", "forward", "isend"]
+    assert worker._pp_send_work == [tensor_handle]
+
+
+def test_jit_monitor_activation_follows_enable_jit_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The post-warmup JIT monitor must stay off when JIT warmup is disabled
+    (e.g. by enforce_eager): runtime compilation is then expected, and
+    warning/erroring on it would be noise."""
+    from vllm.utils import jit_monitor
+
+    calls = []
+    monkeypatch.setattr(jit_monitor, "activate", lambda **kwargs: calls.append(kwargs))
+
+    def worker(enable_jit_warmup):
+        return SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup)
+            ),
+            observability_config=SimpleNamespace(
+                jit_monitor_mode="warn", jit_monitor_verbose=False
+            ),
+        )
+
+    gpu_worker.Worker._maybe_activate_jit_monitor(worker(True))
+    assert calls == [{"mode": "warn", "verbose": False}]
+
+    calls.clear()
+    gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
+    assert calls == []
