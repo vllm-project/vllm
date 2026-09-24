@@ -2054,8 +2054,6 @@ class rocm_aiter_ops:
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
-    # Lazily probed: whether topk_gating preserves softmax renormalization.
-    _TOPK_GATING_AVAILABLE: bool | None = None
 
     @classmethod
     def refresh_env_variables(cls):
@@ -2080,7 +2078,6 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._TOPK_GATING_ENABLED = envs.VLLM_ROCM_USE_AITER_TOPK_GATING
-        cls._TOPK_GATING_AVAILABLE = None
         cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -2190,42 +2187,9 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def topk_gating_available(cls) -> bool:
-        """Whether ``aiter.ops.topk.topk_gating`` exists with softmax args.
-
-        Softmax ``need_renorm`` was silently ignored until AITER #4460
-        (v0.1.20). Builds older than that should set
-        ``VLLM_ROCM_USE_AITER_TOPK_GATING=0``.
-        """
-        if cls._TOPK_GATING_AVAILABLE is None:
-            try:
-                import inspect
-
-                from aiter.ops.topk import topk_gating
-
-                params = inspect.signature(topk_gating).parameters
-                cls._TOPK_GATING_AVAILABLE = (
-                    "need_renorm" in params and "score_func" in params
-                )
-            except (
-                ImportError,
-                ModuleNotFoundError,
-                AttributeError,
-                ValueError,
-                TypeError,
-            ):
-                cls._TOPK_GATING_AVAILABLE = False
-        return cls._TOPK_GATING_AVAILABLE
-
-    @classmethod
-    @if_aiter_supported
     def is_topk_gating_enabled(cls) -> bool:
-        """Use AITER ``topk_gating`` for softmax routing when the API exists."""
-        return (
-            cls.is_fused_moe_enabled()
-            and cls._TOPK_GATING_ENABLED
-            and cls.topk_gating_available()
-        )
+        """Use AITER ``topk_gating`` for softmax routing."""
+        return cls.is_fused_moe_enabled() and cls._TOPK_GATING_ENABLED
 
     @classmethod
     @if_aiter_supported

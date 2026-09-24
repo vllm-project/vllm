@@ -73,11 +73,7 @@ def get_benchmark(scoring_func):
         elif provider == "aiter_gating":
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if (
-                scoring_func != "softmax"
-                or not rocm_aiter_ops.is_fused_moe_enabled()
-                or not rocm_aiter_ops.topk_gating_available()
-            ):
+            if scoring_func != "softmax" or not rocm_aiter_ops.is_topk_gating_enabled():
                 return float("nan"), float("nan"), float("nan")
             topk_weights = torch.empty(
                 (num_tokens, topk), dtype=torch.float32, device="cuda"

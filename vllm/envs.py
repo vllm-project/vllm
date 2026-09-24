@@ -1355,10 +1355,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Route softmax MoE top-k through AITER's newer `topk_gating` family
     # (register-scan / multiwave kernels) instead of the legacy
-    # `topkGatingSoftmax` launcher. Falls back automatically when the AITER
-    # build has no `topk_gating` API, the gating tensor is not contiguous,
-    # or fused shared-expert scoring is requested. Default on; set 0 to
-    # restore the legacy kernel.
+    # `topkGatingSoftmax` launcher. Non-contiguous gating rows, fused
+    # shared-expert scoring, and batches with T > 4096 still use the
+    # legacy launcher. Default on; set 0 to restore it everywhere.
     "VLLM_ROCM_USE_AITER_TOPK_GATING": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TOPK_GATING", "True").lower() in ("true", "1")
     ),
