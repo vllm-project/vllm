@@ -177,7 +177,6 @@ def _mp_race_construct_and_write(
     for the parent's cleanup signal before tearing down.  The wait gives the
     parent a window to read the raw mmap before the creator removes the file."""
     try:
-        region_module.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=num_chunks,
@@ -217,7 +216,6 @@ def _mp_barrier_construct_and_hold(
             return get_populate_write_fn(mmap_obj)
 
         region_module._get_populate_write_fn = track_population
-        region_module.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=2,
@@ -721,22 +719,6 @@ def test_multiprocess_race_construct_and_write(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_unlink_owner_removes_file(iid):
-    """An active unlink owner removes the file during cleanup."""
-    r = _make_region(iid, unlink_owner=False)
-    path = r.mmap_path
-    fd = r.fd
-    mmap_obj = r.mmap_obj
-
-    r._is_unlink_owner = True
-    r.cleanup()
-
-    assert mmap_obj.closed, "mmap should be closed after cleanup"
-    assert not os.path.exists(path), "unlink owner should remove the file"
-    with pytest.raises(OSError):
-        os.fstat(fd)  # fd should be closed
-
-
 def test_cleanup_non_owner_leaves_file(iid):
     """A non-owner must close local resources without removing the file."""
     r0 = _make_region(iid, unlink_owner=False)
@@ -787,29 +769,6 @@ def test_no_barrier_unlink_owner_failure_removes_joined_path(iid, monkeypatch):
         assert not os.path.exists(path)
     finally:
         initializer.cleanup()
-        _cleanup_file(path)
-
-
-def test_cleanup_disarms_unlink_owner(iid, monkeypatch):
-    """A cleanup owner must not try to unlink the path on a second cleanup."""
-    unlink = MagicMock(wraps=os.unlink)
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor.os, "unlink", unlink)
-    region = _make_region(iid, unlink_owner=False)
-    path = region.mmap_path
-    try:
-        region._is_unlink_owner = True
-        region.cleanup()
-
-        replacement_fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-        os.close(replacement_fd)
-        region.cleanup()
-
-        assert unlink.call_count == 1
-        assert region._is_unlink_owner is False
-        assert os.path.exists(path)
-    finally:
         _cleanup_file(path)
 
 
@@ -1110,7 +1069,6 @@ def test_backing_file_unlinked_after_barrier(iid):
     try:
         assert seen_at_barrier == [True], "file must exist during rendezvous"
         assert not os.path.exists(path), "name must be dropped after the barrier"
-        assert region._is_unlink_owner is False
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
@@ -1154,7 +1112,6 @@ def test_unlink_owner_tolerates_path_removed_by_peer(iid):
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     region = _make_region(iid, barrier=lambda: os.unlink(path))
     try:
-        assert region._is_unlink_owner is False
         assert not os.path.exists(path)
     finally:
         region.cleanup()

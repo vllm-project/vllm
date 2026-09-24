@@ -114,7 +114,6 @@ class SharedOffloadRegion:
 
         self.rank = rank
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-        self._is_unlink_owner = unlink_owner
         self.fd: int | None = None
         self.mmap_obj: mmap.mmap | None = None
         self._mmap_view: memoryview | None = None
@@ -191,7 +190,7 @@ class SharedOffloadRegion:
             if barrier is not None and not created_path:
                 self.abort_startup_cleanup()
             elif barrier is None and not created_path:
-                if self._is_unlink_owner:
+                if unlink_owner:
                     self.abort_startup_cleanup()
                 else:
                     self._cleanup_local_resources()
@@ -213,14 +212,14 @@ class SharedOffloadRegion:
             # unlink only after rendezvous; without one, this is safe once this
             # process has mapped the file (for example, the tiering scheduler is
             # the last participant to open it).
-            if self._is_unlink_owner:
+            if unlink_owner:
                 try:
                     os.unlink(self.mmap_path)
                 except FileNotFoundError:
                     pass
                 else:
                     logger.info("Unlinked mmap file %s", self.mmap_path)
-                self._is_unlink_owner = False
+                unlink_owner = False
 
             self._mmap_view = memoryview(self.mmap_obj)
             self._base = torch.frombuffer(self._mmap_view, dtype=torch.int8)
@@ -431,9 +430,6 @@ class SharedOffloadRegion:
         region. They become invalid once this method closes the mmap.
         """
         self._cleanup_local_resources()
-        if self._is_unlink_owner:
-            self._unlink_shared_path()
-        self._is_unlink_owner = False
 
     def abort_startup_cleanup(self) -> None:
         """Release local resources and remove a region from failed startup.
@@ -443,4 +439,3 @@ class SharedOffloadRegion:
         """
         self._cleanup_local_resources()
         self._unlink_shared_path()
-        self._is_unlink_owner = False
