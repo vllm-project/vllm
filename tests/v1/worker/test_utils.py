@@ -1235,8 +1235,6 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
-    worker.host_caches = (torch.empty(1),)
-    worker.resident_caches = (torch.empty(1),)
     released = False
 
     def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
@@ -1244,8 +1242,6 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
         assert runtimes == []
         assert pinned_host_pools == []
         assert shared_host_region is worker.shared_host_region
-        assert worker.host_caches == ()
-        assert worker.resident_caches == ()
         released = True
 
     monkeypatch.setattr(
@@ -1255,7 +1251,6 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
-    assert worker.shared_host_region is None
 
 
 class _TestReplaySSMMixer(MambaMixer2):

@@ -190,11 +190,6 @@ class HiSparseConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self._initialized = False
 
-    def _release_host_cache_views(self) -> None:
-        """Drop connector-owned aliases before closing a shared mmap."""
-        self.host_caches = ()
-        self.resident_caches = ()
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         forward_context = self.vllm_config.compilation_config.static_forward_context
         cache_handles: list[HiSparseCacheHandle] = []
@@ -250,7 +245,6 @@ class HiSparseConnectorWorker:
                 is_host_writer=is_host_writer,
             )
         except Exception:
-            self._release_host_cache_views()
             release_pinned_state(
                 [cache.runtime for cache in cache_handles],
                 pinned_host_pools,
@@ -746,8 +740,8 @@ class HiSparseConnectorWorker:
             return
         for layer_index, cache in enumerate(self.cache_handles):
             source_index = cache.runtime.resident_source_index
-            source = self.host_caches[layer_index]
-            destination = self.resident_caches[layer_index]
+            source: torch.Tensor = self.host_caches[layer_index]
+            destination: torch.Tensor = self.resident_caches[layer_index]
             for transfer in transfers:
                 host_start = transfer.host_block_id * self.kernel_block_size
                 resident_block = transfer.resident_block_ids[source_index]
@@ -926,11 +920,9 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
-        self._release_host_cache_views()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,
             self.shared_host_region,
         )
-        self.shared_host_region = None
         self._initialized = False

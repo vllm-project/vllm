@@ -16,7 +16,6 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group
-from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
