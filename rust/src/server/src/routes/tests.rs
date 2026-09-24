@@ -5816,6 +5816,13 @@ async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn sleep_route_uses_python_compatible_default_query_values() {
+    let before = METRICS.render().expect("render metrics");
+    let success_label =
+        "vllm:rl_sleep_mode_operations_total{operation=\"sleep\",status=\"success\"}";
+    let previous = before
+        .lines()
+        .find_map(|line| line.strip_prefix(success_label)?.trim().parse::<u64>().ok())
+        .unwrap_or(0);
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5851,8 +5858,47 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "sleeping", "level": 1 })
+    );
     engine_task.await.expect("mock engine task");
+    let after = METRICS.render().expect("render metrics");
+    let current = after
+        .lines()
+        .find_map(|line| line.strip_prefix(success_label)?.trim().parse::<u64>().ok())
+        .expect("sleep success metric");
+    assert_eq!(current, previous + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+    for (query, parameter) in [
+        ("level=invalid", "query.level"),
+        ("level=-1", "query.level"),
+        ("level=3", "query.level"),
+        ("mode=invalid", "query.mode"),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sleep?{query}"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(json["error"]["param"], parameter);
+    }
+    engine_task.abort_and_join().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5890,8 +5936,64 @@ async fn release_kv_cache_memory_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "kv_cache_released" })
+    );
     engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn release_kv_cache_memory_error_records_failed_operation() {
+    let error_label = "vllm:rl_sleep_mode_operations_total{operation=\"release_kv_cache_memory\",status=\"error\"}";
+    let before = METRICS.render().expect("render metrics");
+    let previous = before
+        .lines()
+        .find_map(|line| line.strip_prefix(error_label)?.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let call_id = payload.as_array().expect("utility payload array")[1]
+                .as_u64()
+                .expect("call id");
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: call_id.into(),
+                        failure_message: Some("requires a completed pause first".to_owned()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+        })
+    })
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    engine_task.await.expect("mock engine task");
+    let after = METRICS.render().expect("render metrics");
+    let current = after
+        .lines()
+        .find_map(|line| line.strip_prefix(error_label)?.trim().parse::<u64>().ok())
+        .expect("release error metric");
+    assert_eq!(current, previous + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5929,7 +6031,10 @@ async fn wake_up_route_without_tags_accepts_bool_result() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "awake", "tags_woken": null })
+    );
     engine_task.await.expect("mock engine task");
 }
 
@@ -5954,7 +6059,7 @@ async fn wake_up_route_accepts_repeated_tags() {
                 ])])
             );
 
-            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+            send_outputs(push, utility_outputs(call_id, utility_result_value(false))).await;
         })
     })
     .await;
@@ -5974,7 +6079,10 @@ async fn wake_up_route_accepts_repeated_tags() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "sleeping", "tags_woken": ["weights", "kv_cache"] })
+    );
     engine_task.await.expect("mock engine task");
 }
 
