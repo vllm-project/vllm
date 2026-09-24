@@ -154,8 +154,25 @@ def test_custom_allreduce_filters_dtype(
     communicator._ptr = 0
     communicator.world_size = 2
     communicator.max_size = 1024
+    communicator.batch_invariant = False
 
     assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
+    batch_invariant: bool,
+) -> None:
+    """Batch invariance must not switch backends based on the input size."""
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator.batch_invariant = batch_invariant
+    communicator._ptr = 0
+
+    oversized = torch.empty(1024, dtype=torch.float16)
+    assert communicator.should_custom_ar(oversized) is batch_invariant
 
 
 @pytest.mark.parametrize(
@@ -573,6 +590,56 @@ def eager_allreduce(
         for _ in range(num_communication):
             out = fa.all_reduce(out, registered=False)
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def chunked_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    """Inputs above max_size are reduced in chunks and match the fixed-order
+    reference bitwise, both eagerly and inside a CUDA graph."""
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", "1stage")
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        group = get_tp_group().device_group
+        fa = get_tp_group().device_communicator.ca_comm
+
+        # Two full chunks plus a partial one.
+        dtype = torch.bfloat16
+        chunk_numel = fa.max_size // dtype.itemsize
+        inp = torch.randn(2 * chunk_numel + 4096, device=device).to(dtype)
+        gathered = [torch.empty_like(inp) for _ in range(tp_size)]
+        dist.all_gather(gathered, inp, group=group)
+        ref = gathered[0].float()
+        for peer in gathered[1:]:
+            ref = ref + peer.float()
+        ref = ref.to(torch.bfloat16)
+
+        out = fa.all_reduce(inp, registered=False)
+        assert torch.equal(out, ref)
+
+        with fa.capture():
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out = fa.all_reduce(inp, registered=True)
+        graph.replay()
+        assert torch.equal(out, ref)
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_custom_allreduce_chunked(monkeypatch: pytest.MonkeyPatch, tp_size):
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, chunked_allreduce)
 
 
 @pytest.mark.parametrize("tp_size", [2])
