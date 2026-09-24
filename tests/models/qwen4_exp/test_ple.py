@@ -885,6 +885,37 @@ def test_fused_ngram_ids_correctness(
     assert torch.all((actual >= offsets) & (actual < offsets + sizes))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
+def test_ngram_prefetch_ids_outlive_eager_break() -> None:
+    """The side-stream lookup reads ids after the caller frees them, so they
+    must live in a persistent buffer rather than reusable graph-pool memory."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    input_ids = torch.arange(20, 25, dtype=torch.int32, device=device)
+    ngram_context = torch.tensor([[11, 12], [13, 14]], dtype=torch.int32, device=device)
+    params = _ngram_hash_params(device, ngram_context.shape[1])
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    for name in ("layer_multipliers", "ngram_heads_vocab_sizes", "ngram_heads_offsets"):
+        module.register_buffer(name, params[name])
+    module.eos_token_id = params["eos_token_id"]
+    module.heads_per_ngram = params["heads_per_ngram"]
+    num_heads = params["ngram_heads_vocab_sizes"].numel()
+    module._prefetch_ids = torch.empty(8, num_heads, dtype=torch.long, device=device)
+    prefetched: list[torch.Tensor] = []
+    module.ngram_embedding = SimpleNamespace(
+        supports_prefetch=True,
+        start_prefetch=lambda hidden_states, ids: prefetched.append(ids),
+    )
+
+    module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
+
+    (ids,) = prefetched
+    assert ids.data_ptr() == module._prefetch_ids.data_ptr()
+    expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+    assert torch.equal(ids, expected)
+
+
 def _short_conv_dilated_decode_pytorch(
     x_d: torch.Tensor,
     conv_state: torch.Tensor,
