@@ -5,26 +5,57 @@
 import pytest
 import torch
 
+from vllm.models.qwen4_exp.common.ops.qsa_pre_indexer import (
+    qsa_pre_indexer,
+)
 from vllm.models.qwen4_exp.common.qsa_cache import (
     canonical_qsa_rope_positions,
     circular_qsa_slot_mapping,
     compressed_qsa_slot_mapping,
 )
-from vllm.models.qwen4_exp.nvidia.indexer_qsa import apply_qsa_rope
-from vllm.models.qwen4_exp.nvidia.ops.qsa import (
-    qsa_compress_groups_with_ratio,
-    qsa_store_cache_rows,
-)
-from vllm.models.qwen4_exp.nvidia.ops.qsa_pre_indexer import (
-    qsa_pre_indexer,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
 requires_qsa_kernels = pytest.mark.skipif(
-    not current_platform.is_cuda() or not HAS_TRITON,
-    reason="QSA kernels require CUDA and Triton",
+    (not current_platform.is_cuda() and not current_platform.is_rocm())
+    or not HAS_TRITON,
+    reason="QSA kernels require CUDA or ROCm, and Triton",
 )
+
+if current_platform.is_rocm():
+    from vllm.models.qwen4_exp.amd.indexer_qsa import apply_qsa_rope
+    from vllm.models.qwen4_exp.amd.ops.qsa import (
+        qsa_compress_groups_with_ratio,
+        qsa_store_cache_rows,
+    )
+else:
+    from vllm.models.qwen4_exp.nvidia.indexer_qsa import apply_qsa_rope
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import (
+        qsa_compress_groups_with_ratio,
+        qsa_store_cache_rows,
+    )
+
+
+def _reference_gemma_rmsnorm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """The unfused Gemma RMSNorm each vendor's reference path actually runs."""
+    if current_platform.is_rocm():
+        from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+
+        norm = GemmaRMSNorm(weight.shape[-1], eps=eps).to(
+            device=weight.device, dtype=weight.dtype
+        )
+        with torch.no_grad():
+            norm.weight.copy_(weight)
+        return norm.forward_native(x)
+
+    from flashinfer.norm import gemma_rmsnorm
+
+    return gemma_rmsnorm(x, weight, eps)
+
 
 HQ, D = 4, 128
 CR = 4
@@ -96,9 +127,15 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     query_lens,
     history_lens,
 ) -> None:
-    from flashinfer.norm import gemma_rmsnorm
-
     from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    if current_platform.is_rocm() and indexer_dtype == torch.float8_e4m3fn:
+        pytest.skip("the ROCm QSA indexer cache is bf16-only")
+
+    # The FP8 comparison below is a one-ulp bound on data this test generates,
+    # so an unseeded run decides for itself whether it reproduces a rounding
+    # difference. Seed it, or the kernel's bit-exactness is only sampled.
+    torch.manual_seed(0)
 
     device = "cuda"
     rope_params = {
@@ -269,7 +306,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     )
 
     unfused_query = projected_qk[:, : HQ * D].reshape(num_tokens, HQ, D)
-    unfused_query = gemma_rmsnorm(
+    unfused_query = _reference_gemma_rmsnorm(
         unfused_query.reshape(-1, D), q_weight, EPS
     ).reshape_as(unfused_query)
     unfused_query = apply_qsa_rope(rope, positions, unfused_query)
@@ -292,9 +329,9 @@ def test_qsa_fused_pre_indexer_matches_unfused(
         CR,
         rope_positions,
     )
-    compressed_rows = gemma_rmsnorm(pooled.reshape(-1, D), k_weight, EPS).reshape(
-        -1, 1, D
-    )
+    compressed_rows = _reference_gemma_rmsnorm(
+        pooled.reshape(-1, D), k_weight, EPS
+    ).reshape(-1, 1, D)
     group_positions = (
         first_positions.transpose(0, 1) if mrope else first_positions[:, 0]
     )

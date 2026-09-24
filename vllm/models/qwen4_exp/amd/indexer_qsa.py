@@ -19,6 +19,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 
+from ..common.ops.qsa_pre_indexer import qsa_pre_indexer, supports_fused_pre_indexer
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
     QSAForwardMetadata,
@@ -100,6 +101,12 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
+        self.use_fused_pre_indexer = supports_fused_pre_indexer(
+            rotary_emb,
+            self.index_head_dim,
+            self.index_kv_heads,
+            self.compress_ratio,
+        )
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
         # while continuing to update the QSA side cache.
@@ -145,20 +152,27 @@ class QSAIndexer(nn.Module):
     def output_width(self) -> int:
         return self.token_topk + self.compress_ratio - 1
 
-    def project_qk(
+    def project(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Project replicated Q/K, normalize+rotate Q, and preserve raw K."""
+        """Project replicated Q/K and split, leaving both operands unrotated."""
         qk, _ = self.index_qk_proj(hidden_states)
-        q_raw, token_k = qk.split(
+        return qk.split(
             (
                 self.index_n_heads * self.index_head_dim,
                 self.index_kv_heads * self.index_head_dim,
             ),
             dim=-1,
         )
+
+    def project_qk(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project replicated Q/K, normalize+rotate Q, and preserve raw K."""
+        q_raw, token_k = self.project(hidden_states)
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         q = apply_qsa_rmsnorm(
             self.q_layernorm,
@@ -253,6 +267,52 @@ class QSAIndexer(nn.Module):
                 position_rows,
             )
 
+    def _fused_pre_indexer(
+        self,
+        projected_q: torch.Tensor,
+        raw_keys: torch.Tensor,
+        positions: torch.Tensor,
+        raw_metadata: QSAForwardMetadata,
+        compressed_metadata: QSAForwardMetadata,
+    ) -> torch.Tensor:
+        """Normalize and rotate Q, compress K, and write both caches in one launch.
+
+        Replaces ``project_qk``'s norm/RoPE half and the whole of
+        ``_update_and_compress``; the two must stay numerically interchangeable.
+        """
+        raw_key_cache = self.raw_key_cache
+        q = projected_q.new_empty(
+            raw_metadata.num_actual_tokens,
+            self.index_n_heads,
+            self.index_head_dim,
+        )
+        qsa_pre_indexer(
+            projected_q,
+            raw_keys,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            self.q_layernorm.weight,
+            self.k_layernorm.weight,
+            self.q_layernorm.variance_epsilon,
+            q,
+            raw_key_cache.kv_cache,
+            raw_metadata.slot_mapping,
+            raw_metadata.block_table,
+            raw_metadata.query_start_loc,
+            raw_metadata.logical_positions,
+            self.compressed_key_cache.kv_cache,
+            compressed_metadata.slot_mapping,
+            compressed_metadata.k_work_metadata,
+            compress_ratio=self.compress_ratio,
+            mrope_section=getattr(self.rotary_emb, "mrope_section", None),
+            rope_pos_offset=(
+                raw_key_cache.rope_position_offset
+                if raw_key_cache.rope_position_cache is not None
+                else None
+            ),
+        )
+        return q
+
     def _select(
         self,
         q: torch.Tensor,
@@ -297,15 +357,25 @@ class QSAIndexer(nn.Module):
             return result
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
-        q, token_k = self.project_qk(
-            hidden_states[:num_tokens], positions[..., :num_tokens]
-        )
-        self._update_and_compress(
-            token_k,
-            positions[..., :num_tokens],
-            raw_metadata,
-            compressed_metadata,
-        )
+        hidden_states = hidden_states[:num_tokens]
+        positions = positions[..., :num_tokens]
+        if self.use_fused_pre_indexer:
+            projected_q, raw_keys = self.project(hidden_states)
+            q = self._fused_pre_indexer(
+                projected_q,
+                raw_keys,
+                positions,
+                raw_metadata,
+                compressed_metadata,
+            )
+        else:
+            q, token_k = self.project_qk(hidden_states, positions)
+            self._update_and_compress(
+                token_k,
+                positions,
+                raw_metadata,
+                compressed_metadata,
+            )
         if self.skip_topk:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")

@@ -17,13 +17,13 @@ from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 
+from ..common.ops.qsa_pre_indexer import qsa_pre_indexer, supports_fused_pre_indexer
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
     QSAForwardMetadata,
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
-from .ops.qsa_pre_indexer import qsa_pre_indexer
 
 
 def apply_qsa_rope(
@@ -60,32 +60,6 @@ def apply_qsa_rope(
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
 
-def _supports_fused_pre_indexer(
-    rotary_emb: nn.Module,
-    head_dim: int,
-    num_kv_heads: int,
-    compress_ratio: int,
-) -> bool:
-    rotary_dim = int(rotary_emb.rotary_dim)
-    mrope_section = getattr(rotary_emb, "mrope_section", None)
-    return (
-        bool(getattr(rotary_emb, "is_neox_style", False))
-        and (
-            not mrope_section
-            or (
-                len(mrope_section) == 3
-                and sum(mrope_section) == rotary_dim // 2
-                and bool(getattr(rotary_emb, "mrope_interleaved", False))
-            )
-        )
-        and head_dim == 128
-        and rotary_dim == 64
-        and num_kv_heads == 1
-        and compress_ratio > 1
-        and compress_ratio & (compress_ratio - 1) == 0
-    )
-
-
 class QSAIndexer(nn.Module):
     """QSA projection weights, side caches, and paged, weight-free selection.
 
@@ -117,7 +91,7 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
-        self.use_fused_pre_indexer = _supports_fused_pre_indexer(
+        self.use_fused_pre_indexer = supports_fused_pre_indexer(
             rotary_emb,
             self.index_head_dim,
             self.index_kv_heads,

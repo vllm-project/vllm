@@ -168,7 +168,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s models/qwen4_exp/test_qsa_amd.py
+      - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_pre_indexer.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
