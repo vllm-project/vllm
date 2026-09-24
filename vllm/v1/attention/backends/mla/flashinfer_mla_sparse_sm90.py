@@ -43,6 +43,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_sm90_nope_mla
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -64,6 +65,23 @@ _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
 
 
+@triton.jit
+def _pack_topk_indices(
+    slots,
+    indptr,
+    indices,
+    WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    start = tl.load(indptr + row)
+    end = tl.load(indptr + row + 1)
+    mask = (cols < end - start) & (cols < WIDTH)
+    values = tl.load(slots + row * WIDTH + cols, mask=mask, other=0)
+    tl.store(indices + start + cols, tl.maximum(values, 0), mask=mask)
+
+
 class FlashInferMLASparseSM90Backend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -74,7 +92,7 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(64)]
 
     @staticmethod
@@ -192,10 +210,11 @@ class _SM90State:
         self.kv_len_arr = torch.full(
             (max_tokens,), topk_width, dtype=torch.int32, device=device
         )
+        self.kv_indptr = torch.zeros(max_tokens + 1, dtype=torch.int32, device=device)
         self.wrapper = BatchMLAPagedAttentionWrapper(
             self.workspace,
             qo_indptr=torch.zeros(max_tokens + 1, dtype=torch.int32, device=device),
-            kv_indptr=torch.zeros(max_tokens + 1, dtype=torch.int32, device=device),
+            kv_indptr=self.kv_indptr,
             kv_indices=self.kv_indices,
             kv_len_arr=self.kv_len_arr,
             use_cuda_graph=True,
@@ -234,12 +253,13 @@ class _SM90State:
         # fixed (max_tokens+1)-sized buffers with exact-size copy_, so the
         # indptr must always be full-size. Rows past num_tokens are padded
         # empty (qo_indptr flat at num_tokens) — zero-query rows read no q
-        # and schedule no work. Padded rows keep the full width lens; the
-        # value is never dereferenced.
+        # and schedule no work. FlashInfer 0.7 requires packed CSR offsets
+        # matching the exact lengths, including zero-length padded rows.
         torch.clamp(self._arange_cpu, max=num_tokens, out=self._qo_cpu)
-        torch.mul(self._qo_cpu, self.topk_width, out=self._kv_cpu)
-        self._lens_cpu.fill_(self.topk_width)
+        self._lens_cpu.zero_()
         self._lens_cpu[:num_tokens] = kv_lens.to(torch.int32)
+        self._kv_cpu[0] = 0
+        torch.cumsum(self._lens_cpu, dim=0, out=self._kv_cpu[1:])
         self.wrapper.plan(
             self._qo_cpu,
             self._kv_cpu,
@@ -253,6 +273,12 @@ class _SM90State:
             self.sm_scale,
             q_data_type=torch.bfloat16,
             kv_data_type=self.kv_dtype,
+        )
+
+    def pack_indices(self, topk_slots: torch.Tensor) -> None:
+        num_tokens, width = topk_slots.shape
+        _pack_topk_indices[(num_tokens, triton.cdiv(width, 256))](
+            topk_slots, self.kv_indptr, self.kv_indices, width, 256
         )
 
 
@@ -462,12 +488,8 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         )
         state = attn_metadata.state
         assert state is not None
-        # Refresh top-k rows in graph and clamp masked tails to a valid slot;
-        # per-row lengths are already baked into the host-side plan.
-        width = topk_slots.shape[1]
-        state.kv_indices[: num_tokens * width].copy_(
-            topk_slots.reshape(-1).clamp_(min=0).to(torch.int32)
-        )
+        # Pack valid prefixes at the offsets refreshed by plan() before replay.
+        state.pack_indices(topk_slots)
 
         flat = (
             kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)

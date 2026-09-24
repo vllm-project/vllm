@@ -3,6 +3,8 @@
 import contextlib
 import enum
 import functools
+import itertools
+import math
 import os
 import platform
 import sys
@@ -573,10 +575,10 @@ class Platform:
         pass
 
     @classmethod
-    def _find_non_ssm_backend(
+    def _find_non_ssm_backends(
         cls, vllm_config: "VllmConfig"
-    ) -> "type[AttentionBackend] | None":
-        """Find the first non-SSM attention backend from model layers."""
+    ) -> "list[type[AttentionBackend]]":
+        """Distinct non-SSM attention backends, in layer order."""
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -586,11 +588,62 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        backends: list[type[AttentionBackend]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm():
-                return b
-        return None
+            if not b.is_ssm() and b not in backends:
+                backends.append(b)
+        return backends
+
+    @classmethod
+    def _preferred_block_size_for_backends(
+        cls,
+        backend_classes: "list[type[AttentionBackend]]",
+        default_block_size: int,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        """Smallest block size every backend accepts.
+
+        ``supports_block_size`` may be overridden to accept exact sizes only
+        (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
+        one supported size per backend, each checked against every backend.
+
+        Raises:
+            ValueError: If the backends share no supported block size.
+
+        """
+        from vllm.config.vllm import set_current_vllm_config
+        from vllm.v1.attention.backend import MultipleOf
+
+        # Backends may read the current config to decide a preference.
+        with set_current_vllm_config(vllm_config):
+            if len(backend_classes) == 1:
+                return backend_classes[0].get_preferred_block_size(default_block_size)
+            if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                return default_block_size
+            # A backend declaring no sizes accepts any, so it contributes 1.
+            per_backend_sizes = [
+                [
+                    s.base if isinstance(s, MultipleOf) else s
+                    for s in b.get_supported_kernel_block_sizes()
+                ]
+                or [1]
+                for b in backend_classes
+            ]
+            candidates = sorted(
+                {math.lcm(*sizes) for sizes in itertools.product(*per_backend_sizes)}
+            )
+            for candidate in candidates:
+                if all(b.supports_block_size(candidate) for b in backend_classes):
+                    return candidate
+        raise ValueError(
+            "The attention backends share no supported KV cache block size ("
+            + "; ".join(
+                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                for b in backend_classes
+            )
+            + ")."
+        )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -598,7 +651,6 @@ class Platform:
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
-        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -607,34 +659,36 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
 
-        # Phase 1: Pick block size from backend (skip if user set --block-size)
+        # Phase 1: Pick a block size every attention backend supports (skip if
+        # user set --block-size). Models can mix backends with disjoint
+        # preferences, and a size from the first alone later fails
+        # select_common_block_size().
         if not cache_config.user_specified_block_size:
-            with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
-                )
+            preferred = cls._preferred_block_size_for_backends(
+                backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+            )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
-                    "Setting kv cache block size to %d for %s backend.",
+                    "Setting kv cache block size to %d for %s backend(s).",
                     preferred,
-                    backend_cls.get_name(),
+                    "/".join(b.get_name() for b in backend_classes),
                 )
             cache_config.block_size = preferred
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
         if model_config.is_hybrid:
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
+            cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
         # Phase 3: Align block/page sizes when multiple KV dtypes share the
         # block pool (e.g. nvfp4 primary + unquantized skip layers).
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
-            cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+            cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
 
     @classmethod
     def _align_heterogeneous_kv_block_size(

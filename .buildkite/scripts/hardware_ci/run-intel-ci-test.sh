@@ -65,8 +65,6 @@ case "${test_suite}" in
     pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8
     ;;
   graph)
-    export VLLM_XPU_ENABLE_XPU_GRAPH=1
-
     python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B
     python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B --kv-cache-dtype fp8
     python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-CT-AutoRound --max-model-len 4096

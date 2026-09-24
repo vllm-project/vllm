@@ -14,6 +14,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -55,7 +56,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
         self.num_channels = num_channels
         self.hidden_size = config.hidden_size
 
-        self.patch_embedding = nn.Conv3d(
+        self.patch_embedding = Conv3dLayer(
             in_channels=num_channels,
             out_channels=config.hidden_size,
             kernel_size=(temporal_patch_size, patch_size, patch_size),

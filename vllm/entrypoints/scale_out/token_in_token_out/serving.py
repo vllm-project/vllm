@@ -590,7 +590,10 @@ class ServingTokens(GenerateBaseServing):
                                 step_top_logprobs.items()
                             )
                             if num_output_top_logprobs is not None
-                            and i < max(num_output_top_logprobs, 1)
+                            and (
+                                num_output_top_logprobs == -1
+                                or i < max(num_output_top_logprobs, 1)
+                            )
                         ],
                     )
                 )

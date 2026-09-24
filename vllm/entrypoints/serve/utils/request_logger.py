@@ -6,6 +6,8 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -66,6 +68,15 @@ class RequestLogger:
             params,
             lora_request,
         )
+
+    def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
+        if logger.isEnabledFor(logging.DEBUG):
+            max_log_len = self.max_log_len if self.max_log_len is not None else -1
+            logger.debug(
+                "Request %s JSON body: %s",
+                getattr(request, "request_id", "N/A"),
+                request.model_dump_json(exclude_unset=True)[:max_log_len],
+            )
 
     def log_outputs(
         self,

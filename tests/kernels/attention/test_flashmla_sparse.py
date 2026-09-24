@@ -509,3 +509,59 @@ def test_flashinfer_mixed_sparse_indices_separates_window_and_padded_width():
     assert sparse_indices.shape == (1, padded_width)
     assert sparse_indices[0].cpu().tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
     assert sparse_lens.cpu().tolist() == [padded_width]
+
+
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.parametrize("page_padding", [0, 64])
+def test_flashinfer_sparse_forward_reads_packed_kv_rows(model, page_padding):
+    """Decode and prefill must read storage rows after vLLM remaps packed pages."""
+    import importlib
+
+    from vllm.platforms import current_platform
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Requires FlashInfer TRTLLM sparse MLA on SM100/SM103")
+    mod = importlib.import_module(f"vllm.models.{model}.nvidia.flashinfer_sparse")
+    device = "cuda"
+    block_size = 64
+    storage = torch.full(
+        (3, block_size + page_padding, 512), 99, dtype=torch.bfloat16, device=device
+    )
+    cache = storage[:, :block_size]
+    cache[1].fill_(2)
+    cache[2].fill_(3)
+    attn = object.__new__(mod.DeepseekV4FlashInferMLAAttention)
+    attn.compress_ratio = 1
+    attn.window_size = 128
+    attn.scale = 512**-0.5
+    attn.kv_cache_torch_dtype = torch.bfloat16
+    attn.attn_sink = torch.full((64,), -float("inf"), device=device)
+    attn.topk_indices_buffer = torch.empty((3, 0), dtype=torch.int32, device=device)
+    decode_indices = torch.full((1, 128), -1, dtype=torch.int32, device=device)
+    decode_indices[0, :4] = torch.arange(64, 68, dtype=torch.int32, device=device)
+    query_start = torch.tensor([0, 1, 3], dtype=torch.int32)
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.tensor([[1], [2]], dtype=torch.int32, device=device),
+        slot_mapping=torch.tensor([67, 130, 131], device=device),
+        block_size=block_size,
+        seq_lens=torch.tensor([4, 4], dtype=torch.int32, device=device),
+        query_start_loc=query_start.to(device),
+        query_start_loc_cpu=query_start,
+        token_to_req_indices=torch.tensor([0, 1, 1], dtype=torch.int32, device=device),
+        decode_swa_indices=decode_indices,
+        decode_swa_lens=torch.tensor([4], dtype=torch.int32, device=device),
+        decode_swa_width=128,
+        is_valid_token=torch.ones(3, dtype=torch.bool, device=device),
+        replay_start=torch.zeros(2, dtype=torch.int32, device=device),
+        num_decodes=1,
+        num_prefills=1,
+        num_decode_tokens=1,
+        num_prefill_tokens=2,
+        max_decode_query_len=1,
+    )
+    query = torch.zeros((3, 64, 512), dtype=torch.bfloat16, device=device)
+    output = torch.empty_like(query)
+    attn._forward(query, None, cache, metadata, None, True, output)
+    expected = torch.tensor([2, 3, 3], dtype=output.dtype, device=device)
+    torch.testing.assert_close(output, expected[:, None, None].expand_as(output))

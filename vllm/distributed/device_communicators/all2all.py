@@ -56,11 +56,17 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.use_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
 
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
         if self.dp_world_size > 1:
+            if self.use_ep and get_pcp_group().world_size > 1:
+                assert self.tp_group.world_size == 1, (
+                    "DP+PCP with TP>1 requires sequence-parallel MoE inputs"
+                )
+                return get_ep_group()
             return get_dp_group()
         return get_pcp_group()
 
@@ -72,6 +78,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert dp_metadata is not None
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
         assert sizes is not None
+        assert len(sizes) == comm_group.world_size
         return sizes
 
     def dispatch_router_logits(

@@ -69,7 +69,9 @@ class AttentionBackend(ABC):
     forward_includes_kv_cache_update: bool = True
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: "KVCacheSpec | None" = None,
+    ) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @staticmethod
@@ -926,6 +928,10 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_qk_norm_mrope_kvcache_supported(self):
+        """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
+        return False
+
     def fused_rope_kvcache_supported(self):
         """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
@@ -953,6 +959,26 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         writes K/V to the KV cache. Results are written to the pre-allocated
         q_out and k_out tensors; V is split from QKV at the graph level.
         """
+        raise NotImplementedError
+
+    def do_qk_norm_mrope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        mrope_section: tuple[int, int, int],
+        is_interleaved: bool,
+        rotary_dim: int,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """Apply QK-norm and MRoPE, then write K/V to the cache."""
         raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
