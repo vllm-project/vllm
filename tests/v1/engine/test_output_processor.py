@@ -1545,7 +1545,10 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
         output_processor.add_request(request, None, queue=queue)
 
     for request in requests:
-        if abort_by == "internal":
-            output_processor.abort_requests([request.request_id], internal=True)
-        else:
-            output_processor.abort_requests([request.external_req_id], internal=False)
+        request_id = (
+            request.request_id if abort_by == "internal" else request.external_req_id
+        )
+        aborted_ids = output_processor.abort_requests(
+            [request_id], internal=abort_by == "internal"
+        )
+        assert aborted_ids == ([request.request_id], [request.external_req_id])

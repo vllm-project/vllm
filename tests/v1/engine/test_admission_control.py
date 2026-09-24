@@ -14,6 +14,7 @@ These tests cover:
 
 import argparse
 import asyncio
+import logging
 import multiprocessing
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
@@ -250,10 +251,19 @@ def test_admission_reqs_allows_when_under_limit():
     llm.check_admission()
 
 
-def test_admission_reqs_rejects_at_limit():
+def test_admission_reqs_rejects_at_limit(caplog_vllm):
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=10)
-    with pytest.raises(QueueOverflowError):
-        llm.check_admission()
+    with (
+        caplog_vllm.at_level(logging.INFO, logger="vllm"),
+        pytest.raises(QueueOverflowError),
+    ):
+        llm.check_admission(
+            request_id="internal-123", external_request_id="external-123"
+        )
+
+    record = caplog_vllm.records[-1]
+    assert record.request_id == "external-123"
+    assert "internal-123" in record.getMessage()
 
 
 def test_admission_reqs_rejects_with_n():
@@ -365,7 +375,11 @@ async def test_concurrent_single_request_admission_respects_limit():
     llm.log_requests = False
 
     requests = [
-        SimpleNamespace(request_id=f"request-{idx}", prompt_token_ids=[idx])
+        SimpleNamespace(
+            request_id=f"request-{idx}",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=[idx],
+        )
         for idx in range(2)
     ]
     results = await asyncio.gather(
@@ -403,6 +417,29 @@ async def test_parallel_admission_is_all_or_nothing(first_n: int):
     assert isinstance(results[1], QueueOverflowError)
     assert llm.output_processor.get_num_unfinished_requests() == first_n
     assert llm.engine_core.add_request_async.await_count == first_n
+
+
+@pytest.mark.asyncio
+async def test_multi_abort_logs_each_internal_request(caplog_vllm):
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm.output_processor = MagicMock()
+    llm.output_processor.abort_requests.return_value = (
+        ["internal-1", "internal-2"],
+        ["external-123", "external-123"],
+    )
+    llm.engine_core = MagicMock(abort_requests_async=AsyncMock())
+    llm.log_requests = True
+
+    with caplog_vllm.at_level(logging.INFO, logger="vllm"):
+        await llm.abort("external-123")
+
+    records = [
+        record for record in caplog_vllm.records if record.msg.startswith("Aborted ")
+    ]
+    assert [(record.getMessage(), record.request_id) for record in records] == [
+        ("Aborted request internal-1.", "external-123"),
+        ("Aborted request internal-2.", "external-123"),
+    ]
 
 
 @pytest.mark.asyncio

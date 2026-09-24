@@ -509,7 +509,9 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+    def abort_requests(
+        self, request_ids: Iterable[str], internal: bool
+    ) -> tuple[list[str], list[str]]:
         """Abort a list of requests.
 
         The request_ids may be either external request IDs (those passed to
@@ -523,6 +525,10 @@ class OutputProcessor:
         In the case of parallel sampling, a request ID may be used to identify
         a parent request, in which case the associated child requests are aborted
         also.
+
+        Returns:
+            Internal and external IDs of aborted requests, in matching order.
+
         """
         internal_req_ids = []
         for request_id in request_ids:
@@ -541,12 +547,14 @@ class OutputProcessor:
                 # External ID - abort all requests in the external->internal mapping
                 internal_req_ids.extend(internal_ids)
 
-        request_ids_to_abort = []
+        aborted_internal_ids = []
+        aborted_external_ids = []
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.request_finished(request_id, req_state.lora_name)
-                request_ids_to_abort.append(request_id)
+                aborted_internal_ids.append(request_id)
+                aborted_external_ids.append(req_state.external_req_id)
                 # Produce final abort output.
                 if req_state.queue is not None and (
                     request_output := req_state.make_request_output(
@@ -567,11 +575,14 @@ class OutputProcessor:
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs, internal=True)
-                    request_ids_to_abort.extend(child_reqs)
+                    child_reqs, child_external_ids = self.abort_requests(
+                        child_reqs, internal=True
+                    )
+                    aborted_internal_ids.extend(child_reqs)
+                    aborted_external_ids.extend(child_external_ids)
                 self.parent_requests.pop(request_id, None)
         self._update_admission_stats()
-        return request_ids_to_abort
+        return aborted_internal_ids, aborted_external_ids
 
     def add_request(
         self,
