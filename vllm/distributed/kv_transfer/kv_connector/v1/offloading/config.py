@@ -155,10 +155,9 @@ def build_offloading_config(
         if len(kv_cache_config.kv_cache_groups) == 1
         else None
     )
-    all_replicated = kv_cache_config.all_groups_are_tp_replicated
     replicated_layout = (
         vllm_config.model_config.use_mla
-        and all_replicated
+        and kv_cache_config.all_groups_are_tp_replicated
         and worker_kv_bytes_per_block > 0
         # Shared /dev/shm mmap layout is single-node mp only.
         and parallel_config.distributed_executor_backend == "mp"
@@ -223,9 +222,10 @@ def build_offloading_config(
             and parallel_config.world_size == tp_size
         )
 
-    if canonical_layout and is_parallelism_agnostic:
+    if canonical_layout:
         replicated_layout = (
-            all(
+            is_parallelism_agnostic
+            and all(
                 type(spec) is MLAAttentionSpec
                 for _, group in selected_groups
                 for spec in iter_layer_specs(group.kv_cache_spec)
