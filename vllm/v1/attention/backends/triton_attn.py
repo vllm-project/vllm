@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -152,10 +152,26 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        # On SM120, batches whose 16-segment grid under-fills the SMs use 64.
+        self.max_seqs_64_segments = 0
+        if current_platform.is_cuda() and current_platform.is_device_capability(
+            (12, 0)
+        ):
+            self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
+                NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
+            )
+        max_num_tokens_3d = self.seq_threshold_3D
+        if self.max_seqs_64_segments > 0:
+            self.num_par_softmax_segments = 64
+            # build() views the scratch as 4x the rows at 16 segments.
+            max_num_tokens_3d = max(
+                min(self.max_seqs_64_segments, max_num_tokens_3d),
+                cdiv(max_num_tokens_3d, 4),
+            )
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                max_num_tokens_3d,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -164,12 +180,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
@@ -246,6 +262,19 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
         )
+        if 0 < self.max_seqs_64_segments < seq_lens.shape[0]:
+            # The 16-segment grid fills the SMs: same scratch, 16-segment layout.
+            segments = NUM_PAR_SOFTMAX_SEGMENTS
+            attn_metadata.num_par_softmax_segments = segments
+            attn_metadata.softmax_segm_output = self.softmax_segm_output.view(
+                -1, self.num_heads_q, segments, self.softmax_segm_output.shape[-1]
+            )
+            attn_metadata.softmax_segm_max = self.softmax_segm_max.view(
+                -1, self.num_heads_q, segments
+            )
+            attn_metadata.softmax_segm_expsum = self.softmax_segm_expsum.view(
+                -1, self.num_heads_q, segments
+            )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
