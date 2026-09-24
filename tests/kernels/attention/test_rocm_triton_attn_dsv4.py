@@ -521,8 +521,8 @@ def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
     )
 
 
-# 448+64 keeps the fused D tile, 512+64 takes the split one, and 256+0 has no
-# RoPE lanes at all.
+# 448+64 is DeepSeek V4/V4.1, 512+64 is V3.2, and 256+0 stands in for the
+# NoPE-only layouts where the destination spans the whole head dim.
 SPARSE_PREFILL_DIMS = [(NOPE_HEAD_DIM, ROPE_HEAD_DIM), (512, 64), (256, 0)]
 
 
