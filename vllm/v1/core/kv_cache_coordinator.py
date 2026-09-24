@@ -796,6 +796,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             return num_tokens
         return round_down(num_tokens, self.scheduler_block_size)
 
+    def _eagle_lookup_margin(self, manager: SingleTypeKVCacheManager) -> int:
+        """Tokens checked as proof but discarded from the reusable cache hit."""
+        if isinstance(manager, MambaManager):
+            return 0
+        if (
+            self.enable_partial_hash_hits
+            and manager.supports_fine_grained_hash_lookup
+            and manager.block_size > self.hash_block_size
+        ):
+            return self.hash_block_size
+        return manager.block_size
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         boundaries = self.get_replay_boundaries(request)
@@ -880,7 +892,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 first_group_id = group_ids[0]
                 # DCP/PCP shard each block's KV across ranks, so the manager's
                 # effective block size may exceed the spec's.
-                group_block_size = self.single_type_managers[first_group_id].block_size
+                manager = self.single_type_managers[first_group_id]
                 cached_blocks = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
@@ -899,16 +911,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # it, landing back at the candidate length. No margin for
                 # mamba: its finder never drops (draft models have no mamba
                 # layers), so the hit would grow past the candidate.
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size
-                        else group_block_size
-                    )
+                if drop_eagle_block:
+                    # The reusable limit excludes EAGLE's proof tokens. Allow
+                    # the final prompt hash to prove a hit below that limit.
                     _max_length = min(
-                        curr_hit_length + eagle_margin, max_cache_hit_length
+                        curr_hit_length + self._eagle_lookup_margin(manager),
+                        len(block_hashes) * self.hash_block_size,
                     )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
@@ -984,9 +992,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
+            max_length = max_cache_hit_length
+            if use_eagle:
+                max_length = min(
+                    max_length + self._eagle_lookup_margin(manager),
+                    len(block_hashes) * self.hash_block_size,
+                )
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
-                max_length=max_cache_hit_length,
+                max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,

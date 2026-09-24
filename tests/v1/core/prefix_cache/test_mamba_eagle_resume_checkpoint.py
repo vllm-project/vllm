@@ -36,10 +36,15 @@ def _manager(
     num_blocks=8192,
     eagle_group=None,
     num_prefill_lookahead=0,
+    num_speculative_blocks=0,
 ):
     init_none_hash(sha256)
     config = _make_hybrid_kv_cache_config(
         block_size, num_blocks, ["full", "mamba_align"]
+    )
+    config.kv_cache_groups[1].kv_cache_spec = replace(
+        config.kv_cache_groups[1].kv_cache_spec,
+        num_speculative_blocks=num_speculative_blocks,
     )
     if eagle_group is not None:
         groups = list(config.kv_cache_groups)
@@ -166,6 +171,104 @@ def test_sibling_resumes_from_the_observed_junction():
         f"the chunk stopped at {junction} but nothing was cached there: "
         f"sibling resumes at {hit}"
     )
+
+
+@pytest.mark.parametrize("eagle_group", [None, 0])
+@pytest.mark.parametrize(
+    "hash_block_size,prompt_len", [(16, 16000), (16, 16001), (4352, 17408)]
+)
+@pytest.mark.parametrize("suffix_len", [0, 17])
+def test_repeated_prompt_reuses_mtp_tail(
+    eagle_group, hash_block_size, prompt_len, suffix_len
+):
+    """The final proof hash must make the saved replay checkpoint reachable."""
+    block_size = 4352
+    manager = _manager(
+        block_size,
+        hash_block_size,
+        eagle_group=eagle_group,
+        num_prefill_lookahead=1,
+        num_speculative_blocks=5,
+    )
+    stub = _stub(manager, block_size, hash_block_size)
+    owner = make_request("owner", PREFIX[:prompt_len], hash_block_size, sha256)
+    tail = prompt_len // hash_block_size * hash_block_size - hash_block_size
+    assert tail in _prefill(manager, stub, owner)
+    manager.free(owner)
+
+    sibling = make_request(
+        "sibling", PREFIX[:prompt_len] + [-1] * suffix_len, hash_block_size, sha256
+    )
+    blocks, hit, _ = manager.get_computed_blocks(sibling)
+    assert hit == tail
+    assert hit < sibling.num_tokens
+    assert blocks.blocks[1][-1].block_hash_num_tokens == tail
+    _, connector_hit, _, diverged = manager.get_computed_blocks_for_connector(sibling)
+    assert connector_hit == tail
+    assert not diverged
+
+
+@pytest.mark.parametrize("eagle_group", [None, 0])
+@pytest.mark.parametrize("hash_block_size,prompt_len", [(16, 16000), (4352, 17408)])
+def test_mtp_tail_requires_matching_tokens_after_the_checkpoint(
+    eagle_group, hash_block_size, prompt_len
+):
+    """Mamba state cannot prove that a different suffix has valid draft KV."""
+    block_size = 4352
+    manager = _manager(
+        block_size,
+        hash_block_size,
+        eagle_group=eagle_group,
+        num_prefill_lookahead=1,
+        num_speculative_blocks=5,
+    )
+    owner = make_request("owner", PREFIX[:prompt_len], hash_block_size, sha256)
+    _prefill(manager, _stub(manager, block_size, hash_block_size), owner)
+    manager.free(owner)
+
+    sibling = make_request(
+        "sibling", PREFIX[: prompt_len - 1] + [-1], hash_block_size, sha256
+    )
+    tail = prompt_len - hash_block_size
+    assert manager.get_computed_blocks(sibling)[1] < tail
+    assert manager.get_computed_blocks_for_connector(sibling)[1] < tail
+
+
+@pytest.mark.parametrize("eagle_group", [None, 0])
+@pytest.mark.parametrize("hash_block_size,prompt_len", [(16, 16000), (4352, 17408)])
+def test_mtp_proof_lookup_respects_reusable_token_limit(
+    eagle_group, hash_block_size, prompt_len
+):
+    """Extra proof tokens must never increase the caller's reusable limit."""
+    block_size = 4352
+    manager = _manager(
+        block_size,
+        hash_block_size,
+        eagle_group=eagle_group,
+        num_prefill_lookahead=1,
+        num_speculative_blocks=5,
+    )
+    owner = make_request("owner", PREFIX[:prompt_len], hash_block_size, sha256)
+    _prefill(manager, _stub(manager, block_size, hash_block_size), owner)
+    manager.free(owner)
+
+    tail = prompt_len - hash_block_size
+    for limit in (
+        0,
+        hash_block_size - 1,
+        hash_block_size,
+        tail - 1,
+        tail,
+        prompt_len - 1,
+    ):
+        _, hit, _ = manager.coordinator.find_longest_cache_hit(
+            owner.block_hashes, limit
+        )
+        _, group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+            owner.block_hashes, limit
+        )
+        assert 0 <= hit <= limit
+        assert all(0 <= group_hit <= limit for group_hit in group_hits)
 
 
 def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
