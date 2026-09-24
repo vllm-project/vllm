@@ -305,6 +305,14 @@ def refine_fp8_moe_block_shape(
     return [refine, refine]
 
 
+def resolve_fp8_moe_weight_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> list[int] | None:
+    """Compatibility alias for the refined FP8 MoE block-shape helper."""
+    return refine_fp8_moe_block_shape(config, weight_block_size)
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,

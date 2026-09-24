@@ -4,6 +4,7 @@
 
 import inspect
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from functools import partial
 
 import torch
@@ -50,7 +51,10 @@ class CopyReloadPolicy:
             state.copy_(role, state.work(role))
 
 
-def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
+def create_model_reload_tracer(
+    model: torch.nn.Module,
+    frozen_parameter_names: list[str] | None = None,
+) -> ModelReloadTracer:
     """Register supported layers before cold loading; never silently fall back."""
     from vllm.model_executor.layers.attention import (
         Attention,
@@ -65,6 +69,7 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
     from vllm.utils.torch_utils import is_quantized_kv_cache
 
     trace = ModelReloadTracer()
+    frozen_parameter_names = frozen_parameter_names or []
     # Parameter identity -> owning CopyReloadPolicy state. This covers only
     # the ordinary copy path, not custom builders or distinct Parameter objects
     # sharing storage.
@@ -126,7 +131,11 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
             # They participate in cold loading but are not reload inputs.
             # The marker is attached by the owning module so the generic
             # tracer does not need model-specific name matching.
-            if getattr(param, "reload_frozen", False):
+            parameter_name = f"{key}.{role}" if key else role
+            if getattr(param, "reload_frozen", False) or any(
+                fnmatch(parameter_name, pattern)
+                for pattern in frozen_parameter_names
+            ):
                 continue
             owner = copy_owners.get(id(param))
             if owner is not None:

@@ -2353,9 +2353,7 @@ def maybe_fuse_global_scales_from_values(
     """Fuse converted global scales without touching a live layer."""
     if "weight_global_scale" in values and "input_global_scale" in values:
         values = dict(values)
-        values["alpha"] = (
-            values["input_global_scale"] * values["weight_global_scale"]
-        )
+        values["alpha"] = values["input_global_scale"] * values["weight_global_scale"]
     return values
 
 
@@ -2658,8 +2656,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         )
         if self.spec.weight not in fp8_weights:
             raise NotImplementedError(
-                f"{key}: ModelOpt {self.spec.weight} reload policy "
-                "is not implemented"
+                f"{key}: ModelOpt {self.spec.weight} reload policy is not implemented"
             )
         roles = tuple(name for name, _ in layer.named_parameters(recurse=False))
         return ReloadState(

@@ -161,9 +161,7 @@ def prepare_fp8_layer_for_marlin(
     weight, scales, bias = plan.process(
         layer.weight, getattr(layer, scale_name), getattr(layer, "bias", None)
     )
-    layer.workspace = marlin_make_workspace_new(
-        layer.weight.device, existing=getattr(layer, "workspace", None)
-    )
+    layer.workspace = marlin_make_workspace_new(layer.weight.device)
     replace_parameter(layer, "weight", weight)
     replace_parameter(layer, scale_name, scales)
     if bias is not None:
@@ -337,9 +335,7 @@ def prepare_fp8_moe_layer_for_marlin(
         input_dtype,
     )
     converted = plan.process(w13_weight, w2_weight, w13_weight_scale, w2_weight_scale)
-    layer.workspace = marlin_make_workspace_new(
-        layer.w13_weight.device, 4, existing=getattr(layer, "workspace", None)
-    )
+    layer.workspace = marlin_make_workspace_new(layer.w13_weight.device, 4)
     layer.fp8_marlin_processing_plan = plan
     return converted
 
@@ -543,9 +539,7 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     device = layer.weight.device
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(
-        device, existing=getattr(layer, "workspace", None)
-    )
+    layer.workspace = marlin_make_workspace_new(device)
 
     # WEIGHT - repack FP8 weights to Marlin format
     qweight = pack_fp8_to_int32(layer.weight, size_k_first=False)
@@ -628,9 +622,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
     device = w13.device
     param_dtype = torch.get_default_dtype()
 
-    layer.workspace = marlin_make_workspace_new(
-        device, 4, existing=getattr(layer, "workspace", None)
-    )
+    layer.workspace = marlin_make_workspace_new(device, 4)
 
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         if "w13" in name:

@@ -85,8 +85,7 @@ def _argument_key(value: Any) -> Any:
     if isinstance(value, dict):
         return tuple(
             sorted(
-                (_argument_key(key), _argument_key(item))
-                for key, item in value.items()
+                (_argument_key(key), _argument_key(item)) for key, item in value.items()
             )
         )
     if value is None or isinstance(value, (str, int, float, bool)):

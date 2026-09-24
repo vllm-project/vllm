@@ -84,7 +84,10 @@ class BaseModelLoader(ABC):
 
                 # Register per-layer reload states in the pre-load layout;
                 # runtime tensor/kernel/config bindings are captured after PWAL.
-                trace = create_model_reload_tracer(model)
+                trace = create_model_reload_tracer(
+                    model,
+                    frozen_parameter_names=model_config.sleep_preserve_parameter_names,
+                )
             # Temporarily wrap loaders to capture cold-load metadata and ordinary
             # shard slots; RoutedExperts slots use each reload's expert mapping.
             with trace.observe() if trace is not None else nullcontext():

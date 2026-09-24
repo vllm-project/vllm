@@ -54,9 +54,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             layer, layer.weight.data, layer.weight_scale.data
         )
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale.contiguous(), requires_grad=False
-        )
+        layer.weight_scale = Parameter(weight_scale.contiguous(), requires_grad=False)
 
     def process_reload_tensors(
         self,
@@ -157,9 +155,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             layer, layer.weight.data, layer.weight_scale.data
         )
         layer.weight = Parameter(weight, requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale.contiguous(), requires_grad=False
-        )
+        layer.weight_scale = Parameter(weight_scale.contiguous(), requires_grad=False)
 
     def process_reload_tensors(
         self,

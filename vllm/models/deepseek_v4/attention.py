@@ -24,11 +24,11 @@ from vllm.models.common.ops.fused_qk_rmsnorm import (
     _FUSED_Q_KV_RMSNORM_KERNEL,
     fused_q_kv_rmsnorm,
 )
-from vllm.models.deepseek_v4.common.weight_loader import attn_sink_weight_loader
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
+from vllm.models.deepseek_v4.common.weight_loader import attn_sink_weight_loader
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (

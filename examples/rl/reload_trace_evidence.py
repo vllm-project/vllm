@@ -15,9 +15,7 @@ class ReloadTraceEvidence:
         """Inspect parameters and buffers, excluding frozen lookup tensors."""
         result = {}
         model = self.model_runner.model
-        for name, parameter in chain(
-            model.named_parameters(), model.named_buffers()
-        ):
+        for name, parameter in chain(model.named_parameters(), model.named_buffers()):
             if getattr(parameter, "reload_frozen", False):
                 continue
             value = parameter.detach()

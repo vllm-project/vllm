@@ -626,14 +626,15 @@ def test_reload_trace_skips_frozen_parameters():
 
     lookup = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
     lookup.weight_loader = default_weight_loader
-    lookup.reload_frozen = True
     model.lookup.weight = lookup
 
     weight = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
     weight.weight_loader = default_weight_loader
     model.linear.weight = weight
 
-    trace = create_model_reload_tracer(model)
+    trace = create_model_reload_tracer(
+        model, frozen_parameter_names=["lookup.weight"]
+    )
     assert "lookup" not in trace.states
     assert "linear" in trace.states
 
