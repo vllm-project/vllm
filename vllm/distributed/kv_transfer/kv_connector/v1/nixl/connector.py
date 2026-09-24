@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -133,6 +133,15 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         # Subclasses must set self.connector_scheduler and self.connector_worker
         self.connector_scheduler: NixlBaseConnectorScheduler | None = None
         self.connector_worker: NixlBaseConnectorWorker | None = None
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+
+            assert self.connector_scheduler is not None
+            self.connector_scheduler.hisparse = get_hisparse_coordinator(
+                kv_cache_manager
+            )
 
     ############################################################
     # Class Methods

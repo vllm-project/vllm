@@ -534,6 +534,7 @@ def make_nixl_scheduler(
 
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
+    sched.hisparse = None
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,

@@ -2105,7 +2105,8 @@ def recv_worker():
     return worker
 
 
-def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker):
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker, hisparse):
     worker = recv_worker
     worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
     worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
@@ -2113,17 +2114,20 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker):
     worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
 
-    worker._read_blocks_mixed(
-        request_id="request",
-        local_block_size_key=16,
-        local_device_handle=20,
-        local_dram_handle=10,
-        remote_xfer_side_handle=30,
-        local_block_descs_ids=np.array([0, 2]),
-        remote_block_descs_ids=np.array([5, 7]),
-        notif_agent="prefill",
-        notif_id=b"request:1",
-    )
+    if hisparse:
+        _read_hisparse_blocks(worker)
+    else:
+        worker._read_blocks_mixed(
+            request_id="request",
+            local_block_size_key=16,
+            local_device_handle=20,
+            local_dram_handle=10,
+            remote_xfer_side_handle=30,
+            local_block_descs_ids=np.array([0, 2]),
+            remote_block_descs_ids=np.array([5, 7]),
+            notif_agent="prefill",
+            notif_id=b"request:1",
+        )
 
     dram_read, device_read = worker.nixl_wrapper.make_prepped_xfer.call_args_list
     assert dram_read.args[:2] == ("READ", 10)
@@ -2153,6 +2157,53 @@ def test_mixed_memory_read_failure_does_not_notify_producer(recv_worker):
 
     assert "request" not in worker._pending_recv_notifs
     worker.nixl_wrapper.send_notif.assert_not_called()
+
+
+def _read_hisparse_blocks(worker):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
+
+    worker._remote_agents = {"remote": {(0, 0): "prefill"}}
+    worker._hisparse_destination = MagicMock()
+    worker._hisparse_destination.prepare_reads.return_value = [
+        (10, np.array([0]), np.array([5])),
+        (20, np.array([0]), np.array([7])),
+    ]
+    return worker._read_blocks(
+        read_spec=ReadSpec(0, ([0],), ([5],)),
+        dst_engine_id="remote",
+        request_id="request",
+        remote_request_id="request",
+        local_xfer_side_handle=20,
+        local_dram_handle=None,
+        remote_xfer_side_handle=30,
+        expected_consumers=1,
+        awaiting_kvs=True,
+        host_block_ids=[0],
+    )
+
+
+@pytest.mark.parametrize("fail_at", ["prepare", "submit"])
+def test_hisparse_split_read_failure_uses_nixl_cleanup(recv_worker, fail_at):
+    """A partial host/device setup must not notify P or release live blocks."""
+    worker = recv_worker
+    error = RuntimeError("injected split-read failure")
+    worker.nixl_wrapper.make_prepped_xfer.side_effect = (
+        [101, error] if fail_at == "prepare" else [101, 102]
+    )
+    if fail_at == "submit":
+        worker.nixl_wrapper.transfer.side_effect = [None, error]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    assert not _read_hisparse_blocks(worker)
+    assert "request" in worker._recv_failures
+    worker.nixl_wrapper.send_notif.assert_not_called()
+    assert worker.get_finished() == (set(), {"request"})
+    worker.nixl_wrapper.send_notif.assert_not_called()
+    assert "request" not in worker._pending_recv_notifs
+    released = {
+        call.args[0] for call in worker.nixl_wrapper.release_xfer_handle.call_args_list
+    }
+    assert released == ({101} if fail_at == "prepare" else {101, 102})
 
 
 def element_byte_addrs(view: torch.Tensor) -> list[int]:

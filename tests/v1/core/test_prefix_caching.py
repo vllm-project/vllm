@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -371,6 +371,49 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     assert transfers[0].resident_block_ids == (resident[2].block_id,)
 
 
+def test_hisparse_indexer_only_import_lands_on_gpu_when_capacity_allows():
+    manager = make_hisparse_kv_cache_manager(
+        32,
+        16,
+        enable_caching=True,
+    )
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    spill_counts = {spill.transfer_id: 1 for spill in spills}
+    get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
+    _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
+    evicted_indexer_id = indexer_blocks[2].block_id
+    manager.free(original)
+    manager.block_pool.evict_blocks({evicted_indexer_id})
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    get_hisparse_coordinator(manager).prepare_gpu_import(resumed.request_id)
+    blocks, num_local, _ = manager.get_computed_blocks(resumed)
+    max_completion = HISPARSE_BLOCK_SIZE
+    assert num_local == 2 * HISPARSE_BLOCK_SIZE
+    assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
+
+    allocated = manager.allocate_slots(
+        resumed,
+        num_new_tokens=1,
+        num_new_computed_tokens=num_local,
+        new_computed_blocks=blocks,
+        num_external_computed_tokens=max_completion,
+    )
+
+    assert allocated is not None
+    source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
+    assert len(source) == len(indexer) == len(resident) == 4
+    assert len(hot) == 2
+    # The local prefix is adopted from shadow pages and the external page lands
+    # directly in the resident cache because this pool has capacity.
+    assert not any(block.is_null for block in resident[:2])
+    assert not resident[2].is_null
+    assert not resident[3].is_null
+
+
 def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     manager = make_hisparse_kv_cache_manager(
         32,
@@ -486,6 +529,7 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
 def allocate_external_prefix(
     manager: KVCacheManager, request: Request, num_tokens: int
 ) -> KVCacheBlocks | None:
+    get_hisparse_coordinator(manager).prepare_gpu_import(request.request_id)
     return manager.allocate_slots(
         request,
         num_new_tokens=0,
@@ -510,6 +554,8 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
     )
     request.kv_transfer_params = {"do_remote_prefill": True}
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator._get_request_state(request.request_id).host_import = True
     count, is_async = connector.get_num_new_matched_tokens(request, 0)
     assert count == num_tokens and is_async
     assert allocate_external_prefix(manager, request, count) is not None
@@ -517,7 +563,6 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert len(source) == len(resident) == (num_tokens + 15) // 16
     assert all(block.is_null for block in resident[:-1])
     assert not resident[-1].is_null
-    coordinator = get_hisparse_coordinator(manager)
     assert not coordinator.build_offload_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
@@ -561,10 +606,11 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     """An abort cannot recycle storage still used by a queued tail restore."""
     manager = make_hisparse_kv_cache_manager(16, 16)
     request = make_request("import", list(range(17)), HISPARSE_BLOCK_SIZE, sha256)
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator._get_request_state(request.request_id).host_import = True
     assert allocate_external_prefix(manager, request, 17) is not None
     source, _, resident, _ = manager.get_blocks(request.request_id).blocks
     host_tail, gpu_tail = source[-1], resident[-1]
-    coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
     restore = coordinator.build_offload_command().page_transfers[0]
     manager.free(request)
@@ -815,6 +861,9 @@ def test_hisparse_async_admission_requires_only_import_destinations(
     request = make_request(
         "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
+    get_hisparse_coordinator(manager)._get_request_state(
+        request.request_id
+    ).host_import = True
     scheduler.add_request(request)
     scheduler.schedule()
 
@@ -904,6 +953,9 @@ def test_host_receive_completion_without_spill_metadata(failed):
     """Only successful external receives make host pages readable."""
     manager = make_hisparse_kv_cache_manager(32, 16)
     request = make_request("import", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
+    get_hisparse_coordinator(manager)._get_request_state(
+        request.request_id
+    ).host_import = True
     assert allocate_external_prefix(manager, request, 32) is not None
     request.num_computed_tokens = 32
     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -922,7 +974,7 @@ def test_host_receive_completion_without_spill_metadata(failed):
     )
     state = get_hisparse_coordinator(manager).request_states.get(request.request_id)
     if failed:
-        assert state is None
+        assert state is not None and not state.valid_pages
     else:
         assert state is not None and state.valid_pages == {0, 1}
 
@@ -1206,9 +1258,18 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
         sha256,
     )
 
-    allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
+    indexer = manager.coordinator.single_type_managers[1]
+    with patch.object(
+        indexer, "get_num_blocks_to_allocate", wraps=indexer.get_num_blocks_to_allocate
+    ) as count_indexer:
+        allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
+    # Full-sequence admission and actual allocation each count the indexer once,
+    # even when HiSparse switches the sparse groups to host landing.
+    assert count_indexer.call_count == 2
 
     assert allocated is not None
+    assert get_hisparse_coordinator(manager).imports_to_host(request.request_id)
+    assert request.request_id in get_hisparse_coordinator(manager)._pending_imports
     source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
@@ -1230,11 +1291,17 @@ def test_hisparse_external_import_survives_capacity_retry():
     second = make_request("second", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
     assert allocate_external_prefix(manager, first, len(tokens)) is not None
+    assert not get_hisparse_coordinator(manager).imports_to_host(first.request_id)
+    assert first.request_id not in get_hisparse_coordinator(manager)._pending_imports
 
     assert allocate_external_prefix(manager, second, len(tokens)) is None
+    assert get_hisparse_coordinator(manager).imports_to_host(second.request_id)
+    assert second.request_id not in get_hisparse_coordinator(manager)._pending_imports
 
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
+    assert get_hisparse_coordinator(manager).imports_to_host(second.request_id)
+    assert second.request_id in get_hisparse_coordinator(manager)._pending_imports
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
     assert all(block.is_null for block in resident[:-1])
     assert not resident[-1].is_null

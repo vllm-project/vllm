@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -115,6 +116,8 @@ class NixlBaseConnectorScheduler:
         self._reqs_need_recv: dict[
             ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
         ] = {}
+        self._hisparse_host_blocks_to_recv: dict[ReqId, list[int]] = {}
+        self.hisparse: HiSparseCoordinator | None = None
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -490,6 +493,7 @@ class NixlBaseConnectorScheduler:
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                hisparse_host_block_ids=self._hisparse_host_blocks_to_recv.get(req_id),
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
             )
@@ -514,6 +518,7 @@ class NixlBaseConnectorScheduler:
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
+        self._hisparse_host_blocks_to_recv.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
