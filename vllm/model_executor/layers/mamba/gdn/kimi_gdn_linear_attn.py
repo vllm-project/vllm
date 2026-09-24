@@ -9,10 +9,12 @@ from einops import rearrange
 from torch import nn
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import (
@@ -21,10 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
-
-logger = init_logger(__name__)
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -42,6 +41,8 @@ from ..mamba_utils import (
 )
 from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from ..ops.gather_initial_states import gather_initial_states
+
+logger = init_logger(__name__)
 
 # Empirical lower bound for the KDA gate to avoid numerical underflow.
 _KDA_GATE_LOGBOUND_MIN = -5.0
@@ -284,43 +285,47 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             if isinstance(additional_config, dict)
             else "auto"
         )
-        backend = "triton" if backend == "auto" else backend
-        assert backend in ("triton", "helion"), (
-            "The shared Kimi GDN layer only supports 'triton' or 'helion' "
-            f"KDA prefill backends, got {backend!r}."
-        )
+        backend = str(backend).strip().lower()
+        if backend == "auto":
+            backend = "triton"
+        if backend not in ("triton", "helion"):
+            raise ValueError(
+                "The shared Kimi GDN layer only supports 'triton' or 'helion' "
+                f"KDA prefill backends, got {backend!r}."
+            )
 
-        # --- Helion KDA backend selection ---
         decode_backend = (
             additional_config.get("kda_decode_backend", "auto")
-            if isinstance(additional_config, dict) else "auto"
+            if isinstance(additional_config, dict)
+            else "auto"
         )
-        prefill_backend = backend  # already resolved from "kda_prefill_backend"
+        decode_backend = str(decode_backend).strip().lower()
+        if decode_backend == "auto":
+            decode_backend = "triton"
+        if decode_backend not in ("triton", "helion"):
+            raise ValueError(
+                "The shared Kimi GDN layer only supports 'triton' or 'helion' "
+                f"KDA decode backends, got {decode_backend!r}."
+            )
+        prefill_backend = backend
 
-        # Apply env var override
-        import vllm.envs as envs
         if envs.VLLM_DISABLE_HELION_KDA:
             if decode_backend == "helion":
                 decode_backend = "triton"
             if prefill_backend == "helion":
                 prefill_backend = "triton"
-            logger.info(
-                "Helion KDA backend is DISABLED (env override)"
-            )
-
-        # Resolve "auto" -> "triton" (Helion is opt-in, not auto-selected)
-        decode_backend = "triton" if decode_backend == "auto" else decode_backend
+            logger.info_once("Helion KDA backend is DISABLED (env override)")
 
         self._kda_decode_backend = decode_backend
         self._kda_prefill_backend = prefill_backend
 
-        # Import Helion kernels lazily, only when explicitly selected
         self._helion_packed_decode = None
         self._helion_chunk_kda = None
         if decode_backend == "helion" or prefill_backend == "helion":
             if not current_platform.is_cuda():
                 raise ValueError("Helion KDA backend requires NVIDIA CUDA")
             from vllm.utils.import_utils import has_helion
+
             if not has_helion():
                 raise ImportError(
                     "Helion KDA backend requires helion>=1.4.0. "
@@ -330,13 +335,13 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 from vllm.kernels.helion.ops.kda.kda_decode import (
                     helion_fused_recurrent_kda_packed_decode,
                 )
-                self._helion_packed_decode = (
-                    helion_fused_recurrent_kda_packed_decode
-                )
+
+                self._helion_packed_decode = helion_fused_recurrent_kda_packed_decode
             if prefill_backend == "helion":
                 from vllm.kernels.helion.ops.kda.kda_prefill import (
                     chunk_kda as helion_chunk_kda,
                 )
+
                 self._helion_chunk_kda = helion_chunk_kda
 
             log_parts = []
@@ -344,7 +349,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 log_parts.append("decode")
             if prefill_backend == "helion":
                 log_parts.append("prefill")
-            logger.info(
+            logger.info_once(
                 "Helion KDA backend is ENABLED for %s",
                 "/".join(log_parts),
             )
@@ -629,14 +634,18 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 assert has_initial_state is not None
 
                 if self._helion_chunk_kda is not None:
-                    # Helion chunk_kda updates state IN PLACE via indices.
-                    # Zero out state for new requests to avoid stale data.
-                    new_request_mask = ~has_initial_state
-                    new_indices = non_spec_state_indices_tensor[
-                        new_request_mask
-                    ]
-                    if new_indices.numel() > 0:
-                        recurrent_state[new_indices] = 0
+                    # A single packed sequence is already laid out as the
+                    # fixed-shape [1, T, H, D] input expected by Helion. Avoid
+                    # rebuilding equivalent varlen chunk metadata in every
+                    # layer for this common latency-sensitive path.
+                    helion_cu_seqlens = (
+                        None
+                        if non_spec_state_indices_tensor.numel() == 1
+                        else non_spec_query_start_loc
+                    )
+                    use_precomputed_chunks = (
+                        helion_cu_seqlens is not None and m.num_decodes == 0
+                    )
 
                     helion_out = self._helion_chunk_kda(
                         q=q_ns,
@@ -644,16 +653,22 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                         v=v_ns,
                         g=g1_ns,
                         beta=beta_ns,
-                        scale=self.head_dim ** -0.5,
+                        scale=self.head_dim**-0.5,
                         initial_state=recurrent_state,
-                        initial_state_indices=(
-                            non_spec_state_indices_tensor
-                        ),
+                        initial_state_indices=(non_spec_state_indices_tensor),
+                        has_initial_state=has_initial_state,
                         use_qk_l2norm_in_kernel=True,
-                        cu_seqlens=non_spec_query_start_loc,
+                        cu_seqlens=helion_cu_seqlens,
+                        chunk_indices=(
+                            m.chunk_indices if use_precomputed_chunks else None
+                        ),
+                        chunk_offsets=(
+                            m.chunk_offsets if use_precomputed_chunks else None
+                        ),
                         A_log=self.A_log,
                         dt_bias=self.dt_bias,
                         lower_bound=self.gate_lower_bound,
+                        beta_is_logit=True,
                         output_intermediate_states=False,
                     )
                     core_attn_out_non_spec = helion_out
@@ -721,7 +736,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                         b=beta_ns.view(B, -1),
                         A_log=self.A_log,
                         dt_bias=self.dt_bias,
-                        scale=self.head_dim ** -0.5,
+                        scale=self.head_dim**-0.5,
                         initial_state=recurrent_state,
                         out=out,
                         ssm_state_indices=decode_conv_indices,
