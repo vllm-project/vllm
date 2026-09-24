@@ -3,17 +3,17 @@
 
 //! Default output processing pipeline.
 
-mod structural_tag;
 mod unified;
 
 use std::sync::Once;
 
 use futures::StreamExt as _;
 use tracing::info;
+use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
+use xgrammar_structural_tag::ToolChoice;
 
-use self::structural_tag::apply_structural_tag_constraint;
 use self::unified::unified_event_stream;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
@@ -34,6 +34,18 @@ use crate::{Error, Result as ChatResult};
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
     parallel_tool_calls: bool,
+    /// Request facts the initialized parser needs to build its output grammar.
+    /// Absent for the plain-text-only processor, which never builds one.
+    grammar_inputs: Option<GrammarInputs>,
+}
+
+/// Request-scoped inputs for [`UnifiedParser::build_output_grammar`], captured
+/// at construction because the chat request is consumed before the prompt is
+/// tokenized.
+struct GrammarInputs {
+    tools: Vec<ChatTool>,
+    tool_choice: ToolChoice,
+    tool_strict_level: ToolStrictLevel,
 }
 
 impl DefaultChatOutputProcessor {
@@ -42,7 +54,8 @@ impl DefaultChatOutputProcessor {
     ///
     /// Parser resolution happens here so that request validation, prompt
     /// rendering, and streaming all observe the same parser-adjusted
-    /// request state.
+    /// request state. The parser is initialized and its output grammar built
+    /// later, once the final prompt token IDs are known.
     pub fn new(
         request: &mut ChatRequest,
         model_id: &str,
@@ -74,12 +87,6 @@ impl DefaultChatOutputProcessor {
             Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
         };
 
-        apply_structural_tag_constraint(
-            request,
-            parser.structural_tag_builder(),
-            tool_strict_level,
-        )?;
-
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
         }
@@ -87,6 +94,11 @@ impl DefaultChatOutputProcessor {
         Ok(Self {
             parser,
             parallel_tool_calls: request.parallel_tool_calls(),
+            grammar_inputs: Some(GrammarInputs {
+                tools: request.tools().to_vec(),
+                tool_choice: request.tool_choice().into(),
+                tool_strict_level,
+            }),
         })
     }
 
@@ -99,6 +111,7 @@ impl DefaultChatOutputProcessor {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
             parallel_tool_calls: true,
+            grammar_inputs: None,
         }
     }
 
@@ -175,6 +188,30 @@ static REASONING_PARSER_LOG_ONCE: Once = Once::new();
 static UNIFIED_PARSER_LOG_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
+    fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
+        self.parser.initialize(prompt_token_ids).map_err(|error| {
+            Error::OutputParserInitialization {
+                error: Box::new(error),
+            }
+        })
+    }
+
+    fn build_output_grammar(&self) -> Result<Option<BuiltOutputGrammar>> {
+        let Some(inputs) = &self.grammar_inputs else {
+            return Ok(None);
+        };
+        self.parser
+            .build_output_grammar(&OutputGrammarContext {
+                tools: &inputs.tools,
+                tool_choice: &inputs.tool_choice,
+                tool_strict_level: inputs.tool_strict_level,
+                parallel_tool_calls: self.parallel_tool_calls,
+            })
+            .map_err(|error| Error::OutputGrammar {
+                error: Box::new(error),
+            })
+    }
+
     /// Transforms a raw generate-output token stream into structured chat
     /// events through two sequential stages once text decoding has
     /// already happened:
@@ -196,8 +233,9 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::DefaultChatOutputProcessor;
+    use crate::output::ChatOutputProcessor;
     use crate::parser::{ParserSelection, ToolStrictLevel};
-    use crate::request::ChatRequest;
+    use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
 
     fn tokenizer() -> Arc<TestTokenizer> {
         Arc::new(
@@ -205,6 +243,83 @@ mod tests {
                 .with_regular_token("<|channel>", 256)
                 .with_regular_token("<channel|>", 257),
         )
+    }
+
+    #[test]
+    fn output_grammar_preserves_tool_strict_level() {
+        let build = |level, strict, choice| {
+            let tools = vec![ChatTool {
+                name: "search".to_string(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }),
+                strict,
+            }];
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
+                ..ChatRequest::for_test()
+            };
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &ParserSelection::Explicit("qwen3_coder".to_string()),
+                &ParserSelection::None,
+                level,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            processor.build_output_grammar().unwrap()
+        };
+
+        assert!(build(ToolStrictLevel::Auto, None, ChatToolChoice::Auto).is_none());
+        let envelope = build(ToolStrictLevel::Function, None, ChatToolChoice::Auto).unwrap();
+        let parameters = build(ToolStrictLevel::Parameter, None, ChatToolChoice::Auto).unwrap();
+        let strict = build(ToolStrictLevel::Auto, Some(true), ChatToolChoice::Auto).unwrap();
+        assert_eq!(parameters, strict);
+        assert_ne!(envelope, parameters);
+        assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
+    }
+
+    #[test]
+    fn tool_grammar_honors_parallel_call_policy() {
+        for parallel in [false, true] {
+            let tools = vec![ChatTool {
+                name: "lookup".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(true),
+            }];
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    tools,
+                    Some(ChatToolChoice::Auto),
+                    parallel,
+                )
+                .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &ParserSelection::Explicit("qwen3_coder".to_string()),
+                &ParserSelection::None,
+                ToolStrictLevel::Auto,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            let built = processor.build_output_grammar().unwrap().unwrap();
+            let tag =
+                serde_json::to_value(xgrammar_structural_tag::StructuralTag::new(built.format))
+                    .unwrap();
+            assert_eq!(tag["format"]["type"], "triggered_tags");
+            assert_eq!(tag["format"]["stop_after_first"], !parallel);
+        }
     }
 
     #[test]

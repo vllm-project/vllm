@@ -87,11 +87,14 @@ RUN mkdir neo && \
 
 # Install XPU-Manager payloads without registering conflicting libze package
 # dependencies in dpkg.
+# Note that ocl-icd-opencl-dev is required by DLE upgrade but xpu-smi, should
+# can be removed in future.
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends software-properties-common && \
     add-apt-repository -y ppa:kobuk-team/intel-graphics && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
+    apt-get install -y ocl-icd-opencl-dev && \
     mkdir xpu-m && \
     cd xpu-m && \
     wget https://github.com/intel/xpumanager/releases/download/v2.1.0/xpu-smi_2.1.0+26.33.6468cec-1.24.04_amd64.deb && \
@@ -263,5 +266,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
+
+# Replace 2026.1.2 DLE packages to 2026.1.3
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    uv pip install \
+      "intel-cmplr-lib-rt==2026.1.1" \
+      "intel-cmplr-lib-ur==2026.1.1" \
+      "intel-cmplr-lic-rt==2026.1.1" \
+      "intel-sycl-rt==2026.1.1" \
+      "oneccl-devel==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
+      "oneccl==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
+      "dpcpp-cpp-rt==2026.1.1" \
+      "intel-opencl-rt==2026.1.1" \
+      "intel-openmp==2026.1.1" \
+      "intel-pti==1.1.0"
 
 ENTRYPOINT ["vllm", "serve"]

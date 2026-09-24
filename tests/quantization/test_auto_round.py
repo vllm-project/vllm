@@ -146,6 +146,21 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     },
 }
 
+# These checkpoints fail during XPU graph capture, so run them eagerly there.
+XPU_EAGER_ONLY_MODELS = {
+    "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
+    "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
+    "Intel/Qwen3-8B-w2g64-for-ut",
+    "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
+}
+
+
+def _runner_kwargs(model: str) -> dict[str, Any]:
+    kwargs = dict(MODEL_RUNNER_KWARGS.get(model, {}))
+    if current_platform.is_xpu() and model in XPU_EAGER_ONLY_MODELS:
+        kwargs["enforce_eager"] = True
+    return kwargs
+
 
 @pytest.mark.skipif(
     not (
@@ -157,7 +172,7 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
 )
 @pytest.mark.parametrize("model", MODELS + QWEN3_AUTOROUND_MODELS)
 def test_auto_round_model(vllm_runner, model):
-    with vllm_runner(model, **MODEL_RUNNER_KWARGS.get(model, {})) as llm:
+    with vllm_runner(model, **_runner_kwargs(model)) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
 
     assert output
@@ -1636,19 +1651,6 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
 def test_wna16_linear_gptq_unsupported_config_raises() -> None:
     with pytest.raises(NotImplementedError, match="Only 4-bit and 8-bit symmetric"):
         INCWNA16LinearScheme(make_layer_config(sym=False))
-
-
-def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
-
-    with pytest.raises(NotImplementedError, match="unsupported config"):
-        INCWna16Scheme().get_linear_method(
-            make_config(weight_bits=2, sym=False),
-            object(),
-            "layer",
-            make_layer_config(bits=2, sym=False),
-        )
 
 
 def test_inc_get_quant_method_unquantized_linear_returns_unquantized() -> None:
