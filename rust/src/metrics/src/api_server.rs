@@ -187,20 +187,38 @@ mod tests {
 
     use super::ApiServerMetrics;
 
+    fn rendered_metrics(registry: &Registry) -> String {
+        let mut rendered = String::new();
+        encode(&mut rendered, registry).expect("encode metrics");
+        rendered
+    }
+
     #[test]
     fn sleep_mode_recorder_tracks_outcomes_and_concurrency() {
         let mut registry = Registry::default();
         let metrics = ApiServerMetrics::register(&mut registry);
         for operation in ["sleep", "release_kv_cache_memory", "wake"] {
-            metrics.record_sleep_mode_operation(operation).success();
-            drop(metrics.record_sleep_mode_operation(operation));
-        }
-        let mut rendered = String::new();
-        encode(&mut rendered, &registry).expect("encode metrics");
-        for operation in ["sleep", "release_kv_cache_memory", "wake"] {
-            assert!(rendered.contains(&format!(
+            let recorder = metrics.record_sleep_mode_operation(operation);
+            let active = rendered_metrics(&registry);
+            assert!(active.contains(&format!(
+                "vllm:rl_sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 1"
+            )));
+
+            recorder.success();
+            let succeeded = rendered_metrics(&registry);
+            assert!(succeeded.contains(&format!(
+                "vllm:rl_sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
+            )));
+            assert!(succeeded.contains(&format!(
+                "vllm:rl_sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 1"
+            )));
+            assert!(succeeded.contains(&format!(
                 "vllm:rl_sleep_mode_operations_total{{operation=\"{operation}\",status=\"success\"}} 1"
             )));
+
+            let recorder = metrics.record_sleep_mode_operation(operation);
+            drop(recorder);
+            let rendered = rendered_metrics(&registry);
             assert!(rendered.contains(&format!(
                 "vllm:rl_sleep_mode_operations_total{{operation=\"{operation}\",status=\"error\"}} 1"
             )));

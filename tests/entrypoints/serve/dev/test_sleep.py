@@ -7,17 +7,21 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import requests
 from fastapi import FastAPI
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.serve.dev.sleep import metrics as sleep_metrics
 from vllm.entrypoints.serve.dev.sleep.api_router import attach_router
 from vllm.entrypoints.serve.dev.sleep.metrics import SleepModeOperationMetrics
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.entrypoints.serve.instrumentator.metrics import (
+    attach_router as attach_metrics_router,
+)
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.metrics import prometheus as prometheus_metrics
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
@@ -25,6 +29,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B"
 @pytest.fixture
 def sleep_route_app(monkeypatch):
     app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
     app.state.engine_client = AsyncMock()
     metrics = SleepModeOperationMetrics(CollectorRegistry())
     monkeypatch.setattr(
@@ -32,11 +37,8 @@ def sleep_route_app(monkeypatch):
         lambda: metrics,
     )
 
-    @app.exception_handler(RequestValidationError)
-    async def validation_error(_request, _error):
-        return JSONResponse(status_code=400, content={"error": "invalid query"})
-
     attach_router(app)
+    init_exception_handler(app)
     return app, metrics
 
 
@@ -53,15 +55,26 @@ def test_sleep_route_response_and_engine_arguments(sleep_route_app, level):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "query", ["level=invalid", "level=-1", "level=3", "mode=invalid"]
+    ("query", "expected_param"),
+    [
+        ("level=invalid", "query.level"),
+        ("level=-1", "query.level"),
+        ("level=3", "query.level"),
+        ("mode=invalid", "query.mode"),
+    ],
 )
-def test_sleep_route_rejects_invalid_query_before_dispatch(sleep_route_app, query):
+def test_sleep_route_rejects_invalid_query_before_dispatch(
+    sleep_route_app, query, expected_param
+):
     app, metrics = sleep_route_app
     with TestClient(app) as client:
         response = client.post(f"/sleep?{query}")
     assert response.status_code == 400
+    assert response.json()["error"]["param"] == expected_param
     app.state.engine_client.sleep.assert_not_awaited()
     assert list(metrics.operations.collect()[0].samples) == []
+    assert list(metrics.duration.collect()[0].samples) == []
+    assert list(metrics.in_flight.collect()[0].samples) == []
 
 
 @pytest.mark.cpu_test
@@ -151,6 +164,43 @@ def test_sleep_mode_recorder_tracks_success_error_and_in_flight(operation):
         if sample.name.endswith("_count") and sample.labels == {"operation": operation}
     )
     assert count == 2
+
+
+@pytest.mark.cpu_test
+def test_sleep_operation_visible_on_production_metrics_endpoint(monkeypatch):
+    registry = CollectorRegistry()
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    monkeypatch.setattr(sleep_metrics, "REGISTRY", registry)
+    monkeypatch.setattr(sleep_metrics, "_metrics", None)
+    monkeypatch.setattr(prometheus_metrics, "REGISTRY", registry)
+
+    app = FastAPI()
+    app.state.engine_client = AsyncMock()
+    attach_router(app)
+    attach_metrics_router(app)
+
+    with TestClient(app) as client:
+        assert client.post("/sleep").status_code == 200
+        response = client.get("/metrics")
+
+    assert response.status_code == 200
+    samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        for sample in family.samples
+    ]
+    assert any(
+        sample.name == "vllm:rl_sleep_mode_operations_total"
+        and sample.labels == {"operation": "sleep", "status": "success"}
+        and sample.value == 1
+        for sample in samples
+    )
+    assert any(
+        sample.name == "vllm:rl_sleep_mode_operations_in_flight"
+        and sample.labels == {"operation": "sleep"}
+        and sample.value == 0
+        for sample in samples
+    )
 
 
 def test_sleep_mode():
