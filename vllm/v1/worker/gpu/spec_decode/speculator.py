@@ -15,7 +15,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
@@ -249,6 +249,16 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.num_speculative_steps,
                 self.device,
             )
+
+    def adapt_draft_kv_cache_spec(
+        self, kv_cache_spec: dict[str, KVCacheSpec], target_model: nn.Module
+    ) -> None:
+        """Let the target fit the draft layers' KV cache specs to its layout."""
+        adapt = getattr(target_model, "adapt_draft_kv_cache_spec", None)
+        if adapt is None:
+            return
+        for name in self.draft_attn_layer_names & kv_cache_spec.keys():
+            kv_cache_spec[name] = adapt(kv_cache_spec[name], self.vllm_config)
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
         """Inject EPLB state after construction."""

@@ -85,6 +85,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    SlidingWindowSpec,
+    replace_as,
+)
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -1048,6 +1054,23 @@ class Glm5NextForCausalLM(
     ]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
+    @staticmethod
+    def adapt_draft_kv_cache_spec(
+        spec: KVCacheSpec, vllm_config: VllmConfig
+    ) -> KVCacheSpec:
+        """Give sliding-window draft layers full-attention pages, which are the
+        only ones that can join the MLA/indexer pages of each block. The draft
+        attention still applies its window."""
+        if type(spec) is not SlidingWindowSpec:
+            return spec
+        return replace_as(
+            spec,
+            FullAttentionSpec,
+            drop=("extra_retained_tokens",),
+            block_size=vllm_config.cache_config.block_size,
+            page_size_padded=None,
+        )
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1114,6 +1137,10 @@ class Glm5NextForConditionalGeneration(
         from .model import Glm5NextForCausalLM
 
         return Glm5NextForCausalLM.get_mamba_state_copy_func()
+
+    adapt_draft_kv_cache_spec = staticmethod(
+        Glm5NextForCausalLM.adapt_draft_kv_cache_spec
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Glm4vForConditionalGeneration, self).__init__()

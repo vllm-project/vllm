@@ -556,7 +556,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return encoder_runner.get_encoder_timing_stats()
 
     def get_kv_cache_spec(self):
-        return get_kv_cache_spec(self.vllm_config)
+        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+        if isinstance(self.speculator, DraftModelSpeculator):
+            self.speculator.adapt_draft_kv_cache_spec(kv_cache_spec, self.model)
+        return kv_cache_spec
 
     def initialize_kv_cache(
         self,
