@@ -246,23 +246,25 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             OffloadingHistogramMetadata(
                 documentation=(
                     "Histogram of per-job latency for secondary-tier promotion "
-                    "attempts, measured from manager job registration until the "
-                    "tier reports completion so that tier queueing is included, "
-                    "labeled by tier, in seconds. Includes failed attempts."
+                    "attempts, measured from job creation until the tier reports "
+                    "completion so that tier queueing is included, labeled by "
+                    "tier, in seconds. Includes failed attempts."
                 ),
                 labelnames=("tier",),
                 buckets=(
-                    0.0001,
-                    0.0005,
-                    0.001,
                     0.005,
                     0.01,
+                    0.025,
                     0.05,
                     0.1,
+                    0.25,
                     0.5,
                     1,
+                    2.5,
                     5,
                     10,
+                    30,
+                    60,
                 ),
             )
         )

@@ -214,7 +214,7 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
 
 
 def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch):
-    """Tracker measures registration-to-completion, not transfer_time.
+    """Tracker measures job-creation-to-completion, not transfer_time.
 
     Includes failed promotions.
     """
@@ -233,6 +233,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
         TransferJob(0, to_keys([0, 1]), np.array([0, 1]), True, _CTX),
         1,
     )
+    promotion_job.transfer_job.submit_time = clock
     tracker.on_job_registered(promotion_job)
     clock += 1.5
     tracker.on_job_finished(
@@ -263,6 +264,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
         TransferJob(2, to_keys([3]), np.array([3]), True, _CTX),
         0,
     )
+    failed_promotion_job.transfer_job.submit_time = clock
     tracker.on_job_registered(failed_promotion_job)
     clock += 0.2
     tracker.on_job_finished(
