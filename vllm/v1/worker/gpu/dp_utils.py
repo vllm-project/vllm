@@ -224,7 +224,6 @@ def dispatch_cg_and_sync_dp(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     dp_sync: DPSyncState | None = None,
-    num_speculative_tokens: int | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -259,9 +258,6 @@ def dispatch_cg_and_sync_dp(
             same `uniform_token_count`; `num_reqs` may differ, as neither
             depends on it. Passing a sync from a different batch is a caller
             error and trips an assert.
-        num_speculative_tokens: Runtime speculative width used to select a
-            compatible specialized cudagraph. None selects only unspecialized
-            graphs.
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
@@ -288,7 +284,6 @@ def dispatch_cg_and_sync_dp(
             dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
             num_active_loras=num_active_loras,
             max_query_len=max_query_len,
-            num_speculative_tokens=num_speculative_tokens,
         )
 
     if dp_size == 1:

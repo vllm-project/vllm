@@ -20,8 +20,12 @@ from vllm.distributed.device_communicators import pynccl_allocator
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.spec_decode.autoregressive import (
+    cudagraph_utils as spec_cudagraph_utils,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -208,7 +212,6 @@ def _make_spec_decode_manager(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
-    specialize_spec_tokens: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -231,7 +234,6 @@ def _make_spec_decode_manager(
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
-        specialize_spec_tokens=specialize_spec_tokens,
     )
     manager._graphs_captured = True
     return manager
@@ -373,6 +375,78 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
             )
             == desc
         ), desc
+
+
+@pytest.mark.parametrize("specialize", [False, True])
+def test_speculator_replays_graph_for_runtime_width(monkeypatch, specialize):
+    """Equal batch shapes must replay the graph captured for the selected K."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: object()
+    )
+    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", MagicMock)
+    monkeypatch.setattr(
+        spec_cudagraph_utils, "prepare_inputs_to_capture", lambda *a, **kw: ({}, {})
+    )
+    forward = MagicMock()
+    replayed_widths: list[int] = []
+
+    def capture(manager, create_forward_fn, progress_bar_desc):
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]:
+            create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+            k = forward.call_args.kwargs["num_speculative_steps"]
+            graph = MagicMock()
+            graph.replay.side_effect = lambda k=k: replayed_widths.append(k)
+            manager.graphs[desc] = graph
+        manager._graphs_captured = True
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+    manager = spec_cudagraph_utils.SpeculatorCudaGraphManager(
+        _create_decode_vllm_config(
+            capture_sizes=[4],
+            num_speculative_tokens=4,
+            dynamic_spec_schedule=[(1, 2, 4), (3, 4, 2), (5, 6, 1), (7, 8, 0)],
+        ),
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        decode_query_len=1,
+    )
+    manager.capture(
+        forward,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        [],
+        MagicMock(),
+        specialize_spec_tokens=specialize,
+    )
+    captured_widths = [4, 2] if specialize else [4]
+    assert [c.kwargs["num_speculative_steps"] for c in forward.call_args_list] == (
+        captured_widths
+    )
+
+    for k in (2, 4, 2, 3):
+        desc, _ = dispatch_cg_and_sync_dp(
+            manager,
+            num_reqs=3,
+            num_tokens=3,
+            uniform_token_count=1,
+            dp_size=1,
+            dp_rank=0,
+        )
+        desc = manager.specialize_spec_tokens(desc, k)
+        captured_k = k if specialize else 4
+        if captured_k in captured_widths:
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert desc.num_tokens == 4
+            manager.run_fullgraph(desc)
+            assert replayed_widths[-1] == captured_k
+        else:
+            assert desc.cg_mode == CUDAGraphMode.NONE
 
 
 @pytest.mark.parametrize(

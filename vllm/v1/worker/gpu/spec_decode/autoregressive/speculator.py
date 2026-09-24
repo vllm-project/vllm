@@ -136,13 +136,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_mode = CUDAGraphMode.NONE
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
-        dynamic_k = self.speculative_config.uses_dynamic_speculative_decoding()
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            decode_query_len=1,
-            specialize_spec_tokens=self.use_fused_multi_step_decode and dynamic_k,
+            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
         )
 
     def capture(self) -> None:
@@ -195,6 +190,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing decode CUDA graphs",
+            specialize_spec_tokens=self.use_fused_multi_step_decode
+            and self.speculative_config.uses_dynamic_speculative_decoding(),
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
 
@@ -359,8 +356,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
-        dynamic_k = self.speculative_config.uses_dynamic_speculative_decoding()
-        fused_dynamic_k = dynamic_k and self.use_fused_multi_step_decode
         decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
@@ -370,8 +365,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync=decode_batch_sync,
-            num_speculative_tokens=num_speculative_tokens if fused_dynamic_k else None,
         )
+        if self.decode_cudagraph_manager is not None:
+            decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
+                decode_batch_desc, num_speculative_tokens
+            )
         num_tokens_across_dp = (
             decode_batch_sync.num_tokens_across_dp
             if decode_batch_sync is not None

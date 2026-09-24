@@ -74,8 +74,6 @@ class BatchExecutionDescriptor:
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
-    # runtime speculative width for fixed-shape graphs whose work depends on K.
-    num_speculative_tokens: int | None = None
 
 
 def make_cudagraph_stats(
@@ -109,7 +107,6 @@ def _is_compatible(
     num_active_loras: int,
     max_query_len: int | None,
     num_ubatches: int,
-    num_speculative_tokens: int | None,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -129,7 +126,6 @@ def _is_compatible(
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
         and desc.num_ubatches == num_ubatches
-        and desc.num_speculative_tokens in (None, num_speculative_tokens)
     )
 
 
@@ -152,7 +148,6 @@ class CudaGraphManager:
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
-        specialize_spec_tokens: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -164,7 +159,6 @@ class CudaGraphManager:
         self.varlen_decode = varlen_decode
         # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
-        self.specialize_spec_tokens = specialize_spec_tokens
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -371,20 +365,6 @@ class CudaGraphManager:
                 if ubatch_desc is not None:
                     descs_by_mode[mixed_mode].append(ubatch_desc)
 
-        if self.specialize_spec_tokens:
-            assert speculative_config is not None
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.max_num_reqs,
-                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
-            )
-            spec_token_counts = sorted(set(dense_schedule) - {0, 1})
-            for mode, descs in descs_by_mode.items():
-                descs_by_mode[mode] = [
-                    replace(desc, num_speculative_tokens=num_spec_tokens)
-                    for desc, num_spec_tokens in product(descs, spec_token_counts)
-                ]
-
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
             self._capture_descs[mode] = descs
@@ -524,7 +504,6 @@ class CudaGraphManager:
         num_active_loras: int,
         max_query_len: int | None = None,
         num_ubatches: int = 1,
-        num_speculative_tokens: int | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
         effective_loras = self._resolve_effective_loras(num_active_loras)
@@ -539,7 +518,6 @@ class CudaGraphManager:
                     effective_loras,
                     max_query_len,
                     num_ubatches,
-                    num_speculative_tokens,
                 ):
                     return desc
         return BatchExecutionDescriptor(
