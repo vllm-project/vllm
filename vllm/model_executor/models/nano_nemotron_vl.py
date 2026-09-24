@@ -216,6 +216,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             video_token=self.get_video_token(),
             video_pruning_rate=self.get_video_pruning_rate(),
             max_model_len=self.ctx.model_config.max_model_len,
+            dtype=self.ctx.model_config.dtype,
             **kwargs,
         )
 
@@ -986,9 +987,7 @@ class NemotronH_Nano_VL_V2(
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-        llm_dtype = self.language_model.config.dtype
-        assert isinstance(llm_dtype, torch.dtype)
-        self.llm_dtype = llm_dtype
+        self.llm_dtype = llm_dtype = model_config.dtype
         with self._mark_tower_model(vllm_config, {"image", "video", "audio"}):
             self.vision_model = self.get_vit_model_from_radio_config(config).to(
                 llm_dtype
@@ -1110,7 +1109,6 @@ class NemotronH_Nano_VL_V2(
         # When num_frames is provided and temporal_patch_size > 1, consecutive
         #   frames are grouped into tubelets — the batch size must be a multiple
         #   of T so chunk boundaries don't split a tubelet.
-        pixel_values = pixel_values.to(dtype=self.llm_dtype)
         N, _C, H, W = pixel_values.shape
 
         T = self.video_temporal_patch_size if num_frames is not None else 1
@@ -1121,7 +1119,7 @@ class NemotronH_Nano_VL_V2(
 
         vit_embeds_list = []
         for i in range(0, N, micro_batch_size):
-            chunk = pixel_values[i : i + micro_batch_size]
+            chunk = pixel_values[i : i + micro_batch_size].to(dtype=self.llm_dtype)
             if num_frames is not None and T > 1:
                 _, vit_embeds = self.vision_model(chunk, num_frames=chunk.shape[0])
             else:
