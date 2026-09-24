@@ -440,7 +440,7 @@ def test_non_causal_dcp_block_uses_plain_mask0_metadata(monkeypatch):
     assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is None
 
 
-def test_asm_qlen2_without_segmented_builds_no_cprr_metadata(monkeypatch):
+def test_asm_qlen2_without_segmented_fails_during_build(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "aiter",
@@ -450,65 +450,17 @@ def test_asm_qlen2_without_segmented_builds_no_cprr_metadata(monkeypatch):
         rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
     )
 
-    metadata = _cprr_decode_batch(
-        _builder(
-            mtp_decode_qlen=5,
-            dcp_world_size=8,
-            num_heads=12,
-            asm_dcp_verify=True,
-            supports_segmented_dcp_verify=False,
-        ),
-        qlen=2,
-    )
-
-    assert metadata.dcp_verify is None
-    assert metadata.g_kv_indptr is None
-    assert not metadata.has_persistent_metadata
-
-
-def test_asm_qlen2_without_segmented_fails_fast(monkeypatch):
-    captured = {}
-
-    def fake_aiter_decode(*args, **kwargs):
-        captured["called"] = True
-        return None, torch.zeros(2, 16)
-
-    monkeypatch.setattr(
-        rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fake_aiter_decode
-    )
-
-    impl = object.__new__(AiterMLAImpl)
-    impl.num_heads = 12
-    impl.dcp_world_size = 8
-    impl.kv_cache_dtype = "auto"
-    impl.kv_lora_rank = 512
-    impl.qk_rope_head_dim = 64
-    impl.scale = 576**-0.5
-    decode = SimpleNamespace(
-        max_qo_len=2,
-        qo_indptr=torch.tensor([0, 2], dtype=torch.int32),
-        paged_kv_indptr=torch.zeros(2, dtype=torch.int32),
-        paged_kv_indices=torch.zeros(1, dtype=torch.int32),
-        paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
-        use_gluon_decode=False,
-        use_gluon_verify=False,
-        dcp_verify=None,
-        g_kv_indptr=None,
-        has_persistent_metadata=False,
-        attn_out_dtype=torch.bfloat16,
-        asm_decode_num_heads=128,
-        mla_num_kv_splits=256,
-        cp_world_size=8,
-        cp_rank=0,
-        min_kv_seq_len=1,
-    )
-    attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
-    layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
-    q = torch.zeros(2, 96, 576, dtype=torch.bfloat16)
-
     with pytest.raises(RuntimeError, match="requires either segmented MLA"):
-        impl.forward_mqa(q, torch.zeros(1, 1, 576), attn_metadata, layer)
-    assert not captured
+        _cprr_decode_batch(
+            _builder(
+                mtp_decode_qlen=5,
+                dcp_world_size=8,
+                num_heads=12,
+                asm_dcp_verify=True,
+                supports_segmented_dcp_verify=False,
+            ),
+            qlen=2,
+        )
 
 
 def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
@@ -539,12 +491,13 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
         paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         g_kv_indptr=None,
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
-        asm_decode_num_heads=128,
-        mla_num_kv_splits=256,
+        asm_decode_num_heads=0,
+        mla_num_kv_splits=0,
         cp_world_size=8,
         cp_rank=0,
         min_kv_seq_len=1,
@@ -601,6 +554,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
@@ -733,6 +687,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             ),
             use_gluon_decode=False,
             use_gluon_verify=False,
+            dcp_route=rocm_aiter_mla._DCPDecodeRoute.SEGMENTED,
             dcp_verify=view,
             attn_out_dtype=torch.bfloat16,
         )

@@ -145,7 +145,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
-    VLLM_ROCM_AITER_MLA_DCP_VERIFY: str = "asm"
+    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["asm", "segmented"] = "segmented"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -1314,16 +1314,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
-    # Which kernel serves multi-token (spec-decode) verify steps when
-    # decode context parallelism is on. "asm" (default) uses the AITER
-    # round-robin ASM decode, which reads the KV shard once and amortises
-    # it over the whole verify block; "segmented" uses the Triton path,
-    # which expands the block into one single-query row per token.
-    # An optional ":"-separated list of DCP-gathered head counts applies
-    # the route to only those KV groups, e.g. "segmented:64" keeps a
-    # 64-head draft on Triton while a 96-head target stays on ASM.
-    "VLLM_ROCM_AITER_MLA_DCP_VERIFY": lambda: os.getenv(
-        "VLLM_ROCM_AITER_MLA_DCP_VERIFY", "asm"
+    # Kernel for causal multi-token (spec-decode) verify steps under decode
+    # context parallelism on gfx950: "asm" uses AITER's round-robin ASM
+    # decode, "segmented" the Triton segmented MLA path.
+    "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
+        "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
+        "segmented",
+        ["asm", "segmented"],
+        case_sensitive=False,
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through

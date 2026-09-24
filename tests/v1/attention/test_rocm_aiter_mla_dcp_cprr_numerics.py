@@ -22,8 +22,6 @@ Three properties are checked:
   * a shard told the wrong ``cp_rank`` fails both -- without this positive
     control a passing run proves nothing, since a kernel that ignored global
     positions still produces plausible-looking output.
-
-Destined for tests/v1/attention/, alongside test_rocm_aiter_mla_dcp_cprr.py.
 """
 
 from __future__ import annotations
@@ -39,6 +37,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
 from vllm._aiter_ops import is_aiter_found  # noqa: E402
+from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 
 KV_LORA_RANK = 512
 QK_ROPE_HEAD_DIM = 64
@@ -76,6 +75,11 @@ requires_cprr = pytest.mark.skipif(
     not (_gpu_available() and _on_gfx950()),
     reason="cprr DCP verify needs ROCm + AITER on gfx950",
 )
+
+
+@pytest.fixture(autouse=True)
+def select_asm_route(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", "asm")
 
 
 # --------------------------------------------------------------------------
@@ -452,6 +456,7 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
             )
             # The route actually under test must have been taken; a silent
             # fall-out to Triton/segmented would otherwise pass quietly.
+            assert md.decode.dcp_route is rocm_aiter_mla._DCPDecodeRoute.CPRR
             assert md.decode.asm_decode_num_heads, "cprr asm route was not taken"
 
             o = o.float().view(nr, qlen, gathered_heads, KV_LORA_RANK)
@@ -530,6 +535,6 @@ def test_cprr_kernel_is_selected_for_the_k3_shape():
         )
         is True
     )
-    assert m._asm_dcp_verify_selected(96) is True
     assert QLEN >= m._MIN_CPRR_QLEN
+    assert m._select_dcp_decode_route(True, True, QLEN, True) is m._DCPDecodeRoute.CPRR
     assert m._asm_dcp_verify_heads(96) in m._NATIVE_CPRR_HEADS
