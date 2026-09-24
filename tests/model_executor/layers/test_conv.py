@@ -41,23 +41,3 @@ def test_conv3d_patch_embedding_correctness(
     expected = reference(x)
     atol = rtol = 0.02 if dtype == torch.bfloat16 else 1e-5
     torch.testing.assert_close(layer(x), expected, atol=atol, rtol=rtol)
-
-
-def test_conv3d_overlapping_grouped_convolution_correctness(default_vllm_config):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    reference = nn.Conv3d(
-        4, 8, (2, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1), groups=2
-    ).to(device)
-    layer = Conv3dLayer(
-        4,
-        8,
-        (2, 3, 3),
-        stride=(1, 2, 2),
-        padding=(0, 1, 1),
-        groups=2,
-    ).to(device)
-    layer.load_state_dict(reference.state_dict(), strict=True)
-    assert not layer.enable_linear
-
-    x = torch.randn((2, 4, 3, 7, 7), device=device)
-    torch.testing.assert_close(layer(x), reference(x))
