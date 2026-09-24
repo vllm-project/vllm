@@ -33,6 +33,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
@@ -886,9 +887,9 @@ def test_fused_ngram_ids_correctness(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
-def test_ngram_prefetch_ids_outlive_eager_break() -> None:
-    """The side-stream lookup reads ids after the caller frees them, so they
-    must live in a persistent buffer rather than reusable graph-pool memory."""
+def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
+    """Eager breaks hand the side-stream lookup weak refs, so the ids must stay
+    valid after start_prefetch returns rather than be reused from the pool."""
     device = torch.device("cuda")
     query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
     input_ids = torch.arange(20, 25, dtype=torch.int32, device=device)
@@ -905,15 +906,18 @@ def test_ngram_prefetch_ids_outlive_eager_break() -> None:
     prefetched: list[torch.Tensor] = []
     module.ngram_embedding = SimpleNamespace(
         supports_prefetch=True,
-        start_prefetch=lambda hidden_states, ids: prefetched.append(ids),
+        start_prefetch=lambda _, ids: prefetched.append(weak_ref_tensor(ids)),
     )
-
-    module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
-
-    (ids,) = prefetched
-    assert ids.data_ptr() == module._prefetch_ids.data_ptr()
     expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
-    assert torch.equal(ids, expected)
+
+    # A fresh pool makes the next same-size allocation reuse any freed ids,
+    # like a later CUDA graph segment would.
+    pool = torch.cuda.MemPool()
+    with torch.cuda.use_mem_pool(pool):
+        module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
+        torch.full_like(expected, -1)
+
+    assert torch.equal(prefetched[0], expected)
 
 
 def _short_conv_dilated_decode_pytorch(
