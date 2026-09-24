@@ -33,12 +33,8 @@ def compute_fp8_einsum_recipe(
     return einsum_recipe, tma_aligned_scales
 
 
-def _wo_a_weight_scale(wo_a: nn.Module) -> torch.Tensor:
-    return wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
-
-
 def deep_gemm_fp8_o_proj(
-    o: torch.Tensor,
+    o: torch.Tensor | QuantizedActivation,
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     wo_a: nn.Module,
@@ -58,30 +54,43 @@ def deep_gemm_fp8_o_proj(
     layer selects the recipe at initialization. ``wo_b`` is any callable over
     the flattened ``z``: the projection module itself, or a wrapper that also
     reduce-scatters its output (DeepSeek-V4.1 GEMM-RS).
+
+    A QuantizedActivation ``o`` was already rotated and cast by the attention
+    kernel, one ``wo_a`` group per slot with the live groups first, so only
+    the padding groups are sliced off.
     """
     use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
-    o_proj_input, o_scale = fused_inv_rope_fp8_quant(
-        o,
-        positions,
-        cos_sin_cache,
-        n_groups=n_groups,
-        heads_per_group=heads_per_group,
-        nope_dim=nope_dim,
-        rope_dim=rope_dim,
-        quant_group_size=einsum_recipe[2],
-        tma_aligned_scales=tma_aligned_scales,
-        quantize=use_fp8,
-    )
+    if isinstance(o, QuantizedActivation):
+        assert use_fp8
+        o_proj_input, o_scale = o.data[:, :n_groups], o.scale[:, :n_groups]
+    else:
+        o_proj_input, o_scale = fused_inv_rope_fp8_quant(
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+            quant_group_size=einsum_recipe[2],
+            tma_aligned_scales=tma_aligned_scales,
+            quantize=use_fp8,
+        )
     z = torch.empty(
-        (o.shape[0], n_groups, o_lora_rank),
-        device=o.device,
+        (o_proj_input.shape[0], n_groups, o_lora_rank),
+        device=o_proj_input.device,
         dtype=torch.bfloat16,
     )
     if use_fp8:
+        weight_scale = (
+            wo_a.weight_scale
+            if hasattr(wo_a, "weight_scale")
+            else wo_a.weight_scale_inv
+        )
         fp8_einsum(
             "bhr,hdr->bhd",
             (o_proj_input, o_scale),
-            (wo_a.weight, _wo_a_weight_scale(wo_a)),
+            (wo_a.weight, weight_scale),
             z,
             recipe=einsum_recipe,
         )
@@ -92,35 +101,6 @@ def deep_gemm_fp8_o_proj(
             grouped_weight.transpose(1, 2),
             out=z.transpose(0, 1),
         )
-    return wo_b(z.flatten(1))
-
-
-def deep_gemm_prequantized_o_proj(
-    attn_out: QuantizedActivation,
-    wo_a: nn.Module,
-    wo_b: Callable[[torch.Tensor], torch.Tensor],
-    *,
-    n_groups: int,
-    o_lora_rank: int,
-    einsum_recipe: tuple[int, int, int],
-) -> torch.Tensor:
-    """O projection over an attention output the kernel already rotated and cast.
-
-    ``attn_out`` holds one ``wo_a`` group per slot along dim 1; the live groups
-    come first, so the padding groups are sliced off here.
-    """
-    z = torch.empty(
-        (attn_out.data.shape[0], n_groups, o_lora_rank),
-        device=attn_out.data.device,
-        dtype=torch.bfloat16,
-    )
-    fp8_einsum(
-        "bhr,hdr->bhd",
-        (attn_out.data[:, :n_groups], attn_out.scale[:, :n_groups]),
-        (wo_a.weight, _wo_a_weight_scale(wo_a)),
-        z,
-        recipe=einsum_recipe,
-    )
     return wo_b(z.flatten(1))
 
 

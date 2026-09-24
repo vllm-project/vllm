@@ -19,7 +19,6 @@ from vllm.models.deepseek_v4.common.ops import (
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
-    deep_gemm_prequantized_o_proj,
     rope_quant_attn_out,
     rope_quant_unsupported_reason,
 )
@@ -213,16 +212,6 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     def _o_proj(
         self, o: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        if isinstance(o, QuantizedActivation):
-            # The attention kernel already did the inverse RoPE and FP8 cast.
-            return deep_gemm_prequantized_o_proj(
-                o,
-                self.wo_a,
-                self.wo_b,
-                n_groups=self.n_local_groups,
-                o_lora_rank=self.o_lora_rank,
-                einsum_recipe=self._einsum_recipe,
-            )
         return deep_gemm_fp8_o_proj(
             o,
             positions,
