@@ -421,14 +421,14 @@ class OffloadingManager(ABC):
         the string "None" to a value the configuration does not set. A test of
         the implementation should assert that the names here match the
         declaration of the spec, because the runtime check reads the declaration
-        of every tier together and cannot see one unfilled name.
+        of every series together and cannot see one unfilled name.
 
         Returns:
-            One mapping of label name to value for each tier, which gives one
-            series of the info metric. A manager of one tier returns exactly one
+            One mapping of label name to value for each series of the info
+            metric. A manager that reports one configuration returns exactly one
             mapping. The frontend renders each value with str(), so a value must
             be a scalar that msgpack carries, not an enum or an object. The
-            default reports one tier with no fact.
+            default reports one series with no fact.
 
         """
         return [{}]

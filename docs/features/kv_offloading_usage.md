@@ -116,15 +116,15 @@ vllm serve <model> \
 
 The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and always sets it to 1. The labels hold static facts of the offloading configuration, so a user reads the resolved numbers instead of the launch flags. The gauge appears from the first scheduler step, so an idle engine exposes no series. Each engine reports its own configuration, and not the instance total.
 
-The gauge holds one series for each tier, and the `tier` label tells the series apart. Two tiers of one type therefore stay apart.
+The gauge holds one series for each configuration that the manager reports. A manager that holds one configuration gives one series. A manager that holds several adds a label of its own, which tells the series apart.
 
-| Label | Meaning | Notes |
-| --- | --- | --- |
-| `tier` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
+| Label | Declared by | Meaning | Notes |
+| --- | --- | --- | --- |
+| `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
 
-The spec declares the label names in the API server process, and the manager of each tier fills the values in the engine process. The names of every tier bind once, at the declaration. A label that one tier owns reads empty on the series of every other tier. No in-tree tier publishes a fact of its own yet, so `tier` is the only label today.
+The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series. No in-tree manager publishes a fact of its own yet, so `tier` is the only label today.
 
-A tier adds a label with `config_info_keys()` and `config_info()` of its manager class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
+A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
 ## Custom Eviction Policies
 
