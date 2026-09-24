@@ -185,6 +185,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     def _reserve_workspace(self, max_num_seqs: int) -> None:
         """Grow the shared scratch workspace to the prefill worst case."""
+        from vllm.utils.math_utils import cdiv
         from vllm.v1.worker.workspace import (
             current_workspace_manager,
             is_workspace_manager_initialized,
@@ -196,21 +197,28 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         ):
             return
 
-        # Ask the scheduler for the largest batch we can ever submit
-        max_num_partial_tiles = self._get_ps_metadata_info_v1(
-            batch_size=max_num_seqs,
-            num_head_k=self._kernel_num_heads,
-            max_qlen=self._max_num_batched_tokens,
-            qlen_granularity=_FP8_PREFILL_TILE_Q,
-            total_qlen=self._max_num_batched_tokens,
-        )[5][0]
+        # Realistic estimate of max number of partial tiles.
+        # The reduce_partial_map_size from get_ps_metadata_info_v1 is a much looser
+        # upper bound that reach TB scale at large context sizes, so it's unusable.
+        # The PS scheduler can emit one partial tile per QO tile OR per CU. Where
+        #  1. the QO tiles can be spread either over the max num batched tokens
+        #  2. the CU count is a property of gfx950.
+        qo_tile_cnt = (
+            cdiv(self._max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_seqs - 1
+        )
+        from vllm.platforms import current_platform
+
+        cu_num = current_platform.num_compute_units()
+        assert cu_num == 256
+        max_num_partial_tiles = qo_tile_cnt + cu_num
 
         max_partial_q = max_num_partial_tiles * _FP8_PREFILL_TILE_Q
+        max_total_q = self._max_num_batched_tokens
         # logits, attn_lse, final_lse
         current_workspace_manager().get_simultaneous(
             ((max_partial_q, self._kernel_num_heads, self.v_head_dim), torch.float32),
             ((max_partial_q, self._kernel_num_heads), torch.float32),
-            ((self._max_num_batched_tokens, self._kernel_num_heads), torch.float32),
+            ((max_total_q, self._kernel_num_heads), torch.float32),
         )
 
     def _get_kv_indices_buf(self, device: torch.device, length: int) -> torch.Tensor:
@@ -274,7 +282,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             num_head_k=num_head_k,
             max_qlen=max_qlen,
             qlen_granularity=_FP8_PREFILL_TILE_Q,
-            total_qlen=int(qo_indptr_cpu[-1].item()),
         )
 
         work_metadata = torch.empty(
