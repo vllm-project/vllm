@@ -201,6 +201,63 @@ def test_rocm_mxfp8_linear_keeps_per_row_scales():
     assert layer.weight_scale.shape == (64, 256 // 32)
 
 
+def _split_k_case(packed: bool):
+    """A 3-way in-launch split-K on shared_down TP4, with K and M tails."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    n, k, m = 5120, 576, 19
+    layer = _make_block32_layer(n, k, "cuda")
+    x_q, x_scale = mxfp8_e4m3_quantize(
+        torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    )
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
+    )
+    if packed:
+        cfg = g._packed(16, 32, 128, 1, 2, 2, 16, 0, 3)
+    else:
+        cfg = g._tiled(32, 64, 128, 1, True, 4, 2, 16, 0, 3)
+    args = (x_q, x_scale, layer.weight, layer.weight_scale.data[::32].contiguous())
+    return g, cfg, args, expected
+
+
+def _rel_err(out: torch.Tensor, expected: torch.Tensor) -> float:
+    return ((out.float() - expected).norm() / expected.norm()).item()
+
+
+@pytest.mark.parametrize("packed", [True, False])
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_split_k_in_launch(packed):
+    """Splits summed by the tile's last program are exact and repeatable."""
+    torch.manual_seed(0)
+    g, cfg, args, expected = _split_k_case(packed)
+    out = torch.empty_like(expected, dtype=torch.bfloat16)
+    g._launch(*args, out, cfg)
+    assert _rel_err(out, expected) < 5e-3
+    first = out.clone()
+    for _ in range(20):
+        g._launch(*args, out, cfg)
+        assert torch.equal(out, first)
+
+
+@pytest.mark.parametrize("packed", [True, False])
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_split_k_first_use_in_capture(packed):
+    """A stream whose first split-K launch is being captured has no counters
+    yet; it must fall back to an unfused split instead of failing."""
+    torch.manual_seed(0)
+    g, cfg, args, expected = _split_k_case(packed)
+    out = torch.zeros_like(expected, dtype=torch.bfloat16)
+    stream = torch.cuda.Stream()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        g._launch(*args, out, cfg)
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert _rel_err(out, expected) < 5e-3
+
+
 @pytest.mark.parametrize("num_rows", [1, 64, 65])
 @torch.inference_mode()
 def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
