@@ -56,12 +56,12 @@ from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
@@ -939,7 +939,7 @@ class VllmConfig:
 
     def with_hf_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         architectures: list[str] | None = None,
     ) -> "VllmConfig":
         if architectures is not None:
