@@ -7,12 +7,12 @@ import math
 import numpy as np
 import torch
 from torchvision.transforms.v2 import functional as tvF
-from transformers.image_processing_utils import BatchFeature
-from transformers.image_processing_utils_fast import (
-    BaseImageProcessorFast,
+from transformers.image_processing_backends import (
+    TorchvisionBackend,
     group_images_by_shape,
     reorder_images,
 )
+from transformers.image_processing_utils import BatchFeature
 from transformers.image_utils import (
     OPENAI_CLIP_MEAN,
     OPENAI_CLIP_STD,
@@ -327,7 +327,7 @@ class Glm5NextImageProcessorKwargs(ImagesKwargs, total=False):  # type: ignore[c
     max_image_tokens: int | None
 
 
-class Glm5NextImageProcessor(BaseImageProcessorFast):
+class Glm5NextImageProcessor(TorchvisionBackend):
     """Fast torchvision image processor for GLM-5.3-Flash.
 
     ``patch_expand_factor`` multiplies into the ``smart_resize`` spatial
@@ -759,7 +759,7 @@ class Glm5NextProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer", "video_processor"]
     image_processor_class = "AutoImageProcessor"
     video_processor_class = "AutoVideoProcessor"
-    tokenizer_class = ("PreTrainedTokenizer", "PreTrainedTokenizerFast")
+    tokenizer_class = ("PythonBackend", "TokenizersBackend")
 
     def __init__(
         self,
