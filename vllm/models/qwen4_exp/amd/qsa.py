@@ -53,9 +53,9 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_cache import QSAIndexerMetadata
 from . import model
-from .indexer_qsa import QSAIndexer
+from .qsa_indexer import QSAIndexer
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -345,11 +345,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise RuntimeError("QSA main K/V cache is not bound")
 
         num_tokens = main_metadata.num_actual_tokens
-        side_metadata = cast(
-            QSAForwardMetadata,
+        indexer_metadata = cast(
+            QSAIndexerMetadata,
             metadata[self.indexer.raw_key_cache.prefix],
         )
-        if side_metadata.num_actual_tokens != num_tokens:
+        if indexer_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
         selected = self.indexer(
             hidden_states,
@@ -377,7 +377,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.kv_cache,
             main_metadata,
             output,
-            token_to_req=side_metadata.token_to_req,
+            token_to_req=indexer_metadata.token_to_req,
         )
 
     def forward(

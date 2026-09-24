@@ -24,7 +24,7 @@ from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -570,7 +570,7 @@ build_qsa_metadata = (
 
 
 @dataclass
-class QSAForwardMetadata(AttentionMetadata):
+class QSAIndexerMetadata(AttentionMetadata):
     """Common per-forward metadata for one QSA side cache."""
 
     block_table: torch.Tensor
@@ -593,7 +593,7 @@ class QSAForwardMetadata(AttentionMetadata):
     compress_ratio: int
 
 
-class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
+class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -650,7 +650,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> QSAForwardMetadata:
+    ) -> QSAIndexerMetadata:
         del common_prefix_len, fast_build
         num_tokens = common_attn_metadata.num_actual_tokens
         decode_threshold = self.reorder_batch_threshold
@@ -699,7 +699,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 request_capacity=request_capacity,
             )
         )
-        return QSAForwardMetadata(
+        return QSAIndexerMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
             seq_lens=common_attn_metadata.seq_lens,
@@ -744,8 +744,8 @@ class QSAStateBackend(AttentionBackend):
         )
 
     @staticmethod
-    def get_builder_cls() -> type[QSAMetadataBuilder]:
-        return QSAMetadataBuilder
+    def get_builder_cls() -> type[QSAIndexerMetadataBuilder]:
+        return QSAIndexerMetadataBuilder
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -815,9 +815,7 @@ class QSAKeyStateCache(_QSAStateCache):
         key_head_size = int(kwargs.pop("head_size"))
         self.key_head_size = key_head_size
         self.cache_rope_positions = bool(cache_rope_positions)
-        self.rope_position_offset = (
-            (key_head_size + self._BF16_PER_INT64 - 1) // self._BF16_PER_INT64
-        ) * self._BF16_PER_INT64
+        self.rope_position_offset = round_up(key_head_size, self._BF16_PER_INT64)
         storage_head_size = key_head_size
         if self.cache_rope_positions:
             storage_head_size = self.rope_position_offset + (
@@ -842,7 +840,7 @@ class QSAKeyStateCache(_QSAStateCache):
         # the scheduler block size). Anything narrower lets a rejected draft row
         # overwrite a committed key the next step needs to close the group.
         span = self.compress_ratio + vllm_config.num_speculative_tokens
-        capacity = self.compress_ratio * cdiv(span, self.compress_ratio)
+        capacity = round_up(span, self.compress_ratio)
         assert self.cache_config.block_size % capacity == 0, (
             f"QSA ring capacity {capacity} must divide the attention block "
             f"size {self.cache_config.block_size}"
@@ -872,9 +870,9 @@ class QSACompressedKeyCache(_QSAStateCache):
 
 __all__ = [
     "QSACompressedKeyCache",
-    "QSAForwardMetadata",
+    "QSAIndexerMetadata",
     "QSAKeyStateCache",
-    "QSAMetadataBuilder",
+    "QSAIndexerMetadataBuilder",
     "QSAStateBackend",
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",

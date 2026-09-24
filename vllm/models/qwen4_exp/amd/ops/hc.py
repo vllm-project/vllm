@@ -55,21 +55,21 @@ def _grouped_gemma_rmsnorm_kernel(
 def _grouped_gemma_rmsnorm(
     x: torch.Tensor, weight: torch.Tensor, eps: float, num_groups: int
 ) -> torch.Tensor:
-    N, DIM = x.shape
+    num_tokens, dim = x.shape
     assert x.stride(1) == 1, "grouped Gemma RMSNorm requires unit inner stride"
     assert weight.is_contiguous(), "grouped Gemma RMSNorm weight must be contiguous"
-    assert DIM % num_groups == 0
-    group_dim = DIM // num_groups
-    assert weight.numel() in (group_dim, DIM)
+    assert dim % num_groups == 0
+    group_dim = dim // num_groups
+    assert weight.numel() in (group_dim, dim)
 
     y = x.new_empty(x.shape)
-    _grouped_gemma_rmsnorm_kernel[(N * num_groups,)](
+    _grouped_gemma_rmsnorm_kernel[(num_tokens * num_groups,)](
         x,
         weight,
         y,
         x.stride(0),
         y.stride(0),
-        DIM,
+        dim,
         num_groups,
         W_SHARED=weight.numel() == group_dim,
         EPS=eps,
@@ -106,7 +106,7 @@ def _hc_silu_kernel(
 
 
 def _hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
-    num_tokens, DIM = x.shape
+    num_tokens, dim = x.shape
     assert x.stride(1) == 1
 
     output = x.new_empty(x.shape)
@@ -115,7 +115,7 @@ def _hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
         output,
         x.stride(0),
         output.stride(0),
-        DIM=DIM,
+        DIM=dim,
         HC=hc_count,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
@@ -161,23 +161,23 @@ def _hc_gate_mix_kernel(
 
 
 def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
-    N, DIM = gate.shape
+    num_tokens, dim = gate.shape
     assert x.shape == gate.shape
-    assert DIM % hc_count == 0
+    assert dim % hc_count == 0
     assert x.stride(1) == 1
     assert gate.stride(1) == 1
 
-    HC_DIM = DIM // hc_count
-    out = x.new_empty(N, HC_DIM)
+    hc_dim = dim // hc_count
+    out = x.new_empty(num_tokens, hc_dim)
     BLOCK_SIZE = 512
-    _hc_gate_mix_kernel[(N, triton.cdiv(HC_DIM, BLOCK_SIZE))](
+    _hc_gate_mix_kernel[(num_tokens, triton.cdiv(hc_dim, BLOCK_SIZE))](
         x,
         gate,
         out,
         x.stride(0),
         gate.stride(0),
         out.stride(0),
-        DIM,
+        dim,
         hc_count,
         BLOCK_SIZE,
         launch_pdl=current_platform.is_arch_support_pdl(),
@@ -235,18 +235,18 @@ def _hc_combine(
     injection_logits: torch.Tensor,
     hc_count: int,
 ) -> torch.Tensor:
-    N, DIM = residual.shape
-    assert DIM % hc_count == 0
-    hc_dim = DIM // hc_count
-    assert block_output.shape == (N, hc_dim)
-    assert injection_logits.shape == (N, hc_count)
+    num_tokens, dim = residual.shape
+    assert dim % hc_count == 0
+    hc_dim = dim // hc_count
+    assert block_output.shape == (num_tokens, hc_dim)
+    assert injection_logits.shape == (num_tokens, hc_count)
     assert residual.stride(1) == 1
     assert block_output.stride(1) == 1
     assert injection_logits.stride(1) == 1
 
     out = residual.new_empty(residual.shape)
     BLOCK_SIZE = 512
-    _hc_combine_kernel[(N, triton.cdiv(hc_dim, BLOCK_SIZE))](
+    _hc_combine_kernel[(num_tokens, triton.cdiv(hc_dim, BLOCK_SIZE))](
         block_output,
         residual,
         injection_logits,
@@ -339,21 +339,21 @@ def _hc_combine_norm(
     eps: float,
     hc_count: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    N, DIM = residual.shape
-    assert DIM % hc_count == 0
-    hc_dim = DIM // hc_count
-    assert block_output.shape == (N, hc_dim)
-    assert injection_logits.shape == (N, hc_count)
+    num_tokens, dim = residual.shape
+    assert dim % hc_count == 0
+    hc_dim = dim // hc_count
+    assert block_output.shape == (num_tokens, hc_dim)
+    assert injection_logits.shape == (num_tokens, hc_count)
     assert residual.stride(1) == 1
     assert block_output.stride(1) == 1
     assert injection_logits.stride(1) == 1
     assert norm_weight.is_contiguous()
-    assert norm_weight.numel() in (hc_dim, DIM)
+    assert norm_weight.numel() in (hc_dim, dim)
 
     out = residual.new_empty(residual.shape)
     y = residual.new_empty(residual.shape)
     BLOCK_SIZE = 512
-    _hc_combine_norm_kernel[(N, hc_count)](
+    _hc_combine_norm_kernel[(num_tokens, hc_count)](
         block_output,
         residual,
         injection_logits,

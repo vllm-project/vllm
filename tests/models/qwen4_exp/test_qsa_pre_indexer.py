@@ -10,7 +10,6 @@ from vllm.models.qwen4_exp.common.qsa_cache import (
     circular_qsa_slot_mapping,
     compressed_qsa_slot_mapping,
 )
-from vllm.models.qwen4_exp.nvidia.indexer_qsa import apply_qsa_rope
 from vllm.models.qwen4_exp.nvidia.ops.qsa import (
     qsa_compress_groups_with_ratio,
     qsa_store_cache_rows,
@@ -18,6 +17,7 @@ from vllm.models.qwen4_exp.nvidia.ops.qsa import (
 from vllm.models.qwen4_exp.nvidia.ops.qsa_pre_indexer import (
     qsa_pre_indexer,
 )
+from vllm.models.qwen4_exp.nvidia.qsa_indexer import apply_qsa_rope
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 

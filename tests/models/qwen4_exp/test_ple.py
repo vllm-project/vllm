@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from functools import partial
 from itertools import accumulate
 from types import SimpleNamespace
 
@@ -23,8 +22,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
-    compute_ple_shard_overlap,
-    copy_ple_embedding_shard_,
+    PLEVocabParallelEmbedding,
 )
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
@@ -79,12 +77,23 @@ def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
     return module
 
 
+def _make_test_ple_embedding(tp_start: int, tp_end: int) -> PLEVocabParallelEmbedding:
+    """Create an embedding with only the state needed for shard loading."""
+    embedding = PLEVocabParallelEmbedding.__new__(PLEVocabParallelEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.shard_indices = SimpleNamespace(
+        org_vocab_start_index=tp_start,
+        org_vocab_end_index=tp_end,
+    )
+    return embedding
+
+
 def _set_test_embedding_weight_loader(embedding) -> None:
-    embedding.weight.weight_loader = partial(
-        copy_ple_embedding_shard_,
+    loader = _make_test_ple_embedding(
         tp_start=embedding.shard_indices.org_vocab_start_index,
         tp_end=embedding.shard_indices.org_vocab_end_index,
     )
+    embedding.weight.weight_loader = loader.weight_loader
 
 
 def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -113,19 +122,16 @@ def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
 
 
 def test_ple_shard_overlap_and_copy() -> None:
-    overlap = compute_ple_shard_overlap(
-        checkpoint_start=2, checkpoint_rows=5, tp_start=4, tp_end=8
-    )
+    embedding = _make_test_ple_embedding(tp_start=4, tp_end=8)
+    overlap = embedding._compute_shard_overlap(checkpoint_start=2, checkpoint_rows=5)
     assert overlap == PLEShardOverlap(source_start=2, destination_start=0, row_count=3)
 
     destination = torch.full((4, 2), -1.0)
     loaded = torch.arange(10, dtype=torch.float64).reshape(5, 2)
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         destination,
         loaded,
         checkpoint_start=2,
-        tp_start=4,
-        tp_end=8,
     )
 
     assert copied == 3
@@ -134,13 +140,12 @@ def test_ple_shard_overlap_and_copy() -> None:
 
 
 def test_ple_shard_copy_is_a_noop_without_overlap() -> None:
+    embedding = _make_test_ple_embedding(tp_start=4, tp_end=8)
     destination = torch.ones(4, 2)
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         destination,
         torch.zeros(2, 2),
         checkpoint_start=10,
-        tp_start=4,
-        tp_end=8,
     )
 
     assert copied == 0
@@ -566,12 +571,10 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     loaded_weight = (
         torch.arange(12, dtype=torch.float32).reshape(4, 3).to(storage_dtype)
     )
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         embedding.weight,
         loaded_weight,
         checkpoint_start=0,
-        tp_start=0,
-        tp_end=4,
     )
     input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
     output = embedding._lookup(input_ids)
@@ -597,8 +600,18 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     )
 
 
-def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
+@pytest.mark.parametrize(
+    "exclude_pattern",
+    [
+        "model.language_model.layers.1.ple.ple_embedding.ngram_embedding",
+        "*.ngram_embedding",
+    ],
+)
+def test_ple_fp8_embedding_supports_mixed_precision_config(
+    exclude_pattern: str,
+) -> None:
     prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    nvfp4_prefix = "model.language_model.layers.2.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
@@ -607,9 +620,7 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
                 "group_size": 16,
                 "quantized_layers": {
                     prefix: {"quant_algo": "FP8"},
-                    "model.language_model.layers.2.moe.gate_proj": {
-                        "quant_algo": "NVFP4"
-                    },
+                    nvfp4_prefix: {"quant_algo": "NVFP4"},
                 },
             }
         }
@@ -622,8 +633,16 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
     assert isinstance(
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
-            "model.language_model.layers.2.moe.gate_proj",
+            "model.language_model.layers.3.ple.ple_embedding.ngram_embedding",
         ),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+    with pytest.raises(NotImplementedError, match="NVFP4"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, nvfp4_prefix)
+
+    quant_config.exclude_modules = [exclude_pattern]
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
 

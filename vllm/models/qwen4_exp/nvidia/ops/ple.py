@@ -16,7 +16,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
@@ -240,7 +239,7 @@ def _ple_gate_kernel(
     tl.store(normed_ptr + t * HC * H + offs, normed, mask=mask)
 
 
-def _ple_gate(
+def ple_gate(
     key: torch.Tensor,
     value: torch.Tensor,
     hidden: torch.Tensor,
@@ -279,40 +278,6 @@ def _ple_gate(
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return gated, normed
-
-
-def _ple_gate_fake(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    hidden: torch.Tensor,
-    norm_key_w: torch.Tensor,
-    norm_query_w: torch.Tensor,
-    norm_conv_w: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(hidden), torch.empty_like(hidden)
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_gate",
-    op_func=_ple_gate,
-    mutates_args=[],
-    fake_impl=_ple_gate_fake,
-)
-
-
-def ple_gate(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    hidden: torch.Tensor,
-    norm_key_w: torch.Tensor,
-    norm_query_w: torch.Tensor,
-    norm_conv_w: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.qwen4_exp_ple_gate(
-        key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps
-    )
 
 
 # Dilated short convolution
@@ -588,21 +553,21 @@ def ple_conv(
     """Add short convolution and the outer residual; update state."""
     BLOCK_C = 512
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
-    T, C = inputs.shape
-    K = conv_weights.shape[1]
-    state_len = (K - 1) * dilation
+    num_tokens, num_channels = inputs.shape
+    kernel_size = conv_weights.shape[1]
+    state_len = (kernel_size - 1) * dilation
     state_width = state_len + kernel_spec_query_len - 1
     if token_indices is not None:
-        T = token_indices.numel()
-    if conv_state.shape[1] != C or conv_state.shape[2] < state_width:
+        num_tokens = token_indices.numel()
+    if conv_state.shape[1] != num_channels or conv_state.shape[2] < state_width:
         raise ValueError(
             "conv_state must have shape [slots, channels, window], with "
-            f"channels={C} and window >= {state_width}"
+            f"channels={num_channels} and window >= {state_width}"
         )
     state_bs, state_cs, state_ws = conv_state.stride()
 
     if mode == "decode":
-        num_reqs = T
+        num_reqs = num_tokens
         binary_search_iters = 1
         has_initial_states_arg = has_initial_states is not None
     elif mode == "spec":
@@ -631,7 +596,7 @@ def ple_conv(
 
     # Constexpr flags eliminate accesses to optional None arguments. Without a
     # token map, state_indices is an unused but device-resident placeholder.
-    _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
+    _ple_conv_kernel[(num_tokens, triton.cdiv(num_channels, BLOCK_C))](
         inputs,
         conv_state,
         conv_weights,
@@ -649,11 +614,11 @@ def ple_conv(
         state_bs,
         state_ws,
         state_cs,
-        C=C,
+        C=num_channels,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
         DILATION=dilation,
-        KERNEL_SIZE=K,
+        KERNEL_SIZE=kernel_size,
         SPEC_QUERY_LEN=kernel_spec_query_len,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
@@ -663,7 +628,7 @@ def ple_conv(
     )
     # conv state update is fused with the kernel above for decode
     if mode != "decode":
-        _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
+        _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(num_channels, BLOCK_C))](
             inputs,
             conv_state,
             state_indices,
@@ -676,7 +641,7 @@ def ple_conv(
             state_bs,
             state_ws,
             state_cs,
-            C=C,
+            C=num_channels,
             BLOCK_C=BLOCK_C,
             STATE_LEN=state_len,
             SPEC_QUERY_LEN=kernel_spec_query_len,

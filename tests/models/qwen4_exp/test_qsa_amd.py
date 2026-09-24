@@ -13,11 +13,11 @@ from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
-from vllm.models.qwen4_exp.amd.indexer_qsa import (
+from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
+from vllm.models.qwen4_exp.amd.qsa_indexer import (
     apply_qsa_rmsnorm,
     apply_qsa_rope,
 )
-from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
