@@ -13,6 +13,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
+    get_dp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -285,10 +286,13 @@ class IpcModelLoader(BaseModelLoader):
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
     def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+        dp_group = get_dp_group()
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
+            dp_size=dp_group.world_size,
+            dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,
         )
         return self._request_state(cache_config)
