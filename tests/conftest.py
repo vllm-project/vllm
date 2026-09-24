@@ -982,6 +982,8 @@ class VllmRunner:
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
     - `enforce_eager`: Set to `False` to test CUDA graph.
+    - `kernel_config.enable_jit_warmup`: Set to `False` to reduce test startup
+      time.
     """
 
     def __init__(
@@ -1009,6 +1011,8 @@ class VllmRunner:
             if default_torch_num_threads is None
             else set_default_torch_num_threads(default_torch_num_threads)
         )
+
+        kwargs.setdefault("kernel_config", {"enable_jit_warmup": False})
 
         if not kwargs.get("compilation_config", None):
             # Note(@tdoublep): This is set to 4 because some tests (e.g., hybrid

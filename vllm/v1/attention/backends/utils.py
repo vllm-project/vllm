@@ -1096,6 +1096,7 @@ def get_dcp_local_seq_lens(
     Only consider dcp now, we can extend the case of cp based on this.
     """
     seq_lens_i32 = seq_lens.to(torch.int32)
+    rank_offsets: int | torch.Tensor
     if dcp_rank is None:
         rank_offsets = torch.arange(
             dcp_size,
@@ -1113,7 +1114,8 @@ def get_dcp_local_seq_lens(
         rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     else:
-        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        # Use the Python scalar directly to avoid a synchronizing H2D copy.
+        rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled

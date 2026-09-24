@@ -11,7 +11,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     AttentionState,
     BatchExecutionDescriptor,
@@ -42,15 +42,16 @@ def _prepare_dflash_inputs_to_capture(
     attn_metadata = None
     if not skip_attn:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            input_batch.num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
-            num_reqs_padded=input_batch.num_reqs_after_padding,
-        )
+        if block_tables.cp_size > 1:
+            input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
+                input_buffers.dcp_local_seq_lens,
+                input_batch.seq_lens,
+                input_batch.num_reqs,
+                block_tables.cp_size,
+                block_tables.cp_rank,
+                block_tables.cp_interleave,
+                num_reqs_padded=input_batch.num_reqs_after_padding,
+            )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

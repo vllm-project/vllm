@@ -772,9 +772,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
 
-        max_num_partial_tiles = reduce_partial_map_size
+        # AITER metadata sizing assumes all requests can carry max_prefill_qlen tokens,
+        # which is a loose worst case in the number of QO tiles. Rather, the sum of
+        # qlens is bounded by max_num_batched_tokens. Manually compute the number of
+        # qo tiles to avoid OOM at startup.
+        # TODO: AITER should give us this budget constrained value
+        qo_tile_cnt = (
+            cdiv(max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_reqs - 1
+        )
+        max_num_partial_tiles = qo_tile_cnt + current_platform.num_compute_units()
         reservations: list[tuple[tuple[int, ...], torch.dtype]] = [
             (
                 (max_num_partial_tiles * _FP8_PREFILL_TILE_Q, num_head_k, v_head_dim),
@@ -1007,6 +1016,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
         causal = self._decode_causal

@@ -48,12 +48,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -254,12 +254,12 @@ class LongcatRouter(nn.Module):
             else config.num_experts[0]
         )
         self.n_routed_experts = self.n_routed_experts + zero_expert_num
-        self.classifier = ReplicatedLinear(
+        self.classifier = GateLinear(
             config.hidden_size,
             self.n_routed_experts,
             bias=config.router_bias,
+            out_dtype=router_params_dtype,
             params_dtype=router_params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.classifier",
         )
         self.e_score_correction_bias = nn.Parameter(
@@ -331,9 +331,7 @@ class LongcatMoe(nn.Module):
         else:
             hidden_states_padded = hidden_states
 
-        router_logits_full = self.router(
-            hidden_states_padded.to(self.router_params_dtype)
-        )
+        router_logits_full = self.router(hidden_states_padded)
 
         # MoERunner handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that

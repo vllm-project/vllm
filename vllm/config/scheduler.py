@@ -232,13 +232,17 @@ class SchedulerConfig:
 
         # The first half of this warning can be removed once the Scheduler interface is
         # finalized and we can maintain support for scheduler classes that implement it
-        logger.warning_once(
-            "Using custom scheduler class %s. This scheduler interface is not public "
-            "and compatibility may not be maintained. If you have subclassed Scheduler "
-            "instead of AsyncScheduler, you will see degraded performance due to async "
-            "scheduling being disabled.",
-            self.scheduler_cls,  # type: ignore[arg-type]
-        )
+        if not (
+            isinstance(self.scheduler_cls, str)
+            and self.scheduler_cls.startswith("vllm.")
+        ):
+            logger.warning_once(
+                "Using custom scheduler class %s. This scheduler interface is not "
+                "public and compatibility may not be maintained. If you have "
+                "subclassed Scheduler instead of AsyncScheduler, you will see "
+                "degraded performance due to async scheduling being disabled.",
+                self.scheduler_cls,  # type: ignore[arg-type]
+            )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
