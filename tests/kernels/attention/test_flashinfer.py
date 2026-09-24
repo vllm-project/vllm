@@ -26,6 +26,70 @@ SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
 
 
+@pytest.mark.parametrize("backend", ["fa2", "cudnn"])
+@torch.inference_mode()
+def test_dcp_prefill_lse_merge_and_replay(monkeypatch, backend: str) -> None:
+    """Merge real ragged attention with base-2 context, including empty context."""
+    import math
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends import flashinfer as fi_backend
+
+    if backend == "cudnn":
+        pytest.importorskip("cudnn")
+    set_random_seed(0)
+    tokens, heads, kv_heads, dim = 5, 4, 2, 128
+    q = torch.randn(tokens, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(tokens, kv_heads, dim, device="cuda", dtype=q.dtype)
+    v = torch.randn_like(k)
+    context_out = torch.randn_like(q)
+    context_lse = torch.linspace(-2, 3, heads * tokens, device=q.device).view(
+        heads, tokens
+    )
+    context_lse[:, 0] = -torch.inf
+    context_log2 = (context_lse.T / math.log(2)).contiguous()
+    group = SimpleNamespace(all_gather=lambda tensor, dim: tensor)
+    monkeypatch.setattr(fi_backend, "get_dcp_group", lambda: group)
+    wrapper = object.__new__(fi_backend.BatchDCPPrefillWrapper)
+    wrapper._context = SimpleNamespace(
+        run=lambda *args, **kwargs: (context_out, context_log2)
+    )
+    wrapper._dcp_combine = lambda o, lse, *args, **kwargs: (o, lse)
+    workspace = torch.empty(128 * 1024 * 1024, device=q.device, dtype=torch.uint8)
+    wrapper._new_tokens = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+        workspace, backend=backend
+    )
+    indptr = torch.tensor([0, tokens], dtype=torch.int32, device="cpu")
+    wrapper._new_tokens.plan(
+        indptr, indptr, heads, kv_heads, dim, causal=True, q_data_type=q.dtype
+    )
+    layer = SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0)
+    out = torch.empty_like(q)
+
+    def check_output():
+        keys = k.float().repeat_interleave(heads // kv_heads, dim=1)
+        values = v.float().repeat_interleave(heads // kv_heads, dim=1)
+        scores = torch.einsum("qhd,khd->hqk", q.float(), keys) * dim**-0.5
+        mask = torch.ones(tokens, tokens, device=q.device, dtype=torch.bool).triu(1)
+        scores.masked_fill_(mask, -torch.inf)
+        query_lse = scores.logsumexp(-1)
+        query_out = torch.einsum("hqk,khd->qhd", scores.softmax(-1), values)
+        joint_lse = torch.logaddexp(context_lse, query_lse)
+        context_weight = (context_lse - joint_lse).exp().T.unsqueeze(-1)
+        query_weight = (query_lse - joint_lse).exp().T.unsqueeze(-1)
+        expected = context_out.float() * context_weight + query_out * query_weight
+        torch.testing.assert_close(out.float(), expected, atol=2e-2, rtol=1e-2)
+
+    assert wrapper.run(layer, q, (k, v), k, v, out) is out
+    check_output()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        wrapper.run(layer, q, (k, v), k, v, out)
+    q.mul_(0.5).add_(0.4)
+    graph.replay()
+    check_output()
+
+
 def ref_paged_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
