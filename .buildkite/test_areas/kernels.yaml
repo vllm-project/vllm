@@ -713,6 +713,9 @@ steps:
       - vllm/utils/torch_utils.py
       - vllm/platforms/
       - vllm/_aiter_ops.py
+      commands:
+      # MoRI graph cases run in the Fault Tolerance group's healthy EP baseline.
+      - pytest -v -s kernels/moe/test_moe_layer.py -k "not test_moe_layer_mori_graph"
 
 - label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s

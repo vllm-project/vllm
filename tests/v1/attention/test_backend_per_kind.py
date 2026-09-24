@@ -29,7 +29,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpecKind
 def test_largest_kernel_block_within(supported_sizes, expected):
     class Backend:
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return supported_sizes
 
     assert _largest_kernel_block_within(Backend, 1024, 1024 * 1536, 2048) == expected

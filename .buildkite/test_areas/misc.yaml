@@ -518,6 +518,7 @@ steps:
   - vllm/v1/
   - tests/test_envs.py
   - tests/test_outputs.py
+  - tests/test_pcp_dp.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
   - tests/test_sampling_params.py
@@ -538,6 +539,7 @@ steps:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
   - pytest -v -s test_outputs.py
+  - pytest -v -s test_pcp_dp.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_sampling_params.py
