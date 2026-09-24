@@ -48,6 +48,96 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     return min(ideal_splits, max_splits)
 
 
+def reserve_triton_mla_decode_workspace(
+    max_rows: int,
+    num_heads: int,
+    max_seq_len: int,
+    kv_lora_rank: int,
+    sm_count: int,
+) -> None:
+    """Reserve split-KV scratch before warmup locks the workspace manager."""
+    if not is_workspace_manager_initialized():
+        return
+    max_splits = _compute_num_kv_splits(max_seq_len, sm_count)
+    current_workspace_manager().get_simultaneous(
+        ((max_rows, num_heads, max_splits, kv_lora_rank + 1), torch.float32),
+    )
+
+
+def triton_mla_decode_forward(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_seq_len: int,
+    scale: float,
+    kv_lora_rank: int,
+    k_scale: torch.Tensor,
+    sm_count: int,
+    out_dtype: torch.dtype,
+    mask_empty_shards: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the generic split-KV MLA decode over independently bounded rows.
+
+    A caller may flatten a multi-token block into one row per query token and
+    express causality entirely through ``seq_lens``. DCP verify uses that so
+    each rank returns a local output and LSE for the MLA layer to merge.
+
+    ``mask_empty_shards`` is only for that merge. A zero-length row makes the
+    stage-2 reducer store NaN, and the cross-rank LSE combine needs the
+    identity ``(0, -inf)`` instead. The generic Triton path leaves the kernel
+    result alone: rewriting every empty row would change non-DCP padding on
+    every platform.
+    """
+    num_rows, num_heads = q.shape[:2]
+    output = torch.zeros(
+        num_rows, num_heads, kv_lora_rank, dtype=out_dtype, device=q.device
+    )
+    # Zeros, matching the historical Triton MLA decode path.
+    lse = torch.zeros(num_rows, num_heads, dtype=out_dtype, device=q.device)
+    num_kv_splits = (
+        1
+        if envs.VLLM_BATCH_INVARIANT
+        else _compute_num_kv_splits(max_seq_len, sm_count)
+    )
+    logits_shape = (
+        num_rows,
+        num_heads,
+        num_kv_splits,
+        kv_lora_rank + 1,
+    )
+    if is_workspace_manager_initialized():
+        (attn_logits,) = current_workspace_manager().get_simultaneous(
+            (logits_shape, torch.float32),
+        )
+    else:
+        attn_logits = torch.empty(logits_shape, dtype=torch.float32, device=q.device)
+
+    paged_kv = kv_cache.unsqueeze(2)
+    decode_attention_fwd(
+        q,
+        paged_kv,
+        paged_kv[..., :kv_lora_rank],
+        output,
+        lse,
+        block_table,
+        seq_lens,
+        attn_logits,
+        num_kv_splits,
+        scale,
+        paged_kv.size(1),
+        k_scale=k_scale,
+        v_scale=k_scale,
+        is_mla=True,
+    )
+
+    if mask_empty_shards:
+        empty = seq_lens == 0
+        output.masked_fill_(empty[:, None, None], 0)
+        lse.masked_fill_(empty[:, None], float("-inf"))
+    return output, lse
+
+
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # forward_mqa flattens a uniform multi-token block to one decode row per
     # query token, so causal and non-causal blocks both take the decode path.
@@ -72,8 +162,6 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         per-call ``get_simultaneous`` in ``forward_mqa`` never has to grow the
         buffer at runtime (which would raise once the workspace is locked).
         """
-        if not is_workspace_manager_initialized():
-            return
         # forward_mqa flattens each request's block to query_len decode rows,
         # and query_len is bounded by the reorder threshold.
         B = (
@@ -82,13 +170,12 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         )
         # DCP all-gathers the query heads before forward_mqa.
         q_num_heads = self.num_heads * self.dcp_world_size
-        max_splits = _compute_num_kv_splits(
+        reserve_triton_mla_decode_workspace(
+            B,
+            q_num_heads,
             self.model_config.max_model_len,
+            self.mla_dims.kv_lora_rank,
             current_platform.num_compute_units(),
-        )
-        lse_dim = self.mla_dims.kv_lora_rank + 1
-        current_workspace_manager().get_simultaneous(
-            ((B, q_num_heads, max_splits, lse_dim), torch.float32),
         )
 
 
@@ -224,6 +311,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             self.supports_quant_query_input = False
 
+        # Cached once: num_kv_splits is recomputed per forward, but the CU
+        # count is not.
         self._sm_count = current_platform.num_compute_units()
 
     def forward_mqa(
@@ -241,40 +330,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
-        q_num_heads = q.shape[1]
-        o = torch.zeros(
-            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
-        )
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
-
-        # For batch invariance, use only 1 split to ensure deterministic reduction
-        if envs.VLLM_BATCH_INVARIANT:
-            num_kv_splits = 1
-        else:
-            num_kv_splits = _compute_num_kv_splits(
-                attn_metadata.max_seq_len, self._sm_count
-            )
-
-        # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
-        # merge partial attention outputs across splits. The scratch is served
-        # from the shared workspace (reserved at max in the metadata builder), so
-        # there is no per-call allocation on the decode hot path. Fall back to a
-        # direct allocation when the workspace manager is not initialized (e.g.
-        # unit tests without a GPUModelRunner).
-        logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
-        if is_workspace_manager_initialized():
-            (attn_logits,) = current_workspace_manager().get_simultaneous(
-                (logits_shape, torch.float32),
-            )
-        else:
-            attn_logits = torch.empty(
-                logits_shape, dtype=torch.float32, device=q.device
-            )
-
-        # Add a head dim of 1
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
-        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
-        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
@@ -306,23 +361,15 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 # Non-causal draft block: every row sees the same prefix.
                 seq_lens = seq_lens.repeat_interleave(query_len)
 
-        # Run MQA — always pass layer scales. When KV cache is
-        # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
-        decode_attention_fwd(
+        return triton_mla_decode_forward(
             q,
             kv_c_and_k_pe_cache,
-            kv_c_cache,
-            o,
-            lse,
             block_table,
             seq_lens,
-            attn_logits,
-            num_kv_splits,
+            attn_metadata.max_seq_len,
             self.scale,
-            PAGE_SIZE,
-            k_scale=layer._k_scale,
-            v_scale=layer._k_scale,
-            is_mla=True,
+            self.kv_lora_rank,
+            layer._k_scale,
+            self._sm_count,
+            q.dtype,
         )
-
-        return o, lse
