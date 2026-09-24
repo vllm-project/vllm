@@ -324,7 +324,7 @@ You can find more information about vLLM's wheels in
         # Install dependencies
         pip install --upgrade numba \
             scipy \
-            huggingface-hub[cli] \
+            huggingface-hub \
             setuptools_scm
         pip install -r requirements/rocm.txt
 
