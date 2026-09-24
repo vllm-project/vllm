@@ -113,7 +113,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @staticmethod
@@ -248,7 +248,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             positions,
             self.rotary_emb.cos_sin_cache,
             self.wo_a,
-            self.wo_b,
+            self._wo_b_proj,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -627,7 +627,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             positions,
             self.rotary_emb.cos_sin_cache,
             self.wo_a,
-            self.wo_b,
+            self._wo_b_proj,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,

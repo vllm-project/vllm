@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
+import torch
 from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
@@ -37,7 +38,7 @@ from vllm.config import (
     WatermarkConfig,
     update_config,
 )
-from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
@@ -287,6 +288,46 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
 
     with pytest.raises(AssertionError, match="divisible by"):
         VllmConfig.validate_block_size(config)
+
+
+def test_nixl_dcp_check_skipped_for_submodel_config():
+    # with_hf_config() builds a submodule view of the config (e.g. a
+    # multimodal model's text stack) whose architecture list is empty.
+    # Re-running VllmConfig validation on it is unsafe: the NIXL DCP check
+    # reads use_mla, which resolves the architecture registry.
+    model_config = ModelConfig("Qwen/Qwen2-VL-2B-Instruct", max_model_len=2048)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        device_config=DeviceConfig(device="cpu"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+    submodel_config = vllm_config.with_hf_config(model_config.hf_text_config)
+    assert submodel_config.model_config.is_submodel_config
+    assert submodel_config.model_config.architectures == []
+    assert submodel_config.model_config.use_mla is False
+
+
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
+    # Pretend the model has a single KV head so the DCP feasibility checks
+    # pass and the MLA-only assert is what actually fires.
+    monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
+    with pytest.raises(ValidationError, match="only supported for MLA models"):
+        VllmConfig(
+            model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                distributed_executor_backend="mp",
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="NixlConnector",
+                kv_role="kv_both",
+            ),
+        )
 
 
 def test_compile_config_repr_succeeds():
@@ -609,6 +650,70 @@ def test_breakable_cudagraph_platform_default(
 
     try:
         assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "case,hidden,heads,intermediate,tp,expected",
+    [
+        ("bf16", 2048, (16, 8), 6144, 1, True),
+        ("bi-off", 2048, (16, 8), 6144, 1, False),
+        ("opt-out", 2048, (16, 8), 6144, 1, False),
+        ("eager", 2048, (16, 8), 6144, 1, False),
+        ("sp", 2048, (16, 8), 6144, 1, False),
+        ("fp16", 2048, (16, 8), 6144, 1, False),
+        ("quantized", 2048, (16, 8), 6144, 1, False),
+        ("untuned", 4096, (32, 32), 11008, 1, False),
+        ("tp4-tuned", 4096, (8, 2), 12288, 4, True),
+        ("list-intermediate", 2048, (16, 8), [2048, 4096], 1, False),
+        ("no-table", 2048, None, 6144, 1, False),
+    ],
+)
+def test_batch_invariant_breakable_cudagraph(
+    monkeypatch, case, hidden, heads, intermediate, tp, expected
+):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.model_executor.determinism import batch_invariant_configs as bi_configs
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0" if case == "bi-off" else "1")
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    if case == "opt-out":
+        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    table = None if case == "no-table" else {(12288, 2048): None, (6144, 4096): None}
+    monkeypatch.setattr(current_platform, "get_device_capability", lambda: None)
+    monkeypatch.setattr(bi_configs, "_get_tuned_matmul_arch_family", lambda cap: "test")
+    monkeypatch.setattr(
+        bi_configs,
+        "_BATCH_INVARIANT_MATMUL_TUNED_CONFIGS",
+        {"test": table} if table else {},
+    )
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = object.__new__(VllmConfig)
+    config.model_config = SimpleNamespace(
+        architectures=["Qwen3ForCausalLM"],
+        enforce_eager=case == "eager",
+        dtype=torch.float16 if case == "fp16" else torch.bfloat16,
+        quantization="fp8" if case == "quantized" else None,
+        hf_text_config=SimpleNamespace(intermediate_size=intermediate),
+        get_hidden_size=lambda: hidden,
+        get_head_size=lambda: 128,
+        get_num_attention_heads=lambda pc: heads[0],
+        get_num_kv_heads=lambda pc: heads[1],
+    )
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=tp)
+    config.compilation_config = (
+        CompilationConfig(pass_config=PassConfig(enable_sp=True))
+        if case == "sp"
+        else CompilationConfig()
+    )
+    try:
+        assert config._maybe_enable_breakable_cudagraph() is expected
         if expected:
             assert config.compilation_config.mode == CompilationMode.NONE
     finally:
@@ -1082,10 +1187,11 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
 
 def test_v1_model_runner_rejects_v2_only_features():
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             prefill_context_parallel_size=2,
-            enable_batch_sharded_sampling=False,
+            distributed_executor_backend="mp",
         ),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         speculative_config=None,
         model_config=None,
     )
@@ -1243,6 +1349,47 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+def test_v1_model_runner_drops_async_scheduling_with_pipeline_parallelism(monkeypatch):
+    """PP>1 must stay buildable whenever the V1 model runner is selected, such
+    as the external_launcher fallback; async scheduling is dropped instead."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is False
+
+
+def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
+    """Only the async combination desyncs the grammar FSM (#45014), so plain
+    PP>1 must stay usable on the V1 model runner."""
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
+
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
+
+    config.scheduler_config.async_scheduling = True
+    unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
+    assert "pipeline parallelism with async scheduling" in unsupported
 
 
 def test_data_parallel_rpc_port_has_fixed_default():
