@@ -24,12 +24,9 @@ import torch
 from torch import nn
 
 from vllm.config import ModelConfig
-from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.transformers_utils.processor import get_processor, get_processor_config
 from vllm.triton_utils import tl, triton
-
-logger = init_logger(__name__)
 
 # Default tile size along the flattened element axis. 4096 keeps each
 # program's payload large enough to amortise launch overhead while
@@ -245,12 +242,9 @@ class FusedMMInputNorm(CustomOp):
       It is ``uint8`` when ``mm_device_do_normalize`` is enabled (raw bytes
       travel to the device unprocessed) and equals ``visual_dtype``
       otherwise.
-    * Compute dtype — exposed via the ``compute_dtype`` property and set by
-      the constructor's ``dtype`` argument. It is the precision used to
-      store and apply ``weight`` / ``bias``; normally ``torch.float32``.
-    * Output dtype — the ``visual_dtype`` argument of ``forward_*``. It
-      controls the output tensor dtype only and is independent of the
-      compute dtype (e.g. compute fp32, emit bf16).
+    * Output dtype — the ``visual_dtype`` argument of ``forward_*``. The
+      computation itself is always fp32, independent of the output dtype
+      (e.g. compute fp32, emit bf16).
 
     Platform dispatch:
 
@@ -268,7 +262,6 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
-        dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
 
@@ -281,34 +274,17 @@ class FusedMMInputNorm(CustomOp):
         assert rescale_factor != 0.0, "rescale_factor must be non-zero"
 
         self.channel = channel
-        self._compute_dtype = dtype
 
         # Model construction can set the accelerator as PyTorch's default
         # device; build the buffers on CPU first, then move them over.
-        mean = torch.tensor(image_mean, dtype=dtype, device="cpu")
-        std = torch.tensor(image_std, dtype=dtype, device="cpu")
+        mean = torch.tensor(image_mean, dtype=torch.float32, device="cpu")
+        std = torch.tensor(image_std, dtype=torch.float32, device="cpu")
         device = torch.get_default_device()
         self.register_buffer("weight", (rescale_factor / std).to(device))
         self.register_buffer("bias", (-mean / std).to(device))
 
-        if self.compute_dtype != torch.float32:
-            logger.warning_once(
-                "FusedMMInputNorm is initialized with compute dtype=%s, which "
-                "is not torch.float32. The per-channel weight/bias are stored "
-                "and applied at this reduced precision, which can cause "
-                "precision loss during rescale + normalise. Recommend "
-                "dtype=torch.float32 for computation; use visual_dtype in "
-                "forward() to select the output tensor dtype.",
-                self.compute_dtype,
-            )
-
     # Raw pixels arrive as uint8 (device-side normalisation is active).
     input_dtype: torch.dtype | None = torch.uint8
-
-    @property
-    def compute_dtype(self) -> torch.dtype:
-        """The dtype used for internal computation (may differ from output)."""
-        return self._compute_dtype
 
     # ------------------------------------------------------------------
     # Internal helpers shared by the platform-specific forward_* methods
@@ -344,7 +320,8 @@ class FusedMMInputNorm(CustomOp):
         patches, size = self._unpack_2d(pixel_values)
         patch_size = self._patch_size(size)
 
-        x = pixel_values.to(self._compute_dtype).view(patches, self.channel, patch_size)
+        # weight/bias are fp32, so type promotion makes the arithmetic fp32
+        x = pixel_values.view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
@@ -375,13 +352,14 @@ class FusedMMInputNorm(CustomOp):
         bandwidth saving of transferring uint8 pixel_values. The fused
         kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         """
-        if pixel_values.dtype == torch.uint8 and self.weight.dtype == torch.float32:
-            return torch.ops.vllm.xpu_fused_input_norm(
-                pixel_values, self.weight, self.bias, visual_dtype
-            )
-
-        # Fall back to native for unsupported dtypes on XPU.
-        return self.forward_native(pixel_values, visual_dtype)
+        # The out-of-tree XPU kernel only supports the uint8 input that
+        # device-side normalisation guarantees; fail loudly otherwise.
+        assert pixel_values.dtype == torch.uint8, (
+            f"xpu_fused_input_norm requires uint8 input, got {pixel_values.dtype}"
+        )
+        return torch.ops.vllm.xpu_fused_input_norm(
+            pixel_values, self.weight, self.bias, visual_dtype
+        )
 
     def forward_oot(
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
@@ -424,5 +402,4 @@ def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
         image_std=params.image_std,
         rescale_factor=params.rescale_factor,
         channel=channel,
-        dtype=torch.float32,
     )

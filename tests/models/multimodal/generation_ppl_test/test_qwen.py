@@ -97,8 +97,11 @@ class TestMMDeviceDoNormalize:
         ctx.model_config.multimodal_config.mm_device_do_normalize = True
         input_norm = build_mm_input_norm(ctx.model_config).to(_DEVICE_TYPE)
 
+        # With normalisation disabled, the processor emits raw uint8 pixels,
+        # matching the production mm_device_do_normalize path.
+        assert pixel_values_without_normalize.dtype == torch.uint8
         pixel_values_do_input_norm = input_norm(
-            pixel_values_without_normalize.to(dtype).to(_DEVICE_TYPE), dtype
+            pixel_values_without_normalize.to(_DEVICE_TYPE), dtype
         )
 
         torch.testing.assert_close(
