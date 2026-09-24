@@ -89,7 +89,6 @@ ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
     "auto",
     "hf",
-    "slow",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -148,7 +147,6 @@ class ModelConfig:
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
       if available, otherwise it will use the "hf" tokenizer.
     - "hf" will use the fast tokenizer if available.
-    - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
