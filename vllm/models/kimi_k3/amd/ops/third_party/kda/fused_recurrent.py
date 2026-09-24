@@ -352,11 +352,18 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    # Tuned on MI355X (gfx950). A single wave naturally vectorizes the
-    # contiguous K=128 loads as bf16x2/fp32x2, while BV=4 exposes enough
-    # parallelism for decode-shaped launches.
     if use_gate_in_kernel:
-        BV, num_warps, num_stages = 4, 1, 3
+        # Tuned on MI355X (gfx950). A single wave naturally vectorizes the
+        # contiguous K=128 loads as bf16x2/fp32x2. Increase BV as the number
+        # of sequence-heads grows to avoid redundant q/k/g traffic.
+        head_sequences = N * H
+        if head_sequences <= 24:
+            BV, num_stages = 4, 3
+        elif head_sequences <= 192:
+            BV, num_stages = 8, 2
+        else:
+            BV, num_stages = 16, 2
+        num_warps = 1
     else:
         BV, num_warps, num_stages = 8, 1, 2
     grid = (cdiv(V, BV) * N * H,)
