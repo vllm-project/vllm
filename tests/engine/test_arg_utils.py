@@ -5,6 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
+from unittest.mock import patch
 
 import pytest
 from pydantic import Field
@@ -101,6 +102,26 @@ def test_memory_utilization_cli_aliases(option):
     args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
 
     assert args.gpu_memory_utilization == 0.8
+
+
+@pytest.mark.parametrize(
+    "options,num_workers,cache_gb",
+    [
+        ([], 1, 4),
+        (["--mm-processor-num-workers", "3", "--mm-processor-cache-gb", "0"], 3, 0),
+    ],
+)
+def test_mm_processor_num_workers_cli(options, num_workers, cache_gb, monkeypatch):
+    monkeypatch.setattr("vllm.platforms.current_platform.device_type", "cpu")
+    assert EngineArgs().mm_processor_num_workers == 1
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert args.mm_processor_num_workers == num_workers
+    assert args.mm_processor_cache_gb == cache_gb
+    with patch("vllm.engine.arg_utils.ModelConfig") as model_config:
+        args.create_model_config()
+    assert model_config.call_args.kwargs["mm_processor_num_workers"] == num_workers
+    assert model_config.call_args.kwargs["mm_processor_cache_gb"] == cache_gb
 
 
 def test_device_memory_utilization_property():

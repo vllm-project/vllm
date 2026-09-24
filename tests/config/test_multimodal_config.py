@@ -54,6 +54,79 @@ def test_mm_hasher_algorithm_invalid():
         MultiModalConfig(mm_hasher_algorithm="md5")  # type: ignore[arg-type]
 
 
+def test_mm_processor_num_workers_default():
+    config = MultiModalConfig()
+    assert config.mm_processor_num_workers == 1
+    assert config.mm_processor_cache_gb == 4
+
+
+@pytest.mark.parametrize("num_workers", [-1, 0, 1.5])
+def test_mm_processor_num_workers_invalid(num_workers):
+    with pytest.raises(ValueError, match="mm_processor_num_workers"):
+        MultiModalConfig(mm_processor_num_workers=num_workers)
+
+
+@pytest.mark.parametrize("cache_gb", [0.5, 4])
+def test_mm_processor_workers_require_cache_disabled(cache_gb):
+    with pytest.raises(ValueError, match="--mm-processor-cache-gb 0"):
+        MultiModalConfig(mm_processor_num_workers=2, mm_processor_cache_gb=cache_gb)
+
+
+@pytest.mark.parametrize("device", [None, "cpu", "cpu:0", torch.device("cpu")])
+def test_mm_processor_workers_allow_cpu_without_changing_hash(device):
+    config = MultiModalConfig(
+        mm_processor_num_workers=2,
+        mm_processor_cache_gb=0,
+        mm_processor_kwargs={"device": device},
+    )
+    config.validate_mm_processor_device(None)
+    assert config.compute_hash() == MultiModalConfig().compute_hash()
+
+
+@pytest.mark.parametrize(
+    "device", ["cuda", "cuda:1", torch.device("cuda", 1), "xpu", "mps"]
+)
+@pytest.mark.parametrize(
+    "group", [None, "images_kwargs", "videos_kwargs", "audio_kwargs"]
+)
+def test_mm_processor_workers_reject_accelerators_on_cpu_platform(device, group):
+    kwargs: dict[str, object] = (
+        {"device": device}
+        if group is None
+        else {"device": "cpu", group: {"device": device}}
+    )
+    with (
+        patch("vllm.platforms.current_platform.device_type", "cpu"),
+        pytest.raises(ValueError, match="only supports CPU"),
+    ):
+        MultiModalConfig(
+            mm_processor_num_workers=2,
+            mm_processor_cache_gb=0,
+            mm_processor_kwargs=kwargs,
+        )
+
+
+@pytest.mark.parametrize("device", [None, "cpu", torch.device("cpu")])
+def test_mm_processor_workers_allow_nested_cpu_devices(device):
+    kwargs: dict[str, object] = {
+        group: {"device": device}
+        for group in ("images_kwargs", "videos_kwargs", "audio_kwargs")
+    }
+    MultiModalConfig(
+        mm_processor_num_workers=2, mm_processor_cache_gb=0, mm_processor_kwargs=kwargs
+    )
+    MultiModalConfig.validate_cpu_mm_processor_kwargs(kwargs)
+
+
+def test_mm_processor_workers_reject_invalid_device():
+    with pytest.raises(ValueError, match='Invalid "device" in mm_processor_kwargs'):
+        MultiModalConfig(
+            mm_processor_num_workers=2,
+            mm_processor_cache_gb=0,
+            mm_processor_kwargs={"device": "not-a-device"},
+        )
+
+
 def test_mm_encoder_attn_backend_hash_updates():
     base_hash = MultiModalConfig().compute_hash()
     overridden_hash = MultiModalConfig(
@@ -108,6 +181,17 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
 
 _MULTIMODAL_MODEL = "llava-hf/llava-1.5-7b-hf"
 _TEXT_ONLY_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
+def test_mm_processor_num_workers_model_config():
+    """ModelConfig forwards worker selection without changing computation."""
+    base_config = ModelConfig(_MULTIMODAL_MODEL, mm_processor_cache_gb=0)
+    config = ModelConfig(
+        _MULTIMODAL_MODEL, mm_processor_num_workers=2, mm_processor_cache_gb=0
+    )
+    assert config.multimodal_config is not None
+    assert config.multimodal_config.mm_processor_num_workers == 2
+    assert config.compute_hash() == base_config.compute_hash()
 
 
 def _make_mm_prefix_model_config(
@@ -275,11 +359,14 @@ def _resolve_mm_processor_device(
     ec_role: ECRole | None,
     mm_tensor_ipc: str = "torch_shm",
     device: str | None = None,
+    num_workers: int = 1,
 ) -> str | None:
     """Run the `auto` resolution and report where the processor ended up."""
     mm_config = MultiModalConfig(
         mm_processor_kwargs={} if device is None else {"device": device},
         mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
+        mm_processor_num_workers=num_workers,
+        mm_processor_cache_gb=0,
     )
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = mm_config
@@ -293,6 +380,7 @@ def _resolve_mm_processor_device(
 
     with patch("vllm.platforms.current_platform.device_type", "cuda"):
         VllmConfig._resolve_mm_processor_device(vllm_config)
+        VllmConfig._validate_mm_processor_device(vllm_config)
     return mm_config.get_mm_processor_device_type()
 
 
@@ -319,6 +407,15 @@ def test_auto_mm_processor_device_needs_a_device_capable_transport():
 
 def test_auto_mm_processor_device_leaves_an_explicit_request_alone():
     assert _resolve_mm_processor_device(ec_role="ec_producer", device="cpu") == "cpu"
+
+
+def test_mm_processor_workers_reject_auto_accelerator_placement():
+    with pytest.raises(ValueError, match="only supports CPU"):
+        _resolve_mm_processor_device(ec_role="ec_producer", num_workers=2)
+    assert (
+        _resolve_mm_processor_device(ec_role="ec_producer", num_workers=2, device="cpu")
+        == "cpu"
+    )
 
 
 @pytest.mark.parametrize(

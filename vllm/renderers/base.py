@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import multiprocessing
 import time
 import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -43,10 +44,11 @@ from vllm.multimodal.parse import (
     MultiModalUUIDItems,
     parse_mm_uuids,
 )
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor, TimingContext
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -62,6 +64,12 @@ from .inputs import (
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
+from .mm_process import (
+    apply_mm_processor,
+    ensure_mm_process_ready,
+    initialize_mm_process,
+    validate_mm_process_inputs,
+)
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -122,6 +130,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
         self._mm_executor = ThreadPoolExecutor(max_workers=1)
         self._resources.callback(self._mm_executor.shutdown, wait=False)
+        self._mm_process_executor: ProcessPoolExecutor | None = None
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -159,6 +168,8 @@ class BaseRenderer(ABC, Generic[_T]):
             # is 0). Lives in the API-server process only.
             mm_config = config.model_config.multimodal_config
             if mm_config is not None:
+                if mm_config.mm_processor_num_workers > 1:
+                    mm_config.validate_mm_processor_workers()
                 maybe_init_mm_gpu_ipc_pool(
                     mm_config.mm_ipc_gpu_memory_gb,
                     config.parallel_config._api_process_count,
@@ -185,6 +196,30 @@ class BaseRenderer(ABC, Generic[_T]):
             self._resources.callback(self._mm_processor_cache.close)
         if self._mm_processor_only_cache:
             self._resources.callback(self._mm_processor_only_cache.close)
+
+        mm_config = config.model_config.multimodal_config
+        if (
+            self.mm_processor is not None
+            and mm_config is not None
+            and mm_config.mm_processor_num_workers > 1
+        ):
+            maybe_register_config_serialize_by_value()
+            mp_context = multiprocessing.get_context("spawn")
+            self._mm_process_executor = ProcessPoolExecutor(
+                max_workers=mm_config.mm_processor_num_workers,
+                # Never fork the API server's threads or initialized accelerators.
+                mp_context=mp_context,
+                initializer=partial(
+                    initialize_mm_process,
+                    config,
+                    self.tokenizer,
+                    mp_context.Barrier(mm_config.mm_processor_num_workers),
+                ),
+            )
+            self._resources.callback(
+                self._mm_process_executor.shutdown, wait=True, cancel_futures=True
+            )
+            self._process_multimodal_async = self._process_multimodal_mp_async
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -263,6 +298,24 @@ class BaseRenderer(ABC, Generic[_T]):
         # join (the future pointer does not), so warmup() can still tell it
         # already ran.
         if self._mm_warmup_done:
+            return
+        if self._mm_process_executor is not None:
+            mm_config = self.model_config.get_multimodal_config()
+            futures = [
+                self._mm_process_executor.submit(ensure_mm_process_ready)
+                for _ in range(mm_config.mm_processor_num_workers)
+            ]
+            # submit() wakes the manager before spawning a worker. Wake it again
+            # after all workers exist so a failed initializer cannot leave the
+            # manager watching only workers blocked at the readiness barrier.
+            futures.append(
+                self._mm_process_executor.submit(
+                    ensure_mm_process_ready, synchronize=False
+                )
+            )
+            for future in futures:
+                future.result()
+            self._mm_warmup_done = True
             return
         try:
             # prevent MM processor hangs
@@ -371,8 +424,10 @@ class BaseRenderer(ABC, Generic[_T]):
         # _mm_executor and touches the mm_processor_cache, so it must be
         # quiescent before _resources.close() tears down the executors and
         # the cache (both are registered as resources in __init__).
-        self._join_mm_warmup()
-        self._resources.close()
+        try:
+            self._join_mm_warmup()
+        finally:
+            self._resources.close()
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -829,7 +884,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
-    def _process_multimodal(
+    def _prepare_multimodal(
         self,
         prompt: list[int],
         mm_data: MultiModalDataDict,
@@ -838,7 +893,7 @@ class BaseRenderer(ABC, Generic[_T]):
         media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
-    ) -> "MultiModalInput":
+    ) -> tuple[MMProcessorInputs, str]:
         mm_processor = self.get_mm_processor()
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
@@ -862,13 +917,70 @@ class BaseRenderer(ABC, Generic[_T]):
                 else self._mm_processor_cache
             ),
         )
+        return mm_processor_inputs, mm_req_id
+
+    def _process_multimodal(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> MultiModalInput:
+        inputs, mm_req_id = self._prepare_multimodal(
+            prompt,
+            mm_data,
+            mm_uuids,
+            mm_processor_kwargs,
+            media_io_kwargs,
+            skip_mm_cache=skip_mm_cache,
+        )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+        if self._mm_process_executor is not None:
+            validate_mm_process_inputs(inputs)
+            mm_inputs, timing = self._mm_process_executor.submit(
+                apply_mm_processor, inputs, mm_timing_ctx
+            ).result()
+            self._record_mm_process_timing(mm_req_id, timing)
+            return mm_inputs
 
         with set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+            mm_inputs = self.get_mm_processor().apply(inputs, mm_timing_ctx)
 
         self.update_mm_cache_stats()
 
+        return mm_inputs
+
+    def _record_mm_process_timing(self, mm_req_id: str, timing: TimingContext) -> None:
+        self._mm_timing_registry.get(mm_req_id).stage_secs.update(timing.stage_secs)
+
+    async def _process_multimodal_mp_async(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> MultiModalInput:
+        assert self._mm_process_executor is not None
+        inputs, mm_req_id = self._prepare_multimodal(
+            prompt,
+            mm_data,
+            mm_uuids,
+            mm_processor_kwargs,
+            media_io_kwargs,
+            skip_mm_cache=skip_mm_cache,
+        )
+        validate_mm_process_inputs(inputs)
+        timing = self._mm_timing_registry.get(mm_req_id)
+        mm_inputs, timing = await asyncio.wrap_future(
+            self._mm_process_executor.submit(apply_mm_processor, inputs, timing)
+        )
+        self._record_mm_process_timing(mm_req_id, timing)
         return mm_inputs
 
     def _process_tokens(
@@ -877,9 +989,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> TokensInput | MultiModalInput:
-        """Process token inputs, with multimodal preprocessing offloaded
-        to the shared thread pool in the async variant.
-        """
+        """Process token inputs, offloading multimodal work in the async variant."""
         prompt_token_ids = prompt["prompt_token_ids"]
 
         engine_input: TokensInput | MultiModalInput

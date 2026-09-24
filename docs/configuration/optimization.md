@@ -79,6 +79,55 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+## CPU Multimodal Preprocessing
+
+If concurrent multimodal requests are bottlenecked by CPU preprocessing, set
+`--mm-processor-num-workers` to a value greater than `1` to use spawned worker
+processes per API renderer. The default, `1`, retains the existing single-threaded
+multimodal preprocessing path. This is separate from `--renderer-num-workers`,
+which controls the renderer's thread pool.
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+    --mm-processor-num-workers 4 \
+    --mm-processor-cache-gb 0 \
+    --mm-processor-device cpu
+```
+
+Process workers support **CPU preprocessing only**. Non-CPU `device` values in
+`--mm-processor-kwargs`, including nested `images_kwargs`, `videos_kwargs`, and
+`audio_kwargs`, are rejected, as is automatic accelerator placement on an EC
+encoder instance. Use `--mm-processor-device cpu` to override that automatic
+placement; an explicit `device` in the processor kwargs takes precedence.
+
+The multimodal processor cache must be disabled with `--mm-processor-cache-gb 0`.
+Content hashes are preserved, so prefix caching does **not** need to be disabled.
+Workers do not add API servers or change API request admission limits or engine
+scheduling limits.
+
+Each worker loads its own processor and tokenizer and uses additional host
+memory. The worker count multiplies across API renderers, so budget memory and
+CPU cores for the entire deployment. Sending inputs to workers and returning
+processed outputs adds serialization and inter-process communication (IPC)
+overhead, which can outweigh parallelism for small inputs.
+
+The process pool's CPU tensor transport uses shared memory (`/dev/shm` on Linux).
+Docker's default 64 MiB shared-memory allocation can be insufficient for large
+image batches. Provision adequate shared memory with a suitably sized
+`--shm-size` or `--ipc=host` where appropriate. Budget for concurrently in-flight
+tensors across all workers, not just the compressed input media.
+
+Budget intra-op threads as well as processes to avoid oversubscribing CPU cores.
+Each worker uses one PyTorch intra-op thread by default, following
+`set_default_torch_num_threads`. Set `OMP_NUM_THREADS` to override the per-worker
+thread count; account for all API renderers, their workers, and other CPU work
+when choosing it. The thread count is not divided by the number of workers.
+
+Benchmark representative inputs and concurrency on the target hardware with `1`
+and several larger worker counts, measuring throughput, time to first token,
+CPU utilization, host memory, and shared-memory usage. Exclude process startup
+and warmup from steady-state comparisons; more workers are not always faster.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.

@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypeVar, final, overload
+from typing import Any, Literal, TypeAlias, TypeVar, cast, final, overload
 
 import torch
 from pydantic import (
@@ -92,7 +92,9 @@ class MultiModalDummyOptions(dict[str, BaseDummyOptions]):
     @overload
     def get(self, key: str, default: _T, /) -> BaseDummyOptions | _T: ...
 
-    def get(self, key: str, default: object = None, /) -> object:
+    # The modality-specific overloads refine dict.get's return type. Pylance
+    # reports this override on the implementation, unlike mypy above.
+    def get(self, key: str, default: object = None, /) -> object:  # pyright: ignore[reportIncompatibleMethodOverride]
         return super().get(key, default)
 
     @classmethod
@@ -169,6 +171,17 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
+    mm_processor_num_workers: int = Field(default=1, ge=1)
+    """Number of CPU multimodal preprocessing workers per API renderer.
+
+    `1` keeps the existing single-threaded preprocessing path. Values greater
+    than `1` use spawned worker processes and require
+    `--mm-processor-cache-gb 0` and CPU processor placement. Each process loads
+    its own processor and tokenizer, increasing memory usage, and both inputs
+    and outputs incur IPC overhead. API admission limits are unchanged.
+
+    Each worker uses one PyTorch intra-op thread by default. Set
+    `OMP_NUM_THREADS` to override the per-worker thread count."""
     mm_device_do_normalize: bool | None = True
     """
     Move the do_normalize computation in the mm preprocessing to before the ViT, 
@@ -329,10 +342,11 @@ class MultiModalConfig:
         assert isinstance(value, str), (
             "mm_encoder_attn_backend must be a string or an AttentionBackendEnum."
         )
-        return AttentionBackendEnum[value.upper()]
+        return cast(AttentionBackendEnum, AttentionBackendEnum[value.upper()])
 
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
+        self.validate_mm_processor_workers()
         if self.mm_processor_cache_type != "shm" and (
             self.mm_shm_cache_max_object_size_mb
             != MultiModalConfig.mm_shm_cache_max_object_size_mb
@@ -372,6 +386,39 @@ class MultiModalConfig:
                     f"Parent directory for FP8 scale save path not found: {save_parent}"
                 )
         return self
+
+    def validate_mm_processor_workers(self) -> None:
+        """Validate process-worker constraints, including resolved placement."""
+        if self.mm_processor_num_workers == 1:
+            return
+        if self.mm_processor_cache_gb > 0:
+            raise ValueError(
+                "--mm-processor-num-workers > 1 requires --mm-processor-cache-gb 0."
+            )
+        self.validate_cpu_mm_processor_kwargs(self.mm_processor_kwargs)
+
+    @staticmethod
+    def validate_cpu_mm_processor_kwargs(
+        mm_processor_kwargs: Mapping[str, object] | None,
+    ) -> None:
+        """Reject non-CPU devices in startup or per-request worker kwargs."""
+        kwargs = mm_processor_kwargs or {}
+        kwargs_groups = [kwargs]
+        for key in ("images_kwargs", "videos_kwargs", "audio_kwargs"):
+            modality_kwargs = kwargs.get(key)
+            if isinstance(modality_kwargs, Mapping):
+                kwargs_groups.append(modality_kwargs)
+        for group in kwargs_groups:
+            if MultiModalConfig._get_device_type(group.get("device")) not in (
+                None,
+                "cpu",
+            ):
+                raise ValueError(
+                    "--mm-processor-num-workers > 1 only supports CPU "
+                    "preprocessing. Set --mm-processor-device cpu and remove any "
+                    'non-CPU "device" from --mm-processor-kwargs, including '
+                    "modality-specific kwargs."
+                )
 
     @staticmethod
     def fold_mm_processor_device(
@@ -424,11 +471,13 @@ class MultiModalConfig:
 
         Raises:
             ValueError: If `device` is not something `torch.device` accepts.
-                `validate_mm_processor_device` is what surfaces this during
-                startup, so the value is only parsed once.
+                Device validation surfaces this during startup.
 
         """
-        device = (self.mm_processor_kwargs or {}).get("device")
+        return self._get_device_type((self.mm_processor_kwargs or {}).get("device"))
+
+    @staticmethod
+    def _get_device_type(device: object) -> str | None:
         if device is None:
             return None
         try:
@@ -442,8 +491,8 @@ class MultiModalConfig:
     def validate_mm_processor_device(self, ec_config: ECTransferConfig | None) -> None:
         """Check `mm_processor_kwargs["device"]` for this deployment.
 
-        The only place the requested device is validated, so it runs even on a
-        CPU-only platform: the value is parsed before any early return.
+        Runs after automatic device placement, including on a CPU-only
+        platform: the value is parsed before any early return.
 
         Args:
             ec_config: The deployment's EC config, or None when it is not an
@@ -454,9 +503,11 @@ class MultiModalConfig:
         Raises:
             ValueError: If the requested device is not a torch device, or if it
                 is the accelerator on an instance that also runs the language
-                model.
+                model or uses CPU preprocessing workers.
 
         """
+        self.validate_mm_processor_workers()
+
         from vllm.platforms import current_platform
 
         device_type = self.get_mm_processor_device_type()

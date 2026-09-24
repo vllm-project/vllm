@@ -614,6 +614,7 @@ class EngineArgs:
         MultiModalConfig, "media_io_kwargs"
     )
     mm_processor_kwargs: dict[str, Any] | None = MultiModalConfig.mm_processor_kwargs
+    mm_processor_num_workers: int = MultiModalConfig.mm_processor_num_workers
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
@@ -1419,6 +1420,10 @@ class EngineArgs:
             "--mm-processor-kwargs", **multimodal_kwargs["mm_processor_kwargs"]
         )
         multimodal_group.add_argument(
+            "--mm-processor-num-workers",
+            **multimodal_kwargs["mm_processor_num_workers"],
+        )
+        multimodal_group.add_argument(
             "--mm-processor-cache-gb", **multimodal_kwargs["mm_processor_cache_gb"]
         )
         multimodal_group.add_argument(
@@ -1903,6 +1908,7 @@ class EngineArgs:
             skip_mm_profiling=self.skip_mm_profiling,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
+            mm_processor_num_workers=self.mm_processor_num_workers,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,

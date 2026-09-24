@@ -402,6 +402,7 @@ class ModelConfig:
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
+    mm_processor_num_workers: InitVar[int | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
@@ -417,7 +418,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     video_pruning_method: InitVar[str | None] = None
-    mm_tensor_ipc: InitVar[MMTensorIPC] = None
+    mm_tensor_ipc: InitVar[MMTensorIPC | None] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
@@ -534,6 +535,7 @@ class ModelConfig:
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
+        mm_processor_num_workers: int | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_hasher_algorithm: MMHasherAlgorithm | None,
@@ -549,7 +551,7 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         video_pruning_method: str | None,
-        mm_tensor_ipc: MMTensorIPC,
+        mm_tensor_ipc: MMTensorIPC | None,
         mm_ipc_gpu_memory_gb: float | None,
         mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
@@ -753,7 +755,7 @@ class ModelConfig:
             pooler_config_sources.setdefault("use_activation", "pooler_default")
             self._pooler_config_sources = pooler_config_sources
 
-        self.dtype: torch.dtype = _get_and_verify_dtype(
+        self.dtype = _get_and_verify_dtype(
             self.model,
             self.hf_config,
             self.dtype,
@@ -802,6 +804,7 @@ class ModelConfig:
                 enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
+                mm_processor_num_workers=mm_processor_num_workers,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_hasher_algorithm=mm_hasher_algorithm,
@@ -2051,6 +2054,7 @@ class ModelConfig:
           fp32, which is required for RL training-inference consistency
           (the trainer computes logits in fp32).
         """
+        assert isinstance(self.dtype, torch.dtype)
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )

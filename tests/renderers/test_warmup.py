@@ -75,6 +75,7 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     renderer._mm_warmup_future = None
     # MM warmup has not run yet; warmup_mm must actually execute on the mock.
     renderer._mm_warmup_done = False
+    renderer._mm_process_executor = None
     renderer.model_config.max_model_len = 128
     renderer.config.scheduler_config.max_num_batched_tokens = 8192
     renderer.config.scheduler_config.enable_chunked_prefill = True
@@ -328,6 +329,16 @@ class TestBackgroundMmWarmup:
         # future is done after shutdown joined it.
         assert future.done()
         renderer.mm_processor.apply.assert_called_once()
+
+    def test_shutdown_closes_resources_after_background_warmup_failure(self):
+        renderer = _make_renderer_mock({"image": 1})
+        renderer._mm_warmup_future = Future()
+        renderer._mm_warmup_future.set_exception(RuntimeError("worker init failed"))
+
+        with pytest.raises(RuntimeError, match="worker init failed"):
+            renderer.shutdown()
+
+        renderer._resources.close.assert_called_once()
 
 
 class TestEngineStartWarmupHook:
