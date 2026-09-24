@@ -557,7 +557,7 @@ def maybe_fuse_shared_experts(
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: "PretrainedConfig", weight_name: str
+    config: "PreTrainedConfig", weight_name: str
 ) -> int | None:
     """Return the MTP layer index a weight belongs to, or None.
 
@@ -586,7 +586,7 @@ def get_spec_layer_idx_from_weight_name(
 
 
 def skip_spec_layers(
-    weights: Iterable[tuple[str, torch.Tensor]], config: "PretrainedConfig"
+    weights: Iterable[tuple[str, torch.Tensor]], config: "PreTrainedConfig"
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
 
