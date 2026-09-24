@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for the FlashInfer SM90 sparse MLA backend wiring (no GPU).
+"""Tests for the FlashInfer SM90 sparse MLA backend wiring and index packing.
 
 The FlashInfer wrapper and top-k conversion are replaced by CPU recorders;
 the tests pin the contract between the impl and the kernel API: page_size=1
@@ -65,11 +65,17 @@ class FakeState:
     def __init__(self, width, max_tokens=64):
         self.kv_indices = torch.zeros(max_tokens * width, dtype=torch.int32)
         self.kv_len_arr = torch.zeros(max_tokens, dtype=torch.int32)
+        self.kv_indptr = torch.zeros(max_tokens + 1, dtype=torch.int32)
         self.wrapper = FakeWrapper()
         self.plan_calls = []
 
     def plan(self, num_tokens, kv_lens):
         self.plan_calls.append((num_tokens, kv_lens))
+
+    def pack_indices(self, slots):
+        for row in range(slots.shape[0]):
+            start, end = self.kv_indptr[row : row + 2].tolist()
+            self.kv_indices[start:end] = slots[row, : end - start].clamp(min=0)
 
 
 def make_impl(qk_rope, kv_dtype="fp8_e4m3", num_heads=2, topk_width=TOPK):
@@ -113,6 +119,9 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         [6, 5, 4] + [-1] * (TOPK - 3),
         [2] + [-1] * (TOPK - 1),
     ]
+    impl.topk_indices_buffer.copy_(torch.tensor(topk_rows, dtype=torch.int32))
+    state.kv_indptr[1:5] = torch.tensor([8, 13, 16, 17], dtype=torch.int32)
+    state.kv_indptr[5:] = 17
     meta = make_batch(rows, topk_rows, [3])
     meta.state = state
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
@@ -133,11 +142,13 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     ref_slots, ref_counts = ref_convert(
         meta.req_id_per_token, meta.block_table, impl.topk_indices_buffer
     )
-    width = TOPK
-    got_slots = state.kv_indices[: rows * width].view(rows, width)
+    offset = 0
     for t in range(rows):
         k = int(ref_counts[t])
-        assert got_slots[t, :k].tolist() == ref_slots[t, :k].tolist()
+        assert (
+            state.kv_indices[offset : offset + k].tolist() == ref_slots[t, :k].tolist()
+        )
+        offset += k
     assert state.plan_calls == []
 
     assert state.wrapper.run_args is not None
@@ -221,12 +232,50 @@ def test_plan_uses_state_params(monkeypatch):
     args, kwargs = wrapper.plan_args
     (qo, kv, indices, kv_len, heads, ckv, kpe, page, causal, scale) = args
     assert qo.tolist() == [0, 1, 2, 3, 3]  # clamp: rows past 3 have no queries
-    assert kv.tolist() == [i * TOPK for i in (0, 1, 2, 3, 3)]
-    assert kv_len.tolist() == [2, 5, 7, TOPK]  # padded row keeps full width
+    assert kv.tolist() == [0, 2, 7, 14, 14]
+    assert kv_len.tolist() == [2, 5, 7, 0]
     assert (heads, ckv, kpe, page, causal) == (4, HEAD, 64, 1, False)
     assert scale == 576**-0.5
     assert kwargs["q_data_type"] == torch.bfloat16
     assert kwargs["kv_data_type"] == torch.bfloat16
+
+    # Replanning a smaller batch must clear the previous rows' lengths.
+    state.plan(1, torch.tensor([TOPK], dtype=torch.int32))
+    assert state._kv_cpu.tolist() == [0, TOPK, TOPK, TOPK, TOPK]
+    assert state._lens_cpu.tolist() == [TOPK, 0, 0, 0]
+    state.plan(0, torch.empty(0, dtype=torch.int32))
+    assert state._kv_cpu.tolist() == [0, 0, 0, 0, 0]
+    assert state._lens_cpu.tolist() == [0, 0, 0, 0]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("width", [128, 2048, 2176])
+def test_pack_indices_replays_with_updated_offsets(width):
+    """Graph replay packs exact prefixes after row lengths and slots change."""
+    state = sm90_mod._SM90State.__new__(sm90_mod._SM90State)
+    state.kv_indptr = torch.zeros(5, dtype=torch.int32, device="cuda")
+    state.kv_indices = torch.full((4 * width,), -99, dtype=torch.int32, device="cuda")
+    # Exercise a contiguous view with an unaligned starting address.
+    slots = torch.arange(4 * width + 1, dtype=torch.int32, device="cuda")[1:]
+    slots = slots.view(4, width)
+    state.kv_indptr.copy_(torch.tensor([0, 1, 4, 4, 4]))
+    state.pack_indices(slots)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        state.pack_indices(slots)
+
+    for lengths in ([1, 3, 0, 0], [width, 0, 17, width - 1], [0, 0, 0, 0]):
+        offsets = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()])
+        state.kv_indptr.copy_(offsets)
+        state.kv_indices.fill_(-99)
+        slots.add_(1)
+        graph.replay()
+        expected = torch.cat(
+            [slots[row, :length] for row, length in enumerate(lengths)]
+        )
+        torch.testing.assert_close(state.kv_indices[: expected.numel()], expected)
+        assert (state.kv_indices[expected.numel() :] == -99).all()
 
 
 def test_kv_lens_host_formula():
