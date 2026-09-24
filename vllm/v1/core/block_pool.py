@@ -11,6 +11,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -532,7 +533,14 @@ class BlockPool:
                 else None
             )
             block_end = num_tokens
-            curr_mm_idx = -1 if block_start > 0 else 0
+            curr_mm_idx = 0
+            mm_features = request.mm_features
+            if block_start > 0 and mm_features:
+                last_mm_pos = mm_features[-1].mm_position
+                if last_mm_pos.offset + last_mm_pos.length > block_start:
+                    curr_mm_idx, _ = get_mm_features_in_window(
+                        mm_features, block_start, block_end
+                    )
             extra_keys, _ = generate_block_hash_extra_keys(
                 request, block_start, block_end, curr_mm_idx
             )
