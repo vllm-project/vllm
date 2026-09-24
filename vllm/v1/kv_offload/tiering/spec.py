@@ -52,6 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
+import os
 from typing import Any
 
 import torch
@@ -69,7 +70,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _all_workers_barrier
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -307,7 +308,33 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # EngineCore constructs this scheduler-side mapping only after
                 # synchronous worker initialize_from_config RPCs complete, so
                 # every TP worker has already mapped this generation.
-                scheduler_mmap.unlink()
+                # Except under torchrun, where each rank runs its own engine
+                # and there are no such RPCs to order us behind the other ranks'
+                # workers. A world group here means we are one of those ranks;
+                # unlinking early would let a rank that has not opened the path
+                # yet win O_EXCL and map a second, disjoint region.
+                from vllm.distributed import parallel_state
+
+                if parallel_state._WORLD is not None:
+                    _all_workers_barrier()
+                # Unlinking is only safe because we joined a region the workers
+                # already created. Had we won O_EXCL we would be dropping the
+                # name of a region nobody else has mapped, and every worker
+                # opening afterwards would get its own private file.
+                assert not scheduler_mmap._creator, (
+                    "scheduler created the offload region instead of joining it"
+                )
+                if not scheduler_mmap.unlink() and os.path.exists(
+                    scheduler_mmap.mmap_path
+                ):
+                    # Gone already is the normal torchrun case: every rank
+                    # unlinks and only the first one wins. Still present means
+                    # the name is someone else's now, which is worth a warning.
+                    logger.warning(
+                        "Scheduler mmap %s no longer names our region; leaving "
+                        "the pathname in place.",
+                        scheduler_mmap.mmap_path,
+                    )
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
