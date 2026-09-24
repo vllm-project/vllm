@@ -1006,6 +1006,9 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
+    def get_fp8_ds_mla_row_bytes(self) -> int:
+        return 656
+
     @abstractmethod
     def __init__(
         self,

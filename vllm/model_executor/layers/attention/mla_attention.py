@@ -1355,9 +1355,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
-            # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
+            state_content_bytes=(
+                cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
+                if self.kv_cache_dtype == "fp8_ds_mla"
+                else {"nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:

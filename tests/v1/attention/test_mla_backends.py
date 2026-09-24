@@ -214,12 +214,36 @@ def test_masked_mha_routing_is_dimension_specific():
         ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
     ],
 )
+@pytest.mark.parametrize(
+    ("sm120", "kv_lora_rank", "rope_dim", "row_bytes"),
+    [
+        (False, 512, 64, 656),
+        (False, 512, 0, 656),
+        (True, 512, 64, 656),
+        (True, 512, 0, 528),
+        (True, 256, 0, 656),
+    ],
+)
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
-    cache_dtype: str, expected_quant_mode: KVQuantMode
+    cache_dtype: str,
+    expected_quant_mode: KVQuantMode,
+    sm120: bool,
+    kv_lora_rank: int,
+    rope_dim: int,
+    row_bytes: int,
 ):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+        FlashInferMLASparseSM120Impl,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+
+    impl = object.__new__(FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl)
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
     layer = SimpleNamespace(
+        impl=impl,
         kv_cache_dtype=cache_dtype,
-        head_size=576,
+        head_size=kv_lora_rank + rope_dim,
         indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
@@ -234,7 +258,8 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
-        assert spec.page_size_bytes == 64 * 656
+        assert spec.state_content_bytes == row_bytes
+        assert spec.page_size_bytes == 64 * row_bytes
 
 
 @pytest.mark.cpu_test

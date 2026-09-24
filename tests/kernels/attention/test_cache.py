@@ -1014,9 +1014,15 @@ def test_concat_and_cache_ds_mla(
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("block_size", [64, 256])
+@pytest.mark.parametrize(
+    "entry_size,row_padding,page_padding",
+    [(528, 0, 0), (656, 0, 0), (528, 128, 1), (656, 16, 1)],
+)
 @torch.inference_mode()
-def test_concat_and_cache_ds_mla_nope(device: str, block_size: int) -> None:
-    """NoPE matches zero RoPE, clears valid tails, and preserves unused slots."""
+def test_concat_and_cache_ds_mla_nope(
+    device: str, block_size: int, entry_size: int, row_padding: int, page_padding: int
+) -> None:
+    """NoPE matches zero RoPE and preserves unused slots and stride padding."""
     dtype = torch.bfloat16
     if current_platform.is_rocm():
         pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
@@ -1032,28 +1038,51 @@ def test_concat_and_cache_ds_mla_nope(device: str, block_size: int) -> None:
     k_pe = torch.empty(num_tokens, 0, dtype=dtype, device=device)
     zero_k_pe = torch.zeros(num_tokens, 64, dtype=dtype, device=device)
     scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-    kv_cache = torch.full(
+    storage = torch.full(
+        (num_blocks, block_size + page_padding, entry_size + row_padding),
+        0xFF,
+        dtype=torch.uint8,
+        device=device,
+    )
+    kv_cache = storage[:, :block_size, :entry_size]
+    ref_cache = torch.full(
         (num_blocks, block_size, 656), 0xFF, dtype=torch.uint8, device=device
     )
-    ref_cache = kv_cache.clone()
 
     opcheck(
         torch.ops._C_cache_ops.concat_and_cache_mla,
         (kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
-    kv_cache.fill_(0xFF)
+    storage.fill_(0xFF)
     ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale)
     ops.concat_and_cache_mla(
         kv_c, zero_k_pe, ref_cache, slot_mapping, "fp8_ds_mla", scale
     )
 
-    torch.testing.assert_close(kv_cache, ref_cache, atol=0, rtol=0)
-    rows = kv_cache.view(num_blocks * block_size, 656)
-    assert (rows[slot_mapping[:2], 528:] == 0).all()
+    torch.testing.assert_close(kv_cache, ref_cache[..., :entry_size], atol=0, rtol=0)
+    rows = kv_cache.reshape(num_blocks * block_size, entry_size)
+    if entry_size == 656:
+        assert (rows[slot_mapping[:2], 528:] == 0).all()
     untouched = torch.ones(num_blocks * block_size, dtype=torch.bool, device=device)
     untouched[slot_mapping[:2]] = False
     assert (rows[untouched] == 0xFF).all()
+    assert (storage[..., entry_size:] == 0xFF).all()
+    assert (storage[:, block_size:] == 0xFF).all()
+
+    if entry_size == 528:
+        with pytest.raises(RuntimeError, match="528-byte rows with pe_dim == 0"):
+            ops.concat_and_cache_mla(
+                kv_c, zero_k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale
+            )
+        with pytest.raises(RuntimeError, match="at least 656 bytes"):
+            ops.cp_gather_and_upconvert_fp8_kv_cache(
+                kv_cache,
+                torch.empty(1, 576, dtype=dtype, device=device),
+                torch.zeros(1, 1, dtype=torch.int32, device=device),
+                torch.zeros(1, dtype=torch.int32, device=device),
+                1,
+            )
 
 
 # Bytes per token for the nvfp4_ds_mla cache layout (see flashmla_sparse.py).
