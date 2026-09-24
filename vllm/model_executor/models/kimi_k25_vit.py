@@ -21,6 +21,7 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -194,7 +195,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         )
         self.patch_size = patch_size
 
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             in_dim,
             out_dim,
             kernel_size=patch_size,
@@ -220,19 +221,11 @@ class MoonVision3dPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self._proj(x).view(x.size(0), -1)
+        x = self.proj.forward_native(x).view(x.size(0), self.proj.out_channels)
         if pos_embeds is not None:
             return x + pos_embeds
         assert grid_thws is not None
         return self.pos_emb(x, grid_thws)
-
-    def _proj(self, x: torch.Tensor) -> torch.Tensor:
-        weight = self.proj.weight.view(self.proj.out_channels, -1)
-        return F.linear(
-            x.view(x.size(0), weight.size(1)),
-            weight,
-            self.proj.bias,
-        ).view(x.size(0), self.proj.out_channels, 1, 1)
 
 
 class Rope2DPosEmbRepeated(nn.Module):
