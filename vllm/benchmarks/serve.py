@@ -51,13 +51,18 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    redact_sensitive_namespace,
+    write_to_json,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+_SENSITIVE_ARG_FIELDS = ("header",)
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -402,13 +407,15 @@ async def get_request(
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """
-    Asynchronously generates requests at a specified rate
+    """Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
             A list of input requests, each represented as a SampleRequest.
+        self_timed:
+            If True, the requests carry their own arrival timing and no
+            request rate, burstiness or ramp-up is applied.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -426,6 +433,7 @@ async def get_request(
             The starting request rate for ramp-up.
         ramp_up_end_rps (optional):
             The ending request rate for ramp-up.
+
     """
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}."
@@ -521,6 +529,7 @@ def calculate_metrics_for_embeddings(
 
     Returns:
         The calculated benchmark metrics.
+
     """
     total_input = 0
     total_input_sequences = 0
@@ -580,6 +589,7 @@ def calculate_metrics(
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
+
     """
     actual_output_lens: list[int] = []
     total_input = 0
@@ -1536,7 +1546,7 @@ def save_to_pytorch_benchmark_format(
     # later if needed
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
     pt_records = convert_to_pytorch_benchmark_format(
-        args=args,
+        args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
         extra_info={
             k: results[k]
@@ -1566,6 +1576,7 @@ def compute_result_filename(
 
     Returns:
         The computed filename path or None if no result saving is requested
+
     """
     if not (args.plot_timeline or args.save_result or args.append_result):
         return None
@@ -1684,7 +1695,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         - "auto" will use the tokenizer from `mistral_common` for Mistral models
         if available, otherwise it will use the "hf" tokenizer.\n
         - "hf" will use the fast tokenizer if available.\n
-        - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
         - Other custom values can be supported via plugins.""",
@@ -2013,7 +2023,7 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
-    print(args)
+    print(redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS))
     if args.max_concurrency is not None and args.max_concurrency <= 0:
         raise ValueError("--max-concurrency must be greater than 0")
 

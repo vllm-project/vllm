@@ -4,14 +4,14 @@
 
 from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 import torch
 import torch.nn as nn
-from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
+from transformers import BaseImageProcessor, BatchFeature, PreTrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -40,7 +40,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_pp,
+)
 
 IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
@@ -49,12 +54,11 @@ IMAGE_PAD_TOKEN_ID = 151655
 
 
 class Ovis2_5ImagePatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - patch_size: patch_size_x * patch_size_y * num_channels
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
@@ -66,12 +70,11 @@ class Ovis2_5ImagePatchInputs(TensorSchema):
 
 
 class Ovis2_5VideoPatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of videos * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of videos
+    """Dimensions:
+    - bnp: Batch size * number of videos * number of patches
+    - patch_size: patch_size_x * patch_size_y * num_channels
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of videos
     """
 
     type: Literal["video_patches"]
@@ -82,14 +85,17 @@ class Ovis2_5VideoPatchInputs(TensorSchema):
     # This is used to restore the first two dimensions of `flat_data`.
 
 
+class Ovis2_5MultiModalInputs(TypedDict, total=False):
+    images: Ovis2_5ImagePatchInputs | None
+    videos: Ovis2_5VideoPatchInputs | None
+
+
 class VisualTokenizer(torch.nn.Module):
-    """
-    VIT
-    """
+    """VIT."""
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         visual_vocab_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -115,7 +121,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def _init_backbone(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -284,32 +290,26 @@ class Ovis2_5DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2_5ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-
         mm_data = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
         return mm_data
@@ -320,8 +320,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         self,
         visual_indicators: list[int],
     ) -> list[int]:
-        """
-        Filter image indicators placeholders and convert them to corresponding
+        """Filter image indicators placeholders and convert them to corresponding
         tokens in visual tokenizer.
         """
         hf_config = self.info.get_hf_config()
@@ -332,7 +331,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
             if x >= INDICATOR_IDS[0]
         ]
 
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -439,7 +438,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config: PretrainedConfig = config
+        self.config: PreTrainedConfig = config
 
         with self._mark_language_model(vllm_config):
             self.llm = init_vllm_registered_model(
@@ -458,8 +457,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.image_pad_token_id: int = IMAGE_PAD_TOKEN_ID
 
+        language_model = self.get_language_model()
+        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
-            self.get_language_model().make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
@@ -567,8 +568,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             vision_embeddings.append(torch.cat(vision_embeddings_per_image, dim=0))
         return tuple(vision_embeddings)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> Ovis2_5MultiModalInputs:
+        modalities: Ovis2_5MultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -598,10 +601,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
+                assert image_input is not None
                 image_embeddings = self._process_visual_input(image_input)
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
+                assert video_input is not None
                 video_embeddings = self._process_visual_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
 

@@ -5,7 +5,11 @@ from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -25,12 +29,18 @@ class GateLinear(ReplicatedLinear):
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
     method which is only known later).
+
+    A ``quant_config`` that actually quantizes the gate disables every
+    specialized tier, leaving plain ``ReplicatedLinear`` behavior.
     """
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
     FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
     FP32_MAX_TOKENS = 32
+    # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
+    # whose router shape stays ahead further up the range may raise it.
+    LL_BF16_MAX_TOKENS = 16
 
     def __init__(
         self,
@@ -40,7 +50,10 @@ class GateLinear(ReplicatedLinear):
         out_dtype: torch.dtype | None = None,
         params_dtype: torch.dtype | None = None,
         force_fp32_compute: bool = False,
+        skip_bias_add: bool = False,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        return_bias: bool = True,
     ):
         is_hopper = current_platform.is_device_capability((9, 0))
         is_blackwell = current_platform.is_device_capability_family(100)
@@ -72,17 +85,25 @@ class GateLinear(ReplicatedLinear):
             input_size,
             output_size,
             bias=bias,
+            skip_bias_add=skip_bias_add,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=prefix,
+            return_bias=return_bias,
         )
         self.out_dtype = out_dtype
+
+        # A quantized gate exposes no plain ``weight``, so every specialized
+        # tier below is disabled and forward falls back to ReplicatedLinear.
+        self.is_unquantized = isinstance(self.quant_method, UnquantizedLinearMethod)
+        can_use_specialized_kernels &= self.is_unquantized
 
         self.allow_specialized_router_gemm = can_use_specialized_kernels
 
         # fp32 specialized kernel eligibility (exact dims, fp32 weight)
         self.allow_fp32_router_gemm = (
-            not bias
+            self.is_unquantized
+            and not bias
             and self.weight.dtype == torch.float32
             and (
                 (
@@ -94,7 +115,8 @@ class GateLinear(ReplicatedLinear):
             )
         )
         self.allow_bf16x3_router_gemm = (
-            not bias
+            self.is_unquantized
+            and not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
             and is_blackwell
@@ -108,7 +130,7 @@ class GateLinear(ReplicatedLinear):
         # applies on any CUDA-alike device (no bias, since torch.mm has no bias
         # term). The specialized-kernel gate above excludes family-120 Blackwell
         # (GB10 / DGX Spark), which this tier still covers. See #49921.
-        self._router_gemm_no_bias = not bias
+        self._router_gemm_no_bias = self.is_unquantized and not bias
         self._router_gemm_cublas_capable = (
             current_platform.is_cuda() or current_platform.is_rocm()
         ) and self._router_gemm_no_bias
@@ -162,17 +184,26 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+    def _return(
+        self, output: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        return output if not self.return_bias else (output, None)
+
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
-        if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
+        if (
+            self.allow_ll_bf16_gemm
+            and x.shape[0] <= self.LL_BF16_MAX_TOKENS
+            and x.dtype == torch.bfloat16
+        ):
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 ll_bf16_gemm,
             )
 
             output = ll_bf16_gemm(x, self.weight)
-            return output, None
+            return self._return(output)
 
         # Tier 2: fp32 specialized kernel (model-specific shapes, M<=32)
         # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
@@ -184,7 +215,7 @@ class GateLinear(ReplicatedLinear):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(
                 x, self.weight, self.allow_bf16x3_router_gemm
             )
-            return output, None
+            return self._return(output)
 
         # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
@@ -193,20 +224,29 @@ class GateLinear(ReplicatedLinear):
             )
 
             output = bf16x3_router_gemm(x, self.weight)
-            return output, None
+            return self._return(output)
 
         # Tier 4: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
-            return output, None
+            return self._return(output)
 
         # Tier 5: F.linear (ReplicatedLinear)
-        if self.out_dtype is not None and x.dtype != self.weight.dtype:
+        if (
+            self.out_dtype is not None
+            and self.is_unquantized
+            and x.dtype != self.weight.dtype
+        ):
             x = x.to(self.weight.dtype)
-        output, output_bias = super().forward(x)
+        base_output = super().forward(x)
+        output_bias: Parameter | None = None
+        if isinstance(base_output, tuple):
+            output, output_bias = base_output
+        else:
+            output = base_output
         if self.out_dtype is not None and output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
-        return output, output_bias
+        return output if not self.return_bias else (output, output_bias)
 
 
 _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
@@ -217,8 +257,7 @@ def fp32_router_gemm_dispatch_impl(
     weight: torch.Tensor,
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
-    """
-    Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
+    """Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
     otherwise optionally run the experimental BF16x3 kernel for medium/large
     SM100 router batches, then fall back to F.linear.
     This must be wrapped in a custom op because our torch.compile integration

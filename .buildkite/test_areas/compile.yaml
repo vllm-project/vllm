@@ -67,6 +67,31 @@ steps:
     - pytest -v -s tests/compile/passes/test_silu_mul_quant_manual_fusion.py
     # this runner has 2 GPUs available even though num_devices=2 is not set
     - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion and Compile FP8"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      working_dir: "/vllm-workspace/"
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - tests/compile/passes/
+      - tests/compile/correctness_e2e/test_attn_quant.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/model_executor/models/llama.py
+      commands:
+      - amd-smi
+      # MLA static FP8 and distributed AR/RMS are owned by the existing ROCm jobs.
+      - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+      - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":nvidia: (H100) Fusion E2E Quick"
   key: fusion-e2e-quick-h100
@@ -92,7 +117,7 @@ steps:
       dind: false
       device: mi355_1
       working_dir: "/vllm-workspace/"
-      timeout_in_minutes: 25
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -133,7 +158,7 @@ steps:
       dind: false
       device: mi355_1
       working_dir: "/vllm-workspace/"
-      timeout_in_minutes: 30
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -181,6 +206,47 @@ steps:
     # Run all models and attn backends but only Inductor partition and native custom ops
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion E2E TP2 Quick"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/compilation/
+      - vllm/distributed/
+      - vllm/model_executor/
+      - vllm/v1/attention/
+      - tests/compile/fusions_e2e/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+      - >-
+        VLLM_ROCM_USE_AITER=1
+        VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+        pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+        -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+        not +quant_fp8 and not +rms_norm and Llama-3 and
+        ROCM_AITER_UNIFIED_ATTN'
+      - >-
+        VLLM_ROCM_USE_AITER=1
+        VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+        pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+        -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+        +quant_fp8 and +rms_norm and qwen3 and
+        ROCM_AITER_UNIFIED_ATTN'
+      - >-
+        VLLM_ROCM_USE_AITER=1
+        VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+        pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+        -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+        not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
+        ROCM_AITER_MLA'
 
 - label: ":nvidia: (H100) Fusion E2E TP2 AR-RMS Config Sweep"
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100
@@ -221,6 +287,33 @@ steps:
     - nvidia-smi
     # Run just llama3 (fp8 & bf16) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
+  mirror:
+    amd:
+      label: ':amd: (MI355) Fusion E2E TP2 AsyncTP BF16 Config Sweep'
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      working_dir: /vllm-workspace/
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/model_executor/layers/linear.py
+      - vllm/model_executor/layers/utils.py
+      - vllm/distributed/
+      - vllm/v1/attention/backends/triton_attn.py
+      - tests/compile/fusions_e2e/
+      - tests/compile/passes/distributed/test_async_tp.py
+      - tests/compile/rocm/test_async_tp.py
+      - tests/compile/correctness_e2e/test_async_tp.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/model_executor/models/qwen3.py
+      commands:
+      - rocm-smi
+      - pytest -v -s tests/compile/rocm/test_async_tp.py
+      - pytest -v -s tests/compile/fusions_e2e/test_tp2_rocm_async_tp.py
+      - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_rocm_async_tp_bf16_output_correctness
 
 - label: ":nvidia: (B200) Fusion E2E TP2"
   key: fusion-e2e-tp2-b200

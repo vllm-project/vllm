@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 class SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -306,8 +306,7 @@ class Step3p5MTP(nn.Module):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int | None, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [

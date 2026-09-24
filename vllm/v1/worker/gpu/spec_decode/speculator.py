@@ -15,7 +15,6 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
@@ -27,12 +26,15 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    OnlineAcceptanceEstimator,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -55,6 +57,8 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 
 class BaseSpeculator(ABC):
+    num_query_per_req: int = 1
+
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
@@ -158,6 +162,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange_np = np.arange(self.max_num_reqs + 1, dtype=np.int32)
         self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
+        )
+        self.use_acceptance_estimator = self.enable_adaptive_verification
+        self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
+
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
@@ -189,9 +202,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
     @abstractmethod
     def load_draft_model(
-        self,
-        target_model: nn.Module,
-        target_attn_layer_names: set[str],
+        self, target_model: nn.Module, target_attn_layer_names: set[str]
     ) -> nn.Module:
         pass
 
@@ -214,9 +225,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
 
-        target_supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.vllm_config.model_config
-        )
+        target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
         draft_supports_mm = supports_multimodal_embeddings(self.model)
         self.supports_mm_inputs = target_supports_mm and draft_supports_mm
         if target_supports_mm and not draft_supports_mm:
@@ -225,6 +234,20 @@ class DraftModelSpeculator(BaseSpeculator):
                 "Embeddings from the target model will not be passed to the "
                 "drafter; using text-only draft inputs instead.",
                 type(self.model).__name__,
+            )
+
+        if self.use_acceptance_estimator:
+            if self.use_local_argmax_reduction:
+                raise ValueError(
+                    "Adaptive verification without a confidence head estimates "
+                    "per-position acceptance from the draft logits, which "
+                    "use_local_argmax_reduction never materializes. Disable one "
+                    "of them."
+                )
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.device,
             )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
@@ -312,7 +335,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
-            dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+            dcp_local_seq_lens = prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
                 num_reqs,
@@ -341,7 +364,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
-            is_prefilling=self.draft_is_prefilling[:num_reqs],
+            is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
 
@@ -371,12 +394,6 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
-    def _greedy_sample_draft(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
-        logits = self.model.compute_logits(hidden_states)
-        return logits.argmax(dim=-1)
-
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -403,13 +420,41 @@ class DraftModelSpeculator(BaseSpeculator):
             )
             if self.draft_watermarker is not None:
                 sampled = self.draft_watermarker.sample(
-                    logits,
-                    sampled,
-                    idx_mapping,
-                    temperature,
+                    logits, sampled, idx_mapping, temperature
                 )
-            return sampled
-        return self._greedy_sample_draft(hidden_states)
+        elif self.use_local_argmax_reduction:
+            return self.model.get_top_tokens(hidden_states)
+        else:
+            logits = self.model.compute_logits(hidden_states)
+            sampled = logits.argmax(dim=-1)
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
+        return sampled
+
+    def _maybe_predict_acceptance(
+        self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor
+    ) -> None:
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.predict(
+                logits,
+                idx_mapping,
+                draft_step,
+                self.draft_token_confidence_probs,
+                self.temperature,
+            )
+
+    def observe_verification(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> None:
+        """Fold the target's verdict on the last drafts into the estimator.
+
+        Must run before the next `propose`, which overwrites the per-slot
+        features the verdict grades.
+        """
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def prepare_watermarking(
         self, contexts: torch.Tensor, watermarking: torch.Tensor
@@ -427,6 +472,7 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        dummy_run: bool = False,
     ) -> None:
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -436,10 +482,15 @@ class DraftModelSpeculator(BaseSpeculator):
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+        # idx_mapping == -1 marks a row the drafter must not act on: sampling
+        # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
+        # always get it; a dummy batch gets it for every row, since its arange
+        # idx_mapping names request-state slots with stale block tables.
+        if dummy_run:
+            self.idx_mapping.fill_(-1)
+        else:
+            self.idx_mapping[:num_reqs].copy_(idx_mapping)
+            self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(
         self,

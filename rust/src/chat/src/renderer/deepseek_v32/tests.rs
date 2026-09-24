@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use thiserror_ext::AsReport;
 
 use super::DeepSeekV32ChatRenderer;
+use crate::EffortValue;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
@@ -18,7 +19,7 @@ use crate::request::{
 use crate::{ChatRenderer, ChatRole};
 
 fn render_request(request: &ChatRequest) -> String {
-    DeepSeekV32ChatRenderer::new()
+    DeepSeekV32ChatRenderer::default()
         .render(request)
         .unwrap()
         .prompt
@@ -26,8 +27,30 @@ fn render_request(request: &ChatRequest) -> String {
         .expect("deepseek renderer should return text prompt")
 }
 
+#[test]
+fn effort_enables_binary_thinking_and_none_disables_it() {
+    let mut request = ChatRequest::for_test();
+    for (effort, enabled) in [
+        (EffortValue::from("high"), true),
+        (EffortValue::from("custom"), true),
+        (EffortValue::Number(42.into()), true),
+        (EffortValue::from("none"), false),
+    ] {
+        request.chat_options.reasoning_effort = Some(effort);
+        let rendered = DeepSeekV32ChatRenderer::default().render(&request).unwrap();
+        assert_eq!(
+            rendered.prompt.into_text().unwrap().ends_with("<think>"),
+            enabled
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+    }
+}
+
 fn render_result(request: &ChatRequest) -> Result<String, Error> {
-    DeepSeekV32ChatRenderer::new().render(request).map(|rendered| {
+    DeepSeekV32ChatRenderer::default().render(request).map(|rendered| {
         rendered
             .prompt
             .into_text()
@@ -282,6 +305,44 @@ fn assistant_after_last_user_requires_reasoning_or_tool_calls() {
 }
 
 #[test]
+fn last_user_turn_appends_generation_prompt_by_default() {
+    let request = thinking_request(vec![ChatMessage::user("Hello")]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.ends_with("<｜User｜>Hello<｜Assistant｜><think>"));
+}
+
+#[test]
+fn last_user_turn_omits_generation_prompt_when_disabled() {
+    let mut request = thinking_request(vec![ChatMessage::user("Hello")]);
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.ends_with("<｜User｜>Hello"));
+    assert!(!rendered.contains("<｜Assistant｜>"));
+    assert!(!rendered.contains("<think>"));
+}
+
+#[test]
+fn user_then_assistant_still_writes_suffix_without_generation_prompt() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant_text("Hi there."),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>Hi there.<｜end▁of▁sentence｜>"]
+        .assert_eq(&rendered);
+}
+
+#[test]
 fn continue_final_assistant_omits_final_eos() {
     let mut request = ChatRequest {
         messages: vec![
@@ -307,7 +368,7 @@ fn render_rejects_multimodal_input() {
         ..ChatRequest::for_test()
     };
 
-    let error = DeepSeekV32ChatRenderer::new().render(&request).unwrap_err();
+    let error = DeepSeekV32ChatRenderer::default().render(&request).unwrap_err();
 
     assert!(matches!(
         error,

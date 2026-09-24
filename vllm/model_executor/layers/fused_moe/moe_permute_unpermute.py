@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 
 import torch
 
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
+
 
 @dataclass
 class MoEPermuteScratch:
@@ -102,6 +107,79 @@ class MoEPermuteScratch:
         return topk_ids_int32
 
 
+def moe_prepare_scatter(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    scratch: MoEPermuteScratch,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate expert offsets and shared scatter/unpermute destination indices."""
+    assert topk_ids.device == scratch.device
+    assert topk_ids.size(0) <= scratch.max_num_tokens
+    assert topk_ids.size(1) == scratch.topk
+    n_token, topk = topk_ids.shape
+    expanded_rows = topk_ids.numel()
+    inverse = scratch.inv_permuted_idx[:expanded_rows].view(n_token, topk)
+    if expanded_rows == 0:
+        scratch.expert_first_token_offset.zero_()
+        return scratch.expert_first_token_offset, inverse
+    torch.ops._moe_C.moe_prepare_scatter(
+        scratch.prepare_topk_ids(topk_ids),
+        scratch.token_expert_indices_view(n_token),
+        expert_map,
+        scratch.num_experts,
+        scratch.num_local_experts,
+        scratch.expert_first_token_offset,
+        inverse,
+        scratch.sort_workspace,
+        scratch.permuted_experts_id[:expanded_rows].view(n_token, topk),
+        scratch.sorted_row_idx[:expanded_rows].view(n_token, topk),
+        scratch.topk_ids_for_sort[:expanded_rows].view(n_token, topk),
+    )
+    return scratch.expert_first_token_offset, inverse
+
+
+def get_moe_permute_scratch(
+    *,
+    max_num_tokens: int,
+    topk: int,
+    num_experts: int,
+    num_local_experts: int,
+    device: torch.device,
+    hidden_size: int | None = None,
+    hidden_dtype: torch.dtype | None = None,
+) -> MoEPermuteScratch:
+    """Share scratch across sequential layers in the current ubatch and lane.
+
+    Without a workspace manager, allocate new scratch for each call.
+    """
+
+    def create_scratch() -> MoEPermuteScratch:
+        return MoEPermuteScratch(
+            max_num_tokens=max_num_tokens,
+            topk=topk,
+            num_experts=num_experts,
+            num_local_experts=num_local_experts,
+            device=device,
+            hidden_size=hidden_size,
+            hidden_dtype=hidden_dtype,
+        )
+
+    if not is_workspace_manager_initialized():
+        return create_scratch()
+
+    key = (
+        MoEPermuteScratch,
+        max_num_tokens,
+        topk,
+        num_experts,
+        num_local_experts,
+        device,
+        hidden_size,
+        hidden_dtype,
+    )
+    return current_workspace_manager().get_persistent_resource(key, create_scratch)
+
+
 def moe_permute(
     hidden_states: torch.Tensor,
     a1q_scale: torch.Tensor | None,
@@ -112,20 +190,24 @@ def moe_permute(
     permuted_hidden_states: torch.Tensor | None = None,
     scratch: MoEPermuteScratch | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    This function expands and permutes activation to gather uncontinuous tokens
+    """This function expands and permutes activation to gather uncontinuous tokens
       for each expert.
-    Parameters:
-    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
-    - topk_ids (torch.Tensor): topk expert route id for each token.
-    - n_expert (int): The number of expert.
-    - n_local_expert (int): The number of expert in current EP rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-        from the global expert space to the local expert space of the expert
-        parallel shard.
-    - permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
-        If None, the output tensor will be created in this function.
+
+    Args:
+        hidden_states (torch.Tensor): The input tensor to the MoE layer.
+        a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
+        topk_ids (torch.Tensor): topk expert route id for each token.
+        n_expert (int): The number of expert.
+        n_local_expert (int): The number of expert in current EP rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
+        permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
+            If None, the output tensor will be created in this function.
+        scratch (Optional[MoEPermuteScratch]): Optional preallocated scratch
+            buffers. Validated against hidden_states and topk_ids when given,
+            otherwise the buffers are allocated in this function.
+
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - a1q_scale (Optional[torch.Tensor]): permuted quant scale for hidden_states
@@ -134,6 +216,7 @@ def moe_permute(
        of each expert for standard grouped gemm.
     - inv_permuted_idx (torch.Tensor): idx map for moe_unpermute.
     - permuted_idx (torch.Tensor): idx map from hidden to permuted_hidden.
+
     """
     n_token, n_hidden = hidden_states.size()
     topk = topk_ids.size(1)
@@ -249,19 +332,21 @@ def moe_unpermute(
     inv_permuted_idx: torch.Tensor,
     expert_first_token_offset: torch.Tensor | None = None,
 ) -> None:
-    """
-    This function expands and permutes activation to gathering uncontinuous
+    """This function expands and permutes activation to gathering uncontinuous
       tokens for each expert.
-    Parameters:
-    - out (torch.Tensor): output tensor
-    - permuted_hidden_states (torch.Tensor): permuted activation.
-    - topk_weights (torch.Tensor): topk expert route weight for each token.
-    - inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
-    - expert_first_token_offset (Optional[torch.Tensor]): offset of the first
-      token of each expert for grouped gemm.
+
+    Args:
+        out (torch.Tensor): output tensor
+        permuted_hidden_states (torch.Tensor): permuted activation.
+        topk_weights (torch.Tensor): topk expert route weight for each token.
+        inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
+        expert_first_token_offset (Optional[torch.Tensor]): offset of the first
+            token of each expert for grouped gemm.
+
     Returns:
     - hidden_states (torch.Tensor): The reduced and unpermuted activation
       tensor.
+
     """
     topk = topk_weights.size(1)
     n_hidden = permuted_hidden_states.size(-1)
