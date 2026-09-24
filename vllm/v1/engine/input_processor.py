@@ -30,6 +30,7 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -53,6 +54,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.diffusion_config = vllm_config.diffusion_config
         # Load the custom logits processor classes once; the returned callable
         # runs their validate_params hooks per request at admission.
         self.validate_logits_processors_params = (
@@ -128,6 +130,20 @@ class InputProcessor:
             )
 
             self.validate_logits_processors_params(params)
+
+            if self.model_config.is_diffusion:
+                # Without --diffusion-config the served canvas is unknown here;
+                # the ids and the read-only normalisation are still checked.
+                validate_diffusion_sampling_params(
+                    params,
+                    canvas_length=(
+                        self.diffusion_config.canvas_length
+                        if self.diffusion_config is not None
+                        else None
+                    ),
+                    vocab_size=self.model_config.get_vocab_size(),
+                    async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

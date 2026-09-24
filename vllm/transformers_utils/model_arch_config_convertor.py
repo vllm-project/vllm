@@ -813,6 +813,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
     "deepseek_v4": DeepseekV4ModelArchConfigConvertor,
+    "diffusion_gemma": Gemma4ModelArchConfigConvertor,
     "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
