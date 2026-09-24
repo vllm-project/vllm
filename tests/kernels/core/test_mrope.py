@@ -61,71 +61,6 @@ MODELS_TO_TEST = [
 num_tokens_list = [11, 8192]
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only tests."
-)
-@pytest.mark.parametrize("is_neox_style", [True, False])
-@pytest.mark.parametrize("num_tokens", num_tokens_list)
-def test_triton_mrope_strided_qk(is_neox_style: bool, num_tokens: int):
-    """triton_mrope must rotate strided q/k views (e.g. of a packed qkv
-    tensor) exactly as it rotates contiguous tensors, without touching the
-    value rows. Covers the MiniMax M3 ViT usage: partial rotation
-    (rotary_dim < head_size) with fp32 cos/sin."""
-    from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-
-    set_random_seed(42)
-    num_heads = 16
-    head_size = 80
-    rotary_dim = 78
-    mrope_section = [13, 13, 13]
-    assert sum(mrope_section) == rotary_dim // 2
-
-    qkv = torch.randn(
-        num_tokens, 3, num_heads, head_size, dtype=torch.bfloat16, device=device
-    )
-    v_before = qkv[:, 2].clone()
-    q = qkv[:, 0].reshape(num_tokens, -1)
-    k = qkv[:, 1].reshape(num_tokens, -1)
-    assert q.stride(-1) == 1 and not q.is_contiguous()
-
-    cos = torch.randn(
-        3, num_tokens, rotary_dim // 2, dtype=torch.float32, device=device
-    )
-    sin = torch.randn(
-        3, num_tokens, rotary_dim // 2, dtype=torch.float32, device=device
-    )
-
-    q_ref = q.contiguous()
-    k_ref = k.contiguous()
-    triton_mrope(
-        q_ref,
-        k_ref,
-        cos,
-        sin,
-        mrope_section,
-        head_size,
-        rotary_dim,
-        mrope_interleaved=False,
-        is_neox_style=is_neox_style,
-    )
-    triton_mrope(
-        q,
-        k,
-        cos,
-        sin,
-        mrope_section,
-        head_size,
-        rotary_dim,
-        mrope_interleaved=False,
-        is_neox_style=is_neox_style,
-    )
-
-    torch.testing.assert_close(q, q_ref, rtol=0, atol=0)
-    torch.testing.assert_close(k, k_ref, rtol=0, atol=0)
-    # v rows share storage with q/k and must be untouched
-    torch.testing.assert_close(qkv[:, 2], v_before, rtol=0, atol=0)
-
-
 def test_apply_interleaved_rope():
     mrope_section = [3, 1, 1]
     x = torch.tensor(
@@ -238,6 +173,25 @@ def test_mrope(
 
     torch.testing.assert_close(query_native, query_cuda, atol=atol, rtol=rtol)
     torch.testing.assert_close(key_native, key_cuda, atol=atol, rtol=rtol)
+
+    # Strided q/k views of a packed buffer (the MiniMax M3 ViT usage):
+    # bitwise-identical to the contiguous run, neighboring columns untouched.
+    pad = 16
+    packed = torch.zeros(
+        num_tokens,
+        query.shape[1] + key.shape[1] + pad,
+        dtype=dtype,
+        device=device,
+    )
+    packed[:, : query.shape[1]] = query
+    packed[:, query.shape[1] : query.shape[1] + key.shape[1]] = key
+    sentinel = packed[:, -pad:].clone()
+    q_strided = packed[:, : query.shape[1]]
+    k_strided = packed[:, query.shape[1] : query.shape[1] + key.shape[1]]
+    mrope_helper_class.forward_cuda(positions, q_strided, k_strided)
+    torch.testing.assert_close(q_strided, query_cuda, atol=0, rtol=0)
+    torch.testing.assert_close(k_strided, key_cuda, atol=0, rtol=0)
+    torch.testing.assert_close(packed[:, -pad:], sentinel, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
