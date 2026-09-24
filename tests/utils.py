@@ -596,7 +596,10 @@ class RemoteVLLMServer:
                     total_used = 0
                     device_count = current_platform.device_count()
                     for i in range(device_count):
-                        handle = nvmlDeviceGetHandleByIndex(i)
+                        physical_device_id = (
+                            current_platform.visible_device_id_to_physical_device_id(i)
+                        )
+                        handle = nvmlDeviceGetHandleByIndex(physical_device_id)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
                         total_used += mem_info.used
                     return total_used

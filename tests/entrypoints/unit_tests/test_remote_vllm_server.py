@@ -1,12 +1,53 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 import tests.utils as test_utils
 from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
+from vllm.platforms.interface import Platform, PlatformEnum
+
+
+@pytest.mark.parametrize(
+    ("visible_devices", "expected_memory"),
+    [(None, 300), ("2,3", 7), ("3,1", 204)],
+)
+def test_server_gpu_memory_only_counts_visible_devices(
+    visible_devices, expected_memory, monkeypatch: pytest.MonkeyPatch
+):
+    """Other GPUs' allocations must not cause a false server teardown failure."""
+
+    class TestCudaPlatform(Platform):
+        _enum = PlatformEnum.CUDA
+        device_control_env_var = "CUDA_VISIBLE_DEVICES"
+
+        @classmethod
+        def device_count(cls):
+            return 2
+
+    if visible_devices is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.setattr(test_utils, "current_platform", TestCudaPlatform())
+    monkeypatch.setattr(test_utils, "_nvml", nullcontext)
+    monkeypatch.setattr(
+        test_utils, "nvmlDeviceGetHandleByIndex", lambda i: i, raising=False
+    )
+    memory = {0: 100, 1: 200, 2: 3, 3: 4}
+    monkeypatch.setattr(
+        test_utils,
+        "nvmlDeviceGetMemoryInfo",
+        lambda handle: SimpleNamespace(used=memory[handle]),
+        raising=False,
+    )
+    server = object.__new__(RemoteOpenAIServer)
+
+    assert server._get_gpu_memory_used() == expected_memory
 
 
 @pytest.mark.parametrize(
