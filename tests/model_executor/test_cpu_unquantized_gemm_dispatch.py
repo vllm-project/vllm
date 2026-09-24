@@ -7,6 +7,7 @@ import torch
 
 from vllm.model_executor.layers import utils
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 @pytest.fixture(scope="module")
@@ -89,3 +90,25 @@ def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
             expected_prepacked,
         )
     ]
+
+
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_dispatch_cpu_unquantized_gemm_remove_weight_keeps_dtype(
+    monkeypatch, weight_dtype
+):
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+
+    layer = torch.nn.Linear(16, 8, bias=False, dtype=weight_dtype)
+    loading_dtype = (
+        torch.float32 if weight_dtype is not torch.float32 else torch.bfloat16
+    )
+    with set_default_torch_dtype(loading_dtype):
+        utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+    assert layer.weight.numel() == 0
+    assert layer.weight.dtype is weight_dtype
+
+    x = torch.randn(4, 16, dtype=weight_dtype)
+    output = layer.cpu_linear(x, layer.weight, None)
+    assert not output.isnan().any()
