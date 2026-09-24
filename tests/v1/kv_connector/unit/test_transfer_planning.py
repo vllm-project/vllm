@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_sliding_window,
     is_full_attention_spec,
+    iter_layer_specs,
 )
 
 # Arguments mirror the specs the existing unit tests construct.
@@ -148,23 +149,80 @@ def test_instance_classifies_like_its_class(spec: KVCacheSpec):
     assert is_mla_spec(spec) is is_mla_spec(type(spec))
 
 
-def test_wrapper_is_classified_by_its_first_spec():
-    """A group carrying the wrapper answers for the spec the wrapper holds."""
-    first = FullAttentionSpec(**ATTENTION_KWARGS)
-    second = SlidingWindowSpec(**ATTENTION_KWARGS, sliding_window=32)
-    wrapper = UniformTypeKVCacheSpecs(
-        block_size=16, kv_cache_specs={"layer_0": first, "layer_1": second}
+def _group(specs: dict[str, KVCacheSpec]) -> UniformTypeKVCacheSpecs:
+    """Build a group the way the framework builds one, so the layers are legal."""
+    group = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group is not None, "the layers must share one registered base spec"
+    return group
+
+
+def test_group_class_is_stable_across_layer_order():
+    """A group of full attention and MLA layers is attention state either way.
+
+    Layers merge into one group only when they share a registered base spec, and
+    ``FullAttentionSpec`` is the base of ``MLAAttentionSpec`` as well, so this
+    pair is a legal group whose concrete classes differ per layer.
+    """
+    full = FullAttentionSpec(**ATTENTION_KWARGS)
+    mla = MLAAttentionSpec(**MLA_KWARGS)
+
+    for specs in ({"full": full, "mla": mla}, {"mla": mla, "full": full}):
+        group = _group(specs)
+        assert transfer_class(group) is TransferClass.ATTENTION
+        assert is_attention_spec(group) is True
+        assert is_ssm_spec(group) is False
+
+
+def test_representative_spec_answers_for_a_group():
+    """The representative spec stands for the group, not for one layer."""
+    full = FullAttentionSpec(**ATTENTION_KWARGS)
+    group = _group({"layer_0": full})
+
+    assert get_representative_spec(group) is full
+    assert get_representative_spec_type(group) is FullAttentionSpec
+    assert transfer_class(group) is TransferClass.ATTENTION
+
+
+def test_mla_is_a_per_layer_answer():
+    """MLA is per layer, so a group has to be asked layer by layer."""
+    full = FullAttentionSpec(**ATTENTION_KWARGS)
+    mla = MLAAttentionSpec(**MLA_KWARGS)
+    group = _group({"full": full, "mla": mla})
+
+    with pytest.raises(ValueError, match="per-layer"):
+        is_mla_spec(group)
+
+    assert [is_mla_spec(layer) for layer in iter_layer_specs(group)] == [False, True]
+
+
+def test_group_with_mixed_transfer_classes_is_rejected():
+    """A group that cannot move as one class fails closed."""
+    full = FullAttentionSpec(**ATTENTION_KWARGS)
+    mamba = MambaSpec(block_size=16, shapes=((16,), (16,)), dtypes=(torch.float16,))
+    group = UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs={"full": full, "mamba": mamba}
     )
 
-    assert get_representative_spec(wrapper) is first
-    assert get_representative_spec_type(wrapper) is FullAttentionSpec
-    assert transfer_class(wrapper) is TransferClass.ATTENTION
+    with pytest.raises(ValueError, match="one transfer class"):
+        transfer_class(group)
+
+
+def test_empty_wrapper_is_rejected():
+    """A wrapper without layers has no representative and no class."""
+    group = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={})
+
+    with pytest.raises(ValueError, match="carries no layer spec"):
+        get_representative_spec(group)
+    with pytest.raises(ValueError, match="one transfer class"):
+        transfer_class(group)
 
 
 def test_wrapper_class_has_no_class_level_answer():
     """The wrapper class describes a group, so asking for its class raises."""
     with pytest.raises(ValueError, match="UniformTypeKVCacheSpecs"):
         transfer_class(UniformTypeKVCacheSpecs)
+    with pytest.raises(ValueError, match="UniformTypeKVCacheSpecs"):
+        is_attention_spec(UniformTypeKVCacheSpecs)
     with pytest.raises(ValueError, match="UniformTypeKVCacheSpecs"):
         is_mla_spec(UniformTypeKVCacheSpecs)
 
@@ -178,12 +236,8 @@ def test_wrapped_group_answers_the_scheduler_questions():
     full_spec = FullAttentionSpec(**ATTENTION_KWARGS)
     sw_spec = SlidingWindowSpec(**ATTENTION_KWARGS, sliding_window=2048)
 
-    full_wrapper = UniformTypeKVCacheSpecs(
-        block_size=16, kv_cache_specs={"layer_0": full_spec}
-    )
-    sw_wrapper = UniformTypeKVCacheSpecs(
-        block_size=16, kv_cache_specs={"layer_1": sw_spec}
-    )
+    full_wrapper = _group({"layer_0": full_spec})
+    sw_wrapper = _group({"layer_1": sw_spec})
 
     assert get_kv_cache_spec_sliding_window(full_wrapper) is None
     assert is_full_attention_spec(full_wrapper) is True
@@ -205,9 +259,7 @@ def test_build_layer_to_spec_unwraps_groups():
             KVCacheGroupSpec(layer_names=["full_0", "full_1"], kv_cache_spec=full_spec),
             KVCacheGroupSpec(
                 layer_names=["sw_0"],
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=16, kv_cache_specs={"sw_0": sw_spec}
-                ),
+                kv_cache_spec=_group({"sw_0": sw_spec}),
             ),
         ],
     )

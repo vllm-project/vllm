@@ -877,6 +877,11 @@ def test_hma_blocks_per_sw_wrapped_groups():
     # cdiv(32, 16) + 1 == 3 for the wrapped sliding-window group.
     assert scheduler.blocks_per_sw == [0, 3]
     assert scheduler._full_attn_group_idx == 0
+    # The wrapped sliding-window group is clipped to its window tail, the
+    # wrapped full-attention group is left alone.
+    full = [10, 11, 12, 13, 14]
+    sw = [20, 21, 22, 23, 24]
+    assert scheduler.get_exchange_clipped_blocks([full, sw]) == [full, [22, 23, 24]]
 
 
 def test_wrapped_full_attention_group_needs_no_hma():

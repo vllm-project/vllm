@@ -165,6 +165,22 @@ def are_uniform_specs(*specs: KVCacheSpec) -> bool:
     )
 
 
+def _all_spec_classes() -> list[type[KVCacheSpec]]:
+    """Every KVCacheSpec subclass in the tree, the wrapper excluded."""
+    found: list[type[KVCacheSpec]] = []
+    pending = [KVCacheSpec]
+    while pending:
+        for spec_cls in pending.pop().__subclasses__():
+            if spec_cls is UniformTypeKVCacheSpecs:
+                continue
+            found.append(spec_cls)
+            pending.append(spec_cls)
+    return sorted(found, key=lambda cls: cls.__name__)
+
+
+ALL_SPEC_CLASSES = _all_spec_classes()
+
+
 class TestKVCacheSpecRegistry:
     """Test the core registry functionality."""
 
@@ -444,6 +460,34 @@ class TestGetKVCacheSpecKind:
             assert get_kv_cache_spec_kind(spec) is get_kv_cache_spec_kind_for_class(
                 spec_cls
             ), spec_cls.__name__
+
+    @pytest.mark.parametrize("spec_cls", ALL_SPEC_CLASSES, ids=lambda cls: cls.__name__)
+    def test_every_spec_class_answers_the_class_level_kind(self, spec_cls):
+        """Every concrete spec class answers, not only the registered ones.
+
+        The classes without an entry in ``spec_args_map`` are the abstract bases
+        (``KVCacheSpec``, ``AttentionSpec``) and the specs that need a model
+        layout to be constructed, so only the class-level answer is available
+        for them; the rest are checked through an instance as well.
+        """
+        kind = get_kv_cache_spec_kind_for_class(spec_cls)
+
+        if spec_cls in spec_args_map:
+            assert get_kv_cache_spec_kind(make_spec(spec_cls)) is kind
+        else:
+            assert kind in set(KVCacheSpecKind), spec_cls.__name__
+            assert not issubclass(spec_cls, UniformTypeKVCacheSpecs)
+
+    def test_every_kind_is_reachable_from_a_spec_class(self):
+        """Each published kind is what some spec class answers.
+
+        UNKNOWN is one of them: the spec classes the table does not name, such
+        as ``CircularBufferSpec`` and the HiSparse specs, land there and are
+        classified by the spec hierarchy instead.
+        """
+        kinds = {get_kv_cache_spec_kind_for_class(cls) for cls in ALL_SPEC_CLASSES}
+
+        assert kinds == set(KVCacheSpecKind)
 
     def test_wrapper_class_has_no_class_level_kind(self):
         """A wrapper class describes a group, not one spec, so it has no kind."""
