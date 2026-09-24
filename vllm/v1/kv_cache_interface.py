@@ -1456,6 +1456,9 @@ class KVCacheConfig:
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
 
+    all_groups_are_tp_replicated: bool = False
+    """Resolved TP duplication information."""
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""

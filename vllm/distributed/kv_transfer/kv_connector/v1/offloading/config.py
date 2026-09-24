@@ -56,58 +56,6 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     return spec.page_size_bytes * len(group.layer_names)
 
 
-_MLA_LAYER_TYPES = (MLAAttentionSpec, SlidingWindowMLASpec)
-
-
-def _is_replicated_mla_spec(spec: KVCacheSpec) -> bool:
-    """True when ``spec`` is an MLA layer whose KV is replicated across TP.
-
-    Replication requires both:
-    - the spec type stores a latent vector (MLAAttentionSpec/SlidingWindowMLASpec), and
-    - num_kv_heads == 1, which means TP has no head dimension to shard.
-    """
-    return (
-        type(spec) in _MLA_LAYER_TYPES
-        and isinstance(spec, AttentionSpec)
-        and spec.num_kv_heads == 1
-    )
-
-
-def _as_replicated_mla_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
-    """Unwrap *spec* and return its per-layer specs iff they are all replicated-MLA.
-
-    Returns ``None`` when any layer fails the check or the group is empty.
-    ``UniformTypeKVCacheSpecs`` groups several layers of one attention type;
-    both ``MLAAttentionSpec`` and ``SlidingWindowMLASpec`` qualify when they
-    have ``num_kv_heads == 1`` — a single latent vector with no head dimension
-    to shard across TP ranks.
-    """
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        layer_specs = list(spec.kv_cache_specs.values())
-        if not layer_specs:
-            return None
-        return (
-            layer_specs
-            if all(_is_replicated_mla_spec(s) for s in layer_specs)
-            else None
-        )
-    return [spec] if _is_replicated_mla_spec(spec) else None
-
-
-def _is_replicated_group(group: "KVCacheGroupSpec") -> bool:
-    """True when every layer in the group is TP-replicated.
-
-    Only all-MLA groups qualify: every layer spec must be an MLA type with
-    ``num_kv_heads == 1`` (no head dimension to shard across TP ranks).
-    """
-    return _as_replicated_mla_specs(group.kv_cache_spec) is not None
-
-
-def _all_groups_are_replicated(groups) -> bool:
-    """Whether every KV cache group is TP-replicated (all-MLA)."""
-    return bool(groups) and all(_is_replicated_group(g) for g in groups)
-
-
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -207,16 +155,11 @@ def build_offloading_config(
         if len(kv_cache_config.kv_cache_groups) == 1
         else None
     )
+    all_replicated = kv_cache_config.all_groups_are_tp_replicated
     replicated_layout = (
         vllm_config.model_config.use_mla
-        and _all_groups_are_replicated(kv_cache_config.kv_cache_groups)
+        and all_replicated
         and worker_kv_bytes_per_block > 0
-        # Safe MVP boundary: TP-only, no other parallel axes.
-        and parallel_config.tensor_parallel_size > 1
-        and parallel_config.pipeline_parallel_size == 1
-        and parallel_config.prefill_context_parallel_size == 1
-        and parallel_config.decode_context_parallel_size == 1
-        and parallel_config.world_size == parallel_config.tensor_parallel_size
         # Shared /dev/shm mmap layout is single-node mp only.
         and parallel_config.distributed_executor_backend == "mp"
         and parallel_config.nnodes_within_dp == 1
