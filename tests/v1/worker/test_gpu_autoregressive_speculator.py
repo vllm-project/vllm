@@ -19,6 +19,7 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 )
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
@@ -67,6 +68,49 @@ class _TextOnlyDraftModel(torch.nn.Module):
         is_multimodal=None,
     ):
         raise AssertionError("embed_input_ids should not be called during loading")
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
+    def build(common_prefix_len, common_attn_metadata):
+        return split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=1,
+            require_uniform=True,
+            treat_short_extends_as_decodes=False,
+        )
+
+    speculator = object.__new__(_TestSpeculator)
+    speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
+    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
+    speculator.input_buffers = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([11, 21, 0, 0], dtype=torch.int32),
+    )
+    speculator.block_tables = SimpleNamespace(
+        cp_size=1,
+        input_block_tables=[torch.zeros(4, 1, dtype=torch.int32)],
+        slot_mappings=torch.tensor([[10, 20, -1, -1]]),
+    )
+    speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    speculator.attn_groups = [
+        [
+            SimpleNamespace(
+                get_metadata_builder=lambda _: SimpleNamespace(build=build),
+                layer_names=["draft"],
+            )
+        ]
+    ]
+    num_reqs_padded = 4 if cg_mode == CUDAGraphMode.FULL else 2
+    metadata = speculator._build_uniform_attn_metadata(
+        batch_desc=BatchExecutionDescriptor(cg_mode, 4, num_reqs_padded),
+        num_reqs=2,
+        num_query_per_req=1,
+        seq_lens_cpu_upper_bound=torch.tensor([10, 20], dtype=torch.int32),
+        step=1,
+    )
+    assert metadata["draft"] == (num_reqs_padded, 0, num_reqs_padded, 0)
 
 
 def _mock_base_model_load(monkeypatch):

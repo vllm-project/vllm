@@ -227,6 +227,9 @@ pub(super) fn render_request_with_media_order(
                     );
                 }
             }
+            ChatMessage::Custom { role, .. } => {
+                return Err(Error::UnsupportedChatRole { role: role.clone() });
+            }
         }
 
         if is_user_like_entry(message, current_render_index as usize, dialect)
