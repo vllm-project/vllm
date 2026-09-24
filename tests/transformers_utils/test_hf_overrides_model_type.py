@@ -5,12 +5,12 @@
 import json
 import tempfile
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.transformers_utils.config import _CONFIG_REGISTRY, get_config
 
 
-class _TestCustomConfig(PretrainedConfig):
+class _TestCustomConfig(PreTrainedConfig):
     model_type = "test_custom_model"
 
     def __init__(self, custom_attr=42, **kw):
