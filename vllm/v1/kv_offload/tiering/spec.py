@@ -158,10 +158,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent reading from secondary tiers into the primary "
-                "tier, in seconds, labeled by tier. Only tiers that report a "
-                "per-job transfer time contribute; the p2p and kvcr tiers do "
-                "not, so they have no series here. Use PROMOTION_LATENCY for "
-                "tier-independent promotion timing."
+                "tier, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here. Use "
+                "PROMOTION_LATENCY for tier-independent promotion timing."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -175,9 +174,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent writing from the primary tier to secondary "
-                "tiers, in seconds, labeled by tier. Only tiers that report a "
-                "per-job transfer time contribute; the p2p and kvcr tiers do "
-                "not, so they have no series here."
+                "tiers, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -250,10 +248,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of per-job latency of successful promotions from "
-                    "secondary tiers to the primary tier, measured from manager "
-                    "job registration until the tier reports completion so that "
-                    "tier queueing is included, labeled by tier, in seconds."
+                    "Histogram of per-job latency for secondary-tier promotion "
+                    "attempts, measured from manager job registration until the "
+                    "tier reports completion so that tier queueing is included, "
+                    "labeled by tier, in seconds. Includes failed attempts."
                 ),
                 labelnames=(TIER_LABEL,),
                 buckets=(
