@@ -382,8 +382,10 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
             lse_base="ln",
-            lse_layout="HN",
+            lse_layout="NH",
         )
+        # The merge accepts strided HN views, so no transpose copy is needed.
+        lse_query = lse_query.transpose(0, 1)
 
         merge_attn_states(
             out,
