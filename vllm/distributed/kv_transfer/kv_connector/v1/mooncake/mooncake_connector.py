@@ -99,6 +99,23 @@ class TransferRegion:
     group_index: int = 0
 
 
+def _transfer_block_size(
+    vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
+) -> int:
+    """Physical transfer block size for the connector.
+
+    ``cache_config.block_size`` is the *logical* scheduler granularity after the
+    engine core collapses it to the minimum across KV groups.  The connector needs
+    the physical page size of the groups it transfers, so derive it from the group
+    specs and never let a smaller logical value shrink it.
+    """
+    group_sizes = [
+        group.kv_cache_spec.block_size for group in kv_cache_config.transfer_groups
+    ]
+    logical_size = vllm_config.cache_config.block_size
+    return max(group_sizes + [logical_size]) if group_sizes else logical_size
+
+
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
     """Return the TP ratio used by heterogeneous TP transfer planning.
 
@@ -652,7 +669,7 @@ class MooncakeConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size = _transfer_block_size(vllm_config, kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
         assert vllm_config.kv_transfer_config
@@ -688,7 +705,7 @@ class MooncakeConnectorScheduler:
         sw_sizes_tokens: list[tuple[int, int]] = [
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
+            else (0, g.kv_cache_spec.block_size)
             for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to
@@ -1058,7 +1075,7 @@ class MooncakeConnectorWorker:
 
         self.xfer_stats = MooncakeKVConnectorStats()
 
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size = _transfer_block_size(vllm_config, kv_cache_config)
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
