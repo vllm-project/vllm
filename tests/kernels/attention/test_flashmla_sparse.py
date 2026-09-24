@@ -509,3 +509,105 @@ def test_flashinfer_mixed_sparse_indices_separates_window_and_padded_width():
     assert sparse_indices.shape == (1, padded_width)
     assert sparse_indices[0].cpu().tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
     assert sparse_lens.cpu().tolist() == [padded_width]
+
+
+@pytest.mark.parametrize("kv_dtype", [torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "queries,prefixes,num_decodes",
+    [
+        ([1, 1], [100000, 8000], 2),
+        ([8192], [0], 0),
+        ([1, 1, 2051, 19, 1024], [5000, 9000, 3, 0, 99000], 2),
+    ],
+)
+def test_segments_preserve_positions_and_replay_updates(
+    monkeypatch, device, queries, prefixes, num_decodes, kv_dtype
+):
+    """Segmentation preserves every absolute position, including after replay."""
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+        DeepseekSparseSWAFlashInferMetadataBuilder,
+    )
+    from vllm.models.deepseek_v41.sparse_mla import DeepseekV41SparseSWAMetadataBuilder
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required for graph replay")
+    starts = torch.tensor(
+        [0, *torch.tensor(queries).cumsum(0).tolist()], dtype=torch.int32
+    )
+    lengths = torch.tensor(queries, dtype=torch.int32, device=device)
+    lengths += torch.tensor(prefixes, dtype=torch.int32, device=device)
+    base = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0),
+        slot_mapping=torch.empty(0),
+        block_size=128,
+        seq_lens=lengths,
+        query_start_loc_cpu=torch.cat((starts, starts[-1:] + 17)),
+        num_decodes=num_decodes,
+        num_prefills=len(queries) - num_decodes,
+        num_decode_tokens=sum(queries[:num_decodes]),
+        num_prefill_tokens=sum(queries[num_decodes:]),
+    )
+    monkeypatch.setattr(
+        DeepseekV41SparseSWAMetadataBuilder, "build", lambda *args: base
+    )
+    builder = object.__new__(DeepseekSparseSWAFlashInferMetadataBuilder)
+    builder.device = torch.device(device)
+    builder.kv_cache_spec = SimpleNamespace(dtype=kv_dtype)
+    builder._prefill_segment_query_start = torch.empty(
+        sum(queries) + 1, dtype=torch.int32, device=device
+    )
+    builder._prefill_segment_seq_lens = torch.empty(
+        sum(queries), dtype=torch.int32, device=device
+    )
+    metadata = builder.build(0, SimpleNamespace())
+    if num_decodes == len(queries):
+        assert metadata.prefill_segment_query_start is None
+        assert metadata.prefill_segment_seq_lens is None
+        return
+    cu = metadata.prefill_segment_query_start
+    seq = metadata.prefill_segment_seq_lens
+    segment_lengths = cu[1:] - cu[:-1]
+    assert segment_lengths.min() > 0
+    if kv_dtype == torch.float8_e4m3fn:
+        assert segment_lengths.max() <= 1024
+    else:
+        assert segment_lengths.tolist() == queries[num_decodes:]
+    assert cu[-1] == sum(queries[num_decodes:])
+    assert metadata.prefill_segment_max_query_len == segment_lengths.max()
+    expected = torch.cat(
+        [
+            torch.arange(prefix, prefix + query, device=device)
+            for prefix, query in zip(prefixes[num_decodes:], queries[num_decodes:])
+        ]
+    )
+    token_segment = torch.repeat_interleave(
+        torch.arange(seq.numel(), device=device), segment_lengths.long()
+    )
+    token_offset = torch.arange(expected.numel(), device=device) - cu[token_segment]
+
+    def positions():
+        return seq[token_segment] - segment_lengths[token_segment] + token_offset
+
+    torch.testing.assert_close(positions(), expected)
+    if device == "cuda":
+        graph = torch.cuda.CUDAGraph()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            positions()
+        torch.cuda.current_stream().wait_stream(stream)
+        with torch.cuda.graph(graph):
+            captured = positions()
+    lengths.add_(17)
+    updated = builder.build(0, SimpleNamespace())
+    assert updated.prefill_segment_seq_lens.data_ptr() == seq.data_ptr()
+    assert updated.prefill_segment_query_start.data_ptr() == cu.data_ptr()
+    if device == "cuda":
+        graph.replay()
+        torch.testing.assert_close(captured, expected + 17)
+    else:
+        torch.testing.assert_close(positions(), expected + 17)

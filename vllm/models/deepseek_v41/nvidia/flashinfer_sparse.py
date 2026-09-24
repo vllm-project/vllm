@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4 FlashInfer sparse MLA backend."""
 
-from typing import TYPE_CHECKING, ClassVar, cast
+from dataclasses import dataclass
+from typing import ClassVar, cast
 
 import torch
 
@@ -34,10 +35,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
-
-if TYPE_CHECKING:
-    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWABackend,
+    DeepseekSparseSWAMetadata,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
@@ -182,10 +184,73 @@ class DeepseekV4FlashInferSparseMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBu
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
 
+@dataclass
+class DeepseekSparseSWAFlashInferMetadata(DeepseekSparseSWAMetadata):
+    prefill_segment_query_start: torch.Tensor | None = None
+    prefill_segment_seq_lens: torch.Tensor | None = None
+    prefill_segment_max_query_len: int = 0
+
+
 class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
-    """SWA metadata for the FlashInfer sparse decode path (varlen decode)."""
+    """SWA metadata with bounded prefill queries for TRTLLM attention tiling."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _prefill_segment_size = 1024
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._prefill_segment_query_start = torch.empty(
+            self._max_tokens + 1, dtype=torch.int32, device=self.device
+        )
+        self._prefill_segment_seq_lens = torch.empty(
+            self._max_tokens, dtype=torch.int32, device=self.device
+        )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> DeepseekSparseSWAFlashInferMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        result = DeepseekSparseSWAFlashInferMetadata(**vars(metadata))
+        if result.num_prefills == 0:
+            return result
+        assert result.query_start_loc_cpu is not None
+        assert result.seq_lens is not None
+        starts = result.query_start_loc_cpu[
+            result.num_decodes : result.num_decodes + result.num_prefills + 1
+        ].tolist()
+        query_starts = [0]
+        requests = []
+        offsets = []
+        max_query_len = 0
+        for request, (start, end) in enumerate(zip(starts, starts[1:])):
+            length = end - start
+            segment_size = (
+                self._prefill_segment_size
+                if cast(AttentionSpec, self.kv_cache_spec).dtype == torch.float8_e4m3fn
+                else max(length, 1)
+            )
+            for offset in range(0, length, segment_size):
+                segment_len = min(segment_size, length - offset)
+                query_starts.append(query_starts[-1] + segment_len)
+                requests.append(result.num_decodes + request)
+                offsets.append(offset + segment_len - length)
+                max_query_len = max(max_query_len, segment_len)
+        count = len(requests)
+        cu = self._prefill_segment_query_start[: count + 1]
+        seq = self._prefill_segment_seq_lens[:count]
+        cu.copy_(torch.tensor(query_starts, dtype=torch.int32))
+        request_indices = torch.tensor(requests, dtype=torch.int64, device=self.device)
+        segment_offsets = torch.tensor(offsets, dtype=torch.int32, device=self.device)
+        # seq - segment_query_len must preserve the original absolute position.
+        torch.index_select(result.seq_lens, 0, request_indices, out=seq)
+        seq.add_(segment_offsets)
+        result.prefill_segment_query_start = cu
+        result.prefill_segment_seq_lens = seq
+        result.prefill_segment_max_query_len = max_query_len
+        return result
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -481,10 +546,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     ) -> None:
         assert self.kv_cache_torch_dtype in (torch.bfloat16, torch.float8_e4m3fn)
         num_decodes = swa_metadata.num_decodes
-        num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
         num_prefill_tokens = swa_metadata.num_prefill_tokens
-        num_reqs = num_decodes + num_prefills
         num_tokens = num_decode_tokens + num_prefill_tokens
         if num_tokens == 0:
             return
@@ -529,8 +592,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
         workspace = _get_flashinfer_dsv4_workspace(q.device)
         query_start_loc = swa_metadata.query_start_loc
-        query_start_loc_cpu = swa_metadata.query_start_loc_cpu
-        assert query_start_loc is not None and query_start_loc_cpu is not None
+        assert query_start_loc is not None
 
         # Keep the TRTLLM-gen decode/prefill split: the launcher is tuned for
         # uniform-q batches, and this avoids flattening mixed batches into one call.
@@ -572,14 +634,9 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             )
 
         if num_prefill_tokens > 0:
-            # The prefill query view re-anchors at offset 0, so rebase the
-            # cumulative query offsets to start at 0.
-            prefill_cu = (
-                query_start_loc[num_decodes : num_reqs + 1]
-                - query_start_loc[num_decodes]
-            )
-            prefill_cu_cpu = query_start_loc_cpu[num_decodes : num_reqs + 1]
-            prefill_lens_cpu = prefill_cu_cpu[1:] - prefill_cu_cpu[:-1]
+            assert isinstance(swa_metadata, DeepseekSparseSWAFlashInferMetadata)
+            assert swa_metadata.prefill_segment_query_start is not None
+            assert swa_metadata.prefill_segment_seq_lens is not None
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=query[num_decode_tokens:num_tokens],
                 swa_kv_cache=swa_k_cache,
@@ -587,13 +644,13 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 sparse_indices=sparse_indices[num_decode_tokens:num_tokens],
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=sparse_topk_lens[num_decode_tokens:num_tokens],
-                seq_lens=seq_lens[num_decodes:num_reqs],
+                seq_lens=swa_metadata.prefill_segment_seq_lens,
                 out=output[num_decode_tokens:num_tokens],
                 bmm1_scale=bmm1_scale,
                 bmm2_scale=bmm2_scale,
                 sinks=self.attn_sink,
-                cum_seq_lens_q=prefill_cu,
-                max_q_len=int(prefill_lens_cpu.max().item()),
+                cum_seq_lens_q=swa_metadata.prefill_segment_query_start,
+                max_q_len=swa_metadata.prefill_segment_max_query_len,
             )
 
 
