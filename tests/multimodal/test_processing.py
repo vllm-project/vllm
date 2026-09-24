@@ -1261,6 +1261,38 @@ def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
     assert "size" not in overlay_modality_mm_kwargs(merged, None)
 
 
+@pytest.mark.skip_global_cleanup
+def test_mm_processor_kwargs_deep_merges_nested_scoped_kwargs():
+    """Request-level nested kwargs must not drop configured sibling keys.
+
+    A shallow ``dict`` union replaced the whole ``videos_kwargs`` mapping, so a
+    configured ``fps`` (or any key not repeated in the request) was silently
+    dropped. Nested mappings should merge key-by-key instead.
+    """
+    from vllm.config.multimodal import MultiModalConfig
+
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 100, "longest_edge": 1000},
+            "videos_kwargs": {"fps": 2, "size": {"longest_edge": 1200}},
+        }
+    )
+    merged = mm_config.merge_mm_processor_kwargs(
+        {
+            "size": {"longest_edge": 1800},
+            "videos_kwargs": {"size": {"shortest_edge": 200}},
+        }
+    )
+    # Configured fps survives the request merge.
+    assert merged["videos_kwargs"]["fps"] == 2
+    # Nested size dicts are merged key-by-key.
+    assert merged["videos_kwargs"]["size"] == {
+        "longest_edge": 1200,
+        "shortest_edge": 200,
+    }
+    assert merged["size"] == {"shortest_edge": 100, "longest_edge": 1800}
+
+
 def test_processor_inputs_hashes_partial_uuids():
     rng = np.random.RandomState(0)
     images = [random_image(rng, min_wh=8, max_wh=9) for _ in range(2)]

@@ -117,6 +117,28 @@ MMProcessorDevice: TypeAlias = str
 `"xpu"` on XPU). Validated against that set by the CLI."""
 
 
+
+def _deep_merge_mm_kwargs(
+    base: Mapping[str, object], override: Mapping[str, object]
+) -> dict[str, object]:
+    """Deep-merge inference ``mm_processor_kwargs`` over configured ones.
+
+    The previous implementation used a shallow ``dict`` union, so supplying a
+    nested mapping (e.g. ``videos_kwargs``) in the request wholesale replaced the
+    configured one and dropped every key not repeated in the request (e.g. a
+    configured ``fps``). Nested mappings are now merged key-by-key, while
+    non-mapping values are overridden as before.
+    """
+    result: dict[str, object] = dict(base)
+    for key, value in override.items():
+        existing = result.get(key)
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            result[key] = _deep_merge_mm_kwargs(existing, value)
+        else:
+            result[key] = value
+    return result
+
+
 @config
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
@@ -538,7 +560,7 @@ class MultiModalConfig:
         if self.mm_device_do_normalize:
             kwargs["do_normalize"] = False
             kwargs["do_rescale"] = False
-        return kwargs | dict(inference_kwargs)
+        return _deep_merge_mm_kwargs(kwargs, inference_kwargs)
 
     def use_gpu_video_backend(self) -> bool:
         """Return whether the configured video loader or codec uses the GPU."""
