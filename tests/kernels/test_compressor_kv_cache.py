@@ -821,7 +821,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
     )
 
     def prepare_indexer(qr, latent, weights, positions, rotary, qr_scale):
-        DeepseekV4Indexer._produce_k(indexer, latent, positions, rotary)
+        DeepseekV4Indexer.produce_k(indexer, latent, positions, rotary)
         return None, None, None
 
     def observe(*args):
