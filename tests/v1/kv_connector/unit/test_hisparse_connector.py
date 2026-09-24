@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
     ExampleConnector,
@@ -19,8 +20,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -50,6 +53,55 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
 
 def test_hisparse_requires_block_outermost_device_layout():
     assert HiSparseConnector.get_required_kvcache_layout(MagicMock()) == "BLHNC"
+
+
+@pytest.mark.parametrize("metrics_enabled", [False, True])
+def test_hisparse_host_pool_preserves_device_lifecycle(metrics_enabled):
+    from tests.v1.core.test_prefix_caching import (
+        make_hisparse_kv_cache_config,
+        make_kv_cache_manager,
+    )
+    from tests.v1.core.utils import create_requests
+
+    collector = KVCacheMetricsCollector(sample_rate=1.0) if metrics_enabled else None
+    manager = make_kv_cache_manager(
+        make_hisparse_kv_cache_config(2, 2),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+        metrics_collector=collector,
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    assert coordinator.host_manager is not None
+    device = manager.block_pool
+    host = coordinator.host_manager.block_pool
+    assert host is not device and host.medium == MEDIUM_CPU
+    assert host.metrics_collector is device.metrics_collector is collector
+    request = create_requests(1, num_tokens=16)[0]
+    for pool, birth in ((device, 1), (host, 2)):
+        with patch("time.monotonic_ns", return_value=birth * 10**9):
+            block = pool.get_new_blocks(1)[0]
+            assert block.block_id == 1 and block.pool is pool
+            pool.cache_full_blocks(request, [block], 0, 1, 16, 0)
+    if collector is not None:
+        assert collector.drain_events() == []
+    with patch("time.monotonic_ns", return_value=3_000_000_000):
+        host.touch([host.blocks[1]])
+        host.free_blocks([host.blocks[1]])
+    with patch("time.monotonic_ns", return_value=4_000_000_000):
+        host.evict_blocks({1})
+    assert device.blocks[1].ref_cnt == 1
+    with patch("time.monotonic_ns", return_value=6_000_000_000):
+        device.evict_blocks({1})
+    if collector is not None:
+        assert collector.drain_events() == [
+            KVCacheEvictionEvent(2.0, 1.0, ()),
+            KVCacheEvictionEvent(5.0, 5.0, ()),
+        ]
+        assert collector.drain_events() == []
+    for pool in (host, device):
+        pool.free_blocks([pool.blocks[1]])
+    assert manager.reset_prefix_cache()
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers():

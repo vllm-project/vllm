@@ -5,11 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import (
     BlockMetricsState,
     KVCacheMetricsCollector,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.metrics.stats import KVCacheEvictionEvent
 
 
 class TestBlockMetricsState:
@@ -110,6 +112,30 @@ class TestKVCacheMetricsCollector:
 
         assert len(c.block_metrics) == 5
 
+    def test_same_block_id_in_different_pools(self):
+        collector = KVCacheMetricsCollector(sample_rate=1.0)
+        block_a, block_b = [
+            BlockPool(num_gpu_blocks=2, enable_caching=True, hash_block_size=16).blocks[
+                1
+            ]
+            for _ in range(2)
+        ]
+        with patch("time.monotonic_ns") as clock:
+            for block, birth in ((block_a, 1), (block_b, 2)):
+                clock.return_value = birth * 10**9
+                collector.on_block_allocated(block)
+            for access in (3, 5):
+                clock.return_value = access * 10**9
+                collector.on_block_accessed(block_a)
+
+            clock.return_value = 6_000_000_000
+            collector.on_block_evicted(block_b)
+            assert collector.drain_events() == [KVCacheEvictionEvent(4.0, 4.0, ())]
+
+            clock.return_value = 8_000_000_000
+            collector.on_block_evicted(block_a)
+            assert collector.drain_events() == [KVCacheEvictionEvent(7.0, 3.0, (2.0,))]
+
     def test_access(self):
         c = KVCacheMetricsCollector(sample_rate=1.0)
         block = KVCacheBlock(block_id=0)
@@ -122,7 +148,7 @@ class TestKVCacheMetricsCollector:
             with patch("time.monotonic_ns", return_value=t):
                 c.on_block_accessed(block)
 
-        assert len(c.block_metrics[0].access_history) == 3
+        assert len(c.block_metrics[None, 0].access_history) == 3
 
     def test_evict_no_accesses(self):
         # lifetime should equal idle if never accessed
@@ -161,7 +187,7 @@ class TestKVCacheMetricsCollector:
         assert abs(sample.lifetime_seconds - 3.0) < 0.001
         assert abs(sample.idle_seconds - 1.0) < 0.001
         assert sample.reuse_gaps_seconds == (1.0,)
-        assert 0 not in c.block_metrics
+        assert (None, 0) not in c.block_metrics
 
     def test_reset(self):
         c = KVCacheMetricsCollector(sample_rate=1.0)
@@ -176,7 +202,7 @@ class TestKVCacheMetricsCollector:
 
         with patch("time.monotonic_ns", return_value=2000000000):
             c.on_block_allocated(KVCacheBlock(block_id=10))
-        assert 10 in c.block_metrics
+        assert (None, 10) in c.block_metrics
 
     def test_huge_time_jump(self):
         c = KVCacheMetricsCollector(sample_rate=1.0)
