@@ -171,6 +171,25 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
+### Checkpoint Response Templates (`response_template`)
+
+Checkpoints can define a `response_template` in `tokenizer_config.json` to describe their reasoning, content, and tool-call wire format. Select the
+`response_template` parser to parse output from this metadata instead of a model-specific parser:
+
+```bash
+vllm serve <model> \
+    --enable-auto-tool-choice \
+    --tool-call-parser response_template \
+    --reasoning-parser response_template
+```
+
+Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the `thinking` or `tool_calls`
+field the selected parser needs. The `response_template` parser cannot be combined with other reasoning or tool call parsers.
+
+Response templates currently provide parsing, not format-specific constrained decoding. The parser therefore rejects requests for strict tools,
+required or named tool choice, or `parallel_tool_calls=false`. A custom server or request chat template is allowed, but the parser still expects the
+checkpoint's output format.
+
 !!! note
     With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 

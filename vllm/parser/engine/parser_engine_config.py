@@ -106,6 +106,9 @@ class ParserEngineConfig:
     # .strip() content text when tool calls are present.
     strip_content_whitespace_with_tools: bool = True
 
+    # Hold content following tool events until tool promotion is known.
+    defer_content_after_tools: bool = True
+
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 

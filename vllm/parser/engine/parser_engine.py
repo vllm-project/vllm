@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import regex as re
 
@@ -43,6 +43,24 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 logger = init_logger(__name__)
+
+
+class SemanticEventEngine(Protocol):
+    skip_tool_parsing: bool
+    skip_reasoning_parsing: bool
+
+    @property
+    def reasoning_token_count(self) -> int: ...
+
+    def reset(self, initial_state: ParserState | None = None) -> None: ...
+
+    def feed(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+    ) -> list[SemanticEvent]: ...
+
+    def finish(self) -> list[SemanticEvent]: ...
 
 
 class ToolCallSlot:
@@ -89,6 +107,7 @@ class ParserEngine(Parser):
         tools: list[Tool] | None = None,
         *,
         parser_engine_config: ParserEngineConfig,
+        streaming_engine: SemanticEventEngine | None = None,
         model_config=None,
         **kwargs,
     ) -> None:
@@ -104,8 +123,10 @@ class ParserEngine(Parser):
         self._reasoning_parser = None
         self._tool_parser = None
         self.parser_engine_config = parser_engine_config
-        self._engine = StreamingParserEngine(
-            parser_engine_config, tokenizer, vocab=self.vocab
+        self._engine = streaming_engine or StreamingParserEngine(
+            parser_engine_config,
+            tokenizer,
+            vocab=self.vocab,
         )
 
         self._has_reasoning = (
@@ -136,6 +157,7 @@ class ParserEngine(Parser):
         self._strip_content_ws_with_tools = (
             parser_engine_config.strip_content_whitespace_with_tools
         )
+        self._defer_content_after_tools = parser_engine_config.defer_content_after_tools
 
         vocab = self.vocab
         self._reasoning_start_token_id: int | None = None
@@ -790,7 +812,7 @@ class ParserEngine(Parser):
         for event in events:
             match event.type:
                 case EventType.TEXT_CHUNK:
-                    if seen_tool_event:
+                    if seen_tool_event and self._defer_content_after_tools:
                         self._deferred_content += event.value
                     else:
                         content_parts.append(event.value)

@@ -18,7 +18,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, ClassVar, Final, NamedTuple
+from typing import Any, ClassVar, Final, Literal, NamedTuple
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -1092,6 +1092,7 @@ def emit_simple_tool_call_delta(
 
 def emit_simple_tool_call_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
     events: list[StreamingResponsesResponse] = [
         ResponseFunctionCallArgumentsDoneEvent(
@@ -1111,7 +1112,7 @@ def emit_simple_tool_call_done(
                 name=state.tool_call_name,
                 namespace=state.tool_call_namespace,
                 arguments=state.accumulated_text,
-                status="completed",
+                status=status,
                 id=state.current_item_id,
                 call_id=state.tool_call_id,
             ),
@@ -1243,12 +1244,19 @@ class SimpleStreamingEventProcessor:
             and self.state.tool_call_index != tool_call.index
         )
 
-    def close_current(self) -> list[StreamingResponsesResponse]:
+    def close_current(
+        self,
+        *,
+        item_status: Literal["completed", "incomplete"] = "completed",
+    ) -> list[StreamingResponsesResponse]:
         """Close the current state and emit its 'done' event sequence."""
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
-        events = handlers.done_fn(self.state)
+        if self.state.current_state == _StateType.TOOL_CALL:
+            events = handlers.done_fn(self.state, item_status)
+        else:
+            events = handlers.done_fn(self.state)
         self.output_items.extend(
             event.item
             for event in events
