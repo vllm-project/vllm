@@ -1335,9 +1335,10 @@ class BuildFlashinferMixedSparseIndicesKernel(
             # active ranges as a key -- the first min(WINDOW_SIZE, pos + 1)
             # columns and [WINDOW_SIZE, sparse_topk_lens) -- so -1 must not
             # appear in either. Fill the causal window with the first visible
-            # entries and put the rest from column WINDOW_SIZE on.
+            # entries and put the rest from column WINDOW_SIZE on, followed
+            # directly by the compressed entries.
             NONCAUSAL: tl.constexpr = SWA_INDEX_WIDTH > WINDOW_SIZE
-            tl.static_assert(not NONCAUSAL or DECODE_COMPRESSED_TOPK == 0)
+            compressed_start = SWA_TOTAL_WIDTH
             if NONCAUSAL:
                 req_idx = tl.load(token_to_req_indices_ptr + token_idx)
                 query_start = tl.load(query_start_loc_ptr + req_idx)
@@ -1349,12 +1350,15 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 spill_len = (
                     tl.minimum(context_len, WINDOW_SIZE) + query_len - window_len
                 )
+                compressed_start = WINDOW_SIZE + spill_len
             for i in range(0, SWA_TOTAL_WIDTH, WINDOW_BLOCK_SIZE):
                 offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
                 mask = offset < SWA_TOTAL_WIDTH
                 src = offset
                 src_mask = offset < SWA_INDEX_WIDTH
                 if NONCAUSAL:
+                    # Columns from compressed_start on belong to the loops below.
+                    mask = mask & (offset < compressed_start)
                     spill = offset >= WINDOW_SIZE
                     src = tl.where(spill, offset - WINDOW_SIZE + window_len, offset)
                     src_mask = tl.where(
@@ -1409,11 +1413,26 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 tl.store(
                     sparse_indices_ptr
                     + token_idx * sparse_indices_stride
-                    + SWA_TOTAL_WIDTH
+                    + compressed_start
                     + offset,
                     values,
                     mask=mask,
                 )
+
+            if NONCAUSAL:
+                # The row's remaining columns, left over by the shifted
+                # compressed block.
+                for i in range(0, SWA_TOTAL_WIDTH - WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+                    offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
+                    tl.store(
+                        sparse_indices_ptr
+                        + token_idx * sparse_indices_stride
+                        + compressed_start
+                        + PADDED_TOP_K
+                        + offset,
+                        tl.full((WINDOW_BLOCK_SIZE,), -1, dtype=tl.int32),
+                        mask=offset < SWA_TOTAL_WIDTH - compressed_start,
+                    )
 
             if DECODE_COMPRESSED_TOPK == 0:
                 compressed_len = tl.zeros((), dtype=tl.int32)
@@ -1425,12 +1444,9 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 else:
                     compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
 
-            if NONCAUSAL:
-                tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + spill_len)
-            else:
-                tl.store(
-                    sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + compressed_len
-                )
+            tl.store(
+                sparse_topk_lens_ptr + token_idx, compressed_start + compressed_len
+            )
             return
 
         prefill_idx = token_idx - NUM_DECODE_TOKENS

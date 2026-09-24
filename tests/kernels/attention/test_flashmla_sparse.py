@@ -511,6 +511,53 @@ def test_flashinfer_mixed_sparse_indices_separates_window_and_padded_width():
     assert sparse_lens.cpu().tolist() == [padded_width]
 
 
+def test_flashinfer_mixed_sparse_indices_noncausal_rows_have_no_active_gaps():
+    """A DSpark non-causal row keeps -1 out of the kernel's active ranges.
+
+    Each draft token's causal window holds its first visible entries, the rest
+    of the block starts at column `window`, and the compressed entries follow
+    directly; `sparse_topk_lens` ends right after them.
+    """
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        build_flashinfer_mixed_sparse_indices,
+    )
+
+    device = torch.device("cuda")
+    window, width = 4, 8
+    # One request: 1 context token, a 2-token draft block, slots 0..2 visible.
+    decode_swa = torch.full((2, width), -1, dtype=torch.int32, device=device)
+    decode_swa[:, :3] = torch.arange(3, dtype=torch.int32, device=device)
+    compressed = torch.tensor(
+        [[100, 101, -1, -1]] * 2, dtype=torch.int32, device=device
+    )
+    sparse_indices, sparse_lens = build_flashinfer_mixed_sparse_indices(
+        decode_swa_indices=decode_swa,
+        decode_compressed_indices=compressed,
+        decode_compressed_topk_lens=torch.tensor(
+            [2, 2], dtype=torch.int32, device=device
+        ),
+        prefill_topk_indices=torch.empty((0, 4), dtype=torch.int32, device=device),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=device),
+        seq_lens=torch.tensor([3], dtype=torch.int32, device=device),
+        token_to_req_indices=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        swa_block_table=torch.tensor([[0]], dtype=torch.int32, device=device),
+        swa_block_size=64,
+        compressed_block_table=torch.tensor([[0]], dtype=torch.int32, device=device),
+        compressed_block_size=64,
+        window_size=window,
+        compress_ratio=128,
+        topk=0,
+    )
+
+    assert sparse_indices.cpu().tolist() == [
+        # pos 1: window [0, 1]; slot 2 spills to column 4; compressed after it.
+        [0, 1, -1, -1, 2, 100, 101, -1, -1, -1, -1, -1],
+        # pos 2: window [0, 1, 2]; nothing spills; compressed at column 4.
+        [0, 1, 2, -1, 100, 101, -1, -1, -1, -1, -1, -1],
+    ]
+    assert sparse_lens.cpu().tolist() == [7, 6]
+
+
 @pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
 @pytest.mark.parametrize("page_padding", [0, 64])
 def test_flashinfer_sparse_forward_reads_packed_kv_rows(model, page_padding):
