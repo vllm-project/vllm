@@ -31,6 +31,7 @@ from typing import ClassVar
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.attention import IndexerKVDType
 from vllm.forward_context import get_forward_context
@@ -51,6 +52,7 @@ from vllm.models.minimax_m3.common.indexer import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     _minimax_m3_aiter_sparse_pa_requested,
 )
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -596,6 +598,22 @@ def select_aiter_indexer_impl_cls(
         topk_blocks,
         indexer_kv_dtype,
     )
+    # Context-parallel AITER indexer for ROCm TP>1 (opt-in).
+    if (
+        current_platform.is_rocm()
+        and get_tensor_model_parallel_world_size() > 1
+        and envs.VLLM_ROCM_MINIMAX_INDEXER_CP
+    ):
+        from vllm.models.minimax_m3.amd.indexer_aiter_cp import (
+            MiniMaxM3IndexerAiterCPImpl,
+        )
+        logger.info_once(
+            "MiniMax M3 indexer: selected AITER CP (context-parallel, ROCm) "
+            "[topk_blocks=%d, tp=%d]",
+            topk_blocks,
+            get_tensor_model_parallel_world_size(),
+        )
+        return MiniMaxM3IndexerAiterCPImpl
     return MiniMaxM3IndexerAiterImpl
 
 
