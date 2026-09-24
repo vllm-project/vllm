@@ -36,7 +36,7 @@ import torch
 import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.dynamic_module_utils import (
     get_class_from_dynamic_module,
     resolve_trust_remote_code,
@@ -468,7 +468,7 @@ class Resampler4_5(Resampler2_5):
         return x
 
 
-def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
+def get_version_by_config(config: PreTrainedConfig) -> tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
     # The old configs do not include version number
@@ -1235,7 +1235,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         super().__init__()
         # All MiniCPM-V models disable `tie_word_embeddings` but
-        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # `PreTrainedConfig.tie_word_embeddings` defaults to True; we cannot
         # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
         # and config class
         self.config = config
@@ -1425,7 +1425,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -1957,7 +1957,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2058,7 +2058,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2154,7 +2154,7 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2255,7 +2255,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2354,7 +2354,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
