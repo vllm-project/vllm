@@ -246,6 +246,13 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub io_processor_plugin: Option<Unsupported>,
 
+    /// Number of worker threads in the renderer thread pool. The pool is
+    /// consumed by the async renderer path to parallelize tokenization, chat
+    /// template rendering, and multimodal preprocessing across concurrent
+    /// requests.
+    #[arg(long)]
+    pub renderer_num_workers: Option<Noop>,
+
     /// Path to a dynamically reasoning parser plugin that can be dynamically
     /// loaded and registered.
     #[arg(long)]
@@ -281,6 +288,16 @@ pub struct EngineUnsupportedArgs {
     )]
     pub data_parallel_external_lb: Option<Unsupported>,
 
+    /// Enable fault tolerance for detailed error recovery, such as scaling
+    /// down fault DPEngineCore.
+    #[arg(
+        long,
+        visible_alias = "no-enable-fault-tolerance",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_fault_tolerance: Option<Unsupported>,
+
     /// This feature is work in progress and no prefill optimization takes place
     /// with this flag enabled currently.
     #[arg(
@@ -308,6 +325,28 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_processor_cache_type: Option<Unsupported>,
 
+    /// Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
+    /// `"sha512"` for FIPS-compliant deployments.
+    #[arg(long)]
+    pub mm_hasher_algorithm: Option<Unsupported>,
+
+    /// IPC (inter-process communication) method for multimodal tensors.
+    /// - "direct_rpc": Use msgspec serialization via RPC
+    /// - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    #[arg(long)]
+    pub mm_tensor_ipc: Option<Unsupported>,
+
+    /// Device the HF multi-modal processor runs the image/video transform on.
+    /// Convenience for `--mm-processor-kwargs '{"device": ...}'`.
+    #[arg(long)]
+    pub mm_processor_device: Option<Unsupported>,
+
+    /// Amount of GPU memory (in GiB) sequestered on the engine's device for
+    /// GPU-side multimodal work in the API-server (frontend) process, such as
+    /// hardware video decoding.
+    #[arg(long)]
+    pub mm_ipc_gpu_memory_gb: Option<Unsupported>,
+
     /// Dictionary mapping specific modalities to LoRA model paths.
     #[arg(long)]
     pub default_mm_loras: Option<Unsupported>,
@@ -323,6 +362,17 @@ pub struct EngineUnsupportedArgs {
     /// The interval (or buffer size) for streaming in terms of token length.
     #[arg(long)]
     pub stream_interval: Option<Unsupported>,
+
+    /// Maximum number of requests that can be in-flight (waiting or running)
+    /// at the same time. When the limit is reached, new requests are rejected
+    /// with HTTP 503 so the client can retry on another instance.
+    #[arg(long)]
+    pub max_num_queued_reqs: Option<Unsupported>,
+
+    /// Maximum total prompt tokens of requests currently in the prefill phase.
+    /// When the limit is reached, new requests are rejected with HTTP 503.
+    #[arg(long)]
+    pub max_num_queued_tokens: Option<Unsupported>,
 
     /// Structured outputs configuration.
     #[arg(long)]
@@ -419,6 +469,15 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
 
+    /// If set to True, include per-request timing metrics in API responses.
+    #[arg(
+        long,
+        visible_alias = "no-enable-per-request-metrics",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_per_request_metrics: Option<Unsupported>,
+
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -492,6 +551,15 @@ pub struct ServerUnsupportedArgs {
     )]
     pub tokens_only: Option<Unsupported>,
 
+    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
+    /// `custom`, or `none`.
+    #[arg(long)]
+    pub fingerprint_mode: Option<Unsupported>,
+
+    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
+    #[arg(long)]
+    pub fingerprint_value: Option<Unsupported>,
+
     /// Log level for uvicorn.
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
@@ -562,4 +630,14 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_offline_docs: Option<Unsupported>,
+
+    /// If set, run pooling score MaxSim on GPU in the API server process.
+    /// Can significantly improve late-interaction scoring performance.
+    #[arg(
+        long,
+        visible_alias = "no-enable-flash-late-interaction",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_flash_late_interaction: Option<Noop>,
 }
