@@ -47,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.attention_sink import load_padded_attn_sink
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
@@ -573,12 +574,14 @@ class HYV4Model(nn.Module):
                 if "learnable_sink_param" in name:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    param = params_dict[name]
-                    local_weight = loaded_weight[head_rank_start:head_rank_end]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
+                    load_padded_attn_sink(
+                        params_dict[name],
+                        loaded_weight,
+                        head_rank_start,
+                        head_rank_end,
                     )
-                    weight_loader(param, local_weight)
+                    loaded_params.add(name)
+                    continue
                 else:
                     if is_expert_weight:
                         # An expert weight that is not mapped to this rank.

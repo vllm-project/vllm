@@ -24,6 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.attention_sink import load_padded_attn_sink
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -885,13 +886,12 @@ class HYV4MTP(nn.Module):
 
             if "learnable_sink_param" in name:
                 if name in params_dict:
-                    param = params_dict[name]
-                    with torch.no_grad():
-                        local_weight = loaded_weight[head_rank_start:head_rank_end]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, local_weight)
+                    load_padded_attn_sink(
+                        params_dict[name],
+                        loaded_weight,
+                        head_rank_start,
+                        head_rank_end,
+                    )
                     loaded_params.add(name)
                 continue
 
