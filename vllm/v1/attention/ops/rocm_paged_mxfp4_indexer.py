@@ -39,11 +39,15 @@ if TYPE_CHECKING:
     )
     from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
         DeepseekV41RocmMxfp4IndexerMetadata,
+        RocmMxfp4GatherLaunch,
         RocmMxfp4NativeDecode,
         RocmMxfp4PrefillPlan,
     )
 
 MXFP4_BLOCK_SIZE = 32
+# A logits tensor stays under 2 GiB: Triton's AMD backend specializes pointers
+# to storage below that, and buffer loads and stores take 32-bit offsets.
+MAX_LOGITS_BYTES = 2**31 - 1
 _AITER_MODULE = "aiter.ops.triton.attention.pa_mqa_logits_mxfp4"
 
 
@@ -191,6 +195,13 @@ def _kv_view(kv_cache: torch.Tensor, head_dim: int) -> torch.Tensor:
     )
 
 
+def rocm_mxfp4_consumer_rows(num_candidate_cols: int) -> int:
+    """Query rows per candidate-consumer launch. Its logits are [rows, pool]
+    fp32 whatever the context, so the logits budget alone sizes it."""
+    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    return max(1, min(budget, MAX_LOGITS_BYTES) // (4 * num_candidate_cols))
+
+
 def reserve_rocm_mxfp4_indexer_workspace(
     hidden_states: torch.Tensor,
     logits_width: int,
@@ -208,7 +219,7 @@ def reserve_rocm_mxfp4_indexer_workspace(
         specs.append(((rows, nblocks), torch.float32))
         budget += budget // candidate_block_size
     if gather_block_size:
-        # aiter allocates a chunk's candidate lists itself: 24 B per candidate
+        # aiter allocates a launch's candidate lists itself: 24 B per candidate
         # block (int64 value and scale offsets, int64 position) against the
         # compact logits' 4 B per pool column.
         budget += budget * 6 // gather_block_size
@@ -510,46 +521,40 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
 
 
 def _gather_prefill(
-    layer: _Layer,
-    chunk: "DeepseekV32IndexerPrefillChunkMetadata",
-    plan: "RocmMxfp4PrefillPlan",
-    num_cols: int,
+    layer: _Layer, launch: "RocmMxfp4GatherLaunch", num_cols: int
 ) -> None:
     pa = _aiter()
     assert layer.candidates is not None
-    t0, t1 = chunk.token_start, chunk.token_end
+    t0, t1 = launch.token_start, launch.token_end
+    # Each consumer resolves its launch's pool, so none outlives the launch.
+    gather, slot_ends = pa.build_candidate_gather(
+        layer.candidates[t0:t1],
+        launch.row_ends,
+        launch.block_table.expand(t1 - t0, -1),
+        layer.kv,
+        layer.num_heads,
+        layer.head_dim,
+        layer.block,
+    )
     compact = layer.q.new_empty((t1 - t0, num_cols), dtype=torch.float32)
-    for i, (lo, hi, req) in enumerate(plan.requests):
-        if plan.gathers[i] is None:
-            # The first consumer resolves the pool; the other three reuse it.
-            plan.gathers[i] = pa.build_candidate_gather(
-                layer.candidates[t0 + lo : t0 + hi],
-                plan.row_ends[lo:hi],
-                chunk.block_table[req : req + 1].expand(hi - lo, -1),
-                layer.kv,
-                layer.num_heads,
-                layer.head_dim,
-                layer.block,
-            )
-        gather, slot_ends = plan.gathers[i]
-        q, q_scale, weights = layer.rows(t0 + lo, t0 + hi)
-        pa.paged_mxfp4_mqa_logits(
-            q,
-            q_scale,
-            layer.kv,
-            weights,
-            plan.context_lens[req : req + 1],
-            chunk.block_table[req : req + 1],
-            num_cols,
-            out_logits=compact[lo:hi],
-            clean_logits=False,
-            row_ends=slot_ends,
-            use_gather=True,
-            candidates=gather,
-        )
-        out = layer.topk_buffer[t0 + lo : t0 + hi, : layer.topk_tokens]
-        _topk(compact[lo:hi], slot_ends, out, layer.topk_tokens)
-        _remap_compact_topk(out, gather["positions"], layer.block)
+    q, q_scale, weights = layer.rows(t0, t1)
+    pa.paged_mxfp4_mqa_logits(
+        q,
+        q_scale,
+        layer.kv,
+        weights,
+        launch.context_len,
+        launch.block_table,
+        num_cols,
+        out_logits=compact,
+        clean_logits=False,
+        row_ends=slot_ends,
+        use_gather=True,
+        candidates=gather,
+    )
+    out = layer.topk_buffer[t0:t1, : layer.topk_tokens]
+    _topk(compact, slot_ends, out, layer.topk_tokens)
+    _remap_compact_topk(out, gather["positions"], layer.block)
 
 
 def _gather_decode(layer: _Layer, num_cols: int) -> None:
@@ -688,10 +693,10 @@ def rocm_mxfp4_sparse_mqa_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
-            if plan.use_gather:
-                _gather_prefill(layer, chunk, plan, num_candidate_cols)
-            else:
+            if not plan.use_gather:
                 _dense_prefill(layer, chunk, plan, candidate_write=False)
+        for launch in metadata.gather_launches:
+            _gather_prefill(layer, launch, num_candidate_cols)
     if metadata.decode is not None:
         # A FULL graph cannot follow the per-step gate; the gather is the side
         # that stays flat in the context length.

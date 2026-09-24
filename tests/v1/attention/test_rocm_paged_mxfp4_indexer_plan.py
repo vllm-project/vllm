@@ -17,7 +17,9 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     native_decode,
+    plan_gather_launches,
     plan_prefill_chunks,
+    split_prefill_chunks,
 )
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
 
@@ -37,21 +39,33 @@ def _chunk(block_table, token_start, token_end, row_ends):
     )
 
 
-def test_chunks_split_into_requests_and_launches():
-    # A decode (1 token), then prefills of 3, 3, 5 and 6 query tokens; the
-    # last one is sliced into two chunks.
-    query_start_loc = [0, 1, 4, 7, 12, 18]
-    seq_lens = torch.tensor([40, 10, 12, 21, 64])
-    block_table = torch.arange(20, dtype=torch.int32).view(5, 4)
-    chunks = [
-        _chunk(block_table[1:4], 1, 12, list(range(11))),
-        _chunk(block_table[4:5], 12, 15, [29, 30, 30]),
-        _chunk(block_table[4:5], 15, 18, [31, 31, 32]),
-    ]
-    context_lens = seq_lens.int() // 2
-    plans = plan_prefill_chunks(
-        chunks, query_start_loc, seq_lens, context_lens, 2, 8, 20.0
+# A decode (1 token), then prefills of 3, 3, 5 and 6 query tokens; the last
+# one is sliced into two chunks.
+QUERY_START_LOC = [0, 1, 4, 7, 12, 18]
+SEQ_LENS = torch.tensor([40, 10, 12, 21, 64])
+BLOCK_TABLE = torch.arange(20, dtype=torch.int32).view(5, 4)
+CHUNKS = [
+    _chunk(BLOCK_TABLE[1:4], 1, 12, list(range(11))),
+    _chunk(BLOCK_TABLE[4:5], 12, 15, [29, 30, 30]),
+    _chunk(BLOCK_TABLE[4:5], 15, 18, [31, 31, 32]),
+]
+
+
+def _plans(min_gather_width, query_start_loc_device=None):
+    return plan_prefill_chunks(
+        CHUNKS,
+        QUERY_START_LOC,
+        SEQ_LENS,
+        SEQ_LENS.int() // 2,
+        2,
+        8,
+        min_gather_width,
+        query_start_loc_device,
     )
+
+
+def test_chunks_split_into_requests_and_launches():
+    plans = _plans(20.0)
 
     assert [p.requests for p in plans] == [
         [(0, 3, 0), (3, 6, 1), (6, 11, 2)],
@@ -70,24 +84,78 @@ def test_chunks_split_into_requests_and_launches():
     torch.testing.assert_close(plans[2].row_ends, torch.tensor([31, 31, 32]).int())
     torch.testing.assert_close(plans[2].block_ends, torch.tensor([4, 4, 4]).int())
     assert [p.use_gather for p in plans] == [False, True, True]
-    assert all(p.gathers == [None] * len(p.requests) for p in plans)
+    assert [p.first_request for p in plans] == [1, 4, 4]
     # Without the device query_start_loc (varlen off) every chunk launches per run.
     assert all(p.query_start_loc is None for p in plans)
 
-    packed = plan_prefill_chunks(
-        chunks,
-        query_start_loc,
-        seq_lens,
-        context_lens,
-        2,
-        8,
-        20.0,
-        torch.tensor(query_start_loc, dtype=torch.int32),
-    )
+    packed = _plans(20.0, torch.tensor(QUERY_START_LOC, dtype=torch.int32))
     # Only the ragged chunk packs, with offsets local to the chunk; the
     # single-request slices keep their one uniform launch.
     assert packed[0].query_start_loc.tolist() == [0, 3, 6, 11]
     assert packed[1].query_start_loc is None and packed[2].query_start_loc is None
+
+
+def test_dense_split_budgets_the_widest_row():
+    """A dense launch holds [rows, widest context] logits: the requests packed
+    into a chunk do not add their contexts up, as a gathered K would, and a
+    request too wide to launch whole is cut on its query rows."""
+    budget = 4 * 1000 * 30
+    contexts, queries = torch.tensor([1000, 600, 200]), torch.tensor([10, 10, 10])
+    assert split_prefill_chunks(contexts, queries, budget, 2) == [
+        (slice(2, 5), slice(0, 30))
+    ]
+    # the third request would take the chunk past the budget
+    queries = torch.tensor([10, 10, 11])
+    assert split_prefill_chunks(contexts, queries, budget) == [
+        (slice(0, 2), slice(0, 20)),
+        (slice(2, 3), slice(0, 11)),
+    ]
+    assert split_prefill_chunks(torch.tensor([1000]), torch.tensor([100]), budget) == [
+        (slice(0, 1), slice(lo, min(lo + 30, 100))) for lo in range(0, 100, 30)
+    ]
+    # a logits tensor stays under 2 GiB whatever the budget
+    (first, *_) = split_prefill_chunks(
+        torch.tensor([1 << 20]), torch.tensor([1000]), 1 << 40
+    )
+    assert first[1] == slice(0, (2**31 - 1) // (4 << 20))
+
+
+def test_consumer_launch_rows_follow_the_logits_budget(monkeypatch):
+    """A consumer launch holds [rows, pool] fp32 logits whatever the context,
+    so the logits budget alone sizes it, not how many of the step's rows
+    gather."""
+    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    assert ops.rocm_mxfp4_consumer_rows(16384) == 8192
+    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "4096")
+    assert ops.rocm_mxfp4_consumer_rows(16384) == (2**31 - 1) // (4 * 16384)
+
+
+def test_gather_launches_rejoin_a_requests_rows():
+    """The consumers' logits are [rows, pool] whatever the context, so their
+    launches are not the dense split's: a request's rows go back together
+    across the chunks that cut them, then out again at most max_rows a
+    launch, never mixing requests."""
+    plans = _plans(20.0)
+    (joined,) = plan_gather_launches(CHUNKS, plans, 100)
+    assert (joined.token_start, joined.token_end) == (12, 18)
+    assert joined.row_ends.tolist() == [29, 30, 30, 31, 31, 32]
+    assert joined.block_table.tolist() == BLOCK_TABLE[4:5].tolist()
+    assert joined.context_len.tolist() == [32]
+
+    split = plan_gather_launches(CHUNKS, plans, 4)
+    assert [(g.token_start, g.token_end) for g in split] == [(12, 16), (16, 18)]
+    assert [g.row_ends.tolist() for g in split] == [[29, 30, 30, 31], [31, 32]]
+
+    # every chunk gathers: the first chunk's three requests launch apart
+    launches = plan_gather_launches(CHUNKS, _plans(0.0), 100)
+    assert [(g.token_start, g.token_end) for g in launches] == [
+        (1, 4),
+        (4, 7),
+        (7, 12),
+        (12, 18),
+    ]
+    assert [g.block_table[0, 0].item() for g in launches] == [4, 8, 12, 16]
+    assert plan_gather_launches(CHUNKS, _plans(None), 100) == []
 
 
 def test_no_gather_without_candidates():

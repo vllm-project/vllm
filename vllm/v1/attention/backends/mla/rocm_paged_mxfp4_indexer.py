@@ -31,7 +31,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    MAX_LOGITS_BYTES,
     build_rocm_mxfp4_decode_schedule,
+    rocm_mxfp4_consumer_rows,
     rocm_mxfp4_decode_schedule_words,
     rocm_paged_mxfp4_cache_layout,
 )
@@ -65,14 +67,29 @@ class RocmMxfp4PrefillPlan:
     """[rows] int32 exclusive compressed key bound of each row."""
     context_lens: torch.Tensor
     """[chunk.num_reqs] int32 compressed context of each request."""
+    first_request: int
+    """The step's index of the chunk's first request."""
     block_ends: torch.Tensor | None = None
     """[rows] int32 candidate blocks each row sees, for the source's pool."""
     use_gather: bool = False
-    gathers: list = field(default_factory=list)
-    """Per request, the pool the first consumer resolved for the others."""
     query_start_loc: torch.Tensor | None = None
     """[chunk.num_reqs + 1] int32 row offsets of the chunk's requests when they
     launch packed, as one varlen launch; None launches per run instead."""
+
+
+@dataclass
+class RocmMxfp4GatherLaunch:
+    """Query rows [token_start, token_end) of one request, which the candidate
+    consumers score against the pool in one launch."""
+
+    token_start: int
+    token_end: int
+    block_table: torch.Tensor
+    """[1, max_blocks] int32, the request's block table row."""
+    context_len: torch.Tensor
+    """[1] int32 compressed context of the request."""
+    row_ends: torch.Tensor
+    """[rows] int32 exclusive compressed key bound of each row."""
 
 
 @dataclass
@@ -130,6 +147,9 @@ class DeepseekV41RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     decode_use_gather: bool = False
     decode_gather: tuple[dict, torch.Tensor] | None = None
     """The pool the first consumer resolved for the decode rows."""
+    gather_launches: list[RocmMxfp4GatherLaunch] = field(default_factory=list)
+    """The prefill rows of the chunks that gather, as the consumers launch
+    them."""
 
 
 def plan_prefill_chunks(
@@ -183,13 +203,96 @@ def plan_prefill_chunks(
                 width=width,
                 row_ends=row_ends,
                 context_lens=context_lens[reqs],
+                first_request=first,
                 block_ends=(row_ends + block - 1) // block if block else None,
                 use_gather=min_gather_width is not None and width >= min_gather_width,
-                gathers=[None] * len(requests),
                 query_start_loc=packed,
             )
         )
     return plans
+
+
+def split_prefill_chunks(
+    context_lens: torch.Tensor,
+    query_lens: torch.Tensor,
+    max_logits_bytes: int,
+    request_offset: int = 0,
+) -> list[tuple[slice, slice]]:
+    """(request slice, query slice) chunks, as the base chunker returns them.
+
+    Nothing gathers K here, so the requests' contexts do not add up: a chunk's
+    logits are [rows, widest compressed context] fp32, at most
+    ``max_logits_bytes``. A request too wide to launch whole is cut on its
+    query rows.
+    """
+    budget = min(max_logits_bytes, MAX_LOGITS_BYTES)
+
+    def max_rows(width: int) -> int:
+        return max(1, budget // (4 * max(width, 1)))
+
+    chunks: list[tuple[slice, slice]] = []
+    end = 0
+    while end < len(context_lens):
+        start, rows, width = end, 0, 0
+        while end < len(context_lens):
+            q = int(query_lens[end])
+            w = max(width, int(context_lens[end]))
+            if rows and rows + q > max_rows(w):
+                break
+            rows, width = rows + q, w
+            end += 1
+        step = max_rows(width)
+        reqs = slice(start + request_offset, end + request_offset)
+        chunks.extend(
+            (reqs, slice(lo, min(lo + step, rows))) for lo in range(0, rows, step)
+        )
+    return chunks
+
+
+def plan_gather_launches(
+    chunks: list[DeepseekV32IndexerPrefillChunkMetadata],
+    plans: list[RocmMxfp4PrefillPlan],
+    max_rows: int,
+) -> list[RocmMxfp4GatherLaunch]:
+    """The candidate consumers' launches over the chunks that gather.
+
+    A consumer's logits are [rows, pool] however long the context, so the
+    dense split, sized for the context, would launch it far more often than
+    its memory needs. Each request's rows go back together across the chunks
+    that cut them, then out again at most ``max_rows`` a launch.
+    """
+    # Per request: (first token, [(plan, first row, end row)]), and the chunk
+    # and request index its block table and context come from.
+    runs: list[tuple[int, list, DeepseekV32IndexerPrefillChunkMetadata, int]] = []
+    last: tuple[int, int] | None = None
+    for chunk, plan in zip(chunks, plans):
+        if not plan.use_gather:
+            last = None
+            continue
+        for lo, hi, req in plan.requests:
+            request, t_lo = plan.first_request + req, chunk.token_start + lo
+            if last != (request, t_lo):
+                runs.append((t_lo, [], chunk, req))
+            runs[-1][1].append((plan, lo, hi))
+            last = (request, chunk.token_start + hi)
+    launches = []
+    for token_start, pieces, chunk, req in runs:
+        ends = [plan.row_ends[lo:hi] for plan, lo, hi in pieces]
+        row_ends = ends[0] if len(ends) == 1 else torch.cat(ends)
+        block_table = chunk.block_table[req : req + 1]
+        context_len = pieces[0][0].context_lens[req : req + 1]
+        for lo in range(0, row_ends.shape[0], max_rows):
+            hi = min(lo + max_rows, row_ends.shape[0])
+            launches.append(
+                RocmMxfp4GatherLaunch(
+                    token_start + lo,
+                    token_start + hi,
+                    block_table,
+                    context_len,
+                    row_ends[lo:hi],
+                )
+            )
+    return launches
 
 
 class DeepseekV41RocmMxfp4IndexerBackend(DeepseekV41IndexerBackend):
@@ -248,8 +351,6 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
         # Uniform steps also launch the dense layers on next_n-row sequences,
         # see native_decode.
         self.use_flattening = True
-        # Nothing gathers K here, so only the logits budget splits a chunk.
-        self.max_prefill_buffer_size = 1 << 62
 
         self.candidate_block_size = getattr(hf_config, "candidate_block_size", 0)
         self.num_candidate_cols = 0
@@ -274,6 +375,7 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                     f"one {layout.n_per_tile}-entry shuffle group."
                 )
             self.num_candidate_cols = topk_blocks * block
+            self.gather_rows = rocm_mxfp4_consumer_rows(self.num_candidate_cols)
             logger.info_once(
                 "DeepSeek V4.1 indexer: candidate consumers score the %d "
                 "candidate positions with aiter's paged MXFP4 gather once the "
@@ -306,10 +408,20 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
             **int32,
         )
 
-    def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
-        # The consumers' logits are [rows, pool] fp32 whatever the context, so
-        # the chunker budgets every row as at least that wide.
-        return seq_lens_cpu.clamp(min=self.num_candidate_cols)
+    def _split_indexer_prefill_chunks(  # type: ignore[override]
+        self,
+        compressed_seq_lens_cpu: torch.Tensor,
+        prefill_query_lens_cpu: torch.Tensor,
+        workspace_size: int,
+        max_logits_bytes: int,
+        request_offset: int = 0,
+    ) -> list[tuple[slice, slice]]:
+        return split_prefill_chunks(
+            compressed_seq_lens_cpu,
+            prefill_query_lens_cpu,
+            max_logits_bytes,
+            request_offset,
+        )
 
     def _gather_pays(self, context: int, cut: float) -> bool:
         return self.num_candidate_cols > 0 and context >= cut * self.num_candidate_cols
@@ -372,4 +484,8 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 else None,
                 cm.query_start_loc if envs.VLLM_ROCM_MXFP4_INDEXER_VARLEN else None,
             )
+            if self.num_candidate_cols:
+                metadata.gather_launches = plan_gather_launches(
+                    base.prefill.chunks, metadata.prefill_plans, self.gather_rows
+                )
         return metadata

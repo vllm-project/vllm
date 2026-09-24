@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     DeepseekV41RocmMxfp4IndexerMetadata,
     native_decode,
+    plan_gather_launches,
     plan_prefill_chunks,
 )
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
@@ -227,7 +228,9 @@ def _decode_metadata(case, rows, ratio, query_lens):
     )
 
 
-def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc, varlen):
+def _prefill_metadata(
+    case, rows, ratio, chunk_bounds, query_start_loc, varlen, gather_rows, gather
+):
     chunks = []
     for req_lo, req_hi, t0, t1 in chunk_bounds:
         ends = torch.tensor(
@@ -248,6 +251,18 @@ def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc, varlen):
         )
     seq_lens = torch.tensor(case.seq_lens)
     context_lens = (seq_lens // ratio).int().to(DEVICE)
+    plans = plan_prefill_chunks(
+        chunks,
+        query_start_loc,
+        seq_lens,
+        context_lens,
+        ratio,
+        CAND_BLOCK,
+        0.0 if gather else None,
+        torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE)
+        if varlen
+        else None,
+    )
     return DeepseekV41RocmMxfp4IndexerMetadata(
         seq_lens=None,
         max_seq_len=max(case.seq_lens),
@@ -257,18 +272,8 @@ def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc, varlen):
         num_prefills=len(case.seq_lens),
         num_prefill_tokens=len(rows),
         prefill=types.SimpleNamespace(chunks=chunks),
-        prefill_plans=plan_prefill_chunks(
-            chunks,
-            query_start_loc,
-            seq_lens,
-            context_lens,
-            ratio,
-            CAND_BLOCK,
-            0.0,
-            torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE)
-            if varlen
-            else None,
-        ),
+        prefill_plans=plans,
+        gather_launches=plan_gather_launches(chunks, plans, gather_rows),
     )
 
 
@@ -367,10 +372,8 @@ def _run_layers(monkeypatch, case, rows, metadata):
         allowed.append(torch.where(mask, scores, float("-inf")))
 
     for gather in (True, False):
-        consumer = metadata(1)
+        consumer = metadata(1, gather)
         consumer.decode_use_gather = gather
-        for plan in consumer.prefill_plans:
-            plan.use_gather = gather
         _forward_context(monkeypatch, consumer)
         out = topk_buffer()
         ops.rocm_mxfp4_sparse_mqa_indexer(
@@ -415,7 +418,7 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
         monkeypatch,
         case,
         rows,
-        lambda r: _decode_metadata(case, rows, r, query_lens),
+        lambda r, gather=False: _decode_metadata(case, rows, r, query_lens),
     )
 
 
@@ -434,9 +437,12 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
 # Varlen packs a chunk whose requests' rows differ into one launch; off, the
 # chunk launches once per run of equal-row requests.
 @pytest.mark.parametrize("varlen", [True, False], ids=["varlen", "per_run"])
+# The consumers rejoin a request's rows across chunks, then cut them at most
+# gather_rows a launch.
+@pytest.mark.parametrize("gather_rows", [1 << 20, 128], ids=["joined", "cut"])
 @BLOCKS
 def test_prefill_layers_match_reference(
-    monkeypatch, seq_lens, new_tokens, chunks, varlen, block
+    monkeypatch, seq_lens, new_tokens, chunks, varlen, gather_rows, block
 ):
     case = _Case(seq_lens, block)
     rows = [
@@ -449,5 +455,7 @@ def test_prefill_layers_match_reference(
         monkeypatch,
         case,
         rows,
-        lambda r: _prefill_metadata(case, rows, r, chunks, query_start_loc, varlen),
+        lambda r, gather=True: _prefill_metadata(
+            case, rows, r, chunks, query_start_loc, varlen, gather_rows, gather
+        ),
     )
