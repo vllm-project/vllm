@@ -140,6 +140,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
     ),
+    "response_template": (
+        "response_template_reasoning_parser",
+        "ResponseTemplateReasoningParser",
+    ),
     "seed_oss": (
         "seed_oss_engine_reasoning_parser",
         "SeedOssParserReasoningAdapter",

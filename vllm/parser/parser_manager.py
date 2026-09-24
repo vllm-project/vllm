@@ -11,9 +11,12 @@ from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
     from vllm.reasoning import ReasoningParser
+    from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers import ToolParser
 
 logger = init_logger(__name__)
+
+RESPONSE_TEMPLATE_PARSER = "response_template"
 
 
 class ParserManager:
@@ -79,6 +82,7 @@ class ParserManager:
         model_name: str | None = None,
         is_harmony: bool = False,
         tool_strict_level: str = "auto",
+        tokenizer: TokenizerLike | None = None,
     ) -> type[Parser] | None:
         """Get a Parser that handles both reasoning and tool parsing.
 
@@ -93,6 +97,8 @@ class ParserManager:
                         If True, HarmonyParser is always returned.
             tool_strict_level: Server-side floor for tool-call structural
                 tags (``--tool-strict-level``).
+            tokenizer: Tokenizer whose `response_template` metadata is
+                validated when the `response_template` parser is selected.
 
         Returns:
             A Parser class, or None if neither parser is specified.
@@ -118,6 +124,42 @@ class ParserManager:
             HarmonyParser.tool_parser_cls = tool_parser_cls
             HarmonyParser.tool_strict_level = strict_level
             return HarmonyParser
+
+        if RESPONSE_TEMPLATE_PARSER in (reasoning_parser_name, tool_parser_name):
+            if {reasoning_parser_name, tool_parser_name} - {
+                RESPONSE_TEMPLATE_PARSER,
+                None,
+                "",
+            }:
+                raise TypeError(
+                    "The response_template parser cannot be combined with other "
+                    "reasoning or tool call parsers"
+                )
+            from vllm.parser.response_template import (
+                ResponseTemplateParser,
+                validate_tokenizer_response_template,
+            )
+
+            if tokenizer is not None:
+                validate_tokenizer_response_template(
+                    tokenizer,
+                    reasoning=reasoning_parser_cls is not None,
+                    tools=tool_parser_cls is not None,
+                )
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+            auto_tools = enable_auto_tools
+
+            class _ResponseTemplateParser(ResponseTemplateParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+                _parse_reasoning = r_cls is not None
+                _parse_tools = t_cls is not None
+                _enable_auto_tools = auto_tools
+
+            return _ResponseTemplateParser
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser

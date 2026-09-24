@@ -78,6 +78,7 @@ class OnlineDerenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
+            tokenizer=renderer.get_tokenizer(),
         )
 
         self.chat_template = chat_template
@@ -159,6 +160,8 @@ class OnlineDerenderer:
                     chat_template_kwargs=chat_template_kwargs,
                     model_config=self.model_config,
                 )
+                if generate_response.prompt_token_ids is not None:
+                    parser.set_prompt_token_ids(generate_response.prompt_token_ids)
                 reasoning, content, tool_calls = parser.parse(
                     decoded_text,
                     chat_request,
@@ -560,7 +563,11 @@ class OnlineDerenderer:
                 is_named_tool_choice = (
                     type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
                 )
-                if tools_streamed and not is_named_tool_choice:
+                if (
+                    tools_streamed
+                    and not is_named_tool_choice
+                    and not parser.has_incomplete_tool_call
+                ):
                     finish_reason = "tool_calls"
 
             stream_choice = ChatCompletionResponseStreamChoice(
