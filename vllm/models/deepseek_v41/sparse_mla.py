@@ -86,7 +86,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
     @staticmethod
@@ -255,7 +255,7 @@ class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
         return "FLASHMLA_MEGA_ATTN_DSV41"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
