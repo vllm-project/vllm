@@ -4,6 +4,7 @@
 //! Multimodal preprocessing spans and their timing collector configuration.
 
 use tracing::{Span, info_span};
+use tracing_subscriber::filter::{Filtered, LevelFilter};
 use vllm_tracing::timing::{RequestTimingLayer, RequestTimingStats};
 
 /// Target of the multimodal preprocessing stage spans.
@@ -12,7 +13,10 @@ pub(super) const MM_STAGE_TARGET: &str = "mm_processor_timing";
 /// Create the timing layer and its stats handle for multimodal preprocessing
 /// stage spans (`vllm-bench mm-processor`), mirroring the Python
 /// `TimingContext` / `MultiModalTimingRegistry`.
-pub fn mm_timing_layer() -> (RequestTimingLayer, RequestTimingStats) {
+pub fn mm_timing_layer<S>() -> (
+    Filtered<RequestTimingLayer, LevelFilter, S>,
+    RequestTimingStats,
+) {
     RequestTimingLayer::new(MM_STAGE_TARGET)
 }
 
