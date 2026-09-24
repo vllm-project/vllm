@@ -52,6 +52,7 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
     fi
 
+######################### BINUTILS BUILD IMAGE #########################
 # Build a newer GNU assembler for the AMX-FP8 instruction set.
 FROM base AS binutils-build
 
