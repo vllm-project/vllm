@@ -1161,7 +1161,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> CohereCompassProcessor:
         return self.ctx.get_hf_processor(
             CohereCompassProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 

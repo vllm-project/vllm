@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -50,7 +50,7 @@ from .interfaces_base import default_pooling_type
 
 
 class BertWithRopeEmbedding(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         if config.position_embedding_type not in ["rope", "rotary"]:
             raise ValueError(
@@ -347,7 +347,7 @@ class NomicMoE(nn.Module):
 class BertWithRopeBlock(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         moe: bool = False,

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class DeepseekV41Config(PretrainedConfig):
+class DeepseekV41Config(PreTrainedConfig):
     """DeepSeek V4.1 config.
 
     The HF config nests the text model under ``text_config`` and the vision
@@ -34,7 +34,7 @@ class DeepseekV41Config(PretrainedConfig):
         for key, value in text_config.items():
             if key == "model_type":
                 continue
-            # Don't clobber PretrainedConfig properties (e.g. is_encoder_decoder).
+            # Don't clobber PreTrainedConfig properties (e.g. is_encoder_decoder).
             if isinstance(getattr(type(self), key, None), property):
                 continue
             setattr(self, key, value)

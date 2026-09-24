@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm import PoolingParams
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
@@ -70,7 +70,7 @@ def offline_processor_and_context():
     backend = Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
-    proc.tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
+    proc.tokenizer = TokenizersBackend(tokenizer_object=backend)
     proc.model_config = SimpleNamespace(max_model_len=1024, is_encoder_decoder=False)
     proc.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)

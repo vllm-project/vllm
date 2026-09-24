@@ -686,7 +686,6 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
             kwargs["fps"] = fps
 
         return self.ctx.get_hf_processor(
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 

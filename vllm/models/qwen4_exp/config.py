@@ -4,7 +4,7 @@
 
 from typing import Any, ClassVar, cast
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.models.qwen3_vl.configuration_qwen3_vl import (
     Qwen3VLVisionConfig,
 )
@@ -201,9 +201,9 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         return max(int(self.ngram_size) - 1, 0)
 
 
-class Qwen4ExpConfig(PretrainedConfig):
+class Qwen4ExpConfig(PreTrainedConfig):
     model_type = "qwen4_exp"
-    sub_configs: ClassVar[dict[str, type[PretrainedConfig]]] = {
+    sub_configs: ClassVar[dict[str, type[PreTrainedConfig]]] = {
         "vision_config": Qwen4ExpVisionConfig,
         "text_config": Qwen4ExpTextConfig,
     }

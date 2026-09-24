@@ -22,12 +22,12 @@ from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     from vllm.config.vllm import VllmConfig
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
     VllmConfig = Any
 
     me_quant = LazyLoader(
@@ -657,7 +657,7 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
@@ -1066,16 +1066,16 @@ class SpeculativeConfig:
 
     @staticmethod
     def _apply_composed_hf_override(
-        target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
-        hf_config: PretrainedConfig,
-    ) -> PretrainedConfig:
+        target_hf_overrides: Callable[[PreTrainedConfig], PreTrainedConfig],
+        hf_config: PreTrainedConfig,
+    ) -> PreTrainedConfig:
         hf_config = SpeculativeConfig.hf_config_override(hf_config)
         return target_hf_overrides(hf_config)
 
     @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
-    ) -> Callable[[PretrainedConfig], PretrainedConfig]:
+    ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
         """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
         Callable overrides on the target are config-to-config transforms
@@ -1667,7 +1667,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def _maybe_override_draft_max_position_embeddings(
-        draft_hf_config: PretrainedConfig,
+        draft_hf_config: PreTrainedConfig,
         target_max_model_len: int,
     ) -> None:
         """Raise an EAGLE draft's max_position_embeddings up to the target's.
@@ -1704,7 +1704,7 @@ class SpeculativeConfig:
     def _verify_and_get_draft_tp(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int | None,
-        draft_hf_config: PretrainedConfig,
+        draft_hf_config: PreTrainedConfig,
     ) -> int:
         """Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.

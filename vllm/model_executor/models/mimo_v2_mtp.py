@@ -22,7 +22,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -62,7 +62,7 @@ class MiMoV2MTPLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
@@ -145,7 +145,7 @@ class _MiMoV2MTPLayers(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         num_mtp_layers: int,
         quant_config: QuantizationConfig | None,
         prefix: str,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.models.siglip2.configuration_siglip2 import Siglip2VisionConfig
 
 from .nemotron_h import NemotronHConfig
@@ -50,7 +50,7 @@ class Cosmos3EdgeTextConfig(NemotronHConfig):
         return config_dict
 
 
-class Cosmos3EdgeProjectorConfig(PretrainedConfig):
+class Cosmos3EdgeProjectorConfig(PreTrainedConfig):
     model_type = "cosmos3_edge_projector"
 
     def __init__(
@@ -74,7 +74,7 @@ class Cosmos3EdgeVisionConfig(Siglip2VisionConfig):
     model_type = "cosmos3_edge_vision"
 
 
-class Cosmos3EdgeConfig(PretrainedConfig):
+class Cosmos3EdgeConfig(PreTrainedConfig):
     model_type = "cosmos3_edge"
     keys_to_ignore_at_inference = ["past_key_values"]
     has_no_defaults_at_init = True

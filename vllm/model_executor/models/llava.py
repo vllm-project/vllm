@@ -12,7 +12,7 @@ from transformers import (
     CLIPVisionConfig,
     LlavaConfig,
     PixtralVisionConfig,
-    PretrainedConfig,
+    PreTrainedConfig,
     SiglipVisionConfig,
 )
 from transformers.models.llava import LlavaProcessor
@@ -156,7 +156,7 @@ class LlavaMultiModalProjector(nn.Module):
 
 
 class LlavaLikeConfig(Protocol):
-    vision_config: PretrainedConfig
+    vision_config: PreTrainedConfig
     image_token_index: int
     vision_feature_select_strategy: str
     vision_feature_layer: int | list[int]

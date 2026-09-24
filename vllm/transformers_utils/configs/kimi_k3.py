@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 multimodal configuration."""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -10,7 +10,7 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 logger = init_logger(__name__)
 
 
-class KimiK3VisionConfig(PretrainedConfig):
+class KimiK3VisionConfig(PreTrainedConfig):
     model_type = "kimi_k3_vision"
 
     def __init__(
@@ -83,7 +83,7 @@ class KimiK3VisionConfig(PretrainedConfig):
         self.intermediate_size = vt_intermediate_size
 
 
-class KimiK3Config(PretrainedConfig):
+class KimiK3Config(PreTrainedConfig):
     model_type = "kimi_k3"
 
     def __init__(

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from tests.models.utils import build_model_context
 from vllm.config.ec_transfer import ECRole, ECTransferConfig
@@ -136,7 +136,7 @@ def test_language_model_only_disables_via_supports_multimodal_inputs():
 
 
 def test_convertor_clears_mm_prefix_when_multimodal_disabled():
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         model_type="gemma3",
         architectures=["Gemma3ForConditionalGeneration"],
     )

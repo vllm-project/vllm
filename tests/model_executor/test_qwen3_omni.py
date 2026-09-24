@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import ParallelConfig
 from vllm.multimodal.processing import InputProcessingContext
@@ -52,7 +52,7 @@ def print_input_ids(input_ids):
 @pytest.fixture
 def mock_qwen3_omni_config():
     """Create a mock Qwen3OmniMoeThinker config."""
-    config = Mock(spec=PretrainedConfig)
+    config = Mock(spec=PreTrainedConfig)
     # Token IDs from https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct/blob/main/tokenizer_config.json
     config.audio_token_id = 151675  # <|audio_pad|>
     config.video_token_id = 151656  # <|video_pad|>

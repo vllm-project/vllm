@@ -138,7 +138,7 @@ def getattr_iter(
 ) -> Any:
     """A helper function that retrieves an attribute from an object which may
     have multiple possible names. This is useful when fetching attributes from
-    arbitrary `transformers.PretrainedConfig` instances.
+    arbitrary `transformers.PreTrainedConfig` instances.
 
     In the case where the first name in `names` is the preferred name, and
     any other names are deprecated aliases, setting `warn=True` will log a
@@ -314,7 +314,7 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
-    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
+    # PreTrainedConfig (must be before dataclass branch as these are now dataclasses)
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
         try:
             return x.to_json_string()
