@@ -76,13 +76,6 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
-        if model == "ssmits/Qwen2-7B-Instruct-embed-base":
-            # Avoid applying the base Qwen chat template to plain-text inputs.
-            hf_model.model[0].modality_config.pop("message", None)
-            hf_model.model[0].input_formatter.supported_modalities = list(
-                hf_model.model[0].modality_config
-            )
-
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(
