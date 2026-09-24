@@ -611,6 +611,15 @@ _requires_cuda_for_proton = pytest.mark.skipif(
     reason="Proton profiling tests require an NVIDIA CUDA platform.",
 )
 
+# Proton subscribes to CUPTI itself, and a process gets one CUPTI subscriber.
+# CI's kernel-launch recorder is another, injected through CUDA_INJECTION64_PATH
+# on recording runs, and there Proton's cuptiSubscribe fails with error 39.
+_requires_no_injected_cupti_tool = pytest.mark.skipif(
+    bool(os.environ.get("CUDA_INJECTION64_PATH")),
+    reason="Another CUPTI tool is injected (CUDA_INJECTION64_PATH); "
+    "Proton has to be the only one.",
+)
+
 
 @_requires_cuda_for_proton
 class TestProtonConfig:
@@ -1176,6 +1185,7 @@ def test_proton_initializes_before_cuda_graph_capture():
 
 
 @_requires_cuda_for_proton
+@_requires_no_injected_cupti_tool
 @pytest.mark.parametrize("context", ["shadow", "python"])
 @pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
 def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):
