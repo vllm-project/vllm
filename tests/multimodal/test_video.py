@@ -25,6 +25,7 @@ from vllm.multimodal.video import (
     GLM46VVideoBackend,
     GLMGAVideoBackend,
     Molmo2VideoBackend,
+    OpenCVDynamicOpenPanguVideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
     VideoBackend,
@@ -1555,6 +1556,55 @@ class TestGLMGASamplingCaps:
         )
         assert 0 < len(indices) <= GLMGAVideoBackend._MAX_FRAMES
         assert all(0 <= idx < 1000 for idx in indices)
+
+
+def test_openpangu_num_frames_capped_without_fps_limit():
+    """fps=-1 skips the duration clamp, so num_frames must still stop at
+    the source frame count before linspace allocates."""
+    total_frames = 8
+    source = VideoSourceMetadata(
+        total_frames_num=total_frames, original_fps=30.0, duration=1.0
+    )
+    target = VideoTargetMetadata(num_frames=50_000_000, fps=-1, max_duration=300)
+    indices = OpenCVDynamicOpenPanguVideoBackend.compute_frames_index_to_sample(
+        source, target
+    )
+    assert len(indices) == total_frames
+    assert all(0 <= idx < total_frames for idx in indices)
+
+
+def test_openpangu_num_frames_just_below_fps_bound_is_capped():
+    """The fps>0 clamp only fires at or above duration*fps+1. A request
+    just under that bound must still be limited by the source frame count."""
+    total_frames = 10
+    original_fps = 10.0
+    source = VideoSourceMetadata(
+        total_frames_num=total_frames,
+        original_fps=original_fps,
+        duration=(total_frames - 1) / original_fps,
+    )
+    total_duration = (total_frames - 1) / original_fps
+    sample_fps = 1_000
+    just_below = int(total_duration * sample_fps)
+    target = VideoTargetMetadata(
+        num_frames=just_below, fps=sample_fps, max_duration=300
+    )
+    indices = OpenCVDynamicOpenPanguVideoBackend.compute_frames_index_to_sample(
+        source, target
+    )
+    assert just_below > total_frames
+    assert len(indices) == total_frames
+    assert all(0 <= idx < total_frames for idx in indices)
+
+
+def test_openpangu_num_frames_within_source_unchanged():
+    source = VideoSourceMetadata(total_frames_num=100, original_fps=30.0, duration=4.0)
+    target = VideoTargetMetadata(num_frames=8, fps=-1, max_duration=300)
+    indices = OpenCVDynamicOpenPanguVideoBackend.compute_frames_index_to_sample(
+        source, target
+    )
+    assert len(indices) == 8
+    assert all(0 <= idx < 100 for idx in indices)
 
 
 def test_glm5next_backend_selected_for_processor():
