@@ -24,13 +24,13 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicDelta,
     AnthropicDisabledThinkingEffort,
     AnthropicDisabledThinkingEffortOption,
+    AnthropicEffort,
     AnthropicError,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
-    AnthropicThinkingEffortLevel,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -170,7 +170,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         none_prompt = await self._render_probe_prompt("none")
         if none_prompt is None:
             return "low"
-        for effort in get_args(AnthropicThinkingEffortLevel):
+        for effort in get_args(AnthropicEffort):
             if await self._render_probe_prompt(effort) == none_prompt:
                 return "low"
         return "none"
@@ -570,7 +570,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             # "none" clears enable_thinking for templates that honor it; models
             # that cannot disable thinking are configured with a low effort.
             req.reasoning_effort = disabled_thinking_effort
-        elif thinking.type == "enabled" and thinking.budget_tokens is not None:
+        elif thinking.type == "enabled":
             req.thinking_token_budget = thinking.budget_tokens
         # "adaptive" pins nothing: the model chooses depth beneath the ceiling
         # already set from output_config.effort.

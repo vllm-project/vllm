@@ -1768,24 +1768,41 @@ class TestThinkingConfig:
         result = _convert(request)
         assert result.reasoning_effort == "none"
 
-    def test_enabled_with_budget_sets_thinking_token_budget(self):
-        request = _make_request(
-            [{"role": "user", "content": "Hello"}],
+    def test_enabled_sets_thinking_token_budget(self):
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": "Hello"}],
             thinking={"type": "enabled", "budget_tokens": 2048},
         )
 
         result = _convert(request)
         assert result.thinking_token_budget == 2048
-
-    def test_enabled_without_budget_pins_nothing(self):
-        request = _make_request(
-            [{"role": "user", "content": "Hello"}],
-            thinking={"type": "enabled"},
-        )
-
-        result = _convert(request)
-        assert result.thinking_token_budget is None
         assert result.reasoning_effort is None
+
+    @pytest.mark.parametrize(
+        "thinking",
+        [
+            pytest.param({"budget_tokens": 2048}, id="missing-type"),
+            pytest.param({"type": "enabled"}, id="enabled-missing-budget"),
+            pytest.param(
+                {"type": "enabled", "budget_tokens": 1023}, id="budget-below-1024"
+            ),
+            pytest.param(
+                {"type": "enabled", "budget_tokens": 4096}, id="budget-not-below-max"
+            ),
+            pytest.param({"type": "adaptive", "display": "full"}, id="bad-display"),
+        ],
+    )
+    def test_rejects_invalid_thinking(self, thinking):
+        """Mirror the Anthropic API's BetaThinkingConfigParam constraints."""
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+            )
 
     def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):
         """`adaptive` lets the model choose depth, so only the ceiling from
@@ -1811,7 +1828,7 @@ class TestThinkingConfig:
         result = _convert(request, disabled_thinking_effort="low")
         assert result.reasoning_effort == "low"
 
-    @pytest.mark.parametrize("display", ["omitted", "summarized"])
+    @pytest.mark.parametrize("display", ["omitted", "summarized", "updates"])
     def test_display_keeps_reasoning_included(self, display):
         """Suppressing reasoning would mark it ended for structured outputs and
         drop it from multi-turn history, so `display` is ignored."""
