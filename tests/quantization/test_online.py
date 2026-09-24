@@ -36,9 +36,9 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
