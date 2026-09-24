@@ -27,7 +27,7 @@ from cutlass.cutlass_dsl import dsl_user_op
 
 from vllm.cute_utils import _tcgen05, mbarrier, recast_val, simple_tma_copy
 from vllm.cute_utils.cvt import bf16x2_to_fp32x2, fp32x4_to_fp8x4
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
@@ -302,21 +302,11 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
     ) -> CompileKey:
         return self.CompileKey(tokens=tokens, x_stride=x_stride)
 
-    def get_warmup_keys(
-        self, vllm_config: Any, *, max_tokens: int, x_stride: int
-    ) -> list[CompileKey]:
-        compilation_config = vllm_config.compilation_config
-        # Graphs pad batches up to a capture size; eager batches keep theirs.
-        padded = 0
-        if compilation_config.cudagraph_mode.mixed_mode():
-            padded = compilation_config.max_cudagraph_capture_size or 0
-        captured = compilation_config.cudagraph_capture_sizes or []
+    def get_warmup_keys(self, *, max_tokens: int, x_stride: int) -> list[CompileKey]:
+        # Target graphs, draft graphs and eager batches use different token
+        # counts, so warm every count the dispatcher accepts.
         return self._trace_dispatch(self.dispatch)(
-            tokens=[
-                *(size for size in captured if size <= min(padded, max_tokens)),
-                *range(padded + 1, max_tokens + 1),
-            ],
-            x_stride=x_stride,
+            tokens=WarmupIntRange(1, max_tokens + 1), x_stride=x_stride
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:

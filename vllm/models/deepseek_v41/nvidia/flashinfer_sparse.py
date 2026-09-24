@@ -243,22 +243,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        o = attn_out[:, : self.n_local_heads, :]
-        return dsv41_o_proj(
-            o,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self._wo_b_proj,
-            wo_b_layer=self.wo_b,
-            n_groups=self.n_local_groups,
-            heads_per_group=self.n_local_heads // self.n_local_groups,
-            nope_dim=self.nope_head_dim,
-            rope_dim=self.rope_head_dim,
-            o_lora_rank=self.o_lora_rank,
-            einsum_recipe=self._einsum_recipe,
-            tma_aligned_scales=self._tma_aligned_scales,
-        )
+        return dsv41_o_proj(self, attn_out, positions)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -626,22 +611,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        o = attn_out[:, : self.n_local_heads, :]
-        return dsv41_o_proj(
-            o,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self._wo_b_proj,
-            wo_b_layer=self.wo_b,
-            n_groups=self.n_local_groups,
-            heads_per_group=self.n_local_heads // self.n_local_groups,
-            nope_dim=self.nope_head_dim,
-            rope_dim=self.rope_head_dim,
-            o_lora_rank=self.o_lora_rank,
-            einsum_recipe=self._einsum_recipe,
-            tma_aligned_scales=self._tma_aligned_scales,
-        )
+        return dsv41_o_proj(self, attn_out, positions)
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
