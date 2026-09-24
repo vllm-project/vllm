@@ -1459,7 +1459,7 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
             "sliding_window": window_size,
         },
     )
-    vllm_config.speculative_config = SimpleNamespace(
+    vllm_config.speculative_config = SimpleNamespace(  # type: ignore[assignment]
         num_speculative_tokens=upper_query_len - 1,
         parallel_drafting=False,
         enable_adaptive_verification=True,

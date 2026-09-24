@@ -210,7 +210,7 @@ def test_prepare_dflash_inputs_compacts_noncontiguous_request_slots():
     )
 
     prepare_dflash_inputs(
-        input_buffers,
+        input_buffers,  # type: ignore[arg-type]
         query_slot_mapping,
         context_positions,
         context_slot_mapping,
@@ -219,7 +219,7 @@ def test_prepare_dflash_inputs_compacts_noncontiguous_request_slots():
         sample_idx_mapping,
         temperature,
         seeds,
-        input_batch,
+        input_batch,  # type: ignore[arg-type]
         torch.tensor([1, 1], dtype=torch.int32, device=device),
         torch.tensor([2, 1], dtype=torch.int32, device=device),
         last_sampled,
