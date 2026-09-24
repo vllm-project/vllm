@@ -149,16 +149,26 @@ class HunyuanA13BReasoningParser(ReasoningParser):
             return
 
         prev_len = len(previous_token_ids)
-        prev_text = self.model_tokenizer.decode(
+        # Text already emitted for this stream. A decode can end in U+FFFD when a
+        # character spans several tokens (byte-fallback tokenization); that
+        # replacement character is superseded once the character completes, which
+        # would break the prefix relation the slice below relies on. Dropping the
+        # incomplete tail keeps the emitted text a real prefix of later decodes.
+        emitted = self.model_tokenizer.decode(
             list(current_token_ids[:prev_len]), skip_special_tokens=False
-        )
+        ).rstrip("\ufffd")
         for offset, token in enumerate(delta_token_ids):
             cur_text = self.model_tokenizer.decode(
                 list(current_token_ids[: prev_len + offset + 1]),
                 skip_special_tokens=False,
             )
-            yield token, cur_text[len(prev_text) :]
-            prev_text = cur_text
+            if cur_text.endswith("\ufffd"):
+                # Unfinished byte sequence: the token that completes the character
+                # emits its text. Same guard as detokenize_incrementally.
+                yield token, ""
+                continue
+            yield token, cur_text[len(emitted) :]
+            emitted = cur_text
 
     def extract_reasoning_streaming(
         self,

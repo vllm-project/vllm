@@ -228,3 +228,49 @@ def test_streaming_multi_token_delta_matches_single_token_feed(step: int):
         step,
     )
     assert multi_token == single_token
+
+
+def test_empty_delta_returns_none():
+    """A step carrying no tokens has nothing to emit.
+
+    ``extract_reasoning_streaming`` is part of the parser framework, which does
+    pass ``delta_token_ids=[]`` (vllm/parser/engine/parser_engine.py), and before
+    this change an empty delta tripped ``assert len(delta_token_ids) == 1``
+    instead of being ignored.
+    """
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+    assert parser.extract_reasoning_streaming("", "", "", [], [], []) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        " reasoning here",
+        " reasoning 中文测试",
+        " reasoning café naïve résumé",
+        " reasoning rocket 🚀 done",
+        " reasoning 中文 🚀 café",
+    ],
+)
+def test_per_token_text_reconstructs_the_delta(payload: str):
+    """Per-token text must reconstruct the delta exactly.
+
+    A character can span several tokens under byte-fallback tokenization. The
+    helper decodes growing prefixes of the delta, so an unfinished trailing byte
+    sequence (U+FFFD) must be withheld rather than emitted: otherwise the slice
+    that derives each token's text is taken against a prefix that later changes,
+    and astral-plane characters (emoji) come out corrupted.
+    """
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+    token_ids = (
+        list(parser.think_start_ids)
+        + tokenizer.encode(payload)
+        + list(parser.response_start_ids)
+        + tokenizer.encode(" answer")
+        + list(parser.response_end_ids)
+    )
+
+    reconstructed = "".join(
+        text for _, text in parser._iter_delta_tokens([], token_ids, token_ids, "")
+    )
+    assert reconstructed == tokenizer.decode(token_ids, skip_special_tokens=False)
