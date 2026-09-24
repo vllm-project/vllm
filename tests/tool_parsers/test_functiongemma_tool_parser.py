@@ -361,7 +361,7 @@ class TestExtractToolCallsStreaming:
             previous_text = current_text
 
         assert name == "get-weather"
-        assert "".join(args_parts) == '{"city": "Paris"}'
+        assert json.loads("".join(args_parts)) == {"city": "Paris"}
 
 
 if __name__ == "__main__":
