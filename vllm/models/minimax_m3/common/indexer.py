@@ -14,6 +14,7 @@ main attention.
 ``select_indexer_impl_cls``) and delegates ``forward`` to it.
 """
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -91,7 +92,7 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -535,6 +536,23 @@ def select_indexer_impl_cls(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."
         )
+    # Context-parallel Triton indexer for ROCm TP>1 (opt-in via env var).
+    if (
+        current_platform.is_rocm()
+        and get_tensor_model_parallel_world_size() > 1
+        and os.environ.get("VLLM_ROCM_MINIMAX_INDEXER_CP", "False").lower() in ("true", "1")
+    ):
+        from vllm.models.minimax_m3.amd.indexer_context_parallel import (
+            MiniMaxM3IndexerTritonCPImpl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected Triton CP (context-parallel, ROCm) "
+            "[topk_blocks=%d, tp=%d]",
+            topk_blocks,
+            get_tensor_model_parallel_world_size(),
+        )
+        return MiniMaxM3IndexerTritonCPImpl
     logger.info_once(
         "MiniMax M3 indexer: selected Triton (no fmha_sm100) "
         "[topk_blocks=%d, indexer_kv_dtype=%s, sm100=%s]",
