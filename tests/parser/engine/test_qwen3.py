@@ -897,6 +897,30 @@ class TestSchemaAwareTypeCoercion:
         assert args["taskId"] == "1"
         assert isinstance(args["taskId"], str)
 
+    def test_streaming_string_after_int_param_streams_before_close(
+        self, parser_with_tools, mock_request
+    ):
+        """A string after a coerced integer still streams before its close tag."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=TaskUpdate>\n",
+            "<parameter=count>42</parameter>\n",
+            "<parameter=taskId>",
+            "first part of the id, ",
+            "second part of the id",
+            "</param",
+            "eter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser_with_tools, mock_request, chunks)
+        before_close = collect_tool_arguments(results[: chunks.index("</param")])
+        assert before_close.endswith("second part of the id")
+        assert json.loads(collect_tool_arguments(results)) == {
+            "count": 42,
+            "taskId": "first part of the id, second part of the id",
+        }
+
 
 class TestAnyOfTypeCoercion:
     """Verify that _fix_arg_types handles union types (anyOf/oneOf)."""
