@@ -342,8 +342,8 @@ class DiffusionGemmaForConditionalGeneration(
         states = getattr(self, "diffusion_states", None)
         allowed = states.step_allowed if states is not None else None
         if allowed is not None:
-            # One column per allowed id: a [rows, K] GEMM over K gathered rows
-            # of the tied embedding instead of the whole vocabulary.
+            # One column per allowed id: a [rows, K] GEMM over the K gathered
+            # rows of the tied embedding.
             logits = torch.nn.functional.linear(
                 hidden_states, self.lm_head.weight[allowed]
             ).float()
@@ -1478,8 +1478,8 @@ class DiffusionSampler:
             # The decode slots do not share one set, so this step runs over
             # the full vocabulary. Mask each constrained request's rows to
             # its own set so it reads the same as on the shared path. The
-            # helper copies rather than write the runner's tensor: the slow
-            # path, one full-vocab copy like top_k/top_p above.
+            # helper masks a copy, since the runner owns `logits`: one
+            # full-vocab copy per step, as for top_k/top_p above.
             per_row = [
                 None if ids is None else states.allowed_tensor(ids)
                 for ids in (states.constrained.get(s) for s in decode_slots_np.tolist())
