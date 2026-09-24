@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import mmap
 import subprocess
 import sys
 from collections.abc import Callable
@@ -15,6 +16,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.config import (
     CacheConfig,
     KVTransferConfig,
@@ -22,6 +24,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -32,7 +35,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
@@ -52,10 +55,17 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     tensor_data,
 )
+from vllm.v1.hisparse.layout import (
+    create_hisparse_layout,
+    get_hisparse_gpu_memory_usage,
+)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -68,16 +78,157 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
     is_full_attention_spec,
     iter_layer_specs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize("gpu_block_size", [32, 64])
+@pytest.mark.parametrize("shared_host_pool", [False, True])
+def test_hisparse_hma_uses_resolved_gpu_block_size(
+    monkeypatch, gpu_block_size, shared_host_pool
+):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=gpu_block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=gpu_block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    group = KVCacheGroupSpec(list(specs), group_spec)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128),
+            max_model_len=gpu_block_size,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2 if shared_host_pool else 1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2 if shared_host_pool else 1,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    indexer_spec = specs["model.layers.0.self_attn.indexer"]
+    assert get_hisparse_gpu_memory_usage(config, [group]) == (
+        indexer_spec.max_memory_usage_bytes(config)
+    )
+
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, [group], available_memory=2**30
+    )
+    assert cache_config.num_blocks == 7
+    assert cache_config.hisparse_host_num_blocks is not None
+    assert cache_config.hisparse_host_num_blocks > 7
+
+    host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
+    assert cache_config.hisparse_shared_host_pool is shared_host_pool
+    host_page = host_group.kv_cache_spec.page_size_bytes
+    alignment = mmap.PAGESIZE if shared_host_pool else 1
+    expected_host_stride = (host_page + alignment - 1) // alignment * alignment
+    assert cache_config.hisparse_host_block_stride == expected_host_stride
+    assert cache_config.hisparse_host_num_blocks == 2**30 // expected_host_stride
+    assert host_group.host_resident
+    assert not any(group.host_resident for group in [indexer_group, *auxiliary_groups])
+    host_layers = set(host_group.layer_names)
+    for tensor in cache_config.kv_cache_tensors:
+        assert all(
+            (name in host_layers) == tensor.host_resident for name in tensor.layers
+        )
+    host_tensor = next(t for t in cache_config.kv_cache_tensors if t.host_resident)
+    host_spec = host_group.kv_cache_spec.kv_cache_specs[host_tensor.layers[0]]
+    assert host_tensor.block_stride == host_spec.page_size_bytes
+    assert host_tensor.layer_stride == (
+        host_spec.page_size_bytes * cache_config.hisparse_host_num_blocks
+    )
+    assert host_group.kv_cache_spec.block_size == gpu_block_size
+    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
+    host_specs = host_group.kv_cache_spec.kv_cache_specs
+    gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
+    assert set(host_specs) == {"model.layers.0.self_attn"}
+    assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
+    assert indexer_group.kv_cache_spec.prefix_cacheable
+    assert host_group.enable_kv_transfer
+    auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
+    assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
+    assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
+    assert all(
+        spec.block_size == gpu_block_size
+        for spec in auxiliary_specs
+        if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
+    )
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
+        cache_config,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                block_size=16,
+                enable_prefix_caching=True,
+                prefix_match_unit=None,
+            ),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+            kv_transfer_config=object(),
+        ),
+    )
+    assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+def test_hisparse_rejects_deepseek_v4():
+    full_specs = {
+        "model.layers.0.attn": MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            model_version="deepseek_v4",
+        )
+    }
+    full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)
+    assert full_uniform is not None
+    group = KVCacheGroupSpec(list(full_specs), full_uniform)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    with pytest.raises(ValueError, match="does not support DeepSeek V4"):
+        create_hisparse_layout(
+            config,
+            [group],
+            host_budget=2**30,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -128,6 +279,44 @@ def make_request(
     )
 
 
+@pytest.mark.parametrize("dcp", [1, 4])
+def test_effective_attention_block_size_matches_events(dcp):
+    from vllm.distributed.kv_events import BlockStored
+    from vllm.v1.engine.core import EngineCore
+
+    config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], new_kv_cache_spec()),
+        ],
+    )
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([config]),
+        max_model_len=256,
+        scheduler_block_size=16 * dcp,
+        hash_block_size=16 * dcp,
+        dcp_world_size=dcp,
+        enable_kv_cache_events=True,
+    )
+    core = EngineCore.__new__(EngineCore)
+    core.vllm_config = SimpleNamespace(cache_config=CacheConfig(block_size=16))
+    core.scheduler = SimpleNamespace(kv_cache_manager=manager)
+    core._initialize_effective_attention_block_size()
+    block_size = core.vllm_config.cache_config.effective_attention_block_size
+    assert block_size == 16 * dcp
+
+    request = make_request(
+        "block-size", list(range(64)), block_size=16 * dcp, hash_fn=sha256
+    )
+    assert manager.allocate_slots(request, 64) is not None
+    assert [
+        event.block_size
+        for event in manager.take_events()
+        if isinstance(event, BlockStored)
+    ] == [block_size]
+
+
 def new_kv_cache_spec(
     block_size=16,
     num_kv_heads=2,
@@ -172,6 +361,45 @@ def test_kv_cache_config_selects_only_transferable_groups():
         first_blocks,
         third_blocks,
     )
+
+
+def test_kv_cache_config_selects_prefix_cacheable_groups():
+    """Prefix stores exclude scratch state without changing transfer groups."""
+    full_group = KVCacheGroupSpec(["full"], new_kv_cache_spec())
+    qsa_group = KVCacheGroupSpec(
+        ["qsa"],
+        CircularBufferSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=0,
+            dtype=torch.float16,
+        ),
+    )
+    disabled_group = KVCacheGroupSpec(
+        ["disabled"], new_kv_cache_spec(), enable_kv_transfer=False
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[full_group, qsa_group, disabled_group],
+    )
+    assert config.transfer_group_ids == (0, 1)
+    assert config.select_transfer_block_ids(([1], [2], [3])) == ([1], [2])
+    assert config.prefix_cacheable_group_ids == (0,)
+    assert config.prefix_cacheable_groups == (full_group,)
+
+
+def test_kv_cache_blocks_selects_requested_groups():
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(1)],
+            [KVCacheBlock(2)],
+            [KVCacheBlock(3)],
+        )
+    )
+
+    assert blocks.get_block_ids(group_ids=(0, 2)) == ([1], [3])
 
 
 def new_sliding_window_spec(
@@ -840,10 +1068,24 @@ def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
     return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
 
+def test_metrics_empty_distinguishes_no_queries_from_no_hits():
+    """`hit_rate` alone cannot tell the two apart; `empty` can.
+
+    Both an unobserved window and a genuine all-miss window report a hit
+    rate of 0.0, so anything surfacing that number to a human has to check
+    `empty` first - which is what the prefix-cache log line does.
+    """
+    metrics = CachingMetrics(max_recent_requests=5)
+    assert metrics.empty
+    assert metrics.hit_rate == 0.0
+
+    metrics.observe(_stats(1, 20, 0))
+    assert not metrics.empty
+    assert metrics.hit_rate == 0.0
+
+
 def test_metrics():
-    """
-    Test the prefix caching metrics.
-    """
+    """Test the prefix caching metrics."""
     metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
@@ -873,9 +1115,7 @@ def test_metrics():
 
 
 def test_metrics_empty_stats():
-    """
-    Test the prefix caching metrics with empty stats.
-    """
+    """Test the prefix caching metrics with empty stats."""
     metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))
@@ -1675,7 +1915,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
 
 def test_allocate_with_lookahead():
-    """Verify that lookahead tokens correctly affect block allocation"""
+    """Verify that lookahead tokens correctly affect block allocation."""
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,
@@ -3018,6 +3258,45 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert "attention compute is unchanged" in caplog_vllm.text
 
 
+def test_hidden_states_with_tp_scales_page_size():
+    """When TP shrinks KV pages below the hidden-state per-token cost,
+    get_kv_cache_groups must scale up target block sizes so that the
+    common page accommodates the unsharded hidden states."""
+    # Simulate TP=4 sharding a model with 8 KV heads → 2 per rank.
+    # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
+    #         = 16 * 2 * 64 * 2 = 4096 bytes.
+    kv_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    # Hidden-state per-token cost = num_hidden_states(6) * hidden_size(512)
+    #   * dtype(2) = 6144 bytes, which exceeds the 4096-byte KV page.
+    hs_spec = HiddenStateCacheSpec(
+        block_size=16,
+        num_kv_heads=6,
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
+    specs = {
+        "target.0.attn": kv_spec,
+        "target.1.attn": kv_spec,
+        "cache_only_layers.48": hs_spec,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    # The hidden-state layer should be present and no assertion should fire.
+    all_layers = {name for g in groups for name in g.layer_names}
+    assert "cache_only_layers.48" in all_layers
+
+    # The target group block sizes must have been scaled up.
+    for g in groups:
+        if "cache_only_layers.48" not in g.layer_names:
+            assert g.kv_cache_spec.block_size > kv_spec.block_size
+
+
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
     assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
 
@@ -3655,8 +3934,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
-    """
-    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+    """Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
 
     This test guards against that regression by verifying that a VllmConfig
     with kv_events_config set still resolves disable_hybrid_kv_cache_manager
@@ -3848,6 +4126,22 @@ def test_iter_layer_specs_returns_group_members():
     assert list(iter_layer_specs(wrapped)) == [full, mla]
 
 
+def test_wrapped_mamba_group_requires_block_zeroing():
+    mamba = MambaSpec(
+        block_size=4,
+        shapes=((4, 1),),
+        dtypes=(torch.float32,),
+    )
+    wrapped = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs={"mamba": mamba})
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], wrapped)],
+    )
+
+    assert config.needs_kv_cache_zeroing
+
+
 def _spec_decode_grouping_config(method="dspark", model_type=None):
     """Grouping config with an EAGLE-family speculative method enabled."""
     return SimpleNamespace(
@@ -3929,9 +4223,9 @@ def test_draft_group_not_annotated_without_spec_decode():
 
 
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+    # No group carries the draft marker, so consumers fall back to
+    # conservative behavior that silently breaks reuse for Mamba groups.
+    # That must at least be visible.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
@@ -3940,7 +4234,20 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     assert "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
+    # Pure-attention models degrade gracefully under the consumers'
+    # conservative fallback (a one-block hit drop at most), so the warning
+    # stays silent to avoid noise on every unannotated EAGLE deployment.
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+    }
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
@@ -3968,12 +4275,16 @@ def _deepseek_v4_specs(model_version="deepseek_v4"):
     }
 
 
-def test_deepseek_v4_draft_group_annotated_on_packed_path():
+@pytest.mark.parametrize(
+    ("method", "model_type"),
+    [("mtp", "deepseek_v4"), ("dspark", "deepseek_v4"), ("dspark", "deepseek_v41")],
+)
+def test_deepseek_v4_draft_group_annotated_on_packed_path(method, model_type):
     # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
     # carries no draft marker and only the positional rule can find it. This
     # pins the pre-existing behaviour that the unified annotator must preserve.
     groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method="mtp", model_type="deepseek_v4"),
+        _spec_decode_grouping_config(method=method, model_type=model_type),
         _deepseek_v4_specs(model_version=None),
     )
 
@@ -3982,13 +4293,93 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
     assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
 
 
-def test_deepseek_v4_annotation_requires_model_type():
-    # The positional rule is only sound for DeepseekV4, where the draft layer
-    # is known to be registered last. Without that model gate nothing may be
-    # flagged, however the grouping happens to fall out.
+def test_trailing_layer_fallback_applies_to_any_mtp_model():
+    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
+    # MTP blocks reuse the target's decoder layer (no spec marker) and always
+    # register after every target layer. The model_type must not gate it.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="other"),
         _deepseek_v4_specs(),
     )
 
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+
+
+def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
+    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
+    the MTP drafter's full-attn layer (spec-identical to the target's)
+    registered last."""
+    specs = {}
+    idx = 0
+    for _ in range(2):
+        for _ in range(3):
+            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
+                mamba_cache_mode="align"
+            )
+            idx += 1
+        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
+        idx += 1
+    if with_mtp_layer:
+        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
+    return specs
+
+
+def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
+    # A hybrid mamba + full-attention model with an MTP drafter that is
+    # spec-indistinguishable from the target reaches the general multi-group
+    # path. The trailing-layer rule must locate the draft group there so the
+    # Mamba groups are not swept up by the flag-all consumer fallback.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "dspark"])
+def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
+    # Other drafters are not covered by the trailing-layer rule, so an
+    # unidentifiable hybrid draft must still warn.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method=method, model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
     assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" in caplog_vllm.text
+
+
+def test_trailing_layer_fallback_requires_exact_partition():
+    # If the groups do not partition the layers exactly (e.g. a caller that
+    # dropped or duplicated layers), the positional rule is meaningless and
+    # must not fire.
+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+
+    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
+    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
+    groups = get_kv_cache_groups(config, specs)
+    for g in groups:
+        g.is_eagle_group = False
+    # Remove one layer from its group: no longer an exact partition.
+    trimmed = [
+        KVCacheGroupSpec(
+            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
+            g.kv_cache_spec,
+        )
+        for g in groups
+    ]
+    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
+
+    assert not any(g.is_eagle_group for g in trimmed)

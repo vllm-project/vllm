@@ -151,6 +151,25 @@ def test_decode_and_verify_are_disjoint(kv_cache_dtype, num_heads):
         )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+def test_oversized_kv_cache_refuses_gluon(gluon_available, kv_cache_dtype):
+    """Past 2 GiB per layer Gluon drops its KV bounds mask and reads out of range.
+
+    ``None`` is the profiling case, before the cache is sized: nothing to
+    refuse yet, so the usual route stands.
+    """
+    bound = rocm_aiter_mla._GLUON_MAX_KV_CACHE_BYTES
+    for kv_cache_bytes in (None, bound):
+        assert AiterMLAHelper.use_gluon_decode(8, 1, kv_cache_dtype, kv_cache_bytes)
+        assert AiterMLAHelper.use_gluon_verify(
+            8, 8, kv_cache_dtype, kv_cache_bytes=kv_cache_bytes
+        )
+    assert not AiterMLAHelper.use_gluon_decode(8, 1, kv_cache_dtype, bound + 1)
+    assert not AiterMLAHelper.use_gluon_verify(
+        8, 8, kv_cache_dtype, kv_cache_bytes=bound + 1
+    )
+
+
 @pytest.mark.parametrize("num_heads", [1, 2, 3, 5, 6, 7, 8, 9, 12, 15])
 def test_padded_query_is_contiguous(num_heads):
     """asm_mla.cu:805 requires Q.is_contiguous().
@@ -176,3 +195,8 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 
     assert unpadded.shape == q.shape
     torch.testing.assert_close(unpadded, q)
+
+
+def test_a_non_causal_block_never_routes_to_gluon(gluon_available):
+    """A small-head block that normally uses Gluon must use ASM when non-causal."""
+    assert not AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=False)

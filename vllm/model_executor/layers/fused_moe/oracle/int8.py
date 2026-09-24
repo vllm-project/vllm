@@ -37,9 +37,7 @@ class Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[Int8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-    """
+    """Get available backends in priority order based on platform and config."""
     return [
         Int8MoeBackend.TRITON,
         Int8MoeBackend.HUMMING,
@@ -73,10 +71,16 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUExpertsInt8,
             CPUExpertsInt8,
+            PowerCPUExpertsInt8,
             ZenCPUExpertsInt8,
         )
 
-        return [ZenCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8]
+        return [
+            ZenCPUExpertsInt8,
+            PowerCPUExpertsInt8,
+            ArmCPUExpertsInt8,
+            CPUExpertsInt8,
+        ]
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -100,11 +104,9 @@ def select_int8_moe_backend(
     weight_key: QuantKey | None = kInt8StaticChannelSym,
     activation_key: QuantKey | None = kInt8DynamicTokenSym,
 ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
-    """
-    Select the primary Int8 MoE backend.
+    """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     activation_format = (
@@ -191,7 +193,7 @@ def make_int8_moe_quant_config(
 
     if int8_backend == Int8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,
         )
 
@@ -252,7 +254,7 @@ def convert_to_int8_moe_kernel_format(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert INT8 MoE weights to backend-specific kernel format."""
     if int8_backend == Int8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 

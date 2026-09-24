@@ -9,8 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
-    """
-    Useful in the case when some FusedMoEExpertsModular
+    """Useful in the case when some FusedMoEExpertsModular
     implementation does not perform weight application and reduction
     but cannot address the needs of all the compatible PrepareAndFinalize
     implementations.
@@ -42,8 +41,7 @@ class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
 
 
 class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
-    """
-    The fused_experts outputs have already been weight applied and reduced.
+    """The fused_experts outputs have already been weight applied and reduced.
     This implementation is a no-op.
     """
 
@@ -78,8 +76,7 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
 
 
 class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
-    """
-    TopKWeightAndReduce implementation for a fused_experts output
+    """TopKWeightAndReduce implementation for a fused_experts output
     of shape (m, topk, K)
     """
 
@@ -122,8 +119,7 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
 
 
 class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
-    """
-    TopKWeightAndReduce implementation for a fused_experts output
+    """TopKWeightAndReduce implementation for a fused_experts output
     of shape (num_experts, batch_size, K)
     """
 

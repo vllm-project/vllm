@@ -9,15 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
-use vllm_chat::ReasoningEffort;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope,
-    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage, default_true,
-    deserialize_request_top_k, validate_messages, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, ReasoningEffort, StreamOptions,
+    StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage,
+    default_true, deserialize_request_top_k, validate_messages, validate_stop,
+    validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -116,6 +116,10 @@ pub struct ChatCompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
+
     /// Use beam search instead of sampling
     #[serde(default)]
     pub use_beam_search: bool,
@@ -282,6 +286,7 @@ impl Default for ChatCompletionRequest {
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,
+            watermarking: true,
             use_beam_search: false,
             top_k: None,
             min_p: None,
