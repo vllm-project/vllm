@@ -446,7 +446,7 @@ class NixlBaseConnectorWorker:
 
     def _requires_layer_name_routing(self) -> bool:
         """Whether PP push must match HMA/packed layers by name, not region index."""
-        return self._tracks_region_layers() and self.pp_size > 1
+        return self.pp_size > 1 and self._tracks_region_layers()
 
     def _align_remote_regions_by_layer(
         self, nixl_agent_meta: NixlAgentMetadata
@@ -1622,21 +1622,37 @@ class NixlBaseConnectorWorker:
                 virtual_transfer_pages = _uses_dense_virtual_transfer_pages(
                     layer_spec, cache, physical_page_size, num_blocks
                 )
-                # A layer-name-routed PP producer registers its own MLA pages as
-                # per-layer strided regions instead of whole packed rows.
-                routes_own_pages = use_layer_name_routing and is_mla_region
+                # Push workers address the pages of packed MLA rows by layer.
+                packed_mla_push = (
+                    track_region_layers
+                    and self._has_packed_cache
+                    and packed_storage
+                    and storage_is_block_major
+                    and is_mla_region
+                )
                 if virtual_transfer_pages:
                     # A compressed kernel row can contain multiple NIXL transfer pages.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
-                elif (
-                    storage_is_block_major
-                    and not routes_own_pages
-                    and (
-                        (self._has_packed_cache and packed_storage and is_mla_region)
-                        or (not page_contiguous and not self._is_csa_linear)
-                    )
+                elif packed_mla_push and use_layer_name_routing:
+                    # A PP producer registers only its own layer's page of each row.
+                    region_specs = [
+                        (cache.data_ptr(), physical_page_size, block_stride)
+                    ]
+                elif packed_mla_push:
+                    # A PP=1 peer transfers whole rows, and advertises where this
+                    # layer's page sits so a PP producer can address it.
+                    storage_block_len = registration_len // num_blocks
+                    region_specs = [
+                        (registration_base, storage_block_len, storage_block_len)
+                    ]
+                    offset = cache.data_ptr() - storage_addr
+                    assert offset >= 0 and offset + physical_page_size <= block_stride
+                    packed_member_layouts[layer_name] = (offset, physical_page_size)
+                elif storage_is_block_major and (
+                    not page_contiguous
+                    and ((packed_storage and is_mla_region) or not self._is_csa_linear)
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
@@ -1644,17 +1660,6 @@ class NixlBaseConnectorWorker:
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
-                    if track_region_layers and is_mla_region:
-                        # PP=1 keeps whole-row transfers, but advertises the
-                        # slice a PP producer needs to address this layer.
-                        offset = cache.data_ptr() - storage_addr
-                        assert (
-                            offset >= 0 and offset + physical_page_size <= block_stride
-                        )
-                        packed_member_layouts[layer_name] = (
-                            offset,
-                            physical_page_size,
-                        )
                 elif storage_is_block_major:
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)

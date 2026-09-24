@@ -1745,6 +1745,7 @@ def test_layer_identity_gate_preserves_the_non_hma_path():
 
     # A base worker (pull) never routes by layer name.
     pull = object.__new__(NixlBaseConnectorWorker)
+    pull.pp_size = 2
     pull._transfer_layer_names = ()
     pull._transfer_layer_region_indices = ()
     pull._transfer_layer_group_ids = ()

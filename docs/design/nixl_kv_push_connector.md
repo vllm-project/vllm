@@ -209,18 +209,21 @@ layer order. Descriptor offsets use each layer's region capacity, so P and
 D need not allocate the same number of blocks. Physical allocations are still
 registered once, even when multiple layers share them.
 
-Packed MLA caches interleave layer pages within each block. PP stages can
-pack different layers at different offsets and block strides. A PP producer
-registers one logical transfer region per layer, while memory registration
-still covers the shared allocation once. A `PP=1` peer keeps whole-row
-transfers and advertises each layer's byte offset and page size through
-`packed_member_layouts`. The producer folds those offsets into the remote
-region addresses; the ordinary descriptor builders then use each side's
-own `block_strides`. Aliased layers remain distinct when their page sizes
-differ. Pull-mode registration and transfers are unchanged.
-Packed push hashes the sorted attention-backend names, since PP can change
-their discovery order without changing the cache format. A different backend
-set still fails the compatibility check.
+Packed MLA caches (block-outermost layouts such as DeepSeek-V4's) store the
+pages of every layer for one block in a single row. A PP stage holds only its
+own layers, so its rows are shorter and each layer sits at a different offset:
+
+```text
+D (PP=1),    block b: | L0 | L1 | L2 | L3 | L4 | L5 |
+P (stage 2), block b: | L3 | L4 | L5 |
+```
+
+`PP=1` peers transfer whole rows. They also advertise where each layer's page
+sits in the row (`NixlAgentMetadata.packed_member_layouts`), so a PP producer
+writes each of its pages to the matching slot in D's row. Page sizes must
+match; offsets, row strides, and block counts may differ. Because PP stages can
+list the same attention backends in a different order, packed push compares the
+sorted set of backend names during the handshake. Pull mode is unchanged.
 
 Invariants enforced when the remote regions are aligned:
 
