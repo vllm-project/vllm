@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import re
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -296,8 +297,13 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
 
 def _make_mock_backend_for_kernel_block_size(
     supported_sizes: list[int | MultipleOf],
+    name: str = "MOCK",
 ):
     class _MockBackend:
+        @staticmethod
+        def get_name():
+            return name
+
         @staticmethod
         def get_supported_kernel_block_sizes():
             return supported_sizes
@@ -323,6 +329,17 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+def test_select_common_block_size_error_names_each_backend_and_its_sizes():
+    backend_a = _make_mock_backend_for_kernel_block_size([MultipleOf(48)], name="A")
+    backend_b = _make_mock_backend_for_kernel_block_size([64], name="B")
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("No common block size for 96 (A: [MultipleOf(48)]; B: [64])."),
+    ):
+        select_common_block_size(96, [backend_a, backend_b])
 
 
 def test_select_common_block_size_without_active_backends_uses_manager_size():
