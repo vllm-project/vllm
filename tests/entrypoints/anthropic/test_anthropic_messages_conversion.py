@@ -1839,13 +1839,11 @@ class TestThinkingConfig:
 
 
 class TestProbeDisabledThinkingEffort:
-    """``auto`` falls back to the configured effort level when ``none`` cannot
-    turn thinking off."""
+    """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
 
     @staticmethod
-    async def _probe(render, level="low"):
+    async def _probe(render):
         obj = MagicMock(spec=AnthropicServingMessages)
-        obj._disabled_thinking_effort_level = level
         obj.online_renderer = MagicMock()
         obj.online_renderer.render_chat = AsyncMock(
             side_effect=lambda req: ([], [render(req.reasoning_effort)])
@@ -1885,7 +1883,3 @@ class TestProbeDisabledThinkingEffort:
     @pytest.mark.asyncio
     async def test_renderer_rejects_none(self):
         assert await self._probe(self._reject_none) == "low"
-
-    @pytest.mark.asyncio
-    async def test_fallback_uses_configured_level(self):
-        assert await self._probe(self._reject_none, level="medium") == "medium"

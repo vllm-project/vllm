@@ -121,7 +121,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
-        disabled_thinking_effort_level: AnthropicThinkingEffortLevel = "low",
     ):
         super().__init__(
             engine_client=engine_client,
@@ -150,7 +149,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
         )
-        self._disabled_thinking_effort_level = disabled_thinking_effort_level
 
     async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
         if self._disabled_thinking_effort is None:
@@ -164,17 +162,17 @@ class AnthropicServingMessages(OpenAIServingChat):
         return self._disabled_thinking_effort
 
     async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
-        """Use the fallback level if the renderer rejects or ignores ``none``.
+        """Use ``low`` if the renderer rejects or ignores ``none``.
 
         ``none`` is ignored when it renders the same prompt as a thinking
         effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
         """
         none_prompt = await self._render_probe_prompt("none")
         if none_prompt is None:
-            return self._disabled_thinking_effort_level
+            return "low"
         for effort in get_args(AnthropicThinkingEffortLevel):
             if await self._render_probe_prompt(effort) == none_prompt:
-                return self._disabled_thinking_effort_level
+                return "low"
         return "none"
 
     async def _render_probe_prompt(
