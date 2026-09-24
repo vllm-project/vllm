@@ -13,6 +13,7 @@ mid-decode (silent corruption of an unrelated request).
 
 from collections import defaultdict
 from threading import Event, Lock
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -120,16 +121,16 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("push_pp", [False, True])
-def test_overlaid_transfer_groups_share_region_geometry(push_pp):
-    """Groups overlaid on one allocation share its transfer region."""
-    import msgspec
+def _register_overlaid_mla_worker(
+    *, push_pp: bool = False, tail_bytes: int = 0, page_covers_view: bool = True
+):
+    """Register two MLA layers overlaid on one allocation.
 
+    ``tail_bytes`` leaves spare bytes past the last block, the way an allocation
+    rounded up to a page boundary does. Clearing ``page_covers_view`` narrows
+    each layer's view below its page, leaving the block interior non-contiguous.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlAgentMetadata,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
         NixlPushConnectorWorker,
     )
@@ -152,10 +153,12 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     )
     page_size = spec.page_size_bytes
     block_stride = 2 * page_size
-    backing = torch.zeros(num_blocks, block_stride, dtype=torch.uint8)
+    view_size = page_size if page_covers_view else page_size - 8
+    allocation = torch.zeros(num_blocks * block_stride + tail_bytes, dtype=torch.uint8)
+    backing = allocation[: num_blocks * block_stride].view(num_blocks, block_stride)
     caches = {
-        "layer.0": backing[:, :page_size],
-        "layer.1": backing[:, :page_size],
+        "layer.0": backing[:, :view_size],
+        "layer.1": backing[:, :view_size],
     }
     groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
 
@@ -203,14 +206,9 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     worker._logical_num_blocks = num_blocks
     worker.region_mem_types = []
     worker.region_group_ids = []
-    worker.region_mem_types = []
     worker._mixed_mem_types = False
     worker.region_names = []
     worker.region_num_blocks = []
-    worker._mixed_mem_types = False
-    worker._desc_is_dram_by_block_size = {}
-    worker._desc_pos_by_block_size = {}
-    worker._dram_src_handles_by_block_size = {}
     worker._transfer_layer_names = ()
     worker._transfer_layer_region_indices = ()
     worker._transfer_layer_group_ids = ()
@@ -231,7 +229,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
         num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=backing.nbytes,
+                size=allocation.nbytes,
                 layers=[name],
                 layer_stride=page_size,
                 block_stride=block_stride,
@@ -241,21 +239,43 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
         kv_cache_groups=groups,
     )
 
-    transfer_topology = MagicMock()
-
     with (
-        patch.object(bw, "TransferTopology", return_value=transfer_topology),
+        patch.object(bw, "TransferTopology", return_value=MagicMock()),
         patch.object(bw, "compute_nixl_compatibility_hash", return_value="hash"),
     ):
         worker.register_kv_caches(caches)
 
+    return SimpleNamespace(
+        worker=worker,
+        allocation=allocation,
+        num_blocks=num_blocks,
+        block_stride=block_stride,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("push_pp", [False, True])
+def test_overlaid_transfer_groups_share_region_geometry(push_pp):
+    """Groups overlaid on one allocation share its transfer region."""
+    import msgspec
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+
+    registered = _register_overlaid_mla_worker(push_pp=push_pp)
+    worker = registered.worker
+    allocation = registered.allocation
+    num_blocks = registered.num_blocks
+    block_stride = registered.block_stride
+
     assert worker.region_group_ids == [-1]
     assert worker.block_stride_per_layer == [block_stride]
     assert worker.nixl_wrapper.registered[0][0] == [
-        (backing.data_ptr(), backing.nbytes, 0, "")
+        (allocation.data_ptr(), allocation.nbytes, 0, "")
     ]
     expected_addrs = [
-        backing.data_ptr() + block * block_stride for block in range(num_blocks)
+        allocation.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
     num_desc_regions = 2 if push_pp else 1
     assert worker.src_blocks_data[:, 0].tolist() == expected_addrs * num_desc_regions
@@ -273,6 +293,39 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     assert metadata.region_num_blocks == [num_blocks]
     assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
+
+
+def _descriptor_geometry(registered) -> dict:
+    """The geometry handed to NIXL, addressed relative to the allocation."""
+    worker = registered.worker
+    base = registered.allocation.data_ptr()
+    return {
+        "block_len_per_layer": list(worker.block_len_per_layer),
+        "block_stride_per_layer": list(worker.block_stride_per_layer),
+        "desc_offsets": [addr - base for addr in worker.src_blocks_data[:, 0].tolist()],
+        "desc_lens": worker.src_blocks_data[:, 1].tolist(),
+    }
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "page_covers_view", [True, False], ids=["dense-page", "narrow-view"]
+)
+def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
+    """A tail shorter than one block must not move a single descriptor.
+
+    An allocation rounded up to a page boundary keeps a few spare bytes past the
+    last block, which cannot hold another block. The narrow view is the branch
+    DeepSeek-V4-Flash's sliding-window cache lands in.
+    """
+    unpadded = _register_overlaid_mla_worker(page_covers_view=page_covers_view)
+    # More spare bytes than blocks, so dividing the padded length by the block
+    # count overshoots the stride and would shift every descriptor.
+    padded = _register_overlaid_mla_worker(
+        tail_bytes=2 * unpadded.num_blocks, page_covers_view=page_covers_view
+    )
+
+    assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
 
 
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
