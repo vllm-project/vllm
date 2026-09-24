@@ -7,10 +7,20 @@ from unittest.mock import MagicMock, patch
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 
+def _mock_logger():
+    mock_logger = MagicMock()
+
+    def log(level, *args, **kwargs):
+        getattr(mock_logger, logging.getLevelName(level).lower())(*args, **kwargs)
+
+    mock_logger.log.side_effect = log
+    return mock_logger
+
+
 def test_request_logger_log_outputs():
     """Test the new log_outputs functionality."""
     # Create a mock logger to capture log calls
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=None)
@@ -36,7 +46,7 @@ def test_request_logger_log_outputs():
 
 def test_request_logger_log_outputs_streaming_delta():
     """Test log_outputs with streaming delta mode."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=None)
@@ -62,7 +72,7 @@ def test_request_logger_log_outputs_streaming_delta():
 
 def test_request_logger_log_outputs_streaming_complete():
     """Test log_outputs with streaming complete mode."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=None)
@@ -88,7 +98,7 @@ def test_request_logger_log_outputs_streaming_complete():
 
 def test_request_logger_log_outputs_with_truncation():
     """Test log_outputs respects max_log_len setting."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         # Set max_log_len to 10
@@ -123,7 +133,7 @@ def test_request_logger_log_outputs_with_truncation():
 
 
 def test_request_logger_log_output_token_ids_require_debug():
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
     mock_logger.isEnabledFor.side_effect = lambda level: level >= logging.INFO
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
@@ -149,7 +159,7 @@ def test_request_logger_log_output_token_ids_require_debug():
 
 def test_request_logger_log_outputs_none_values():
     """Test log_outputs handles None values correctly."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=None)
@@ -174,7 +184,7 @@ def test_request_logger_log_outputs_none_values():
 
 def test_request_logger_log_outputs_empty_output():
     """Test log_outputs handles empty output correctly."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=5)
@@ -199,7 +209,7 @@ def test_request_logger_log_outputs_empty_output():
 
 def test_request_logger_log_outputs_integration():
     """Test that log_outputs can be called alongside log_inputs."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=None)
@@ -235,12 +245,16 @@ def test_request_logger_log_outputs_integration():
 
         assert "Generated response %s%s" in output_call[0]
         assert output_call[1] == "test-integration"
+        assert all(
+            call.kwargs["extra"]["request_id"] == "test-integration"
+            for call in mock_logger.info.call_args_list
+        )
 
 
 def test_streaming_complete_logs_full_text_content():
     """Test that streaming complete logging includes
     full accumulated text, not just token count."""
-    mock_logger = MagicMock()
+    mock_logger = _mock_logger()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         request_logger = RequestLogger(max_log_len=None)

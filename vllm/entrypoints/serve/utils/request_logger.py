@@ -8,7 +8,7 @@ import torch
 
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest
 from vllm.entrypoints.serve.engine.typing import AnyRequest
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -43,7 +43,8 @@ class RequestLogger:
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
+        request_log = bind_external_request_id(logger, request_id)
+        if request_log.isEnabledFor(logging.DEBUG):
             max_log_len = self.max_log_len
             if max_log_len is not None:
                 if prompt is not None:
@@ -52,7 +53,7 @@ class RequestLogger:
                 if prompt_token_ids is not None:
                     prompt_token_ids = prompt_token_ids[:max_log_len]
 
-            logger.debug(
+            request_log.debug(
                 "Request %s details: prompt: %r, "
                 "prompt_token_ids: %s, "
                 "prompt_embeds shape: %s.",
@@ -62,7 +63,7 @@ class RequestLogger:
                 prompt_embeds.shape if prompt_embeds is not None else None,
             )
 
-        logger.info(
+        request_log.info(
             "Received request %s: params: %s, lora_request: %s.",
             request_id,
             params,
@@ -87,6 +88,7 @@ class RequestLogger:
         is_streaming: bool = False,
         delta: bool = False,
     ) -> None:
+        request_log = bind_external_request_id(logger, request_id)
         max_log_len = self.max_log_len
         if max_log_len is not None and outputs is not None:
             outputs = outputs[:max_log_len]
@@ -95,18 +97,18 @@ class RequestLogger:
         if is_streaming:
             stream_info = " (streaming delta)" if delta else " (streaming complete)"
 
-        if logger.isEnabledFor(logging.DEBUG):
+        if request_log.isEnabledFor(logging.DEBUG):
             if max_log_len is not None and output_token_ids is not None:
                 output_token_ids = list(output_token_ids)[:max_log_len]
 
-            logger.debug(
+            request_log.debug(
                 "Generated response %s%s details: output_token_ids: %s",
                 request_id,
                 stream_info,
                 output_token_ids,
             )
 
-        logger.info(
+        request_log.info(
             "Generated response %s%s: output: %r, finish_reason: %s",
             request_id,
             stream_info,
