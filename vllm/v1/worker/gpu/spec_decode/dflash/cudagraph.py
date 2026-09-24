@@ -84,8 +84,12 @@ class DFlashCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         causal: bool | Mapping[int, bool],
+        precompute_context_kv: Callable[[int], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
+        """``precompute_context_kv(num_reqs)`` is captured ahead of the query
+        forward."""
+
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
@@ -110,13 +114,17 @@ class DFlashCudaGraphManager(CudaGraphManager):
             )
             attn_metadata, slot_mappings = attn_state
 
-            return lambda cg_mode: forward_fn(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cg_mode,
-            )
+            def forward(cg_mode: CUDAGraphMode) -> None:
+                precompute_context_kv(num_reqs)
+                forward_fn(
+                    num_reqs,
+                    num_tokens,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cg_mode,
+                )
+
+            return forward
 
         super().capture(create_forward_fn, progress_bar_desc)
