@@ -2695,7 +2695,6 @@ def peer_recovery_worker():
     # Exercise the worker lifecycle without initializing devices or NIXL.
     with patch.object(NixlBaseConnectorWorker, "__init__", return_value=None):
         worker = NixlConnectorWorker(None, "local", None)
-    worker._recv_engine_by_req = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
     worker._handshake_lock = threading.RLock()
@@ -2770,7 +2769,6 @@ def _peer_recovery_request(worker, req_id="req", engine_id="peer", handles=()):
         remote=RemoteMeta(([2],), "localhost", 1234, engine_id, f"p-{req_id}"),
     )
     worker._recving_metadata[req_id] = meta
-    worker._recv_engine_by_req[req_id] = engine_id
     if handles:
         worker._recving_transfers[req_id] = list(handles)
     return meta
@@ -2881,21 +2879,6 @@ def test_peer_recovery_waits_for_remaining_reads(peer_recovery_worker):
 
 
 @pytest.mark.cpu_test
-def test_peer_recovery_detects_late_failure_without_metadata(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w, handles=(10,))
-    # Attribute a late failure even when its request metadata is unavailable.
-    w._recving_metadata.pop("req")
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w.nixl_wrapper.check_xfer_state.return_value = "PROC"
-    w._handle_failed_transfer("req", None, w._recv_failures)
-    assert w.get_finished() == (set(), set())
-    assert w._invalid_remote_engines == {"peer"}
-    assert w._recv_engine_by_req == {"req": "peer"}
-    w.nixl_wrapper.release_dlist_handle.assert_not_called()
-
-
-@pytest.mark.cpu_test
 def test_peer_recovery_defers_cleanup_during_handshake(peer_recovery_worker):
     w = peer_recovery_worker
     _peer_recovery_request(w)
@@ -2927,7 +2910,6 @@ def test_peer_recovery_success_does_not_probe(peer_recovery_worker):
     _peer_recovery_request(w, handles=(10,))
     w.nixl_wrapper.check_xfer_state.return_value = "DONE"
     assert w.get_finished() == (set(), {"req"})
-    assert not w._recv_engine_by_req
     w.nixl_wrapper.check_remote_metadata.assert_not_called()
     w.nixl_wrapper.release_dlist_handle.assert_not_called()
 
@@ -2951,7 +2933,6 @@ def test_peer_recovery_cleanup_failure_is_not_swallowed(peer_recovery_worker):
 def test_peer_recovery_tracks_reads_through_failure(peer_recovery_worker, invalidated):
     w = peer_recovery_worker
     meta = _peer_recovery_request(w)
-    w._recv_engine_by_req.clear()
 
     def read(**kwargs):
         if invalidated:
@@ -2961,7 +2942,6 @@ def test_peer_recovery_tracks_reads_through_failure(peer_recovery_worker, invali
     w.nixl_wrapper.check_remote_metadata.return_value = not invalidated
     with patch.object(w, "_read_blocks", side_effect=read) as reads:
         w._read_blocks_for_req("req", meta)
-        assert w._recv_engine_by_req == {"req": "peer"}
         assert reads.call_count == (1 if invalidated else 2)
     assert w.get_finished() == (set(), {"req"})
     assert ("peer" not in w._remote_agents) is invalidated
@@ -3043,7 +3023,6 @@ def test_peer_recovery_notify_only_never_reports_receive(
     meta.local_block_ids = ()
     meta.awaiting_kvs = False
     w._recving_metadata.clear()
-    w._recv_engine_by_req.clear()
     w.pcp_rank = 0
     w._reqs_to_process = set()
     if invalidated:
