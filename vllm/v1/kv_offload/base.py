@@ -236,6 +236,10 @@ class OffloadingKVEventsConfig:
     self_describing_kv_events: bool
 
 
+# The labels of one info metric series: a label name mapped to its value.
+ConfigInfoMapping = Mapping[str, str | int | float | bool]
+
+
 class OffloadingManager(ABC):
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -408,7 +412,7 @@ class OffloadingManager(ABC):
         """Return collected metrics since last call, or None if disabled."""
         return None
 
-    def config_info(self) -> Sequence[Mapping[str, str | int | float | bool]]:
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
         """Return static config facts to publish as info metric labels.
 
         The scheduler reads this once, after the manager is built, so the

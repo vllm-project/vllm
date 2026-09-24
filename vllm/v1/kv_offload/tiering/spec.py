@@ -439,7 +439,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         keys = dict.fromkeys(super().config_info_keys(extra_config))
         keys["tier"] = None
         for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
-            keys.update(dict.fromkeys(tier_cls.config_info_keys(tier_config)))
+            tier_keys = tier_cls.config_info_keys(tier_config)
+            assert "tier" not in tier_keys, (
+                f"{tier_cls.__name__} must not declare the reserved label 'tier'"
+            )
+            keys.update(dict.fromkeys(tier_keys))
         return tuple(keys)
 
     @classmethod

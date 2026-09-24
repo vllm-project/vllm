@@ -1668,3 +1668,23 @@ def test_tiering_spec_passes_each_tier_its_own_config():
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
 
     assert seen == tier_configs
+
+
+def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
+    """TieringOffloadingManager.config_info() writes the tier label over the
+    value of a tier, so a tier that declares the name loses its own value with
+    no message. The declaration must fail at start-up instead."""
+
+    class _ReservedLabelTier(MetricsSecondaryTierManager):
+        @classmethod
+        def config_info_keys(cls, extra_config):
+            return ("tier",)
+
+    tier_configs = [{"type": "test_metrics"}]
+    with (
+        patch.object(
+            SecondaryTierFactory, "get_tier_class", return_value=_ReservedLabelTier
+        ),
+        pytest.raises(AssertionError, match="reserved label 'tier'"),
+    ):
+        TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})

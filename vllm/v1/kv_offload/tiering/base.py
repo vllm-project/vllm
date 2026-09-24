@@ -4,13 +4,14 @@
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     Locality,
     LookupResult,
     Medium,
@@ -366,7 +367,8 @@ class SecondaryTierManager(ABC):
         The metric holds one series for each tier, and the tier label tells the
         series apart, so a tier declares its own names only.
         TieringOffloadingSpec merges the names of every tier into one
-        declaration. Every other rule matches OffloadingSpec.config_info_keys().
+        declaration, and it rejects the reserved name tier, which it adds
+        itself. Every other rule matches OffloadingSpec.config_info_keys().
 
         Args:
             tier_config: Configuration dict of this tier.
@@ -377,7 +379,7 @@ class SecondaryTierManager(ABC):
         """
         return ()
 
-    def config_info(self) -> Mapping[str, str | int | float | bool]:
+    def config_info(self) -> ConfigInfoMapping:
         """Return static config facts to publish as info metric labels.
 
         One tier gives one series, so this returns one mapping and not a list.

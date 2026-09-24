@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
@@ -343,7 +344,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         gauge_values = self._values.setdefault(gauge_name, {})
         gauge_values[labelvalues] = gauge_value
 
-    def set_info(self, info: Sequence[Mapping[str, str | int | float | bool]]) -> None:
+    def set_info(self, info: Sequence[ConfigInfoMapping]) -> None:
         """Put the static config facts of this engine on the stats payload.
 
         Args:

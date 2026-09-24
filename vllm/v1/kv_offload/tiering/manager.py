@@ -20,7 +20,7 @@ Key Design Principles:
 """
 
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     OffloadingEvent,
@@ -980,7 +981,7 @@ class TieringOffloadingManager(OffloadingManager):
         return stats
 
     @override
-    def config_info(self) -> Sequence[Mapping[str, str | int | float | bool]]:
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
         """Compose one info mapping for each tier, primary tier first.
 
         Every mapping holds the tier label, so two tiers of one type stay
