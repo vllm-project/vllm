@@ -12,8 +12,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics_descriptor import (
+    INC_BY_SUM_U64,
+    build_metrics_descriptor,
+    maybe_attach_metrics_descriptor,
+    metric_def,
+    strip_metrics_descriptor,
+)
 from vllm.v1.metrics.utils import create_metric_per_engine
 
+# Single source for Python Prom and Rust MetricsDescriptorV1 (wire key, docs).
 _HISPARSE_COUNTERS: tuple[tuple[str, str], ...] = (
     ("cache_hits", "Number of HiSparse device hot-buffer hits."),
     ("cache_misses", "Number of HiSparse device hot-buffer misses."),
@@ -22,6 +30,23 @@ _HISPARSE_COUNTERS: tuple[tuple[str, str], ...] = (
         "Bytes transferred from host KV storage to HiSparse hot buffers.",
     ),
 )
+
+
+def build_hisparse_metrics_descriptor() -> dict[str, Any]:
+    """Derive MetricsDescriptorV1 from ``_HISPARSE_COUNTERS`` (same as Prom)."""
+    return build_metrics_descriptor(
+        "HiSparseConnector",
+        [
+            metric_def(
+                name=f"vllm:hisparse_{wire_key}",
+                type="counter",
+                documentation=documentation,
+                samples_path=wire_key,
+                sample_kind=INC_BY_SUM_U64,
+            )
+            for wire_key, documentation in _HISPARSE_COUNTERS
+        ],
+    )
 
 
 @dataclass
@@ -33,9 +58,18 @@ class HiSparseKVConnectorStats(KVConnectorStats):
     """
 
     def __post_init__(self):
+        # Wire may include _metrics_descriptor; keep it out of the accumulator.
+        self.data = strip_metrics_descriptor(self.data) or {}
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
+
+    def to_dict(self) -> dict[str, Any]:
+        return maybe_attach_metrics_descriptor(
+            self.data,
+            connector_id="HiSparseConnector",
+            descriptor=build_hisparse_metrics_descriptor(),
+        )
 
     def reset(self):
         # Must be serializable
