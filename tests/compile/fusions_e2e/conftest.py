@@ -182,7 +182,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # TODO: Remove log counting in unit tests
             # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
+            if match_name not in (
+                "attn_quant_fusion",
+                "act_quant_fusion",
+                "norm_rope_fusion",
+            ):
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
@@ -190,7 +194,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
             expected_matches = getattr(matches, match_name)
 
-            if match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
+            if match_name == "norm_rope_fusion":
+                # Opaque LayerName lets the combined pass consume short-range
+                # sites before the standalone pass; count either owner.
+                assert len(log_matches) >= n_expected
+                assert all(m in (0, expected_matches) for m in log_matches)
+                assert sum(log_matches) == expected_matches * n_expected, (
+                    f"{match_name} expected {expected_matches * n_expected} "
+                    f"sites across both passes, found: {log_matches}"
+                )
+            elif match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
                 # AR+rms+quant takes precedence over rms+quant if activated.
                 # That means we get full matching where ar+rms+quant was not
                 # activated, and less where it was (only the smallest range).

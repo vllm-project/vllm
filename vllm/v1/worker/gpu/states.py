@@ -78,10 +78,7 @@ class RequestState:
         )
 
         self.next_prefill_tokens = torch.zeros(
-            num_prefill_lookahead,
-            self.max_num_reqs,
-            dtype=torch.int32,
-            device=device,
+            num_prefill_lookahead, self.max_num_reqs, dtype=torch.int32, device=device
         )
 
     @property

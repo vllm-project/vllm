@@ -90,13 +90,12 @@ def create_batched_mm_kwargs(
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
-    dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
     mm_counts = {
         modality: 3 if limit is None else limit
         for modality, limit in supported_mm_limits.items()
     }
-    processor_inputs = dummy_inputs.get_dummy_processor_inputs(
+    processor_inputs = processor.get_dummy_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
         mm_options=MultiModalDummyOptions(),

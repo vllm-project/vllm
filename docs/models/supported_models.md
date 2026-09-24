@@ -240,7 +240,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 #### Download a model
 
-If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
+If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#hf-download) or specific files from a model repository:
 
 ```bash
 # Download a model
@@ -549,6 +549,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `DeepseekOCRForCausalLM` | DeepSeek-OCR | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-OCR`, etc. | ✅︎ | ✅︎ |
 | `DeepseekOCR2ForCausalLM` | DeepSeek-OCR-2 | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-OCR-2`, etc. | ✅︎ | ✅︎ |
 | `DeepseekV4ForConditionalGeneration` | DeepSeek-V4 (vision) | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp` | ✅︎ | ✅︎ |
+| `DiffusionGemmaForBlockDiffusion` | DiffusionGemma | T + I<sup>+</sup> + V<sup>+</sup> | `google/diffusiongemma-26B-A4B-it`, etc. | | |
 | `Eagle2_5_VLForConditionalGeneration` | Eagle2.5-VL | T + I<sup>E+</sup> | `nvidia/Eagle2.5-8B`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | Ernie4.5-VL | T + I<sup>+</sup>/ V<sup>+</sup> | `baidu/ERNIE-4.5-VL-28B-A3B-PT`, `baidu/ERNIE-4.5-VL-424B-A47B-PT` | | ✅︎ |
 | `Exaone4_5_ForConditionalGeneration` | EXAONE-4.5 | T + I<sup>E+</sup> | `LGAI-EXAONE/EXAONE-4.5-33B`, etc. | ✅︎ | ✅︎ |

@@ -8,6 +8,7 @@ from typing import cast
 import torch
 
 from vllm import envs
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -26,6 +27,7 @@ from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -35,9 +37,11 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -445,6 +449,20 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # All per-token metadata is built from device query boundaries into
+            # persistent buffers, so adaptive verification can replay varlen
+            # FULL decode graphs after reallocating drafts across requests.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -512,6 +530,20 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # SWA indices, lengths, and token-to-request mappings are built from
+            # device boundaries into persistent buffers, so adaptive verification
+            # can replay varlen FULL decode graphs safely.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
     # also refreshes the ROCm-specific ragged SWA indices and indptrs.
     supports_draft_decode_metadata_update = False
@@ -1144,6 +1176,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.n_local_groups,
                 self.o_lora_rank,
                 self.wo_a,
+                inverse_rope=False,
             )
             zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
@@ -1214,9 +1247,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
+        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
+        # the rotation into the decode reduce would apply it twice. Only the
+        # BF16 einsum path hands its rotation off to the decode.
+        fuse_inv_rope = self._wo_a_fp8_weight is None
+        rotated = 0
         if num_decodes > 0:
-            self._forward_decode(
+            rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
+                positions=positions[:num_decode_tokens] if fuse_inv_rope else None,
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,
@@ -1230,17 +1269,31 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     and rocm_metadata.for_cudagraph_capture
                 ),
             )
+        if fuse_inv_rope:
+            # Only the decode reduce rotates its own rows, and only the leading
+            # `rotated` of them; prefill rows and any decode path that did not
+            # fuse still owe the standalone pass. Settle that here rather than
+            # in _o_proj: the split is batch-dependent and _o_proj runs
+            # compiled, where such a value freezes at its trace-time value.
+            rocm_inverse_rope_rows_(
+                output[rotated:, : self.n_local_heads, :],
+                positions[rotated:],
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+            )
 
     def _forward_decode(
         self,
         q: torch.Tensor,
+        positions: torch.Tensor | None,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
         adaptive_splits: bool,
-    ) -> None:
+    ) -> int:
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -1272,7 +1325,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        rocm_sparse_attn_decode(
+        return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
@@ -1292,6 +1345,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             rope_head_dim=self.rope_head_dim,
             output=output,
             adaptive_splits=adaptive_splits,
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
