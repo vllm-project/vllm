@@ -29,7 +29,7 @@ repos:
   hooks:
   - id: markdownlint-cli2
     language_version: lts
-    args: [--fix]
+    args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
     exclude: (^|/)CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
@@ -39,7 +39,7 @@ repos:
   rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
   hooks:
   - id: shellcheck
-    args: ["-s", "bash", "--format=gcc"]
+    args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:

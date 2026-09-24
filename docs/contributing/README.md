@@ -46,8 +46,8 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e .
 To rebuild only the Rust frontend binary:
 
 ```bash
-./build_rust.sh          # release build
-./build_rust.sh --debug  # faster build for development
+./tools/build_rust.sh          # release build
+./tools/build_rust.sh --debug  # faster build for development
 ```
 
 If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
@@ -88,6 +88,11 @@ pre-commit install
 ```
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
+
+When running ShellCheck or markdownlint directly, or configuring an editor
+integration, use the configuration files in `tools/pre_commit/`:
+`--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
+`--config tools/pre_commit/.markdownlint.yaml` for markdownlint-cli2.
 
 !!! tip "Tips"
     You can manually run the `pre-commit` hooks using:

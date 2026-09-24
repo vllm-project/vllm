@@ -50,7 +50,7 @@
 # Rust Frontend
 /rust/ @BugenZhao @njhill
 /rust/src/bench @esmeetu
-/build_rust.sh @BugenZhao @njhill
+/tools/build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
 /.buildkite/test_areas/rust* @BugenZhao @njhill
 
@@ -134,7 +134,7 @@
 mkdocs.yaml @hmellor
 
 # Linting
-.markdownlint.yaml @hmellor
+/tools/pre_commit/.markdownlint.yaml @hmellor
 .pre-commit-config.yaml @hmellor
 /tools/pre_commit @hmellor
 
