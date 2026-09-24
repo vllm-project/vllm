@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -16,6 +18,22 @@ else:
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
+
+
+def test_abort_request_forwards_only_internal_ids():
+    engine = LLMEngine.__new__(LLMEngine)
+    engine.output_processor = MagicMock()
+    engine.output_processor.abort_requests.return_value = (
+        ["internal-1", "internal-2"],
+        ["external-123", "external-123"],
+    )
+    engine.engine_core = MagicMock()
+
+    engine.abort_request(["external-123"])
+
+    engine.engine_core.abort_requests.assert_called_once_with(
+        ["internal-1", "internal-2"]
+    )
 
 
 def _vllm_model(
