@@ -1888,6 +1888,7 @@ class VllmConfig:
                 if (
                     self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                     and model_config.pooler_config is not None
+                    and os.environ.get("VLLM_LAYA_ALLOW_FULL_CG", "0") != "1"
                 ):
                     logger.warning_once(
                         "Pooling models do not support full cudagraphs. "

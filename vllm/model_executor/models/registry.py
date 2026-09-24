@@ -230,6 +230,7 @@ _EMBEDDING_MODELS = {
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
+    "LayaForDecision": ("laya", "LayaForDecision"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
