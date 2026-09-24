@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.structural_tag_markers import bind_marker_tokens
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 if TYPE_CHECKING:
     from vllm.entrypoints.generate.base.protocol import (
@@ -196,6 +198,24 @@ class ParserEngineToolAdapter(ToolParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         return self._parser_engine.adjust_request(request)
+
+    def get_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        reasoning: bool = False,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
+    ):
+        tag = super().get_structural_tag(
+            request, reasoning=reasoning, strict_level=strict_level
+        )
+        if tag is None:
+            return None
+        # The engine keys these markers by token ID, so the grammar must
+        # require the dedicated tokens too; otherwise a generation spelled
+        # from ordinary tokens satisfies the grammar but parses as content.
+        engine = self._parser_engine
+        return bind_marker_tokens(tag, engine.token_id_markers, engine.vocab)
 
     def extract_tool_calls(
         self,
