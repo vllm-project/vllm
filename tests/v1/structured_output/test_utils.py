@@ -10,7 +10,7 @@ from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
     validate_xgrammar_grammar,
 )
-from vllm.v1.structured_output.utils import choice_as_grammar
+from vllm.v1.structured_output.utils import choice_as_grammar, convert_lark_to_ebnf
 
 pytestmark = pytest.mark.cpu_test
 
@@ -266,6 +266,68 @@ class TestHasXGrammarUnsupportedJsonFeatures:
         )
         def test_supported_list_type_json_features(self, schema):
             assert not has_xgrammar_unsupported_json_features(schema)
+
+
+class TestConvertLarkToEbnfQuoteEscaping:
+    """Quote and comment handling must respect backslash escapes and quoted
+    spans. See https://github.com/vllm-project/vllm/issues/22639.
+    """
+
+    def test_escaped_quote_in_literal_is_preserved(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf(r'start: "a \" b"'))
+        assert _is_grammar_accept_string(grammar, 'a " b')
+        assert not _is_grammar_accept_string(grammar, "a  b")
+
+    def test_quoted_hash_is_not_treated_as_a_comment(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf('start: "#" foo\nfoo: "x"'))
+        assert _is_grammar_accept_string(grammar, "#x")
+        assert not _is_grammar_accept_string(grammar, "x")
+
+    def test_real_trailing_comment_is_still_stripped(self):
+        grammar = Grammar.from_ebnf(
+            convert_lark_to_ebnf('start: "hello"  # a real comment')
+        )
+        assert _is_grammar_accept_string(grammar, "hello")
+
+    def test_escaped_backslash_before_a_real_comment(self):
+        # the backslash is itself escaped, so the quote that follows closes
+        # the literal and the '#' after it is a genuine comment
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf(r'start: "a\\"  # comment'))
+        assert _is_grammar_accept_string(grammar, "a\\")
+
+    def test_escaped_single_quote_in_single_quoted_literal(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf(r"start: 'a\'b'"))
+        assert _is_grammar_accept_string(grammar, "a'b")
+
+    def test_double_quote_inside_single_quoted_literal(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf("start: 'say \"hi\"'"))
+        assert _is_grammar_accept_string(grammar, 'say "hi"')
+
+    def test_apostrophe_inside_double_quoted_literal(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf('start: "it\'s"'))
+        assert _is_grammar_accept_string(grammar, "it's")
+
+    def test_apostrophes_in_separate_double_quoted_literals(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf('start: "don\'t" | "can\'t"'))
+        assert _is_grammar_accept_string(grammar, "don't")
+        assert _is_grammar_accept_string(grammar, "can't")
+
+    def test_plain_literal_is_unaffected(self):
+        grammar = Grammar.from_ebnf(convert_lark_to_ebnf(r'start: "hello"'))
+        assert _is_grammar_accept_string(grammar, "hello")
+        assert not _is_grammar_accept_string(grammar, "goodbye")
+
+    def test_undefined_rule_reference_still_rejected(self):
+        with pytest.raises(ValueError, match="not defined"):
+            convert_lark_to_ebnf("start: foo")
+
+    def test_unterminated_string_still_rejected(self):
+        with pytest.raises(ValueError, match="Mismatched quotes"):
+            convert_lark_to_ebnf('start: "unterminated')
+
+    def test_unterminated_single_quoted_string_still_rejected(self):
+        with pytest.raises(ValueError, match="Mismatched quotes"):
+            convert_lark_to_ebnf("start: 'unterminated")
 
 
 class TestIsGrammarAcceptString:
