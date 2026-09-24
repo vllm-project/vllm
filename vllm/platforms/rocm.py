@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.metadata
 import os
 import platform
 from datetime import timedelta
@@ -359,6 +360,25 @@ def get_cdna_version() -> int:
     if on_gfx1250():
         return 5
     return 0
+
+
+@cache
+def get_rocm_version() -> tuple[int, ...] | None:
+    """Return the installed ROCm release as (major, minor, patch), or None."""
+    # ROCm 10+ ships as the `rocm` pip SDK; older releases install to /opt/rocm.
+    try:
+        version = importlib.metadata.version("rocm")
+    except importlib.metadata.PackageNotFoundError:
+        rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+        try:
+            with open(os.path.join(rocm_path, ".info", "version")) as f:
+                version = f.read()
+        except OSError:
+            return None
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", version)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups() if part is not None)
 
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
@@ -913,12 +933,6 @@ class RocmPlatform(Platform):
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
-
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.data_parallel_size > 1
-        ):
-            raise ValueError("PCP does not support data parallelism on ROCm yet.")
 
         if (
             compilation_config.cudagraph_mode.has_full_cudagraphs()
