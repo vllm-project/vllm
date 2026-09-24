@@ -81,11 +81,16 @@ See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <http
 
 ## CPU Multimodal Preprocessing
 
-If concurrent multimodal requests are bottlenecked by CPU preprocessing, set
-`--mm-processor-num-workers` to a value greater than `1` to use spawned worker
+Prefer [API server scale-out](#parallel-processing) when concurrent multimodal
+requests are bottlenecked by CPU preprocessing. It parallelizes the full input
+pipeline without adding a preprocessing-worker IPC boundary.
+
+`--mm-processor-num-workers` is an opt-in alternative for deployments that need
+to keep a fixed API-server count. Values greater than `1` use spawned worker
 processes per API renderer. The default, `1`, retains the existing single-threaded
 multimodal preprocessing path. This is separate from `--renderer-num-workers`,
-which controls the renderer's thread pool.
+which controls the renderer's thread pool. Do not assume process workers are
+faster: compare them with API-server scale-out on the deployment's workload.
 
 ```bash
 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
@@ -127,6 +132,9 @@ Benchmark representative inputs and concurrency on the target hardware with `1`
 and several larger worker counts, measuring throughput, time to first token,
 CPU utilization, host memory, and shared-memory usage. Exclude process startup
 and warmup from steady-state comparisons; more workers are not always faster.
+See the [multimodal concurrency benchmark procedure](../benchmarking/mm_preprocessing.md)
+for a CPU-only rendering comparison and the separate inference benchmark
+required to establish an end-to-end benefit.
 
 ## Parallelism Strategies
 
