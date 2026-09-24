@@ -346,12 +346,7 @@ def rocm_unquantized_gemm_impl(
     if use_skinny:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
-        #
-        # Build that view inside the branches that consume it. The outer gate
-        # is much broader than the two inner conditions, so hoisting the copy
-        # above them makes every shape that passes the gate and matches
-        # neither pay for a tensor that is discarded on the fall-through
-        # below, which uses the original `x`.
+        # Note: Only build that view inside the branches that consume it.
         if (m == 1 or m > 8) and 0 < n <= 5:
             x_view = x.reshape(-1, x.size(-1)).contiguous()
             cu_count = num_compute_units()
