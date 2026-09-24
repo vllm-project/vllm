@@ -24,7 +24,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl
+from vllm.triton_utils import HAS_TRITON, tl
+
+requires_triton = pytest.mark.skipif(
+    not HAS_TRITON, reason="Requires a working Triton installation"
+)
 
 
 def test_int8_w8a8_quant_config_static_act_per_channel_weights() -> None:
@@ -105,6 +109,7 @@ def test_quark_static_int8_per_tensor_keeps_tensor_weight_scales() -> None:
     assert quant_config.per_act_token_quant is False
 
 
+@requires_triton
 def test_triton_moe_launcher_forwards_independent_scale_flags(monkeypatch) -> None:
     captured: dict[str, bool] = {}
 
@@ -144,6 +149,7 @@ def test_triton_moe_launcher_forwards_independent_scale_flags(monkeypatch) -> No
     assert captured["per_out_ch_quant"] is True
 
 
+@requires_triton
 def test_fused_experts_forwards_independent_scale_flags(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
