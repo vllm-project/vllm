@@ -258,3 +258,32 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+def test_jit_monitor_activation_follows_enable_jit_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The post-warmup JIT monitor must stay off when JIT warmup is disabled
+    (e.g. by enforce_eager): runtime compilation is then expected, and
+    warning/erroring on it would be noise."""
+    from vllm.utils import jit_monitor
+
+    calls = []
+    monkeypatch.setattr(jit_monitor, "activate", lambda **kwargs: calls.append(kwargs))
+
+    def worker(enable_jit_warmup):
+        return SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup)
+            ),
+            observability_config=SimpleNamespace(
+                jit_monitor_mode="warn", jit_monitor_verbose=False
+            ),
+        )
+
+    gpu_worker.Worker._maybe_activate_jit_monitor(worker(True))
+    assert calls == [{"mode": "warn", "verbose": False}]
+
+    calls.clear()
+    gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
+    assert calls == []
