@@ -31,10 +31,10 @@ from typing import Annotated
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -208,17 +208,13 @@ class GraniteSpeechDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-
         return {
             "audio": self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -233,7 +229,7 @@ class GraniteSpeechDummyInputsBuilder(
 class GraniteSpeechEncoderProjector(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -291,7 +287,7 @@ class GraniteSpeechConformerFeedForward(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -327,7 +323,7 @@ class GraniteSpeechConformerAttention(nn.Module):
     for more details.
     """
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(self, config: PreTrainedConfig, prefix: str = ""):
         super().__init__()
 
         inner_dim = config.dim_head * config.num_heads
@@ -433,7 +429,7 @@ class GraniteSpeechConformerConvModule(nn.Module):
     convolutional layers.
     """
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(self, config: PreTrainedConfig, prefix: str = ""):
         super().__init__()
         inner_dim = config.hidden_dim * config.conv_expansion_factor
 
@@ -464,7 +460,7 @@ class GraniteSpeechConformerBlock(nn.Module):
     """Conformer block, consisting largely of linear layers,
     attention, and convolutional layers."""
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(self, config: PreTrainedConfig, prefix: str = ""):
         super().__init__()
         self.ff1 = GraniteSpeechConformerFeedForward(config, prefix=f"{prefix}.ff1")
         self.attn = GraniteSpeechConformerAttention(config, prefix=f"{prefix}.attn")
@@ -490,7 +486,7 @@ class GraniteSpeechCTCEncoder(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
     ):
@@ -626,7 +622,7 @@ class GraniteSpeechForConditionalGeneration(
 
     def _build_encoder(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> "GraniteSpeechCTCEncoder":

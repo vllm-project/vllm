@@ -13,7 +13,7 @@ from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -176,29 +176,6 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
             ),
         }
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-    ) -> ProcessorInputs:
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-
-        num_audios = mm_counts.get("audio", 0)
-        dummy_tokens = (
-            [198]
-            if num_audios == 0
-            else [
-                KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
-                KimiAudioProcessor.KIMIA_TEXT_BLANK,
-                KimiAudioProcessor.KIMIA_MEDIA_END,
-            ]
-            * num_audios
-        )
-
-        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
-
 
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
@@ -227,6 +204,30 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
 
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
     """vLLM multi-modal processor wrapper for Kimi-Audio."""
+
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        builder = self.dummy_inputs
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
+        num_audios = mm_counts.get("audio", 0)
+        dummy_tokens = (
+            [198]
+            if num_audios == 0
+            else [
+                KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                KimiAudioProcessor.KIMIA_MEDIA_END,
+            ]
+            * num_audios
+        )
+
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
     def _get_hf_mm_inputs(
         self,

@@ -29,7 +29,7 @@ from typing import Annotated, Any, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
     Qwen2_5OmniConfig,
@@ -44,7 +44,7 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
@@ -282,7 +282,7 @@ def create_qwen2_5_omni_thinker_field_factory(
     def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         audio_feature_lengths = hf_inputs.get(
             "audio_feature_lengths", torch.empty((0,))
-        )
+        ).flatten()
 
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         image_pixel_grid_sizes = image_grid_thw.prod(-1)
@@ -332,6 +332,14 @@ def create_qwen2_5_omni_thinker_field_factory(
 
 
 class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    embedding_fields = {
+        **Qwen2VLMultiModalDataParser.embedding_fields,
+        "audio": {
+            "input_audio_features": "values",
+            "audio_feature_lengths": "metadata",
+        },
+    }
+
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(self._spatial_merge_size, *args, **kwargs)
@@ -341,10 +349,15 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("audio")
+            data = dict(data)
+            if "audio_feature_lengths" in data:
+                data["audio_feature_lengths"] = data["audio_feature_lengths"].flatten()
             return DictEmbeddingItems(
                 data,
                 modality="audio",
-                required_fields={"input_audio_features", "audio_feature_lengths"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=create_qwen2_5_omni_thinker_field_factory(
                     self._spatial_merge_size
                 ),
@@ -362,7 +375,6 @@ class Qwen2_5OmniThinkerProcessingInfo(
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
         return self.ctx.get_hf_processor(
             Qwen2_5OmniProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -448,12 +460,8 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         feature_extractor = self.info.get_feature_extractor()
 
         target_audio_length = (
@@ -469,28 +477,24 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        audio_overrides = mm_options.get("audio")
-
         mm_data = {
             "audio": self._get_dummy_audios(
                 length=target_audio_length,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -688,7 +692,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     @classmethod
     def omni_get_updates_use_audio_in_video(
         cls,
-        thinker_config: PretrainedConfig,
+        thinker_config: PreTrainedConfig,
         audio_len: int,
         video_grid_thw: list[int] | torch.Tensor,
         video_second_per_grid_t: float,

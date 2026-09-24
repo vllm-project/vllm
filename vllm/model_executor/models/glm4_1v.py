@@ -36,9 +36,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from einops import rearrange
-from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
 from transformers.image_processing_base import ImageProcessingMixin
 from transformers.models.glm4v.configuration_glm4v import (
@@ -54,7 +52,7 @@ from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -131,8 +129,6 @@ logger = init_logger(__name__)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
-
-TRANSFORMERS_WITH_GA = Version(transformers.__version__) >= Version("5.10.0.dev0")
 
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
@@ -1389,17 +1385,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         timestamps_list = full_second_idxs[::2]
         return list(timestamps_list)
 
-    def _get_video_frame_embed_token_id(self, hf_processor: object) -> int:
-        attr = (
-            "image_token_id"
-            if isinstance(hf_processor, Glm4vProcessor) or TRANSFORMERS_WITH_GA
-            else "video_token_id"
-        )
-        token_id = getattr(hf_processor, attr, None)
-        if not isinstance(token_id, int):
-            raise ValueError(f"Processor has no valid {attr}")
-        return token_id
-
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
@@ -1437,7 +1422,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         num_tokens_per_frame = int(H * W) // merge_length
         placeholder = []
         placeholder.append(bov_token_id)
-        frame_embed_token_id = self._get_video_frame_embed_token_id(hf_processor)
+        frame_embed_token_id = hf_processor.image_token_id
         for frame_idx in frames_idx_token:
             placeholder.append(boi_token_id)
             placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
@@ -1470,33 +1455,26 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1601,10 +1579,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         processor = self.info.get_hf_processor(**hf_kwargs)
 
-        use_direct_path = (
-            not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
-        )
-        if use_direct_path:
+        if not isinstance(processor, Glm4vProcessor):
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
                 hf_data, hf_kwargs
             )
@@ -1627,8 +1602,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
-            frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
-            swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
             for item in videos:
                 video_array, metadata = item
 
@@ -1651,10 +1624,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_mm_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
-                if swap_video_frame_tokens:
-                    input_ids[input_ids == processor.image_token_id] = (
-                        processor.video_token_id
-                    )
+
+                input_ids[input_ids == processor.image_token_id] = (
+                    processor.video_token_id
+                )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
@@ -1670,17 +1643,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
         else:
             video_outputs = dict()
-            swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_kwargs),
             dict(text=prompt_text, **hf_data),
             hf_kwargs,
         )
-        if swap_video_frame_tokens:
-            input_ids = processed_data["input_ids"]
-            input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-            processed_data["input_ids"] = input_ids
+        input_ids = processed_data["input_ids"]
+        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
+        processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
         return self._finalize_hf_mm_data(
@@ -1728,7 +1699,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
-                embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor),
+                embed_token_id=hf_processor.image_token_id,
             )
 
         return [

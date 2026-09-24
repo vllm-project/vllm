@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.metadata
 import os
 import platform
 from datetime import timedelta
@@ -22,9 +23,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
+
+_KV_CACHE_DTYPE_REASON = "kv_cache_dtype not supported"
+_TURBOQUANT_LAYOUT_REASON = "no KV cache layout in common with TURBOQUANT"
 
 try:
     from amdsmi import (
@@ -361,6 +366,25 @@ def get_cdna_version() -> int:
     return 0
 
 
+@cache
+def get_rocm_version() -> tuple[int, ...] | None:
+    """Return the installed ROCm release as (major, minor, patch), or None."""
+    # ROCm 10+ ships as the `rocm` pip SDK; older releases install to /opt/rocm.
+    try:
+        version = importlib.metadata.version("rocm")
+    except importlib.metadata.PackageNotFoundError:
+        rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+        try:
+            with open(os.path.join(rocm_path, ".info", "version")) as f:
+                version = f.read()
+        except OSError:
+            return None
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", version)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups() if part is not None)
+
+
 # Enable HIP online tuning early, before hipBLASLt initializes.
 # Turn on hipBLASLt online tuning if use AITER hipBLASLt GEMM.
 if (
@@ -485,6 +509,53 @@ def _get_backend_priorities(
     return backends
 
 
+def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
+    """Whether the run's KV cache dtype is one of the turboquant_* presets."""
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and str(cache_config.cache_dtype).startswith(
+        "turboquant_"
+    )
+
+
+def _shares_layout_with_turboquant(backend_class: type["AttentionBackend"]) -> bool:
+    """Whether this backend reads a KV cache layout TURBOQUANT reads too.
+
+    A turboquant_* run keeps its boundary layers at the native dtype (see
+    TurboQuantConfig.get_boundary_skip_layers), so those layers pick a backend of
+    their own while every other layer picks TURBOQUANT. One layout has to serve
+    the whole worker, and get_supported_kv_cache_layouts() turns an empty
+    intersection into a hard error at engine startup.
+    """
+    layouts = backend_class.supported_kv_cache_layouts()
+    turboquant_layouts = (
+        AttentionBackendEnum.TURBOQUANT.get_class().supported_kv_cache_layouts()
+    )
+    if layouts is None or turboquant_layouts is None:
+        return True
+    return not set(layouts).isdisjoint(turboquant_layouts)
+
+
+def _get_invalid_reasons(
+    backend_class: type["AttentionBackend"],
+    device_capability: DeviceCapability,
+    attn_selector_config: "AttentionSelectorConfig",
+    *,
+    is_turboquant_run: bool,
+) -> list[str]:
+    """Why this backend cannot serve the layer, empty when it can."""
+    invalid_reasons = backend_class.validate_configuration(
+        device_capability=device_capability,
+        **attn_selector_config._asdict(),
+    )
+    if (
+        not invalid_reasons
+        and is_turboquant_run
+        and not _shares_layout_with_turboquant(backend_class)
+    ):
+        invalid_reasons = [_TURBOQUANT_LAYOUT_REASON]
+    return invalid_reasons
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -591,12 +662,14 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
-                backend_class = backend.get_class()
-                invalid_reasons_i = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                invalid_reasons_i = _get_invalid_reasons(
+                    backend.get_class(),
+                    device_capability,
+                    attn_selector_config,
+                    is_turboquant_run=is_turboquant_run,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -619,11 +692,16 @@ class RocmPlatform(Platform):
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
+            # Keep lazy: vllm.config imports current_platform during initialization.
+            from vllm.config import get_current_vllm_config_or_none
+
+            is_turboquant_run = _uses_turboquant(get_current_vllm_config_or_none())
             try:
-                backend_class = selected_backend.get_class()
-                sel_invalid_reasons = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                sel_invalid_reasons = _get_invalid_reasons(
+                    selected_backend.get_class(),
+                    device_capability,
+                    attn_selector_config,
+                    is_turboquant_run=is_turboquant_run,
                 )
             except ImportError:
                 sel_invalid_reasons = ["ImportError"]
@@ -633,21 +711,29 @@ class RocmPlatform(Platform):
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
-            # Only tolerate the mismatch for turboquant_* KV-cache layers:
-            # boundary layers keep the native dtype (served by the selected
-            # backend) while turboquant_* layers need TURBOQUANT, so no single
-            # --attention-backend can serve every layer. For any other dtype
-            # the explicit selection is genuinely invalid -> fail loud.
+            # Only tolerate the mismatch when turboquant is in play: boundary
+            # layers keep the native dtype while every other layer needs
+            # TURBOQUANT, so no single --attention-backend can serve every layer.
+            # For any other dtype the selection is genuinely invalid -> fail loud.
             kv_dtype = attn_selector_config.kv_cache_dtype
-            if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
+            layer_is_turboquant = kv_dtype is not None and str(kv_dtype).startswith(
+                "turboquant"
+            )
+            is_turboquant_fallback = (
+                is_turboquant_run or layer_is_turboquant
+            ) and sel_invalid_reasons in (
+                [_KV_CACHE_DTYPE_REASON],
+                [_TURBOQUANT_LAYOUT_REASON],
+            )
+            if not is_turboquant_fallback:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
                     f"this configuration. Reason: {sel_invalid_reasons}"
                 )
             # NOTE: pass a str (not the list) -- info_once hashes its args.
             logger.info_once(
-                "Selected backend %s is incompatible with this turboquant "
-                "layer (%s); using the auto-selected per-layer backend. "
+                "Selected backend %s is incompatible with this layer (%s) of "
+                "the turboquant run; using the auto-selected per-layer backend. "
                 "Reason: %s",
                 selected_backend.name,
                 attn_selector_config.attn_type,
@@ -913,12 +999,6 @@ class RocmPlatform(Platform):
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
-
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.data_parallel_size > 1
-        ):
-            raise ValueError("PCP does not support data parallelism on ROCm yet.")
 
         if (
             compilation_config.cudagraph_mode.has_full_cudagraphs()

@@ -16,7 +16,7 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -114,6 +114,12 @@ UltravoxAudioInputs: TypeAlias = (
 )
 
 
+class UltravoxMultiModalDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "audio": {"audio_embeds": "values", "audio_num_tokens": "metadata"},
+    }
+
+
 class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         config = self.ctx.model_config.hf_config
@@ -145,10 +151,11 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
 
-        return MultiModalDataParser(
+        return UltravoxMultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.get_target_channels(),
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_target_channels(self) -> int:
@@ -169,7 +176,7 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -177,15 +184,12 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         audio_len = (
             feature_extractor.chunk_length * sampling_rate * _MAX_ENCODER_BATCH_SIZE
         )
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -250,6 +254,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             # num_chunks can convert audio_chunked to audio batch dimension
             audio_num_chunks=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
+            audio_num_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -276,6 +281,8 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         )
 
         def get_replacement_ultravox(item_idx: int):
+            if "audio_num_tokens" in out_mm_data:
+                return [replacement_id] * int(out_mm_data["audio_num_tokens"][item_idx])
             start = chunks_start_idx[item_idx]
             end = chunks_start_idx[item_idx + 1]
             audio_token_len = out_mm_data["audio_token_len"][start:end].sum()

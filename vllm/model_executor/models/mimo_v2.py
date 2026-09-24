@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -50,6 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -155,14 +157,16 @@ class MiMoV2MoE(nn.Module):
 
         dtype = getattr(config, "moe_router_dtype", "float32")
         self.gate_dtype = str_dtype_to_torch_dtype(dtype)
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
-            dtype=self.gate_dtype,
+            params_dtype=self.gate_dtype,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(
-            torch.empty(config.n_routed_experts, dtype=self.gate_dtype)
+            torch.empty(config.n_routed_experts, dtype=self.gate.out_dtype)
         )
 
         self.experts = FusedMoEFactory(
@@ -181,7 +185,7 @@ class MiMoV2MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             scoring_func="sigmoid",
-            router_logits_dtype=self.gate_dtype,
+            router_logits_dtype=self.gate.out_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -197,7 +201,7 @@ class MiMoV2MoE(nn.Module):
             gate_input = hidden_states.to(self.gate_dtype)
         else:
             gate_input = hidden_states
-        router_logits = self.gate(gate_input)
+        router_logits, _ = self.gate(gate_input)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
@@ -460,6 +464,28 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         return self.config.hybrid_layer_pattern[self.layer_id] == 1
 
 
+def _requantize_fp8(
+    grouped: torch.Tensor, rows_rank: int, block: int, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block-quantize a rank's ``[Q | K | V]`` rows back to fp8.
+
+    A rank's rows need not end on a block boundary (a single 1856-row slice is
+    14.5 blocks) while ``scaled_quantize`` requires both dims to be multiples of
+    the block size, so pad the tail with zeros: zero rows cannot raise a block's
+    amax, so every scale -- and the number of scale rows -- is unchanged. The
+    padding is dropped again here.
+    """
+    padded = cdiv(rows_rank, block) * block
+    if padded != rows_rank:
+        grouped = torch.cat(
+            [grouped, grouped.new_zeros(padded - rows_rank, grouped.shape[1])], dim=0
+        )
+    w_rank, s_rank = scaled_quantize(
+        grouped, GroupShape(block, block), dtype, compute_dtype=torch.float32
+    )
+    return w_rank[:rows_rank], s_rank
+
+
 def _shard_fp8_qkv_proj(
     w_full: torch.Tensor,
     s_full: torch.Tensor,
@@ -469,74 +495,135 @@ def _shard_fp8_qkv_proj(
     v_head_dim: int,
     tp_rank: int,
     tp_size: int,
+    ckpt_tp: int,
     block: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Shard the fp8 qkv_proj weights for ``tp_rank``.
 
-    The checkpoint stores the fused QKV as ``num_kv_heads`` contiguous groups
-    (one per KV head; ``n`` below), each ordered ``[Q | K | V]``:
+    The checkpoint stores the fused QKV pre-sharded for ``ckpt_tp`` ranks (the
+    model config's ``num_key_value_heads``), each chunk holding that slice's
+    Q, K and V rows:
 
-        [Q_1 | K_1 | V_1 | Q_2 | K_2 | V_2 | ... | Q_n | K_n | V_n]
+        [Q_0 | K_0 | V_0 | Q_1 | K_1 | V_1 | ... | Q_n | K_n | V_n]   (n = ckpt_tp)
 
-    Per group, Q has ``(num_heads / num_kv_heads) * head_dim`` rows, K has
-    ``head_dim`` rows, and V has ``v_head_dim`` rows.
+    Per chunk, Q has ``(num_heads / ckpt_tp) * head_dim`` rows, K has
+    ``(num_kv_heads / ckpt_tp) * head_dim`` rows, and V has
+    ``(num_kv_heads / ckpt_tp) * v_head_dim`` rows, and the fp8 block scales
+    are tiled per chunk too (``ceil(rows_per_chunk / block)`` rows each).
 
-    Each TP rank owns ``g = num_kv_heads / tp_size`` of these groups, and the
-    forward expects them de-interleaved into a single Q, K, and V block:
+    ``ckpt_tp`` is not the layer's KV-head count: a MiMo-V2.5 SWA layer has 8
+    KV heads over 4 chunks, so each chunk carries two KV heads (3712 rows = 29
+    blocks) while a GA layer has 4 KV heads over 4 chunks (3392 rows each).
+
+    The forward expects each rank's slice de-interleaved:
 
         [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
 
-    When ``g == 1`` the rank's slice is already ``[Q | K | V]``, so a plain
-    chunk suffices. When ``g > 1`` we cannot reach the de-interleaved layout by
-    re-permuting the fp8 block scales: each scale covers a 128-row block, and
-    since K is 192 rows (1.5 blocks) a block straddles the K/V boundary, so no
-    whole-block permutation produces it. Instead we dequantize this rank's
-    groups to float (dropping the block constraint), reorder the rows into the
-    layout above (Q, K, and V then each span a whole number of blocks), and
-    re-quantize to fp8.
+    When ``tp_size == ckpt_tp`` the checkpoint chunk *is* that layout, so a
+    plain chunk of both weight and scale suffices. Otherwise each rank's Q, K
+    and V rows are gathered from the chunks that hold them, dequantized with
+    the chunk's own scales, reordered, and re-quantized to fp8.
     """
-    assert tp_size <= num_kv_heads and num_kv_heads % tp_size == 0, (
-        "TP size must evenly split the number of KV heads."
+    assert num_heads % tp_size == 0, (
+        f"num_heads={num_heads} must be divisible by tp_size={tp_size}."
     )
-
-    kv_heads_per_rank = num_kv_heads // tp_size
-    if kv_heads_per_rank == 1:
-        # One KV head per rank. The weights and scale can be trivially sharded
-        # without re-quantization.
-        w = w_full.chunk(tp_size, dim=0)[tp_rank]
-        s = s_full.chunk(tp_size, dim=0)[tp_rank]
-        return w, s
-
-    q_rows_per_group = (num_heads // num_kv_heads) * head_dim
-    k_rows_per_group = head_dim
-    v_rows_per_group = v_head_dim
-    rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
-    scale_rows_per_group = s_full.shape[0] // num_kv_heads
-    qs, ks, vs = [], [], []
-    for g_idx in range(tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank):
-        row_start = g_idx * rows_per_group
-        scale_row_start = g_idx * scale_rows_per_group
-        # Dequantize this group's weights.
-        w_g = w_full[row_start : row_start + rows_per_group].to(torch.float32)
-        s_g = s_full[scale_row_start : scale_row_start + scale_rows_per_group].to(
-            torch.float32
+    if ckpt_tp <= 0 or num_heads % ckpt_tp or num_kv_heads % ckpt_tp:
+        raise ValueError(
+            f"fused qkv_proj is pre-sharded at {ckpt_tp} chunks, which do not "
+            f"divide num_heads={num_heads} / num_kv_heads={num_kv_heads}."
         )
-        s_g_expanded = s_g.repeat_interleave(block, dim=0).repeat_interleave(
-            block, dim=1
-        )[:rows_per_group]
-        w_g_dequant = w_g * s_g_expanded
-        # Track the dequantized q, k, and v weights separately.
-        qs.append(w_g_dequant[:q_rows_per_group])
-        ks.append(w_g_dequant[q_rows_per_group : q_rows_per_group + k_rows_per_group])
-        vs.append(w_g_dequant[q_rows_per_group + k_rows_per_group :])
-
-    # Combine the q, k, and v weights into the following layout:
-    # [Q_1, Q_2, .., Q_g, K_1, K_2, ..., K_g, V_1, V_2, ..., V_g]
-    grouped = torch.cat([torch.cat(qs), torch.cat(ks), torch.cat(vs)], dim=0)
-    # Quantize back to fp8.
-    return scaled_quantize(
-        grouped, GroupShape(block, block), w_full.dtype, compute_dtype=torch.float32
+    # When there are fewer KV heads than ranks, vLLM replicates them
+    # (`num_kv_head_replicas`) and rank r owns KV head r // replicas, which
+    # keeps every Q head grouped with the KV head it attends to.
+    if tp_size <= num_kv_heads:
+        assert num_kv_heads % tp_size == 0, (
+            f"num_kv_heads={num_kv_heads} must be divisible by tp_size={tp_size}."
+        )
+        kv_head_ids = list(
+            range(
+                tp_rank * (num_kv_heads // tp_size),
+                (tp_rank + 1) * (num_kv_heads // tp_size),
+            )
+        )
+    else:
+        assert tp_size % num_kv_heads == 0, (
+            f"tp_size={tp_size} must be divisible by num_kv_heads={num_kv_heads}."
+        )
+        kv_head_ids = [tp_rank // (tp_size // num_kv_heads)]
+    q_head_ids = list(
+        range(tp_rank * (num_heads // tp_size), (tp_rank + 1) * (num_heads // tp_size))
     )
+
+    rows_per_chunk = w_full.shape[0] // ckpt_tp
+    q_per_chunk = (num_heads // ckpt_tp) * head_dim
+    k_per_chunk = (num_kv_heads // ckpt_tp) * head_dim
+    v_per_chunk = (num_kv_heads // ckpt_tp) * v_head_dim
+    if q_per_chunk + k_per_chunk + v_per_chunk != rows_per_chunk:
+        raise ValueError(
+            f"fused qkv_proj has {w_full.shape[0]} rows, not {ckpt_tp} chunks of "
+            f"{q_per_chunk} Q + {k_per_chunk} K + {v_per_chunk} V rows."
+        )
+
+    # The scales are tiled per chunk; they collapse to one continuous grid when
+    # a chunk is a whole number of blocks (the SWA chunks are: 3712 = 29 * 128).
+    chunk_scale_rows = cdiv(rows_per_chunk, block)
+    rows = torch.arange(w_full.shape[0])
+    per_chunk_scales = s_full.shape[0] == ckpt_tp * chunk_scale_rows
+    if per_chunk_scales:
+        scale_index = (rows // rows_per_chunk) * chunk_scale_rows + (
+            rows % rows_per_chunk
+        ) // block
+    elif s_full.shape[0] == cdiv(w_full.shape[0], block):
+        scale_index = rows // block
+    else:
+        raise ValueError(
+            f"fused qkv_proj scale has {s_full.shape[0]} rows, expected either "
+            f"{ckpt_tp * chunk_scale_rows} ({ckpt_tp} chunks of "
+            f"{chunk_scale_rows} rows) or {cdiv(w_full.shape[0], block)} "
+            f"(one continuous grid)"
+        )
+
+    if tp_size == ckpt_tp and per_chunk_scales:
+        # One checkpoint chunk per rank: already [Q | K | V] for that rank, and
+        # its scale rows line up with ceil(rows_per_chunk / block).
+        return (
+            w_full.chunk(ckpt_tp, dim=0)[tp_rank],
+            s_full.chunk(ckpt_tp, dim=0)[tp_rank],
+        )
+
+    # Gather this rank's Q, K and V rows from the chunks that hold them.
+    q_heads_per_chunk = num_heads // ckpt_tp
+    kv_heads_per_chunk = num_kv_heads // ckpt_tp
+    head_rows = torch.arange(head_dim)
+    v_head_rows = torch.arange(v_head_dim)
+    row_index: list[torch.Tensor] = []
+    for head in q_head_ids:
+        chunk = head // q_heads_per_chunk
+        row_index.append(
+            chunk * rows_per_chunk + (head % q_heads_per_chunk) * head_dim + head_rows
+        )
+    for head in kv_head_ids:
+        chunk = head // kv_heads_per_chunk
+        row_index.append(
+            chunk * rows_per_chunk
+            + q_per_chunk
+            + (head % kv_heads_per_chunk) * head_dim
+            + head_rows
+        )
+    for head in kv_head_ids:
+        chunk = head // kv_heads_per_chunk
+        row_index.append(
+            chunk * rows_per_chunk
+            + q_per_chunk
+            + k_per_chunk
+            + (head % kv_heads_per_chunk) * v_head_dim
+            + v_head_rows
+        )
+    index = torch.cat(row_index)
+    grouped = w_full[index].to(torch.float32) * s_full[
+        scale_index[index]
+    ].repeat_interleave(block, dim=1)
+    return _requantize_fp8(grouped, index.numel(), block, w_full.dtype)
 
 
 @support_torch_compile
@@ -819,6 +906,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             v_head_dim=attn.v_head_dim,
             tp_rank=tp_rank,
             tp_size=tp_size,
+            # The fused qkv_proj is pre-sharded for this many ranks.
+            ckpt_tp=self.config.num_key_value_heads,
         )
         sharded = {"weight": w_rank, "weight_scale_inv": s_rank}
         for kind, tensor in sharded.items():

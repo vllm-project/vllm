@@ -132,6 +132,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -161,6 +162,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
@@ -755,7 +757,11 @@ class OpenAIServingChat(GenerateBaseServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
+                        if (
+                            tools_streamed[i]
+                            and not tool_choice_function_name
+                            and output.finish_reason == "stop"
+                        ):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (

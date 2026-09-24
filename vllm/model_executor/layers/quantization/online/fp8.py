@@ -737,11 +737,13 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         )
         # Reject backends whose make_fp8_moe_quant_config branch silently
         # drops per_act_token_quant / per_out_ch_quant or collapses scales:
-        # MARLIN / CPU route through fp8_w8a16_moe_quant_config; FLASHINFER_*
-        # fold scales into a per-tensor alpha (oracle/fp8.py).
+        # MARLIN / CPU route through fp8_w8a16_moe_quant_config, CPU_W8A8
+        # ignores both flags, and FLASHINFER_* fold scales into a per-tensor
+        # alpha (oracle/fp8.py).
         if self.fp8_backend in (
             Fp8MoeBackend.MARLIN,
             Fp8MoeBackend.CPU,
+            Fp8MoeBackend.CPU_W8A8,
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ):
