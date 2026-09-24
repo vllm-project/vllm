@@ -9,11 +9,13 @@ request validation get the same behavior.
 """
 
 import pytest
+from mistral_common.protocol.instruct.tool_calls import Tool, ToolChoiceEnum
 from transformers import AutoTokenizer
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import (
     XgrammarBackend,
@@ -24,6 +26,7 @@ pytestmark = pytest.mark.cpu_test
 
 TOKENIZER = "openai-community/gpt2"
 VOCAB_SIZE = 50257
+MISTRAL_TOKENIZER = "mistralai/Ministral-3-3B-Instruct-2512"
 
 # Uses Lark features beyond plain rules: a regex terminal, `%import common`,
 # and a rule alias. The Codex `apply_patch` tool grammar has the same shape.
@@ -37,10 +40,14 @@ NUMBER: /[0-9]+/
 EBNF_GRAMMAR = 'root ::= "id=" [0-9]+'
 
 
-def _validate(grammar: str, backend: str = "xgrammar") -> StructuredOutputsParams:
+def _validate(
+    grammar: str, backend: str = "xgrammar", tokenizer: object | None = None
+) -> StructuredOutputsParams:
     params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
     params._validate_structured_outputs(
-        _StubModelConfig(), StructuredOutputsConfig(backend=backend), tokenizer=object()
+        _StubModelConfig(),
+        StructuredOutputsConfig(backend=backend),
+        tokenizer=tokenizer or object(),
     )
     assert params.structured_outputs is not None
     return params.structured_outputs
@@ -63,6 +70,30 @@ def test_validation_accepts_grammar_without_rewriting_it(grammar: str):
 
 def test_auto_backend_selects_xgrammar_for_lark():
     assert _validate(LARK_GRAMMAR, backend="auto")._backend == "xgrammar"
+
+
+@pytest.mark.parametrize("mode", [ToolChoiceEnum.required, ToolChoiceEnum.none])
+def test_auto_backend_selects_guidance_for_mistral_lark(mode: ToolChoiceEnum):
+    """The Mistral tool parser generates Lark grammars for llguidance, which
+    keeps special tokens such as `[TOOL_CALLS]` out of regex matches."""
+    tokenizer = MistralTokenizer.from_pretrained(MISTRAL_TOKENIZER)
+    factory = tokenizer.grammar_factory
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    grammar = factory.get_lark_from_jinja(
+        template=factory.select_jinja_template(),
+        mode=mode,
+        tools=[Tool.from_openai(tool)],
+        json_schema=None,
+        parallel_tool_calls=True,
+        json_only=False,
+    )
+    assert _validate(grammar, "auto", tokenizer)._backend == "guidance"
 
 
 @pytest.mark.parametrize(
