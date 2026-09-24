@@ -551,9 +551,56 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
             model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
             attention_config=AttentionConfig(),
         )
+        config._get_v1_model_runner_unsupported_features = lambda: []
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
+
+
+def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
+    """The ROCm V1 default is a speed preference, not a capability claim.
+
+    DSpark runs only on V2, so pinning DeepSeek V4 to V1 would fail config
+    validation instead of serving it. With nothing V1 refuses, it still holds.
+    """
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architectures=["DeepseekV4ForCausalLM"], is_diffusion=False
+        ),
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_batch_sharded_sampling=False,
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        speculative_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
+    config._get_v2_model_runner_unsupported_features = lambda: []
+    # The real predicate, so the test also pins where dspark lands in it.
+    config._get_v1_model_runner_unsupported_features = lambda: (
+        VllmConfig._get_v1_model_runner_unsupported_features(config)
+    )
+
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
+
+    config.speculative_config = SimpleNamespace(
+        method="dspark", enable_adaptive_verification=False
+    )
+    assert VllmConfig.use_v2_model_runner.fget(config) is True
+
+    # Yielding is not the same as selecting V2: the later checks still run, so
+    # a config neither runner can serve lands on V1 and fails validation there.
+    config._get_v2_model_runner_unsupported_features = lambda: ["sequence parallelism"]
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 @pytest.mark.parametrize(
