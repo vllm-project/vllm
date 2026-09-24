@@ -231,11 +231,17 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
             self._warming_compile_key = None
 
     def compile_many(self, compile_keys: Iterable[CompileKeyT]) -> None:
-        """Compile startup warmup variants in parallel, then wait for completion."""
+        """Compile CUDA startup warmup variants in parallel, then wait."""
         keys = list(compile_keys)
         num_threads = min(envs.VLLM_TRITON_JIT_WARMUP_NUM_THREADS, len(keys))
         async_compile = getattr(triton, "AsyncCompileMode", None)
-        if self._run_autotune or async_compile is None or num_threads <= 1:
+        # AMD LLVM code generation can abort under concurrent compilation.
+        if (
+            not current_platform.is_cuda()
+            or self._run_autotune
+            or async_compile is None
+            or num_threads <= 1
+        ):
             return super().compile_many(keys)
 
         def compile_all() -> None:

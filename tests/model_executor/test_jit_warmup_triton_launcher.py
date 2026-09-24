@@ -120,7 +120,8 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
 
 
 @pytest.mark.skipif(
-    not hasattr(triton, "AsyncCompileMode"), reason="Requires Triton async compilation"
+    not current_platform.is_cuda() or not hasattr(triton, "AsyncCompileMode"),
+    reason="Requires CUDA Triton async compilation",
 )
 def test_failed_parallel_warmup_does_not_leak_into_runtime(monkeypatch) -> None:
     from triton.runtime._async_compile import active_mode
@@ -164,8 +165,8 @@ def _warmup_store_kernel(out, VALUE: tl.constexpr):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() or not hasattr(triton, "AsyncCompileMode"),
-    reason="Requires GPU Triton async compilation",
+    not current_platform.is_cuda() or not hasattr(triton, "AsyncCompileMode"),
+    reason="Requires CUDA Triton async compilation",
 )
 def test_registered_warmup_parallelizes_compile_only_and_runtime_stays_serial(
     monkeypatch,

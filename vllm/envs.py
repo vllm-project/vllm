@@ -1182,7 +1182,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
         in ("1", "true")
     ),
-    # Maximum compiler threads per worker for registered Triton JIT warmup.
+    # Maximum compiler threads per worker for registered CUDA Triton JIT warmup.
     # Set to 1 for serial warmup. Does not affect runtime JIT or autotuning.
     "VLLM_TRITON_JIT_WARMUP_NUM_THREADS": lambda: int(
         os.getenv("VLLM_TRITON_JIT_WARMUP_NUM_THREADS", "4")
