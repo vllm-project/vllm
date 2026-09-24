@@ -83,8 +83,7 @@ def before_generate_case(context: schemathesis.HookContext, strategy):
     assert op is not None
 
     def no_invalid_types(case: schemathesis.Case):
-        """
-        Skips tool_calls with `"type": "custom"` which schemathesis incorrectly
+        """Skips tool_calls with `"type": "custom"` which schemathesis incorrectly
         generates instead of the valid `"type": "function"`.
 
         Example test case that is skipped:
@@ -148,6 +147,7 @@ def test_openapi_stateless(case: schemathesis.Case):
         "/start_draft_weight_update",
         "/update_weights",
         "/finish_weight_update",
+        "/update_weight_version",
     ):
         return
 

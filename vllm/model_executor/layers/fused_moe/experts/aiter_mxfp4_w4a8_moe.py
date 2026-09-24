@@ -46,11 +46,27 @@ def aiter_triton_kernel_w4a8_moe_forward(
         and quant_config.use_mxfp4_w4a8
         and rocm_aiter_ops.is_enabled()
     )
-    from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+    from vllm.platforms.rocm import on_gfx1250
+
+    try:
+        from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
+    except ImportError:
+        from aiter.ops.triton.moe_routing import routing as _routing_mod
+
+    if on_gfx1250():
+        _routing_mod.is_tdm_avail = lambda: False
+    aiter_routing = _routing_mod.routing
 
     routing_data, gather_idx, scatter_idx = aiter_routing(
         gating_output, topk, sm_first=not renormalize
     )
+
+    # gfx1250: aiter's in-kernel gather is numerically broken
+    if on_gfx1250():
+        gather_src = gather_idx.to(torch.long) // topk
+        hidden_states = hidden_states[gather_src]
+        gather_idx = None
+
     return triton_kernel_fused_mxfp4_w4a8_experts(
         None,
         hidden_states,
@@ -115,6 +131,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
+        weight_mx_scale,
     )
 
     _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
@@ -134,7 +151,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         hidden_states,
         w1.storage.data,
         None,
-        quant_config.w1_precision.weight_scale.storage.data,
+        weight_mx_scale(quant_config.w1_precision).storage.data,
         quant_config.w1_precision.flex_ctx.lhs_data.scale,
         quant_config.w2_precision.flex_ctx.lhs_data.scale,
         quant_config.w1_bias,
@@ -154,7 +171,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         intermediate_cache1,
         w2.storage.data,
         None,
-        quant_config.w2_precision.weight_scale.storage.data,
+        weight_mx_scale(quant_config.w2_precision).storage.data,
         quant_config.w2_precision.flex_ctx.lhs_data.scale,
         None,
         quant_config.w2_bias,
@@ -170,8 +187,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
 
 
 class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """
-    Monolithic MXFP4 W4A8 expert using AITER triton kernels.
+    """Monolithic MXFP4 W4A8 expert using AITER triton kernels.
 
     This backend uses:
     - aiter.ops.triton.moe_routing.routing for routing
@@ -199,12 +215,11 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # Requires AITER and GFX950
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-        return on_gfx950()
+        return on_gfx950() or on_gfx1250()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -231,7 +246,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return (
-            not moe_parallel_config.use_all2all_kernels
+            not moe_parallel_config.use_ep
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )

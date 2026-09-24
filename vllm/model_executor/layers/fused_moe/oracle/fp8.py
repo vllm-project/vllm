@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from enum import Enum
 from typing import Any
 
@@ -30,11 +31,14 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -53,7 +57,9 @@ class Fp8MoeBackend(Enum):
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
+    # CPU FP8 W8A16 (BF16 activations); CPU_W8A8 needs native AMX-FP8.
     CPU = "CPU"
+    CPU_W8A8 = "CPU_W8A8"
     HPC = "HPC"
     # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
     # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
@@ -71,12 +77,10 @@ def _get_priority_backends(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> list[Fp8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
-
     _AVAILABLE_BACKENDS = [
         Fp8MoeBackend.AITER,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
@@ -90,6 +94,7 @@ def _get_priority_backends(
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.XPU,
+        Fp8MoeBackend.CPU_W8A8,
         Fp8MoeBackend.CPU,
         Fp8MoeBackend.HPC,
     ]
@@ -127,8 +132,10 @@ def _get_priority_backends(
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
 
     if current_platform.is_cpu():
-        # CPU platform uses FP8 W8A16 fused MoE kernel.
+        # W8A8 first: it falls through to the W8A16 backend whenever the
+        # hardware (AMX-FP8) or the config isn't supported.
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.CPU)
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.CPU_W8A8)
 
     return _AVAILABLE_BACKENDS
 
@@ -236,6 +243,13 @@ def backend_to_kernel_cls(
 
         return [CPUExpertsFp8]
 
+    elif backend == Fp8MoeBackend.CPU_W8A8:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsFp8W8A8,
+        )
+
+        return [CPUExpertsFp8W8A8]
+
     elif backend == Fp8MoeBackend.HPC:
         from vllm.model_executor.layers.fused_moe.hpc_moe import (
             HPCExperts,
@@ -268,17 +282,121 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     )
 
 
+def refine_fp8_moe_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> list[int] | None:
+    """Compute a refined block shape for block-quantized FP8 MoE weights whose
+    checkpoint blocks cannot be sharded exactly across TP ranks.
+
+    TP shards the intermediate dim of the expert weights, so a per-shard size
+    that is not a multiple of the checkpoint's block size makes the
+    checkpoint's block scales impossible to shard exactly. When a finer block
+    size (>= 32) divides both the checkpoint blocks and all involved dims,
+    the weight scales can be refined to that granularity at load time (a
+    lossless upsampling, since the refined block divides the checkpoint
+    block). Only Triton-based kernels can consume the refined block shape:
+    they take it as a runtime argument, while the other backends require the
+    native 128x128 blocks. The refined shape is encoded in the QuantKey used
+    for backend selection, so backends that only support 128x128 blocks are
+    rejected by the oracle automatically.
+
+    Returns the refined [block_n, block_k] shape, or None if no refinement
+    is needed or possible.
+    """
+    block_n, block_k = weight_block_size
+    ispp = config.intermediate_size_per_partition
+    if ispp % block_n == 0 and (config.tp_size == 1 or ispp % block_k == 0):
+        return None
+    refine = math.gcd(block_n, block_k, ispp, config.hidden_dim)
+    if refine < 32:
+        return None
+    return [refine, refine]
+
+
+def pad_tp_shard_to_weight_blocks(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> bool:
+    """Pad the TP shard to whole checkpoint blocks, keeping scales rank-local."""
+    block_n, block_k = weight_block_size
+    if (
+        block_n != block_k
+        or config.tp_size == 1
+        or config.intermediate_size_per_partition % block_n == 0
+    ):
+        return False
+    if (
+        config.intermediate_size % block_n != 0
+        or config.hidden_dim % block_n != 0
+        or config.ep_size != 1
+        or config.is_lora_enabled
+        or config.has_bias
+    ):
+        raise ValueError(
+            f"Block-aligned FP8 TP sharding requires {block_n}-aligned "
+            "global expert dimensions, pure TP, and no LoRA or "
+            "expert bias."
+        )
+    config.tp_shard_with_padding = True
+    config.intermediate_size_per_partition = round_up(
+        config.intermediate_size_per_partition, block_n
+    )
+    return True
+
+
+def resolve_fp8_moe_weight_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+    activation_key: QuantKey,
+    is_checkpoint_fp8_serialized: bool,
+) -> tuple[list[int], tuple[int, int] | None]:
+    """Return the TP-adapted block shape and refine factor:
+    refine if kernels allow, else pad to the TP shard."""
+    refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
+    if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
+        kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
+        can_refine = refined_shape is not None and any(
+            k_cls._supports_quant_scheme(
+                create_fp8_quant_key(
+                    static=True, group_shape=GroupShape(*refined_shape)
+                ),
+                activation_key,
+            )
+            for k_cls in kernel_classes
+        )
+        if not can_refine and pad_tp_shard_to_weight_blocks(config, weight_block_size):
+            logger.info_once(
+                "FP8 %s TP loading uses complete checkpoint blocks: "
+                "local allocation %d, without weight requantization.",
+                config.moe_backend,
+                config.intermediate_size_per_partition,
+            )
+            return weight_block_size, None
+    if refined_shape is None:
+        return weight_block_size, None
+    logger.info_once(
+        "FP8 MoE block scales refined from %s to %s to fit "
+        "the TP-sharded intermediate size %d.",
+        str(weight_block_size),
+        str(refined_shape),
+        config.intermediate_size_per_partition,
+    )
+    return refined_shape, (
+        weight_block_size[0] // refined_shape[0],
+        weight_block_size[1] // refined_shape[1],
+    )
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary FP8 MoE backend
+    """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 
@@ -370,17 +488,16 @@ def select_fp8_moe_backend(
                 backend, config, weight_key, activation_key, activation_format
             )
 
-    # Handle explicit MARLIN FP8 configuration.
-    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
-        backend = Fp8MoeBackend.MARLIN
-        return _return_or_raise(
-            backend, config, weight_key, activation_key, activation_format
-        )
-
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
+        skip_aiter_moe = (
+            not envs.VLLM_ROCM_USE_AITER
+            or not envs.VLLM_ROCM_USE_AITER_MOE
+            or rocm_aiter_ops.is_rdna_aiter_enabled()
+        )
+        if skip_aiter_moe:
+            if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
             backend = Fp8MoeBackend.AITER
             return _return_or_raise(
@@ -477,12 +594,16 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+        w13.is_shuffled = True
+        w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
             w13, w2, w13_scale, w2_scale
         )
+        w13.is_shuffled = True
+        w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -543,6 +664,14 @@ def convert_to_fp8_moe_kernel_format(
         )
 
         w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.CPU_W8A8:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_fp8_w8a8_moe_layer_for_cpu,
+        )
+
+        w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
+            w13, w2, w13_scale, w2_scale
+        )
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,
@@ -577,8 +706,7 @@ def make_fp8_moe_quant_config(
     gemm1_beta: float | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Create FusedMoEQuantConfig for the specified FP8 Backend.
+    """Create FusedMoEQuantConfig for the specified FP8 Backend.
     The FusedMoEQuantConfig holds the scales that are used
     at runtime by the Modular Kernel abstraction.
 
@@ -589,8 +717,15 @@ def make_fp8_moe_quant_config(
     In a future PR, we will have this function should be
     a method of the modular kernel itself.
     """
+    if fp8_backend == Fp8MoeBackend.CPU_W8A8:
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            block_shape=block_shape,
+        )
 
-    # MARLIN and CPU are mixed precision W8A16 config.
+    # MARLIN and CPU (W8A16) are mixed precision W8A16 configs.
     if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
@@ -604,12 +739,17 @@ def make_fp8_moe_quant_config(
         )
     elif fp8_backend == Fp8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,
         )
 
         assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
 
     # Flashinfer CUTLASS or HPC per-tensor uses single dq scale
     # (alpha = w_scale * a_scale) and inverse a2 scale.
@@ -618,6 +758,17 @@ def make_fp8_moe_quant_config(
         and block_shape is None
     ):
         assert a1_scale is not None and a2_scale is not None
+        g1_alphas = w1_scale * a1_scale
+        g2_alphas = w2_scale * a2_scale
+        if layer is not None:
+            layer.register_parameter(
+                "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
+            )
+            layer.register_parameter(
+                "g2_alphas", torch.nn.Parameter(g2_alphas, requires_grad=False)
+            )
+            g1_alphas = layer.g1_alphas
+            g2_alphas = layer.g2_alphas
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -627,8 +778,8 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             a1_gscale=(1.0 / a1_scale),
             a2_gscale=(1.0 / a2_scale),
-            g1_alphas=(w1_scale * a1_scale).squeeze(),
-            g2_alphas=(w2_scale * a2_scale).squeeze(),
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
             gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are
@@ -673,7 +824,6 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -687,11 +837,6 @@ def make_fp8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
-    if fp8_backend == Fp8MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs = {"layer": layer}
-
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -701,13 +846,11 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

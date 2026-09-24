@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 
 # downloading lora to test lora requests
-from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -144,9 +144,7 @@ def server():
         "--enforce-eager",
     ] + ROCM_EXTRA_ARGS
 
-    with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict=ROCM_ENV_OVERRIDES
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -453,7 +451,7 @@ async def test_inconsistent_tool_choice_and_tools(
 async def test_max_tokens_with_tool_choice_required(
     client: openai.AsyncOpenAI, tool_choice
 ):
-    """ """
+    """Requesting a single token with a required tool choice must not crash."""
     models = await client.models.list()
     model_name: str = models.data[0].id
 

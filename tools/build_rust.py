@@ -11,8 +11,38 @@ from pathlib import Path
 
 from setuptools import setup
 from setuptools_rust import Binding, RustExtension
+from setuptools_scm import get_version
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+VLLM_RS_BUILD_VERSION = "VLLM_RS_BUILD_VERSION"
+
+# Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
+VLLM_GIT_DESCRIBE_COMMAND = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--abbrev=40",
+    "--match",
+    "v[0-9]*",
+]
+
+
+def prepare_build_environment() -> str | None:
+    """Set the device-independent vLLM source version for Rust artifacts."""
+    version = os.getenv(VLLM_RS_BUILD_VERSION) or None
+    if version is None:
+        try:
+            version = get_version(
+                root=ROOT_DIR,
+                git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+            )
+        except LookupError:
+            return None
+
+    os.environ[VLLM_RS_BUILD_VERSION] = version
+    return version
 
 
 def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
@@ -61,6 +91,7 @@ def build_binary(build_rust_args: list[str]) -> None:
 
 
 def main() -> None:
+    prepare_build_environment()
     build_binary(sys.argv[1:])
 
 

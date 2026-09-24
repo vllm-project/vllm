@@ -11,8 +11,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_layers_from_vllm_config,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -25,12 +30,17 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
+    get_num_attention_heads_from_layers,
+)
+from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_sdpa,
+    zentorch_sdpa_attn,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    KVCacheLayout,
 )
 
 logger = init_logger(__name__)
@@ -52,12 +62,17 @@ class CPUAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [MultipleOf(32)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The CPU backend only reads head-major block interiors.
+        return (KVCacheLayout.LBHNC,)
 
     @staticmethod
     def get_name() -> str:
@@ -89,20 +104,6 @@ class CPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
         return CPUAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return num_blocks, num_kv_heads, block_size, 2 * head_size
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -146,26 +147,58 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         parallel_config = vllm_config.parallel_config
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.num_heads = vllm_config.model_config.get_num_attention_heads(
-            parallel_config
-        )
+        # The scheduler metadata built here sizes a scratchpad from the query
+        # head count, so it must come from this group's layers: the model-wide
+        # count is wrong for models that vary it per layer (e.g. Laguna).
+        self.num_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or vllm_config.model_config.get_num_attention_heads(parallel_config)
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
-        self.window_size = getattr(kv_cache_spec, "sliding_window", -1)
-        if self.window_size is None:
-            self.window_size = -1
-        self.block_size = vllm_config.cache_config.block_size
-        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.window_size = self._group_sliding_window()
+        self.block_size = kv_cache_spec.block_size
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
             self.dtype,
             self.block_size,
             self.head_dim,
-            kv_cache_dtype_str,
+            self.kv_cache_dtype,
         )
+        self._set_isa_to_layers(layer_names)
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.is_encoder_only_attention = isinstance(
             kv_cache_spec, EncoderOnlyAttentionSpec
         )
+
+    def _set_isa_to_layers(self, layer_names: list[str]) -> None:
+        attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            Attention,
+            layer_names,
+        )
+        for layer in attn_layers.values():
+            layer.isa = self.isa  # type: ignore
+
+    def _group_sliding_window(self) -> int:
+        """The window shared by every layer in this group, else -1 (no window).
+
+        Taken from the layers rather than the group spec: one KV cache group can
+        hold both windowed and global layers (e.g. Gemma-3 with the hybrid KV
+        cache manager disabled), and the scheduler metadata built here is shared
+        by the whole group, so it may only assume a window all of them agree on.
+        """
+        layers = get_layers_from_vllm_config(
+            self.vllm_config, Attention, self.layer_names
+        )
+        windows = {
+            layer.impl.sliding_window
+            for layer in layers.values()
+            if isinstance(layer.impl, CPUAttentionBackendImpl)
+        }
+        if len(windows) != 1:
+            return -1
+        window = windows.pop()
+        return -1 if window is None else window
 
     def build(
         self,
@@ -234,6 +267,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             isa=self.isa,
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
             dynamic_causal=dynamic_casual,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -306,11 +340,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         vllm_config = get_current_vllm_config()
-        self.isa = _get_attn_isa(
+        self.use_zentorch_sdpa = should_use_zentorch_sdpa(
+            attn_type,
             vllm_config.model_config.dtype,
-            vllm_config.cache_config.block_size,
-            self.head_size,
-            self.kv_cache_dtype,
         )
 
     def forward(
@@ -328,14 +360,22 @@ class CPUAttentionBackendImpl(AttentionImpl):
         """Forward pass for CPU attention backend.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -349,8 +389,26 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # For encoder attention
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+        is_encoder_attention = self.attn_type in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        )
+        if is_encoder_attention:
+            if self.use_zentorch_sdpa:
+                # Encoder attention never reads the KV cache back, so the
+                # zentorch path attends the packed QKV directly instead of
+                # staging it through the scratch encoder cache.
+                zentorch_sdpa_attn(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    self.scale,
+                    self.sliding_window,
+                    self.alibi_slopes,
+                )
+                return output
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -361,26 +419,28 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
+        if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                self.isa,
+                layer.isa,  # type: ignore
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 kv_cache_dtype=self.kv_cache_dtype,
             )
 
+        # The CPU kernel executes attention sinks natively in bf16. If the
+        # sinks tensor is anything other than bf16, cast it to fp32 so it is
+        # executed in full float precision (done lazily here, after weights
+        # are loaded, rather than at __init__ time).
+        if self.sinks is not None and self.sinks.dtype not in [
+            torch.bfloat16,
+            torch.float32,
+        ]:
+            self.sinks = self.sinks.to(torch.float32)
         ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,
@@ -424,7 +484,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             key_cache,
             value_cache,
             slot_mapping,
-            self.isa,
+            layer.isa,  # type: ignore
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             kv_cache_dtype=self.kv_cache_dtype,
@@ -487,11 +547,10 @@ def _get_attn_isa(
         )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
+    elif supports_arm:
+        return "neon"
     elif block_size % 32 == 0:
-        if supports_arm:
-            # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
-            return "neon"
-        elif supports_riscv and _riscv_supports_rvv():
+        if supports_riscv and _riscv_supports_rvv():
             return "rvv"
         elif supports_vxe:
             return "vxe"

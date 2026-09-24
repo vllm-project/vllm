@@ -6,17 +6,19 @@ import os
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-from huggingface_hub import snapshot_download
 
 from tests.conftest import AudioTestAssets
 from tests.utils import RemoteOpenAIServer
+from vllm.transformers_utils.repo_utils import hf_api
 
 # NOTE - the tests in this module are currently analogous to test_chat, but are
 # separated to avoid OOM killing due to module-scoped servers, since we
 # need a multimodal model for these tests.
 
 # Contains a modality specific lora alongside the base model
-MULTIMODAL_MODEL_NAME = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+MULTIMODAL_MODEL_NAME = hf_api().snapshot_download(
+    "microsoft/Phi-4-multimodal-instruct"
+)
 AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
 
 ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501

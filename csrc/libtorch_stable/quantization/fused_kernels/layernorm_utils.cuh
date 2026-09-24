@@ -47,27 +47,13 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
-__device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
-                                          int64_t thread_in_warp,
-                                          int64_t reduced_elems) {
+__device__ float warpReduceMax(float val) {
   static_assert(WARP_SIZE == 32 || WARP_SIZE == 64);
-  if constexpr (WARP_SIZE == 64) {
-    if (thread_in_warp + 64 < reduced_elems)
-      val[tid] = fmaxf(val[tid], val[tid + 64]);
+#pragma unroll
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+    val = fmaxf(val, VLLM_SHFL_DOWN_SYNC(val, offset));
   }
-  if (thread_in_warp + 32 < reduced_elems)
-    val[tid] = fmaxf(val[tid], val[tid + 32]);
-  if (thread_in_warp + 16 < reduced_elems)
-    val[tid] = fmaxf(val[tid], val[tid + 16]);
-  if (thread_in_warp + 8 < reduced_elems)
-    val[tid] = fmaxf(val[tid], val[tid + 8]);
-  if (thread_in_warp + 4 < reduced_elems)
-    val[tid] = fmaxf(val[tid], val[tid + 4]);
-  if (thread_in_warp + 2 < reduced_elems)
-    val[tid] = fmaxf(val[tid], val[tid + 2]);
-  if (thread_in_warp + 1 < reduced_elems)
-    val[tid] = fmaxf(val[tid], val[tid + 1]);
-  return val[tid];
+  return val;
 }
 
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
@@ -115,16 +101,15 @@ __device__ void compute_dynamic_per_token_scales(
     for (auto i = 0; i < groups_per_warp; ++i) {
       int64_t const group_id = i * num_warps + warp_id;
       if (group_id < num_groups) {
-        int64_t warp_start = group_id * threads_per_group;
-        int64_t const start = warp_start + thread_in_warp;
-        int64_t const warp_end = min(warp_start + threads_per_group,
-                                     static_cast<int64_t>(hidden_size));
-        for (auto j = start; j + warp_size < warp_end; j += warp_size) {
-          s_max_vals[start] =
-              fmaxf(s_max_vals[start], s_max_vals[j + warp_size]);
+        int64_t const warp_start = group_id * threads_per_group;
+        float warp_max = 0.0f;
+        for (auto j = thread_in_warp; j < threads_per_group; j += warp_size) {
+          warp_max = fmaxf(warp_max, s_max_vals[warp_start + j]);
         }
-        warpReduceMaxSpecialized(s_max_vals, start, thread_in_warp,
-                                 min(warp_end - warp_start, warp_size));
+        warp_max = warpReduceMax(warp_max);
+        if (thread_in_warp == 0) {
+          s_max_vals[warp_start] = warp_max;
+        }
       }
     }
     __syncthreads();
@@ -375,16 +360,15 @@ __device__ void compute_dynamic_per_token_scales(
     for (auto i = 0; i < groups_per_warp; ++i) {
       int64_t const group_id = i * num_warps + warp_id;
       if (group_id < num_groups) {
-        int64_t warp_start = group_id * threads_per_group;
-        int64_t const start = warp_start + thread_in_warp;
-        int64_t const warp_end = min(warp_start + threads_per_group,
-                                     static_cast<int64_t>(hidden_size));
-        for (auto j = start; j + warp_size < warp_end; j += warp_size) {
-          s_max_vals[start] =
-              fmaxf(s_max_vals[start], s_max_vals[j + warp_size]);
+        int64_t const warp_start = group_id * threads_per_group;
+        float warp_max = 0.0f;
+        for (auto j = thread_in_warp; j < threads_per_group; j += warp_size) {
+          warp_max = fmaxf(warp_max, s_max_vals[warp_start + j]);
         }
-        warpReduceMaxSpecialized(s_max_vals, start, thread_in_warp,
-                                 min(warp_end - warp_start, warp_size));
+        warp_max = warpReduceMax(warp_max);
+        if (thread_in_warp == 0) {
+          s_max_vals[warp_start] = warp_max;
+        }
       }
     }
     __syncthreads();

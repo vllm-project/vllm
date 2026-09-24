@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -51,8 +51,7 @@ logger = init_logger(__name__)
 
 
 def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
-    """
-    Split grid_thw in t dimension.
+    """Split grid_thw in t dimension.
 
     Args:
         grid_thw: [N, 3] tensor of [t, h, w]
@@ -66,6 +65,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
     tensor([[1, 3, 4],
            [1, 3, 4],
            [1, 5, 6]])
+
     """
     t = grid_thw[:, 0]
     h_w = grid_thw[:, 1:]
@@ -76,8 +76,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
 def get_num_patches(
     grid_thw: torch.Tensor, num_frames: list[int] | torch.Tensor
 ) -> list[int]:
-    """
-    Return num_patches per video.
+    """Return num_patches per video.
 
     Args:
         grid_thw: Tensor with shape [N, 3] containing temporal, height, width
@@ -101,8 +100,8 @@ def get_num_patches(
         >>> get_num_patches(grid_thw, num_frames)
         tensor([16, 1])  # Total patches for first video: 8+8=16,
                            second video: 1.
-    """
 
+    """
     assert len(grid_thw.shape) == 2
     if isinstance(num_frames, torch.Tensor):
         num_frames = num_frames.clone().tolist()
@@ -121,13 +120,12 @@ def get_num_patches(
 
 
 class KeyeVL1_5ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * Number of patches
-        - c: Number of channels
-        - ps: Patch size
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - bnp: Batch size * Number of patches
+    - c: Number of channels
+    - ps: Patch size
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values"]
@@ -140,13 +138,12 @@ class KeyeVL1_5ImagePixelInputs(TensorSchema):
 
 
 class KeyeVL1_5ImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of image features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - nf: Number of image features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["image_embeds"]
@@ -160,13 +157,12 @@ KeyeVL1_5ImageInputs: TypeAlias = (
 
 
 class KeyeVL1_5VideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * Number of patches
-        - c: Number of channels
-        - ps: Patch size
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - bnp: Batch size * Number of patches
+    - c: Number of channels
+    - ps: Patch size
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values_videos"]
@@ -179,13 +175,12 @@ class KeyeVL1_5VideoPixelInputs(TensorSchema):
 
 
 class KeyeVL1_5VideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of video features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-        - nv: Number of videos
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - nf: Number of video features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
+    - nv: Number of videos
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["video_embeds"]
@@ -202,8 +197,8 @@ KeyeVL1_5VideoInputs: TypeAlias = (
 class KeyeVL1_5Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -309,29 +304,36 @@ def _keye_field_config(
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
             "video", video_num_patches
         ),
         video_embeds=MultiModalFieldConfig.flat_from_sizes("video", video_num_patches),
-        video_grid_thw=MultiModalFieldConfig.flat_from_sizes("video", video_num_grids),
-        num_frames=MultiModalFieldConfig.batched("video"),
+        video_grid_thw=MultiModalFieldConfig.flat_from_sizes(
+            "video", video_num_grids, keep_on_cpu=True
+        ),
+        num_frames=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
     )
 
 
 class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+        "video": {"video_embeds": "values", "video_grid_thw": "metadata"},
+    }
+
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={
-                    "image_embeds",
-                    "image_grid_thw",
-                },
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_keye_field_config,
             )
 
@@ -342,13 +344,12 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={
-                    "video_embeds",
-                    "video_grid_thw",
-                },
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_keye_field_config,
             )
 
@@ -359,6 +360,7 @@ class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
     def get_data_parser(self):
         return KeyeVL1_5MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_max_frame_per_video(self) -> int:
@@ -371,16 +373,8 @@ class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
 
 
 class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path to use the
-        # video-specific logic in processing_keye.py
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_prompt_updates(
         self,
@@ -438,10 +432,10 @@ class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingIn
         cu_seqlens = torch.cumsum(torch.tensor([0] + num_frames.tolist()), dim=-1)
 
         def get_replacement_keye(item_idx: int, modality: str):
-            """
-            Args:
-                item_idx(int): The item index of modality to replace
-                modality(str): The modality
+            """Args:
+            item_idx(int): The item index of modality to replace
+            modality(str): The modality
+
             """
             if modality == "image":
                 out_item = out_mm_kwargs[modality][item_idx]
@@ -515,15 +509,15 @@ class KeyeVL1_5ForConditionalGeneration(
 ):
     def _build_projector(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         return KeyeVL1_5Projector(text_config, vision_config, quant_config, prefix)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         self.merge_size = config.vision_config.spatial_merge_size
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

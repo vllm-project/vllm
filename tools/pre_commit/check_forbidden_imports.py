@@ -6,6 +6,23 @@ from dataclasses import dataclass, field
 
 import regex as re
 
+# Hub entry points that must go through the vLLM-tagged repo_utils helpers.
+_HF_NAMES = (
+    r"HfApi|HfFileSystem|hf_hub_download|snapshot_download"
+    r"|list_repo_files|file_exists|try_to_load_from_cache"
+    r"|list_repo_refs|repo_exists"
+)
+
+# Transformers v4 names kept as aliases in v5.
+_TRANSFORMERS_LEGACY_NAMES = (
+    r"PretrainedConfig|PreTrainedTokenizer|PreTrainedTokenizerFast"
+    r"|BaseImageProcessorFast|\w+ImageProcessorFast"
+)
+_TRANSFORMERS_LEGACY_MODULES = (
+    r"tokenization_utils|tokenization_utils_fast|image_processing_utils_fast"
+    r"|models\.\w+\.\w+_fast"
+)
+
 
 @dataclass
 class ForbiddenImport:
@@ -13,6 +30,7 @@ class ForbiddenImport:
     tip: str
     allowed_pattern: re.Pattern = re.compile(r"^$")  # matches nothing by default
     allowed_files: set[str] = field(default_factory=set)
+    allowed_dirs: set[str] = field(default_factory=set)
 
 
 CHECK_IMPORTS = {
@@ -40,6 +58,8 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/shm_object_storage.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
+            "vllm/model_executor/model_loader/weight_cache/protocol.py",
+            "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
             "tests/multimodal/media/test_base.py",
@@ -50,8 +70,6 @@ CHECK_IMPORTS = {
             "benchmarks/kernels/benchmark_lora.py",
             "benchmarks/kernels/benchmark_machete.py",
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
-            "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
-            "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/v1/executor/ray_executor.py",
@@ -83,6 +101,52 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
     ),
+    "tilelang": ForbiddenImport(
+        pattern=r"^(from|import)\s+tilelang(\s|\.|$)",
+        tip="Use 'from vllm.tilelang_utils import tilelang, T' instead.",
+        allowed_pattern=re.compile(
+            r"from\s+vllm\.tilelang_utils\s+import\s+"
+            r"(tilelang|T|T, tilelang|tilelang, T)\b"
+        ),
+        allowed_files={"vllm/tilelang_utils/__init__.py"},
+    ),
+    "huggingface_hub repo API": ForbiddenImport(
+        # Catch `from huggingface_hub import <fn>`, including parenthesized,
+        # multi-line imports.
+        pattern=(
+            r"^\s*from\s+huggingface_hub\s+import\s*\([^)]*\b(?:" + _HF_NAMES + r")\b"
+            r"|"
+            r"^\s*from\s+huggingface_hub\s+import\b[^\n]*\b(?:" + _HF_NAMES + r")\b"
+        ),
+        tip=(
+            "Use the shared, vLLM-tagged helpers from "
+            "vllm.transformers_utils.repo_utils (e.g. hf_api(), hf_fs(), "
+            "list_repo_files, file_exists) instead of calling "
+            "huggingface_hub directly."
+        ),
+        allowed_files={"vllm/transformers_utils/repo_utils.py"},
+        allowed_dirs={"examples/"},
+    ),
+    "transformers legacy names": ForbiddenImport(
+        pattern=(
+            r"^\s*from\s+transformers(?:\.[\w.]+)?\s+import\s*\([^)]*\b(?:"
+            + _TRANSFORMERS_LEGACY_NAMES
+            + r")\b"
+            r"|"
+            r"^\s*from\s+transformers(?:\.[\w.]+)?\s+import\b[^\n]*\b(?:"
+            + _TRANSFORMERS_LEGACY_NAMES
+            + r")\b"
+            r"|"
+            r"^\s*(?:from|import)\s+transformers\.(?:"
+            + _TRANSFORMERS_LEGACY_MODULES
+            + r")\b"
+        ),
+        tip=(
+            "Use the Transformers v5 names, e.g. PreTrainedConfig, PythonBackend, "
+            "TokenizersBackend, TorchvisionBackend, tokenization_utils_tokenizers, "
+            "tokenization_utils_sentencepiece and image_processing_backends."
+        ),
+    ),
 }
 
 
@@ -95,10 +159,17 @@ def check_file(path: str) -> int:
         # Skip files that are allowed for this import
         if path in forbidden_import.allowed_files:
             continue
+        # Skip directories that are allowed for this import
+        if any(path.startswith(prefix) for prefix in forbidden_import.allowed_dirs):
+            continue
         # Search for forbidden imports
         for match in re.finditer(forbidden_import.pattern, content, re.MULTILINE):
             # Check if it's allowed
             if forbidden_import.allowed_pattern.match(match.group()):
+                continue
+            # Skip matches inside a comment
+            line_start = content.rfind("\n", 0, match.start()) + 1
+            if "#" in content[line_start : match.start()]:
                 continue
             # Calculate line number from match position
             line_num = content[: match.start() + 1].count("\n") + 1
@@ -119,7 +190,10 @@ def main():
 
 
 def test_regex():
-    test_cases = [
+    def matches(rule: str, content: str) -> bool:
+        return bool(re.search(CHECK_IMPORTS[rule].pattern, content, re.MULTILINE))
+
+    pickle_cases = [
         # Should match
         ("import pickle", True),
         ("import cloudpickle", True),
@@ -139,11 +213,110 @@ def test_regex():
         ("print('import pickle')", False),
         ("import pickleas as asdf", False),
     ]
-    for i, (line, should_match) in enumerate(test_cases):
-        result = bool(CHECK_IMPORTS["pickle/cloudpickle"].pattern.match(line))
+    for i, (content, should_match) in enumerate(pickle_cases):
+        result = matches("pickle/cloudpickle", content)
         assert result == should_match, (
-            f"Test case {i} failed: '{line}' (expected {should_match}, got {result})"
+            f"pickle case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
         )
+
+    tilelang_cases = [
+        # Should match
+        ("import tilelang", True),
+        ("import tilelang.language as T", True),
+        ("from tilelang.jit import JITImpl", True),
+        ("from tilelang.jit.kernel import JITKernel", True),
+        # Should not match: indented (local) imports are allowed, mirroring
+        # the "triton" rule, so mocked-module test imports are not flagged.
+        ("    import tilelang", False),
+        ("        from tilelang.jit import JITImpl", False),
+        ("from vllm.tilelang_utils import tilelang", False),
+        ("from vllm.tilelang_utils import T", False),
+        ("from vllm.tilelang_utils import T, tilelang", False),
+        ("from vllm.tilelang_utils import tilelang, T", False),
+        ("import tilelang_kernels", False),
+    ]
+    for i, (content, should_match) in enumerate(tilelang_cases):
+        result = matches("tilelang", content)
+        assert result == should_match, (
+            f"tilelang case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
+    hf_cases = [
+        # Should match
+        ("from huggingface_hub import snapshot_download", True),
+        ("from huggingface_hub import hf_hub_download", True),
+        ("from huggingface_hub import HfApi", True),
+        ("from huggingface_hub import HfFileSystem", True),
+        ("from huggingface_hub import list_repo_files", True),
+        ("from huggingface_hub import try_to_load_from_cache", True),
+        ("    from huggingface_hub import snapshot_download", True),
+        ("from huggingface_hub import PyTorchModelHubMixin, hf_hub_download", True),
+        ("from huggingface_hub import (snapshot_download)", True),
+        # Parenthesized multi-line import must not bypass the hook
+        ("from huggingface_hub import (\n    snapshot_download,\n)", True),
+        (
+            "from huggingface_hub import (\n    PyTorchModelHubMixin,\n    HfApi,\n)",
+            True,
+        ),
+        # Should not match
+        ("import huggingface_hub", False),
+        ("import huggingface_hub as hf", False),
+        ("from huggingface_hub import PyTorchModelHubMixin", False),
+        ("from huggingface_hub.constants import HF_HUB_CACHE", False),
+        ("from huggingface_hub.utils import EntryNotFoundError", False),
+        ("from vllm.transformers_utils.repo_utils import hf_api", False),
+        ("from huggingface_hub import (\n    PyTorchModelHubMixin,\n)", False),
+        ("# from huggingface_hub import snapshot_download", False),
+    ]
+    for i, (content, should_match) in enumerate(hf_cases):
+        result = matches("huggingface_hub repo API", content)
+        assert result == should_match, (
+            f"huggingface_hub case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
+    transformers_cases = [
+        # Should match
+        ("from transformers import PretrainedConfig", True),
+        ("from transformers import AutoConfig, PretrainedConfig", True),
+        ("from transformers import PreTrainedTokenizer", True),
+        ("from transformers import PreTrainedTokenizerFast", True),
+        ("from transformers.models.siglip import SiglipImageProcessorFast", True),
+        ("from transformers import (\n    PreTrainedTokenizerFast,\n)", True),
+        ("from transformers.configuration_utils import PretrainedConfig", True),
+        ("    from transformers import PretrainedConfig", True),
+        ("from transformers.tokenization_utils import AddedToken", True),
+        ("from transformers.tokenization_utils_fast import X", True),
+        ("from transformers.image_processing_utils_fast import X", True),
+        (
+            "from transformers.models.qwen2_vl.image_processing_qwen2_vl_fast import X",
+            True,
+        ),
+        ("import transformers.tokenization_utils_fast", True),
+        # Should not match
+        ("from transformers import PreTrainedConfig", False),
+        ("from transformers import PreTrainedTokenizerBase", False),
+        ("from transformers import PythonBackend, TokenizersBackend", False),
+        ("from transformers.tokenization_utils_base import BatchEncoding", False),
+        ("from transformers.tokenization_utils_tokenizers import X", False),
+        (
+            "from transformers.image_processing_backends import TorchvisionBackend",
+            False,
+        ),
+        ("from transformers.models.qwen2_vl import Qwen2VLImageProcessor", False),
+        ("from vllm.foo import GLM4VImageProcessorFast", False),
+        ("from transformers import (\n    PreTrainedConfig,\n)", False),
+        ("# from transformers import PretrainedConfig", False),
+    ]
+    for i, (content, should_match) in enumerate(transformers_cases):
+        result = matches("transformers legacy names", content)
+        assert result == should_match, (
+            f"transformers case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
     print("All regex tests passed.")
 
 

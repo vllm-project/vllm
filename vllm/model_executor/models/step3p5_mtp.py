@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -30,13 +30,20 @@ logger = init_logger(__name__)
 class SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
+        # Give the head its prefix so the quant config's exclude_modules matcher
+        # can skip it; without one it defaults to "" and never matches, so a
+        # checkpoint-excluded (BF16) MTP head gets quantized -> load crash.
         self.head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.head",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -55,7 +62,9 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = SharedHead(
+            config=config, quant_config=quant_config, prefix=f"{prefix}.shared_head"
+        )
         self.mtp_block = Step3p5DecoderLayer(
             vllm_config,
             prefix=f"{prefix}.mtp_block",
@@ -296,9 +305,8 @@ class Step3p5MTP(nn.Module):
             )
         return loaded_params
 
-    def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+    def _rewrite_spec_layer_name(self, spec_layer: int | None, name: str) -> str:
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [
@@ -315,6 +323,7 @@ class Step3p5MTP(nn.Module):
                 break
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
+            assert spec_layer is not None
             name = name.replace(
                 f"model.layers.{spec_layer}.", f"model.layers.{spec_layer}.mtp_block."
             )

@@ -5,7 +5,7 @@ import json
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
@@ -36,6 +36,8 @@ async def pause_generation(
     """Pause generation requests to allow weight updates.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         mode: How to handle in-flight requests:
             - ``"abort"``: Abort all in-flight requests immediately (default).
             - ``"wait"``: Wait for in-flight requests to complete.
@@ -43,8 +45,8 @@ async def pause_generation(
         wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
             draining. Ignored when mode="keep".
-    """
 
+    """
     engine = engine_client(raw_request)
 
     try:
@@ -74,7 +76,6 @@ async def pause_generation(
 @router.post("/resume")
 async def resume_generation(raw_request: Request) -> JSONResponse:
     """Resume generation after a pause."""
-
     engine = engine_client(raw_request)
 
     try:
@@ -97,7 +98,6 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 
     Empty/missing ``request_ids`` aborts all in-flight requests.
     """
-
     engine = engine_client(raw_request)
 
     try:
@@ -139,7 +139,6 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 @router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
-
     engine = engine_client(raw_request)
 
     try:
@@ -203,9 +202,27 @@ async def update_weights(raw_request: Request):
 
 
 @router.post("/finish_weight_update")
-async def finish_weight_update(raw_request: Request):
-    await engine_client(raw_request).finish_weight_update()
+async def finish_weight_update(
+    raw_request: Request,
+    weight_version: Annotated[str | None, Body(embed=True)] = None,
+):
+    await engine_client(raw_request).finish_weight_update(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
+
+
+@router.post("/update_weight_version")
+async def update_weight_version(
+    raw_request: Request,
+    new_version: Annotated[str, Body(embed=True)],
+):
+    await engine_client(raw_request).update_weight_version(new_version)
+    return JSONResponse(content={"success": True, "new_version": new_version})
+
+
+@router.get("/weight_info")
+async def weight_info(raw_request: Request):
+    weight_version = await engine_client(raw_request).get_weight_version()
+    return JSONResponse(content={"weight_version": weight_version})
 
 
 @router.get("/get_world_size")
@@ -216,9 +233,12 @@ async def get_world_size(
     """Get the world size from the parallel config.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         include_dp: If True (default), returns the world size including
             data parallelism (TP * PP * DP). If False, returns the world
             size without data parallelism (TP * PP).
+
     """
     parallel_config = engine_client(raw_request).vllm_config.parallel_config
     if include_dp:

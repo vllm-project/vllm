@@ -19,12 +19,14 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -54,8 +56,19 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
+def get_mlp_layer_types(config) -> list[str]:
+    """Return which layers are MoE, rejecting configs predating Transformers support."""
+    mlp_layer_types = getattr(config, "mlp_layer_types", None)
+    if mlp_layer_types is None:
+        raise ValueError(
+            "Laguna requires the `LagunaConfig` from Transformers, which is "
+            "available from v5.17.0. Please update Transformers to run this model."
+        )
+    return mlp_layer_types
+
+
 class LagunaMLP(nn.Module):
-    """Dense MLP for Laguna (used in mlp_only_layers)."""
+    """Dense MLP for Laguna."""
 
     def __init__(
         self,
@@ -132,7 +145,6 @@ class LagunaMoE(nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
 
         self.n_routed_experts = config.num_experts
@@ -160,21 +172,14 @@ class LagunaMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         # Router gate
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
-        # Shared expert (optional) - passed to FusedMoE for overlap optimization
+        # Shared expert (optional) - passed to FusedMoEFactory for overlap optimization
         self.shared_expert: LagunaMLP | None
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = LagunaMLP(
@@ -191,26 +196,28 @@ class LagunaMoE(nn.Module):
         # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664). The
         # checkpoint stores one [num_experts] tensor per MoE layer at
         # `mlp.experts.e_score_correction_bias`; registering it as a Parameter
-        # on the FusedMoE lets the weight loader pick it up and the router
+        # on the MoERunner lets the weight loader pick it up and the router
         # add it during top-k selection. The fused top-k bias router requires
         # float32 regardless of model dtype.
         e_score_correction_bias = torch.nn.Parameter(
             torch.zeros(config.num_experts, dtype=torch.float32),
             requires_grad=False,
         )
-
-        # FusedMoE with SIGMOID routing. Passing `shared_experts=` lets the
+        # MoERunner with SIGMOID routing. Passing `shared_experts=` lets the
         # layer overlap the shared-expert compute with the all2all dispatch.
-        # `apply_routed_scale_to_output=True` makes FusedMoE handle the
+        # `apply_routed_scale_to_output=True` makes MoERunner handle the
+        # FusedMoEFactory with SIGMOID routing. Passing `shared_experts=` lets the
+        # layer overlap the shared-expert compute with the all2all dispatch.
+        # `apply_routed_scale_to_output=True` makes FusedMoEFactory handle the
         # routed_scaling_factor, shared+routed combine, and TP all-reduce
         # internally, so forward() just returns the final hidden states.
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_expert,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob,
+            renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
@@ -297,13 +304,12 @@ class LagunaAttention(nn.Module):
         else:
             self.sliding_window = None
 
-        # QKV projection (no bias for Laguna)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=config.qkv_bias,
+            bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -321,6 +327,7 @@ class LagunaAttention(nn.Module):
         # config.gating may be:
         #   - True / "per-element": one gate per (head, head_dim) channel
         #   - "per-head":           one gate per head, broadcast across head_dim
+        self.g_proj: ColumnParallelLinear | None
         if self.gating:
             # v5 LagunaConfig uses ``gating=True`` for per-head; older configs
             # used ``"per-head"``. Accept both. ``"per-element"`` (or legacy
@@ -509,14 +516,9 @@ class LagunaDecoderLayer(nn.Module):
             ),
         )
 
-        # Check if this layer uses MoE or dense MLP (matches Qwen2/Qwen3 convention)
-        mlp_only_layers = (
-            [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
-        )
         self.is_moe_layer = (
-            (layer_idx not in mlp_only_layers)
-            and (config.num_experts > 0)
-            and ((layer_idx + 1) % config.decoder_sparse_step == 0)
+            get_mlp_layer_types(config)[layer_idx] == "sparse"
+            and config.num_experts > 0
         )
 
         if self.is_moe_layer:
@@ -767,8 +769,5 @@ class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

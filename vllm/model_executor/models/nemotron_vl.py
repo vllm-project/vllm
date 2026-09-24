@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoModel, PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -89,6 +89,12 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
 )
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    # Ignore registered buffers, see
+    # https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"norm_mean": None, "norm_std": None}
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -132,7 +138,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.img_context_token_id = None
+        self.img_context_token_id: int | None = None
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -140,7 +146,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -154,7 +160,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -166,7 +172,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _init_mlp1(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vit_hidden_size: int | None = None,
         vision_projection_hidden_size: int | None = None,
     ) -> nn.Module:
@@ -377,16 +383,11 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        ## Ignore registered_buffers
-        ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28 # noqa: E501
-        skip_substrs = ["norm_mean", "norm_std"]
-        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="mlp1",
@@ -464,8 +465,7 @@ class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[LlamaNemotronVLEmbedProcessingInfo],
 )
 class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling):
-    """
-    LlamaNemotronVL model for embeddings.
+    """LlamaNemotronVL model for embeddings.
 
     Inherits from LlamaNemotronVLChatModel and specializes it for embedding tasks:
     - Uses SigLIP vision encoder instead of C-RADIO
@@ -505,7 +505,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config,
         *,
         prefix: str,
@@ -518,12 +518,21 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
             use_head=False,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(
+        self,
+        config: PreTrainedConfig,
+        vit_hidden_size: int | None = None,
+        vision_projection_hidden_size: int | None = None,
+    ) -> nn.Module:
         """Override to use different MLP structure for embedding model."""
+        if vit_hidden_size is None:
+            vit_hidden_size = config.vision_config.hidden_size
+        if vision_projection_hidden_size is None:
+            vision_projection_hidden_size = config.get_text_config().hidden_size
         return super()._init_mlp1(
             config,
-            vit_hidden_size=config.vision_config.hidden_size,
-            vision_projection_hidden_size=config.get_text_config().hidden_size,
+            vit_hidden_size=vit_hidden_size,
+            vision_projection_hidden_size=vision_projection_hidden_size,
         )
 
     def _call_vision_model(self, pixel_values: torch.Tensor) -> torch.Tensor:

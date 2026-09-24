@@ -4,7 +4,7 @@
 
 Rust rewrite of `vllm bench serve` — a high-performance benchmark client for vLLM serving endpoints. Standalone binary, no Python dependency at runtime.
 
-Member crate `vllm-bench` of the `rust/` workspace. Uses workspace dependencies and lints; the workspace `[profile.release]` (thin LTO, `panic = "abort"`) applies. Note the workspace bans rustls/ring (`rust/deny.toml`) — all HTTP must stay on native-tls, which is why HF Hub downloads go through `src/hub.rs` (async hf-hub API bridged to sync) instead of hf-hub's ureq backend.
+Member crate `vllm-bench` of the `rust/` workspace. Uses workspace dependencies and lints; the workspace `[profile.release]` (thin LTO, `panic = "abort"`) applies. Note the workspace bans rustls/ring (`rust/deny.toml`) — all HTTP must stay on native-tls, which is why HF Hub downloads go through `src/hub.rs` (hf-hub's async reqwest/native-tls API) instead of hf-hub's ureq backend.
 
 ## Build & Test
 
@@ -23,7 +23,7 @@ cargo test -p vllm-bench -- --ignored
 
 ## Architecture
 
-- `src/main.rs` — Entry point, mimalloc, tokio runtime, mode dispatch (compare/sweep/multi-run/multi-turn/single)
+- `src/main.rs` — Entry point, mimalloc, tokio runtime, mode dispatch (compare/sweep/multi-run/multi-turn/single, `mm-processor` subcommand)
 - `src/cli.rs` — clap derive CLI args (~50+ flags)
 - `src/config.rs` — Validated config from CLI; `GoodputConfig`, `RampUpConfig`, sampling param merging
 - `src/error.rs` — `BenchError` enum (Http, Json, Tokenizer, Config, EndpointTimeout, Backend, Io)
@@ -32,9 +32,10 @@ cargo test -p vllm-bench -- --ignored
 - `src/sweep.rs` — Concurrency/rate parameter sweep (`--sweep-max-concurrency`, `--sweep-request-rate`)
 - `src/multi_run.rs` — N-run aggregation with mean/std/min/max/CV (`--num-runs`)
 - `src/compare.rs` — Side-by-side diff of two result JSON files (`--compare`)
+- `src/mm_processor.rs` — `vllm-bench mm-processor` subcommand: offline multimodal preprocessing latency benchmark against a managed headless engine (mirrors `vllm bench mm-processor`); per-stage timings come from `vllm_tracing::timing::RequestTimingLayer` (via `vllm_chat::mm_timing_layer`)
 - `src/tokenizer.rs` — `TokenizerKind` enum: Local(HuggingFace), Tiktoken, OR Server-side `/tokenize`+`/detokenize` fallback
 - `src/tiktoken.rs` — Tiktoken BPE loader (`.tiktoken`/`.model` files; built-in encodings o200k_base/cl100k_base; pat_str extraction from Python source)
-- `src/hub.rs` — `HubRepo`: sync facade over hf-hub's async (reqwest/native-tls) API — per-download thread with its own runtime; the sync ureq backend is unusable here because it pulls rustls, which `rust/deny.toml` bans
+- `src/hub.rs` — `HubRepo`: thin wrapper over hf-hub's async (reqwest/native-tls) API — file download and repo listing, optional revision; the sync ureq backend is unusable here because it pulls rustls, which `rust/deny.toml` bans
 - `src/rate_control.rs` — Gamma/Poisson request scheduling + linear/exponential ramp-up
 - `src/ready_checker.rs` — Endpoint readiness with retry
 - `src/backends/` — Backend implementations (enum dispatch, not trait objects)
@@ -48,7 +49,7 @@ cargo test -p vllm-bench -- --ignored
 - `src/datasets/sharegpt.rs` — ShareGPT JSON loader + HuggingFace Hub auto-download with caching
 - `src/datasets/sonnet.rs` and `src/datasets/sonnet.txt` — Sonnet dataset (built-in Shakespeare sonnets via `include_str!("sonnet.txt")`; controllable token length + shared prefix; mirrors Python `SonnetDataset`)
 - `src/datasets/speed_bench.rs` — NVIDIA SPEED-Bench loader (HF datasets-server API, 6 configs, 11 categories, local cache)
-- `src/datasets/hf_dataset.rs` — Generic HuggingFace dataset loader (datasets-server API, column auto-detection)
+- `src/datasets/hf_dataset.rs` — Generic HuggingFace dataset loader (parquet shards via hf-hub into the standard HF hub cache; datasets-server for config/split discovery; native main-branch parquet/JSON fallback for private datasets; column auto-detection)
 - `src/datasets/custom.rs` — Custom JSONL dataset (`{"prompt": ..., "output_tokens": ...}` per line; `--custom-output-len -1` uses per-line output_tokens; prompts always sent raw — no client-side chat template)
 - `src/datasets/prefix_repetition.rs` — Prefix repetition dataset (N shared prefixes × fresh random suffixes, standard prefix-cache stress; mirrors Python `PrefixRepetitionRandomDataset`)
 - `src/datasets/random_rerank.rs` — Random rerank dataset (one query + batched documents per request for `vllm-rerank`; `--no-reranker` for embedding-based scoring; mirrors Python `RandomDatasetForReranking`)

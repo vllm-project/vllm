@@ -13,10 +13,10 @@ namespace vec_op {
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
 
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
+#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+// Note: FP16 (Half) is not supported on POWER VSX — no FP16Vec16 type.
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
@@ -287,7 +287,7 @@ struct FP32Vec4 : public Vec<FP32Vec4> {
 
   explicit FP32Vec4(__vector float data) : reg(data) {}
 
-  explicit FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
+  FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
 };
 
 struct FP32Vec8 : public Vec<FP32Vec8> {
@@ -316,7 +316,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 
   explicit FP32Vec8(f32x4x2_t data) : reg(data) {}
 
-  explicit FP32Vec8(const FP32Vec8& data) {
+  FP32Vec8(const FP32Vec8& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
   }
@@ -416,6 +416,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
       tmp.val[0] = two_x;
       tmp.val[1] = two_x;
       FP32Vec8 temp_vec(tmp);
+      FP32Vec8 exp_vec = temp_vec.exp();
       vector float e = temp_vec.exp().reg.val[0];
 
       vector float num = vec_sub(e, one);
@@ -593,7 +594,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
-  explicit FP32Vec16(const FP32Vec16& data) {
+  FP32Vec16(const FP32Vec16& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
     reg.val[2] = data.reg.val[2];
@@ -634,6 +635,16 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = vec_ctf(v.reg.val[3], 0);
   }
 
+  explicit FP32Vec16(const float* __restrict__ base, const INT32Vec16& index) {
+    INT32Vec16::AliasReg idx;
+    idx.reg = index.reg;
+    AliasReg ar;
+    for (int i = 0; i < VEC_ELEM_NUM; ++i) {
+      ar.values[i] = base[idx.values[i]];
+    }
+    reg = ar.reg;
+  }
+
   FP32Vec16 operator*(const FP32Vec16& b) const {
     return FP32Vec16(f32x4x4_t({vec_mul(reg.val[0], b.reg.val[0]),
                                 vec_mul(reg.val[1], b.reg.val[1]),
@@ -646,6 +657,13 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_add(reg.val[1], b.reg.val[1]),
                                 vec_add(reg.val[2], b.reg.val[2]),
                                 vec_add(reg.val[3], b.reg.val[3])}));
+  }
+
+  FP32Vec16 operator-() const {
+    const __vector float zero = vec_splats(0.0f);
+    return FP32Vec16(
+        f32x4x4_t({vec_sub(zero, reg.val[0]), vec_sub(zero, reg.val[1]),
+                   vec_sub(zero, reg.val[2]), vec_sub(zero, reg.val[3])}));
   }
 
   FP32Vec16 operator-(const FP32Vec16& b) const {
@@ -745,6 +763,33 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   FP32Vec16 abs() const {
     return FP32Vec16(f32x4x4_t({vec_abs(reg.val[0]), vec_abs(reg.val[1]),
                                 vec_abs(reg.val[2]), vec_abs(reg.val[3])}));
+  }
+
+  FP32Vec16 exp() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_e = lo.exp();
+    auto hi_e = hi.exp();
+    return FP32Vec16(f32x4x4_t{lo_e.reg.val[0], lo_e.reg.val[1],
+                               hi_e.reg.val[0], hi_e.reg.val[1]});
+  }
+
+  FP32Vec16 tanh() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_tanh = lo.tanh();
+    auto hi_tanh = hi.tanh();
+    return FP32Vec16(f32x4x4_t{lo_tanh.reg.val[0], lo_tanh.reg.val[1],
+                               hi_tanh.reg.val[0], hi_tanh.reg.val[1]});
+  }
+
+  FP32Vec16 er() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_er = lo.er();
+    auto hi_er = hi.er();
+    return FP32Vec16(f32x4x4_t{lo_er.reg.val[0], lo_er.reg.val[1],
+                               hi_er.reg.val[0], hi_er.reg.val[1]});
   }
 
   float reduce_max() {
