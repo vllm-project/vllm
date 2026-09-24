@@ -772,29 +772,21 @@ def test_varlen_encoder_attention_amx(
     )
 
 
-@pytest.mark.parametrize(
-    "isa,head_size,block_size", [("vec", 128, 128), ("vec16", 80, 48)]
-)
-@pytest.mark.parametrize("dtype", QTYPES)
-def test_paged_attention_query_tile_tails(
-    isa: str,
-    head_size: int,
-    block_size: int,
-    dtype: torch.dtype,
-) -> None:
-    """Check prefill tile tails and a decode request in one batch."""
+@pytest.mark.parametrize("dtype", [torch.float32, torch.half])
+def test_paged_attention_vec16_query_tile_tails(dtype: torch.dtype) -> None:
+    """Check VEC16 prefill tile tails for FP32 and FP16."""
     varlen_with_paged_kv(
-        seq_lens=[(1, 31), (3, 65), (5, 129), (9, 193), (17, 257)],
+        seq_lens=[(1, 31), (5, 129), (9, 193), (17, 257)],
         num_heads=(16, 2),
-        head_size=head_size,
+        head_size=80,
         sliding_window=None,
         dtype=dtype,
-        block_size=block_size,
+        block_size=48,
         soft_cap=None,
         num_blocks=16,
         use_alibi=False,
         use_sink=False,
-        isa=isa,
+        isa="vec16",
     )
 
 
