@@ -17,7 +17,7 @@ from einops import rearrange
 from transformers import (
     BartConfig,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 
 from vllm.config import CacheConfig, VllmConfig
@@ -440,7 +440,7 @@ class RadioWithNeck(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -480,7 +480,7 @@ class RadioWithNeck(nn.Module):
 
     def get_vit_model_from_radio_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> RadioModel:
         hf_config_vision = hf_config.encoder
