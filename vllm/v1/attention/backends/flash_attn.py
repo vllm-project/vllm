@@ -629,23 +629,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     ) -> AttentionCGSupport:
         speculative_config = vllm_config.speculative_config
         if (
-            speculative_config is not None
+            get_flash_attn_version() == 4
+            and speculative_config is not None
             and speculative_config.enable_adaptive_verification
-            and current_platform.is_device_capability_family(100)
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
-            and not vllm_config.attention_config.use_non_causal
-            and isinstance(kv_cache_spec, AttentionSpec)
-            and kv_cache_spec.head_size <= 128
-            and get_flash_attn_version(
-                requires_alibi=vllm_config.model_config.uses_alibi,
-                head_size=kv_cache_spec.head_size,
-                head_size_v=kv_cache_spec.head_size_v,
-                kv_cache_block_size=kv_cache_spec.block_size,
-                supports_fa4_hd256=True,
-            )
-            == 4
         ):
-            # SM100 FA4 consumes device-side query offsets during graph replay.
             return AttentionCGSupport.ALWAYS
         return cls._cudagraph_support
 
