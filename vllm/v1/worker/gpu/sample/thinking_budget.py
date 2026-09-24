@@ -361,6 +361,30 @@ def _thinking_budget_kernel(
             if prefix_match:
                 end_prefix_len = prefix_len
 
+    # If the tail already ends with the *complete* forced end sequence, the
+    # exit walk is finished. Stop forcing here so the model can resume normal
+    # generation. Without this guard the prefix-match alignment shifts once
+    # the whole sequence has been emitted, ``end_prefix_len`` is recomputed as
+    # 0, and the kernel re-forces the first end token forever. When the forced
+    # end tokens do not coincide with a natural-reasoning-end marker, this
+    # collapses the request into a repetition loop once the budget runs out.
+    if effective_len >= END_LEN:
+        full_end_match = True
+        for j in tl.static_range(0, END_LEN):
+            expected = tl.load(reasoning_end_token_ids_ptr + j)
+            actual = _load_effective_token(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                effective_len - END_LEN + j,
+            )
+            full_end_match = full_end_match & (actual == expected)
+        if full_end_match:
+            return
+
     force_token_id = tl.load(reasoning_end_token_ids_ptr + end_prefix_len)
     tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
 
