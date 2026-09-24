@@ -17,9 +17,11 @@ where::
     bias = -image_mean / image_std
 """
 
+import math
 from typing import Any, NamedTuple
 
 import torch
+from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -190,6 +192,95 @@ class NormParams(NamedTuple):
     rescale_factor: float
 
 
+def _is_identity_params(params: NormParams) -> bool:
+    """Whether ``weight = rescale/std`` and ``bias = -mean/std`` are
+    numerically the identity transform (mirrors ``torch.allclose``'s default
+    fp32 tolerances)."""
+    return all(
+        math.isclose(params.rescale_factor / s, 1.0, rel_tol=1e-5, abs_tol=1e-8)
+        and math.isclose(m / s, 0.0, abs_tol=1e-8)
+        for m, s in zip(params.image_mean, params.image_std)
+    )
+
+
+def _load_norm_params(model_config: ModelConfig) -> NormParams:
+    """Load ``(do_rescale, do_normalize, image_mean, image_std,
+    rescale_factor)`` from the processor config, falling back to the image
+    processor object."""
+    model = model_config.model
+    revision = model_config.revision
+
+    # Try to read parameters from the processor config.
+    config = get_processor_config(model, revision=revision)
+    do_rescale: Any = config.get("do_rescale", None)
+    do_normalize: Any = config.get("do_normalize", None)
+    image_mean: Any = config.get("image_mean", None)
+    image_std: Any = config.get("image_std", None)
+    rescale_factor: Any = config.get("rescale_factor", None)
+
+    # Fallback to the image_processor object if any parameter is missing.
+    if any(
+        v is None
+        for v in (do_rescale, do_normalize, image_mean, image_std, rescale_factor)
+    ):
+        image_processor = get_processor(model, revision=revision).image_processor
+
+        if do_rescale is None:
+            do_rescale = getattr(image_processor, "do_rescale", None)
+        if do_normalize is None:
+            do_normalize = getattr(image_processor, "do_normalize", None)
+        if image_mean is None:
+            image_mean = getattr(image_processor, "image_mean", None)
+        if image_std is None:
+            image_std = getattr(image_processor, "image_std", None)
+        if rescale_factor is None:
+            rescale_factor = getattr(image_processor, "rescale_factor", None)
+
+    # Apply defaults based on flags.
+    if not do_rescale:
+        rescale_factor = 1.0
+    if not do_normalize:
+        num_channels = 3
+        image_mean = [0.0] * num_channels
+        image_std = [1.0] * num_channels
+
+    assert rescale_factor is not None, "rescale_factor is still None after resolution."
+    assert image_mean is not None, "image_mean is still None after resolution."
+    assert image_std is not None, "image_std is still None after resolution."
+
+    return NormParams(
+        do_rescale=bool(do_rescale),
+        do_normalize=bool(do_normalize),
+        image_mean=[float(v) for v in image_mean],
+        image_std=[float(v) for v in image_std],
+        rescale_factor=float(rescale_factor),
+    )
+
+
+class IdentityInputNorm(nn.Module):
+    """Stand-in used when the processor requires no rescale/normalise.
+
+    Not a no-op: with ``mm_device_do_normalize`` enabled, raw ``uint8``
+    pixels travel to the device unprocessed and must be cast to
+    ``visual_dtype`` here (or copied into the ``out`` buffer when given).
+    """
+
+    # Pixels arrive already processed; no fixed input dtype.
+    input_dtype: torch.dtype | None = None
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        visual_dtype: torch.dtype,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if out is None:
+            return pixel_values.to(visual_dtype, copy=False)
+        out_view = out[: pixel_values.shape[0]]
+        out_view.copy_(pixel_values)
+        return out_view
+
+
 @CustomOp.register("fused_mm_input_norm")
 class FusedMMInputNorm(CustomOp):
     """Module that applies rescaling and normalisation to input images.
@@ -197,7 +288,7 @@ class FusedMMInputNorm(CustomOp):
 
     Dtype semantics:
 
-    * Input dtype — the dtype of the ``grid_thw`` argument to ``forward_*``.
+    * Input dtype — the dtype of the ``pixel_values`` argument to ``forward_*``.
       It is ``uint8`` when ``mm_device_do_normalize`` is enabled (raw bytes
       travel to the device unprocessed) and equals ``visual_dtype``
       otherwise.
@@ -240,29 +331,14 @@ class FusedMMInputNorm(CustomOp):
         self._compute_dtype = dtype
 
         # Model construction can set the accelerator as PyTorch's default
-        # device. Determine whether the normalisation is an identity on CPU
-        # so torch.allclose does not introduce a device synchronization while
-        # the model is being initialized. The buffers registered below are then
-        # moved to the caller's default device.
-        mean_cpu = torch.tensor(image_mean, dtype=self.compute_dtype, device="cpu")
-        std_cpu = torch.tensor(image_std, dtype=self.compute_dtype, device="cpu")
-        weight_cpu = rescale_factor / std_cpu
-        bias_cpu = -mean_cpu / std_cpu
-        self.is_identity = bool(
-            torch.allclose(weight_cpu, torch.ones_like(weight_cpu))
-            and torch.allclose(bias_cpu, torch.zeros_like(bias_cpu))
-        )
+        # device; build the buffers on CPU first, then move them over.
+        mean = torch.tensor(image_mean, dtype=dtype, device="cpu")
+        std = torch.tensor(image_std, dtype=dtype, device="cpu")
+        device = torch.get_default_device()
+        self.register_buffer("weight", (rescale_factor / std).to(device))
+        self.register_buffer("bias", (-mean / std).to(device))
 
-        if not self.is_identity:
-            device = torch.get_default_device()
-            self.register_buffer("weight", weight_cpu.to(device))
-            self.register_buffer("bias", bias_cpu.to(device))
-        else:
-            self.register_buffer("weight", None)
-            self.register_buffer("bias", None)
-            self.forward = self._identity_forward  # type: ignore[method-assign]
-
-        if not self.is_identity and self.compute_dtype != torch.float32:
+        if self.compute_dtype != torch.float32:
             logger.warning_once(
                 "FusedMMInputNorm is initialized with compute dtype=%s, which "
                 "is not torch.float32. The per-channel weight/bias are stored "
@@ -273,116 +349,13 @@ class FusedMMInputNorm(CustomOp):
                 self.compute_dtype,
             )
 
-    @property
-    def input_dtype(self) -> torch.dtype | None:
-        return None if self.is_identity else torch.uint8
+    # Raw pixels arrive as uint8 (device-side normalisation is active).
+    input_dtype: torch.dtype | None = torch.uint8
 
     @property
     def compute_dtype(self) -> torch.dtype:
         """The dtype used for internal computation (may differ from output)."""
         return self._compute_dtype
-
-    @classmethod
-    def identity(
-        cls, channel: int = 3, dtype: torch.dtype = torch.float32
-    ) -> "FusedMMInputNorm":
-        return cls(
-            image_mean=[0.0] * channel,
-            image_std=[1.0] * channel,
-            rescale_factor=1.0,
-            channel=channel,
-            dtype=dtype,
-        )
-
-    @staticmethod
-    def _load_norm_params(
-        model_config: "ModelConfig",
-    ) -> "NormParams":
-        """Load ``(do_rescale, do_normalize, image_mean, image_std,
-        rescale_factor)`` from the processor config, falling back to the image
-        processor object."""
-        model = model_config.model
-        revision = model_config.revision
-
-        # Try to read parameters from the processor config.
-        config = get_processor_config(model, revision=revision)
-        do_rescale: Any = config.get("do_rescale", None)
-        do_normalize: Any = config.get("do_normalize", None)
-        image_mean: Any = config.get("image_mean", None)
-        image_std: Any = config.get("image_std", None)
-        rescale_factor: Any = config.get("rescale_factor", None)
-
-        # Fallback to the image_processor object if any parameter is missing.
-        if any(
-            v is None
-            for v in (
-                do_rescale,
-                do_normalize,
-                image_mean,
-                image_std,
-                rescale_factor,
-            )
-        ):
-            image_processor = get_processor(model, revision=revision).image_processor
-
-            if do_rescale is None:
-                do_rescale = getattr(image_processor, "do_rescale", None)
-            if do_normalize is None:
-                do_normalize = getattr(image_processor, "do_normalize", None)
-            if image_mean is None:
-                image_mean = getattr(image_processor, "image_mean", None)
-            if image_std is None:
-                image_std = getattr(image_processor, "image_std", None)
-            if rescale_factor is None:
-                rescale_factor = getattr(image_processor, "rescale_factor", None)
-
-        # Apply defaults based on flags.
-        if not do_rescale:
-            rescale_factor = 1.0
-        if not do_normalize:
-            num_channels = 3
-            image_mean = [0.0] * num_channels
-            image_std = [1.0] * num_channels
-
-        assert rescale_factor is not None, (
-            "rescale_factor is still None after resolution."
-        )
-        assert image_mean is not None, "image_mean is still None after resolution."
-        assert image_std is not None, "image_std is still None after resolution."
-
-        return NormParams(
-            do_rescale=bool(do_rescale),
-            do_normalize=bool(do_normalize),
-            image_mean=[float(v) for v in image_mean],
-            image_std=[float(v) for v in image_std],
-            rescale_factor=float(rescale_factor),
-        )
-
-    @classmethod
-    def from_model_config(cls, model_config: "ModelConfig") -> "FusedMMInputNorm":
-        mm_config = getattr(model_config, "multimodal_config", None)
-        if not getattr(mm_config, "mm_device_do_normalize", False):
-            return cls.identity()
-
-        params = cls._load_norm_params(model_config)
-
-        # If no processing is needed, return an identity module.
-        if not params.do_rescale and not params.do_normalize:
-            return cls.identity()
-
-        channel = len(params.image_mean)
-        assert len(params.image_std) == channel, (
-            f"image_mean and image_std have different lengths: "
-            f"{channel} vs {len(params.image_std)}"
-        )
-
-        return cls(
-            image_mean=params.image_mean,
-            image_std=params.image_std,
-            rescale_factor=params.rescale_factor,
-            channel=channel,
-            dtype=torch.float32,
-        )
 
     # ------------------------------------------------------------------
     # Internal helpers shared by the platform-specific forward_* methods
@@ -390,16 +363,16 @@ class FusedMMInputNorm(CustomOp):
 
     def _prepare_output(
         self,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor,
         visual_dtype: torch.dtype,
         out: torch.Tensor | None,
     ) -> tuple[int, int, torch.Tensor | None]:
         """Validate ``out`` (if provided) and return ``(patches, size, out_view)``."""
-        assert grid_thw.ndim == 2, (
-            f"grid_thw must be 2D (patches, size), got {grid_thw.dim()}D "
-            f"with shape {tuple(grid_thw.shape)}"
+        assert pixel_values.ndim == 2, (
+            f"pixel_values must be 2D (patches, size), got {pixel_values.dim()}D "
+            f"with shape {tuple(pixel_values.shape)}"
         )
-        patches, size = grid_thw.shape
+        patches, size = pixel_values.shape
 
         out_view: torch.Tensor | None = None
         if out is not None:
@@ -408,33 +381,21 @@ class FusedMMInputNorm(CustomOp):
                 f"with shape {tuple(out.shape)}"
             )
             assert out.shape[0] >= patches, (
-                f"out.shape[0]={out.shape[0]} < grid_thw.shape[0]={patches}"
+                f"out.shape[0]={out.shape[0]} < pixel_values.shape[0]={patches}"
             )
             assert out.shape[1] == size, (
-                f"out.shape[1]={out.shape[1]} != grid_thw.shape[1]={size}"
+                f"out.shape[1]={out.shape[1]} != pixel_values.shape[1]={size}"
             )
             assert out.dtype == visual_dtype, (
                 f"out.dtype={out.dtype} != visual_dtype={visual_dtype}"
             )
             assert out.is_contiguous(), "out must be contiguous"
-            assert out.device == grid_thw.device, (
-                f"out.device={out.device} != grid_thw.device={grid_thw.device}"
+            assert out.device == pixel_values.device, (
+                f"out.device={out.device} != pixel_values.device={pixel_values.device}"
             )
             out_view = out[:patches]
 
         return patches, size, out_view
-
-    def _identity_forward(
-        self,
-        grid_thw: torch.Tensor,
-        visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
-        if out_view is not None:
-            out_view.copy_(grid_thw)
-            return out_view
-        return grid_thw.to(visual_dtype, copy=False)
 
     # ------------------------------------------------------------------
     # Platform-specific implementations
@@ -442,7 +403,7 @@ class FusedMMInputNorm(CustomOp):
 
     def forward_native(
         self,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor,
         visual_dtype: torch.dtype,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -451,14 +412,14 @@ class FusedMMInputNorm(CustomOp):
         This is the semantic reference implementation and the fallback used
         on any platform without a specialised kernel.
         """
-        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
+        patches, size, out_view = self._prepare_output(pixel_values, visual_dtype, out)
 
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
         )
         patch_size = size // self.channel
 
-        x = grid_thw.to(self._compute_dtype).view(patches, self.channel, patch_size)
+        x = pixel_values.to(self._compute_dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
@@ -472,12 +433,12 @@ class FusedMMInputNorm(CustomOp):
 
     def forward_cuda(
         self,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor,
         visual_dtype: torch.dtype,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
-        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
+        patches, size, out_view = self._prepare_output(pixel_values, visual_dtype, out)
 
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
@@ -486,7 +447,7 @@ class FusedMMInputNorm(CustomOp):
 
         # Materialize a contiguous copy once if needed; the kernel
         # requires contiguous inputs.
-        x = grid_thw.contiguous()
+        x = pixel_values.contiguous()
         x3 = x.view(patches, self.channel, patch_size)
 
         # The Triton kernel writes in-place into a destination buffer, so
@@ -494,7 +455,7 @@ class FusedMMInputNorm(CustomOp):
         # before dispatch.
         if out_view is None:
             out_view = torch.empty(
-                (patches, size), dtype=visual_dtype, device=grid_thw.device
+                (patches, size), dtype=visual_dtype, device=pixel_values.device
             )
         y3 = out_view.view(patches, self.channel, patch_size)
 
@@ -508,7 +469,7 @@ class FusedMMInputNorm(CustomOp):
 
     def forward_xpu(
         self,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor,
         visual_dtype: torch.dtype,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -520,11 +481,11 @@ class FusedMMInputNorm(CustomOp):
         bandwidth saving of transferring uint8 pixel_values. The fused
         kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         """
-        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
+        patches, size, out_view = self._prepare_output(pixel_values, visual_dtype, out)
 
-        if grid_thw.dtype == torch.uint8 and self.weight.dtype == torch.float32:
+        if pixel_values.dtype == torch.uint8 and self.weight.dtype == torch.float32:
             y = torch.ops.vllm.xpu_fused_input_norm(
-                grid_thw, self.weight, self.bias, visual_dtype
+                pixel_values, self.weight, self.bias, visual_dtype
             )
             if out_view is None:
                 return y
@@ -532,13 +493,51 @@ class FusedMMInputNorm(CustomOp):
             return out_view
 
         # Fall back to native for unsupported dtypes on XPU.
-        return self.forward_native(grid_thw, visual_dtype, out)
+        return self.forward_native(pixel_values, visual_dtype, out)
 
     def forward_oot(
         self,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor,
         visual_dtype: torch.dtype,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Out-of-tree platform override entrypoint."""
-        return self.forward_native(grid_thw, visual_dtype, out)
+        return self.forward_native(pixel_values, visual_dtype, out)
+
+
+def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
+    """Build the input normalisation module for a model.
+
+    Returns an ``IdentityInputNorm`` when device-side normalisation is
+    disabled or the processor's rescale/normalise is numerically the identity
+    transform; otherwise a ``FusedMMInputNorm`` built from the processor's
+    parameters.
+    """
+    mm_config = getattr(model_config, "multimodal_config", None)
+    if not getattr(mm_config, "mm_device_do_normalize", False):
+        return IdentityInputNorm()
+
+    params = _load_norm_params(model_config)
+
+    # If no processing is needed, only the dtype cast is required.
+    if not params.do_rescale and not params.do_normalize:
+        return IdentityInputNorm()
+
+    channel = len(params.image_mean)
+    assert len(params.image_std) == channel, (
+        f"image_mean and image_std have different lengths: "
+        f"{channel} vs {len(params.image_std)}"
+    )
+
+    # A config can request rescale/normalise and still be numerically
+    # the identity transform; skip the kernel in that case.
+    if _is_identity_params(params):
+        return IdentityInputNorm()
+
+    return FusedMMInputNorm(
+        image_mean=params.image_mean,
+        image_std=params.image_std,
+        rescale_factor=params.rescale_factor,
+        channel=channel,
+        dtype=torch.float32,
+    )

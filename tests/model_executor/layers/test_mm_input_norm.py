@@ -8,6 +8,9 @@ import torch
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
+    IdentityInputNorm,
+    NormParams,
+    _is_identity_params,
     fused_mm_input_norm_triton,
 )
 from vllm.platforms import current_platform
@@ -98,7 +101,6 @@ class TestFusedMMInputNormModule:
             rescale_factor=_RGB_RESCALE,
             channel=channel,
         ).to(_DEVICE)
-        assert not norm.is_identity
 
         out = norm(pixel_values, visual_dtype=torch.float32)
         expected = _reference_input_norm(
@@ -112,8 +114,7 @@ class TestFusedMMInputNormModule:
         torch.testing.assert_close(out, expected)
 
     def test_identity_passthrough(self):
-        norm = FusedMMInputNorm.identity().to(_DEVICE)
-        assert norm.is_identity
+        norm = IdentityInputNorm()
 
         pixel_values = torch.randn(8, 3 * 196, dtype=torch.float32, device=_DEVICE)
         out = norm(pixel_values, visual_dtype=torch.bfloat16)
@@ -425,7 +426,7 @@ class TestFusedMMInputNormOutBuffer:
         assert torch.all(out[patches:] == 123.0)
 
     def test_identity_oversized_out_buffer(self):
-        norm = FusedMMInputNorm.identity().to(_DEVICE)
+        norm = IdentityInputNorm()
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
 
         out = torch.full((10, 3 * 8), 7.0, dtype=torch.bfloat16, device=_DEVICE)
@@ -467,7 +468,7 @@ class TestFusedMMInputNormOutBuffer:
             )
 
     def test_identity_out_buffer(self):
-        norm = FusedMMInputNorm.identity().to(_DEVICE)
+        norm = IdentityInputNorm()
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
         out = torch.empty_like(x, dtype=torch.bfloat16)
         sentinel = out.data_ptr()
@@ -577,17 +578,18 @@ class TestFusedMMInputNormKernel:
 # ===========================================================================
 @requires_vllm_config
 class TestFusedMMInputNormConstruction:
-    """Identity detection and weight/bias buffer semantics at init time."""
+    """Weight/bias buffer semantics at init time."""
 
-    def test_identity_from_identity_config(self):
+    def test_identity_config_buffers(self):
+        """Numerically identity parameters still build plain weight/bias
+        buffers; the identity shortcut lives in ``from_model_config``."""
         norm = FusedMMInputNorm(
             image_mean=[0.0, 0.0, 0.0],
             image_std=[1.0, 1.0, 1.0],
             rescale_factor=1.0,
         )
-        assert norm.is_identity
-        assert norm.weight is None
-        assert norm.bias is None
+        torch.testing.assert_close(norm.weight, torch.ones(3))
+        torch.testing.assert_close(norm.bias, torch.zeros(3))
 
     def test_non_identity_buffers(self):
         channel = 3
@@ -597,7 +599,6 @@ class TestFusedMMInputNormConstruction:
             rescale_factor=_RGB_RESCALE,
             channel=channel,
         )
-        assert not norm.is_identity
         assert norm.weight.shape == (channel,)
         assert norm.bias.shape == (channel,)
 
@@ -606,40 +607,35 @@ class TestFusedMMInputNormConstruction:
         torch.testing.assert_close(norm.weight, _RGB_RESCALE / std)
         torch.testing.assert_close(norm.bias, -mean / std)
 
+    def test_is_identity_params(self):
+        """The numeric-identity check mirrors the old allclose detection."""
+        assert _is_identity_params(
+            NormParams(True, True, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0)
+        )
+        assert not _is_identity_params(
+            NormParams(True, True, _RGB_MEAN, _RGB_STD, _RGB_RESCALE)
+        )
+
     @pytest.mark.parametrize(
-        ("image_mean", "image_std", "rescale_factor", "is_identity"),
+        ("image_mean", "image_std", "rescale_factor"),
         [
-            ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, True),
-            ([0.5, 0.5, 0.5], [0.25, 0.25, 0.25], 1 / 255, False),
+            ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0),
+            ([0.5, 0.5, 0.5], [0.25, 0.25, 0.25], 1 / 255),
         ],
     )
-    def test_fused_input_norm_initialization_on_device(
+    def test_buffers_initialized_on_default_device(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         image_mean: list[float],
         image_std: list[float],
         rescale_factor: float,
-        is_identity: bool,
     ):
-        """Identity detection must not synchronize the default device."""
-        original_allclose = torch.allclose
-
-        def cpu_allclose(input: torch.Tensor, other: torch.Tensor, *args, **kwargs):
-            assert input.device.type == "cpu"
-            assert other.device.type == "cpu"
-            return original_allclose(input, other, *args, **kwargs)
-
-        monkeypatch.setattr(torch, "allclose", cpu_allclose)
+        """Buffers are built on CPU first, then moved to the caller's
+        default device, so init never touches the accelerator."""
         # The meta device gives the CPU-only test shard the same non-CPU
         # default-device semantics without requiring a CUDA build.
         default_device = "cuda" if torch.cuda.is_available() else "meta"
         with torch.device(default_device):
-            input_norm = FusedMMInputNorm(image_mean, image_std, rescale_factor)
+            norm = FusedMMInputNorm(image_mean, image_std, rescale_factor)
 
-        assert input_norm.is_identity is is_identity
-        if is_identity:
-            assert input_norm.weight is None
-            assert input_norm.bias is None
-        else:
-            assert input_norm.weight.device.type == default_device
-            assert input_norm.bias.device.type == default_device
+        assert norm.weight.device.type == default_device
+        assert norm.bias.device.type == default_device

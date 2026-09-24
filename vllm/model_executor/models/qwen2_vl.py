@@ -51,7 +51,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
-from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -534,7 +537,7 @@ class Qwen2VisionTransformer(nn.Module):
         vision_config: Qwen2VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        input_norm: FusedMMInputNorm | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -562,9 +565,7 @@ class Qwen2VisionTransformer(nn.Module):
             in_channels=in_channels,
             embed_dim=embed_dim,
         )
-        self.input_norm = (
-            input_norm if input_norm is not None else FusedMMInputNorm.identity()
-        )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = embed_dim // num_heads
@@ -1296,7 +1297,7 @@ class Qwen2VLForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
-                input_norm=FusedMMInputNorm.from_model_config(self.model_config),
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
