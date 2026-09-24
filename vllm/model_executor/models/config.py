@@ -546,6 +546,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
         config.num_labels = 1
+        config.get_text_config().num_labels = 1
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
