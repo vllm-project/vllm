@@ -9,12 +9,10 @@ identical outputs.
 
 import json
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -25,6 +23,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 
 class WeightCacheDaemon:
@@ -38,9 +37,7 @@ class WeightCacheDaemon:
     ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            self.health_port = sock.getsockname()[1]
+        self.health_port = get_open_port()
         self._cmd = [
             sys.executable,
             "-m",
@@ -74,26 +71,20 @@ class WeightCacheDaemon:
         assert self._proc is not None and self._proc.stderr is not None
         self._proc.stderr.read()
 
-    def wait_ready(self, expected: int, timeout_s: float = 120.0) -> dict[str, Any]:
-        deadline = time.monotonic() + timeout_s
+    def check_health(self, expected: int) -> dict[str, Any]:
         url = f"http://127.0.0.1:{self.health_port}/health"
-        last_body: dict[str, Any] | None = None
-        while time.monotonic() < deadline:
-            try:
-                with urllib.request.urlopen(url, timeout=1) as response:
-                    body = json.loads(response.read())
-                    last_body = body
-                    if (
-                        response.status == 200
-                        and body.get("status") == "ready"
-                        and body.get("expected") == expected
-                        and body.get("ready") == expected
-                    ):
-                        return body
-            except (urllib.error.HTTPError, urllib.error.URLError):
-                pass
-            time.sleep(0.5)
-        raise AssertionError(f"Weight cache daemon did not become ready: {last_body}")
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                body = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            body = json.loads(error.read())
+            raise AssertionError(
+                f"Unexpected daemon health response: {body}"
+            ) from error
+        assert body["status"] == "ready"
+        assert body["expected"] == expected
+        assert body["ready"] == expected
+        return body
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -232,8 +223,8 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
-        expected_daemons = 2 if case is QWEN_MTP_CASE else 1
-        health = d.wait_ready(expected_daemons)
+        expected_daemons = 2 if case.llm_kwargs.get("speculative_config") else 1
+        health = d.check_health(expected_daemons)
         assert health["ready_ranks"]
         assert {rank["role"] for rank in health["ready_ranks"]} == (
             {"target", "draft"} if expected_daemons == 2 else {"target"}
