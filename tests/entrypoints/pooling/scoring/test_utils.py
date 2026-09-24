@@ -3,7 +3,7 @@
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.entrypoints.pooling.scoring.typing import ScoreInput
 from vllm.entrypoints.pooling.scoring.utils import (
@@ -76,7 +76,7 @@ def test_truncate_text_to_tokens_handles_shared_character_offsets():
     }
     backend = Tokenizer(models.BPE(vocab=vocab, merges=[]))
     backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
 
     truncated = truncate_text_to_tokens("aéx", tokenizer, max_tokens=2)
 

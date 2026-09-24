@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm import TokensPrompt
 from vllm.entrypoints.pooling.scoring.io_processor import (
@@ -48,7 +48,7 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
 
     processor = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
     processor.model_config = SimpleNamespace(enable_prompt_embeds=False)
-    processor.tokenizer = PreTrainedTokenizerFast(
+    processor.tokenizer = TokenizersBackend(
         tokenizer_object=backend,
         unk_token="[UNK]",
         cls_token="[CLS]",
