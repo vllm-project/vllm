@@ -432,6 +432,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
+                per_out_ch_quant=self.per_out_ch_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
             )
@@ -553,6 +554,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
+                per_out_ch_quant=self.per_out_ch_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w2_bias,
             )
