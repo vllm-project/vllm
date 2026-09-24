@@ -20,6 +20,8 @@ def _triton_mrope_forward(
     cos,
     sin,
     num_tokens,
+    q_token_stride,
+    k_token_stride,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     hd: tl.constexpr,
@@ -39,9 +41,10 @@ def _triton_mrope_forward(
     # and supports cos and sin cache with shape (3, num_tokens, rotary_dim // 2)
     # instead of (3, bsz, seq_len, head_dim), also supports interleaved rotary
     pid = tl.program_id(0)
-    # locate start address
-    q_ptr = q_ptr + pid * (n_qh * hd)
-    k_ptr = k_ptr + pid * (n_kh * hd)
+    # locate start address (row stride is explicit so strided views of a
+    # packed qkv tensor work without a contiguous copy)
+    q_ptr = q_ptr + pid * q_token_stride
+    k_ptr = k_ptr + pid * k_token_stride
 
     # ####################################################################
     # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
@@ -173,6 +176,9 @@ def triton_mrope(
     Args:
         q: [num_tokens, num_heads * head_size]
         k: [num_tokens, num_kv_heads * head_size]
+            q and k are updated in place. They may be strided views (e.g. of a
+            packed qkv tensor) as long as each token row is dense; a row stride
+            is passed to the kernel explicitly instead of forcing a copy.
         cos: [3, num_tokens, rotary_dim // 2]
             (T/H/W positions with multimodal inputs)
         sin: [3, num_tokens, rotary_dim // 2]
@@ -186,6 +192,10 @@ def triton_mrope(
             adjacent (GPT-J) layout.
 
     """
+    if q.dim() == 3:
+        q = q.reshape(q.shape[0], -1)
+    if k.dim() == 3:
+        k = k.reshape(k.shape[0], -1)
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
     n_kv_head = k.shape[1] // head_size
@@ -193,10 +203,11 @@ def triton_mrope(
     pad_n_q_head = triton.next_power_of_2(n_q_head)
     pad_n_kv_head = triton.next_power_of_2(n_kv_head)
 
-    # ensure tensors passed into the kernel are contiguous.
-    # It will be no-op if they are already contiguous
-    q = q.contiguous()
-    k = k.contiguous()
+    # The kernel needs dense token rows; only copy when that is not the case.
+    if q.stride(-1) != 1:
+        q = q.contiguous()
+    if k.stride(-1) != 1:
+        k = k.contiguous()
     cos = cos.contiguous()
     sin = sin.contiguous()
 
@@ -211,6 +222,8 @@ def triton_mrope(
         cos,
         sin,
         n_row,
+        q.stride(0),
+        k.stride(0),
         n_q_head,
         n_kv_head,
         head_size,
