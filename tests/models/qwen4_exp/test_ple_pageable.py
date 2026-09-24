@@ -462,6 +462,55 @@ def test_graph_replay_zeroes_rows_that_become_invalid(tmp_path):
 
 
 @requires_pageable
+def test_full_graph_captures_prefetch_and_forward(tmp_path, monkeypatch):
+    """start_prefetch + forward fit in one FULL cudagraph and replay new ids.
+
+    The pinned backend joins its side stream in _finalize_prefetch; this
+    backend looks up on the current stream, and joining the (uncaptured) side
+    stream anyway fails the capture with cudaErrorStreamCaptureIsolation.
+    """
+    shards = {0: 3, 1: 3, 2: 3, 3: 3}
+    model = _checkpoint(tmp_path, [shards])
+    monkeypatch.setattr(
+        ngram_embedding_module,
+        "resolve_checkpoint_files",
+        lambda model_config, load_config: _files(model),
+    )
+    emb = _mapped_embedding({"dir": model})
+    heads, tokens = 2, 3
+    emb._prefetch_buffer = torch.empty(
+        4, heads, ROW, dtype=torch.float8_e4m3fn, device="cuda"
+    )
+    emb._output_dim = heads * ROW
+    emb._prefetch_stream = torch.cuda.Stream()
+    emb.tp_size, emb.etp_data_parallel_size = 1, 1
+    emb.shard_indices = SimpleNamespace(org_vocab_start_index=0, org_vocab_end_index=12)
+    emb.bind_storage_after_loading()
+    hidden = torch.empty(tokens, 8, device="cuda")
+    ids = torch.tensor([[0, 5], [7, 11], [3, 3]], device="cuda")
+
+    def step():
+        emb.start_prefetch(hidden, ids)
+        return emb.forward(hidden)
+
+    ref = _reference(shards)
+    eager = step().view(torch.uint8).cpu().numpy()
+    np.testing.assert_array_equal(
+        eager, ref[ids.cpu().numpy()].reshape(tokens, heads * ROW)
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = step()
+    ids.copy_(torch.tensor([[1, 2], [4, 6], [9, 10]], device="cuda"))
+    graph.replay()
+    torch.accelerator.synchronize()
+    np.testing.assert_array_equal(
+        out.view(torch.uint8).cpu().numpy(),
+        ref[ids.cpu().numpy()].reshape(tokens, heads * ROW),
+    )
+
+
+@requires_pageable
 def test_zero_mapping_reads_zeros_without_committing_memory():
     table = MappedTable.zeros(1 << 20, ROW, torch.device("cuda"))
     ids = torch.tensor([0, 12345, (1 << 20) - 1], device="cuda")

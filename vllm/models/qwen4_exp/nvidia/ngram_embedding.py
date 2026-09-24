@@ -235,6 +235,14 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         """
         self._lookup_on_current_stream(ngram_ids)
 
+    def _join_prefetch_stream(self) -> None:
+        """Nothing to join: start_prefetch ran the lookup on the current stream.
+
+        Joining the side stream anyway fails a FULL cudagraph capture, because
+        that stream is never part of the capture
+        (cudaErrorStreamCaptureIsolation).
+        """
+
     def _lookup(
         self,
         input_ids: torch.Tensor,

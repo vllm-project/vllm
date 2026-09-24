@@ -559,10 +559,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         output: torch.Tensor,
     ) -> None:
         """Join the side stream, reduce ETP shards, and select local rows."""
-        prefetch_stream = self._prefetch_stream
-        if prefetch_stream is None:
-            raise RuntimeError("pinned PLE finalize requires a prior start_prefetch")
-        torch.cuda.current_stream().wait_stream(prefetch_stream)
+        self._join_prefetch_stream()
         slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
         active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
         embeddings = self._reduce_etp_embeddings(active_output)
@@ -572,6 +569,12 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             slot_offset,
         )
         output.copy_(embeddings.flatten(-2))
+
+    def _join_prefetch_stream(self) -> None:
+        prefetch_stream = self._prefetch_stream
+        if prefetch_stream is None:
+            raise RuntimeError("pinned PLE finalize requires a prior start_prefetch")
+        torch.cuda.current_stream().wait_stream(prefetch_stream)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Finish the pinned lookup into graph-owned output storage."""
