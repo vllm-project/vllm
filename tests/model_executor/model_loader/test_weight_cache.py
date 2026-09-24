@@ -7,12 +7,16 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
+from http.server import ThreadingHTTPServer
 from typing import Any
 
 import pytest
@@ -318,3 +322,54 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     )
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
+
+
+def test_weight_cache_daemon_health_reports_target_and_draft_readiness():
+    from types import SimpleNamespace
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        _HealthState,
+        _make_health_handler,
+    )
+    process = SimpleNamespace(exitcode=None)
+    expected = {
+        ("target", 0),
+        ("target", 1),
+        ("draft", 0),
+        ("draft", 1),
+    }
+    state = _HealthState(expected, [process])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_health_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def get_health() -> tuple[int, dict[str, object]]:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/health"
+            ) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    try:
+        status, body = get_health()
+        assert status == 503
+        assert body["status"] == "starting"
+        assert body["expected"] == 4
+        assert body["ready"] == 0
+
+        for rank in expected:
+            state.mark_ready(rank)
+        status, body = get_health()
+        assert status == 200
+        assert body["status"] == "ready"
+        assert body["expected"] == body["ready"] == 4
+
+        process.exitcode = 1
+        status, body = get_health()
+        assert status == 503
+        assert body["status"] == "failed"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()

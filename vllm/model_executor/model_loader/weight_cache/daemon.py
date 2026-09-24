@@ -78,13 +78,17 @@ cached and keep loading from disk in the engine.
 
 import contextlib
 import fcntl
+import json
 import multiprocessing
 import os
 import queue
 import signal
 import socket
 import sys
+import threading
 from collections.abc import Callable
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import product
 
 import torch
@@ -128,6 +132,66 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
+
+
+class _HealthState:
+    def __init__(
+        self,
+        expected: set[tuple[str, int]],
+        processes: list[multiprocessing.Process],
+    ) -> None:
+        self.expected = expected
+        self.processes = processes
+        self.ready: set[tuple[str, int]] = set()
+        self._lock = threading.Lock()
+
+    def mark_ready(self, rank: tuple[str, int]) -> None:
+        with self._lock:
+            self.ready.add(rank)
+
+    def snapshot(self) -> tuple[int, dict[str, object]]:
+        with self._lock:
+            ready = sorted(self.ready)
+            expected = sorted(self.expected)
+        failed = any(proc.exitcode is not None for proc in self.processes)
+        status = (
+            "ready"
+            if not failed and len(ready) == len(expected)
+            else "failed"
+            if failed
+            else "starting"
+        )
+        return (
+            HTTPStatus.OK if status == "ready" else HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "status": status,
+                "expected": len(expected),
+                "ready": len(ready),
+                "ready_ranks": [
+                    {"role": role, "rank": rank} for role, rank in ready
+                ],
+            },
+        )
+
+
+def _make_health_handler(state: _HealthState) -> type[BaseHTTPRequestHandler]:
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path.split("?", 1)[0] != "/health":
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            status, payload = state.snapshot()
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    return HealthHandler
 
 
 def export_entries(
@@ -534,6 +598,18 @@ def main() -> None:
         "--weight-cache-master-port + 1 for multi-node, or a free port for "
         "single-node.",
     )
+    parser.add_argument(
+        "--weight-cache-health-port",
+        type=int,
+        default=None,
+        help="Port for the parent /health endpoint; disabled by default.",
+    )
+    parser.add_argument(
+        "--weight-cache-health-host",
+        type=str,
+        default="0.0.0.0",
+        help="Host for the parent /health endpoint (default: 0.0.0.0).",
+    )
     args = parser.parse_args()
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
@@ -634,10 +710,32 @@ def main() -> None:
             tp_rank,
         ) in product(groups, placements)
     ]
+    health_server = None
+    health_thread = None
+    health_state = _HealthState(expected_ready, procs)
+    if args.weight_cache_health_port is not None:
+        health_server = ThreadingHTTPServer(
+            (args.weight_cache_health_host, args.weight_cache_health_port),
+            _make_health_handler(health_state),
+        )
+        health_thread = threading.Thread(
+            target=health_server.serve_forever,
+            name="vllm-weight-cache-health",
+            daemon=True,
+        )
+        health_thread.start()
+        logger.info(
+            "Weight cache daemon health endpoint listening on %s:%d/health",
+            args.weight_cache_health_host,
+            health_server.server_port,
+        )
+
     for proc in procs:
         proc.start()
 
     def _shutdown(signum, frame):
+        if health_server is not None:
+            health_server.shutdown()
         for proc in procs:
             proc.terminate()
 
@@ -647,7 +745,9 @@ def main() -> None:
     ready: set[tuple[str, int]] = set()
     while len(ready) < len(expected_ready):
         try:
-            ready.add(ready_queue.get(timeout=1.0))
+            rank = ready_queue.get(timeout=1.0)
+            ready.add(rank)
+            health_state.mark_ready(rank)
         except queue.Empty:
             dead = [p for p in procs if p.exitcode is not None]
             if dead:
@@ -660,6 +760,8 @@ def main() -> None:
                     proc.terminate()
                 for proc in procs:
                     proc.join()
+                if health_server is not None:
+                    health_server.shutdown()
                 sys.exit(max((p.exitcode or 0) for p in procs))
     socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
     logger.info_once(
@@ -674,6 +776,10 @@ def main() -> None:
 
     for proc in procs:
         proc.join()
+    if health_server is not None:
+        health_server.shutdown()
+    if health_thread is not None:
+        health_thread.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))
 
 
