@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -15,6 +15,32 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 logger = init_logger(__name__)
+
+
+def _watermark_sampler_cls(
+    base_sampler_cls: type[Sampler],
+) -> "type[GPUWatermarkSampler]":
+    """Compose GPUWatermarkSampler on top of a pluggable sampler class.
+
+    Watermarking layers sampling behavior over the base sampler, so it is
+    expressed as a mixin placed first in the MRO. Cached because the runner
+    builds the class once per process and `type()` creation is not free.
+    """
+    composed = _watermark_sampler_cls_cache.get(base_sampler_cls)
+    if composed is None:
+        composed = cast(
+            "type[GPUWatermarkSampler]",
+            type(
+                "WatermarkSampler",
+                (GPUWatermarkSampler, base_sampler_cls),
+                {},
+            ),
+        )
+        _watermark_sampler_cls_cache[base_sampler_cls] = composed
+    return composed
+
+
+_watermark_sampler_cls_cache: dict[type[Sampler], "type[GPUWatermarkSampler]"] = {}
 
 
 class GPUWatermarkSampler(Sampler):
