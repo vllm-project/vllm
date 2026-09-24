@@ -466,6 +466,7 @@ class TestReasoningTokenCounts:
         assert "".join(e.value for e in reasoning) == "tok1tok2"
         assert sum(e.token_count for e in reasoning) == 2
         assert engine.reasoning_token_count == 2
+        assert engine.content_token_count == 1
 
     def test_counts_tokens_after_final_deferred_start_terminal(self):
         engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
@@ -490,6 +491,7 @@ class TestReasoningTokenCounts:
         )
         assert sum(e.token_count for e in events if e.type == EventType.TEXT_CHUNK) == 1
         assert engine.reasoning_token_count == 2
+        assert engine.content_token_count == 1
 
 
 def _func_prefix_config() -> ParserEngineConfig:

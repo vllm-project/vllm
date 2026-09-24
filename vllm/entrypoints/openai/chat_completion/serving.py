@@ -25,6 +25,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    OutputTokenMetricsTracker,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
@@ -62,7 +63,7 @@ from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
@@ -139,6 +140,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         enable_per_request_metrics: bool = False,
+        enable_per_request_output_token_metrics: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -171,6 +173,13 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.enable_per_request_metrics = enable_per_request_metrics
+        self.enable_per_request_output_token_metrics = (
+            enable_per_request_output_token_metrics
+        )
+        self.validate_output_token_metrics_parser(
+            enable_per_request_output_token_metrics,
+            self.parser_cls,
+        )
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -329,6 +338,12 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if (
+                    self.enable_per_request_output_token_metrics
+                    and not request.stream
+                    and (request.n or 1) == 1
+                ):
+                    sampling_params.output_kind = RequestOutputKind.DELTA
 
             self._log_inputs(
                 sub_request_id,
@@ -475,6 +490,7 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cached_tokens = None
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
+        output_token_metrics_tracker = OutputTokenMetricsTracker()
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -678,6 +694,17 @@ class OpenAIServingChat(GenerateBaseServing):
                             tuple(generated_token_ids[i])
                         )
 
+                    if (
+                        self.enable_per_request_output_token_metrics
+                        and num_choices == 1
+                    ):
+                        phase_counts = (
+                            parser.classify_token_phases(generated_token_ids[i])
+                            if parser is not None
+                            else None
+                        )
+                        output_token_metrics_tracker.update(res.metrics, phase_counts)
+
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
@@ -846,13 +873,20 @@ class OpenAIServingChat(GenerateBaseServing):
                 stream_per_request_metrics: PerRequestMetrics | None = None
                 # See note in chat_completion_full_generator: suppress for n>1.
                 if (request.n or 1) == 1:
-                    if self.enable_per_request_metrics:
+                    if (
+                        self.enable_per_request_metrics
+                        or self.enable_per_request_output_token_metrics
+                    ):
                         last_metrics = (
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
                             last_metrics, completion_tokens
                         )
+                        if self.enable_per_request_output_token_metrics:
+                            stream_per_request_metrics.output_token_metrics = (
+                                output_token_metrics_tracker.build()
+                            )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
                         if stream_per_request_metrics is None:
@@ -928,10 +962,52 @@ class OpenAIServingChat(GenerateBaseServing):
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
+        output_token_metrics_tracker = OutputTokenMetricsTracker()
+        phase_token_ids: list[int] = []
+        collect_output_token_metrics = (
+            self.enable_per_request_output_token_metrics and (request.n or 1) == 1
+        )
 
         try:
             async for res in result_generator:
-                final_res = res
+                if collect_output_token_metrics:
+                    for output in res.outputs:
+                        phase_delta_token_ids = as_list(output.token_ids)
+                        if parser is not None:
+                            phase_token_ids.extend(phase_delta_token_ids)
+                            parser.parse_delta(
+                                delta_text=output.text,
+                                delta_token_ids=phase_delta_token_ids,
+                                request=request,
+                                prompt_token_ids=res.prompt_token_ids,
+                                finished=output.finish_reason is not None,
+                            )
+                            phase_counts = parser.classify_token_phases(phase_token_ids)
+                        else:
+                            phase_counts = None
+                        output_token_metrics_tracker.update(res.metrics, phase_counts)
+
+                if final_res is None:
+                    final_res = res
+                elif collect_output_token_metrics:
+                    final_res.add(res, aggregate=True)
+                    final_res.metrics = res.metrics
+                    # DELTA outputs carry these request-wide values only on
+                    # their final chunk; RequestOutput.add merges token data
+                    # but intentionally does not copy these optional fields.
+                    outputs_by_index = {
+                        output.index: output for output in final_res.outputs
+                    }
+                    for output in res.outputs:
+                        aggregated = outputs_by_index[output.index]
+                        if output.routed_experts is not None:
+                            aggregated.routed_experts = output.routed_experts
+                        if output.sampling_mask is not None:
+                            aggregated.sampling_mask = output.sampling_mask
+                        if output.spec_decode_metrics is not None:
+                            aggregated.spec_decode_metrics = output.spec_decode_metrics
+                else:
+                    final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
@@ -1152,10 +1228,17 @@ class OpenAIServingChat(GenerateBaseServing):
         # generation stream. For n>1 the stats belong to only one of the n
         # sequences, so they cannot be attributed to the request; suppress.
         if (request.n or 1) == 1:
-            if self.enable_per_request_metrics:
+            if (
+                self.enable_per_request_metrics
+                or self.enable_per_request_output_token_metrics
+            ):
                 per_request_metrics = build_per_request_timing_metrics(
                     final_res.metrics, num_generated_tokens
                 )
+                if self.enable_per_request_output_token_metrics:
+                    per_request_metrics.output_token_metrics = (
+                        output_token_metrics_tracker.build()
+                    )
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:
                 if per_request_metrics is None:

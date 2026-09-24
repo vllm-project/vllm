@@ -87,7 +87,11 @@ from vllm.renderers.online_renderer import (
     ResponsesPreviousMessages,
     ResponsesRenderResult,
 )
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
@@ -114,6 +118,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_per_request_metrics: bool = False,
+        enable_per_request_output_token_metrics: bool = False,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -143,6 +148,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.enable_per_request_metrics = enable_per_request_metrics
+        self.enable_per_request_output_token_metrics = (
+            enable_per_request_output_token_metrics
+        )
+        self.validate_output_token_metrics_parser(
+            enable_per_request_output_token_metrics,
+            self.parser,
+        )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -487,6 +499,14 @@ class OpenAIServingResponses(GenerateBaseServing):
                             )
                         ),
                     )
+            # Simple and Harmony contexts can consume engine deltas. ParsableContext
+            # expects one complete output and performs a full parse in append_output.
+            if (
+                self.enable_per_request_output_token_metrics
+                and not request.stream
+                and not isinstance(context, ParsableContext)
+            ):
+                sampling_params.output_kind = RequestOutputKind.DELTA
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
                 engine_input=engine_input,
@@ -652,8 +672,19 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
             async for res in generator:
-                context.request_metrics = res.metrics
+                if res.metrics is not None:
+                    context.request_metrics = res.metrics
                 context.append_output(res)
+                if self.enable_per_request_output_token_metrics and isinstance(
+                    context, (HarmonyContext, ParsableContext)
+                ):
+                    # ParsableContext consumes one complete output. Its final
+                    # timestamp cannot identify category boundaries, so retain
+                    # accurate counts but leave category timings unavailable.
+                    context.record_output_token_metrics(
+                        res,
+                        include_batch_timing=not isinstance(context, ParsableContext),
+                    )
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
@@ -735,8 +766,27 @@ class OpenAIServingResponses(GenerateBaseServing):
         async with AsyncExitStack() as exit_stack:
             try:
                 await self._initialize_tool_sessions(request, context, exit_stack)
-                async for _ in result_generator:
-                    pass
+                async for current_context in result_generator:
+                    if (
+                        self.enable_per_request_output_token_metrics
+                        and not request.stream
+                        and isinstance(current_context, SimpleContext)
+                        and current_context.response_parser is not None
+                        and current_context.last_output is not None
+                    ):
+                        current_output = current_context.last_output.outputs[0]
+                        current_context.response_parser.parse_delta(
+                            delta_text=current_output.text,
+                            delta_token_ids=as_list(current_output.token_ids),
+                            request=request,
+                            prompt_token_ids=(
+                                current_context.last_output.prompt_token_ids
+                            ),
+                            finished=current_output.finish_reason is not None,
+                        )
+                        current_context.record_output_token_metrics(
+                            current_context.last_output
+                        )
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
 
@@ -869,11 +919,15 @@ class OpenAIServingResponses(GenerateBaseServing):
         per_request_metrics = None
         if (
             self.enable_per_request_metrics
-            and context.request_metrics_cover_all_generation_turns
-        ):
+            or self.enable_per_request_output_token_metrics
+        ) and context.request_metrics_cover_all_generation_turns:
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics, num_generated_tokens
             )
+            if self.enable_per_request_output_token_metrics:
+                per_request_metrics.output_token_metrics = (
+                    context.build_output_token_metrics()
+                )
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
@@ -1227,6 +1281,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                     prompt_token_ids=ctx.last_output.prompt_token_ids,
                     finished=output.finish_reason is not None,
                 )
+                if self.enable_per_request_output_token_metrics:
+                    ctx.record_output_token_metrics(ctx.last_output)
             else:
                 delta_message = DeltaMessage(content=output.text)
 

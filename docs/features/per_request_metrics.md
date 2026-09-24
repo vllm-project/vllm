@@ -65,8 +65,9 @@ request.
     accurately attributed to the request as a whole. Token usage
     (`prompt_tokens`, `completion_tokens`) remains accurate in these cases.
     Per-request metrics also require server-side statistics logging, which is
-    on by default. vLLM rejects `--enable-per-request-metrics` when
-    `--disable-log-stats` is also set.
+    on by default. vLLM rejects `--enable-per-request-metrics` or
+    `--enable-per-request-output-token-metrics` when `--disable-log-stats` is also
+    set.
 
 ## Example Request
 
@@ -131,6 +132,94 @@ Metrics are omitted for Responses requests that perform multiple
 model-generation turns, such as built-in tool-call workflows, because the
 response retains timing data for only one generation turn while token usage is
 accumulated across all turns.
+
+## Output Token Metrics
+
+Output-token metrics are experimental and subject to change. Enable them for a
+reasoning model with a compatible output parser:
+
+```bash
+vllm serve openai/gpt-oss-20b \
+  --enable-per-request-output-token-metrics
+```
+
+GPT-OSS models automatically configure the built-in `openai_gptoss` reasoning
+parser and Harmony output parser. Other reasoning models must be started with a
+compatible `--reasoning-parser`, such as `gemma4` or `nemotron_v3`. When
+output-token metrics are enabled, vLLM verifies at startup that the resolved
+parser supports output-token classification and rejects unsupported parser
+configurations.
+
+This option does not require `--enable-per-request-metrics`; it includes the
+aggregate timing metrics and adds a nested `output_token_metrics` object to
+Responses and Chat Completions responses:
+
+```json
+{
+  "metrics": {
+    "time_to_first_token_ms": 85.2,
+    "generation_time_ms": 1240.5,
+    "queue_time_ms": 12.3,
+    "mean_itl_ms": 9.1,
+    "tokens_per_second": 103.2,
+    "output_token_metrics": {
+      "reasoning": {
+        "token_count": 36,
+        "time_to_first_token_ms": 108.22,
+        "generation_time_ms": 160.0,
+        "mean_itl_ms": 4.57,
+        "tokens_per_second": 218.75
+      },
+      "content": {
+        "token_count": 20,
+        "time_to_first_token_ms": 268.22,
+        "generation_time_ms": 210.0,
+        "mean_itl_ms": 11.05,
+        "tokens_per_second": 90.5
+      },
+      "unclassified_token_count": 2
+    }
+  }
+}
+```
+
+Each category reports timing scoped to its classified tokens. Both category
+TTFT values use the request's scheduled time as their common origin. Category
+generation time spans its first and last observed token batches; mean ITL
+divides that interval by `token_count - 1`, and category throughput is its
+reciprocal. Unlike aggregate `tokens_per_second`, category throughput excludes
+the category's TTFT. A zero-token category remains present with `token_count: 0`
+and `null` timing fields.
+
+Token timing has engine output-batch resolution. When one output batch contains
+multiple tokens, including tokens on both sides of a reasoning/content
+boundary, those tokens share a timestamp. Category mean ITL and throughput are
+averages over the interval between the first and last observed batches; vLLM
+does not infer individual timestamps for tokens within a batch. These fields
+remain `null` when there are fewer than two category tokens or no measurable
+interval between the first and last observations. Multiple segments of the same
+category are aggregated, so their generation interval includes time between
+segments.
+
+`reasoning.token_count` uses the same parser classification as the endpoint's
+existing reasoning-token usage field. It therefore equals
+`usage.output_tokens_details.reasoning_tokens` for Responses and
+`usage.completion_tokens_details.reasoning_tokens` for Chat Completions. For
+Harmony, this follows the existing usage convention in which analysis and
+addressed commentary or tool-call tokens count as reasoning.
+
+`content.token_count` represents final-answer payload tokens.
+`unclassified_token_count` contains remaining boundary, framing, and other
+parser-control tokens. For every classified response, the three counts
+reconcile to the existing total output-token count:
+
+```text
+reasoning.token_count + content.token_count + unclassified_token_count
+    = total generated tokens
+```
+
+The total is `usage.output_tokens` for Responses and
+`usage.completion_tokens` for Chat Completions.
 
 ## Relationship to Prometheus Metrics
 

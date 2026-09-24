@@ -19,6 +19,7 @@ from vllm.entrypoints.generate.base.protocol import (
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
+    TokenPhaseCounts,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -234,6 +235,16 @@ class Parser:
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Return the number of reasoning tokens in generated token IDs."""
         return 0
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        """Classify generated tokens, or return ``None`` if unsupported."""
+        return None
+
+    @classmethod
+    def supports_token_phase_classification(cls) -> bool:
+        return cls.classify_token_phases is not Parser.classify_token_phases
 
 
 class DelegatingParser(Parser):
@@ -820,6 +831,71 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return 0
         return self._reasoning_parser.count_reasoning_tokens(token_ids)
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        reasoning_parser = self._reasoning_parser
+        if reasoning_parser is None:
+            if self._tool_parser is None:
+                return TokenPhaseCounts(0, len(token_ids), 0)
+            return None
+        if self._tool_parser is not None:
+            return None
+        if (
+            type(reasoning_parser).count_reasoning_tokens
+            is ReasoningParser.count_reasoning_tokens
+        ):
+            return None
+
+        parser_engine = getattr(reasoning_parser, "_parser_engine", None)
+        if getattr(reasoning_parser, "_streaming_count_valid", False):
+            if parser_engine is None:
+                return None
+            phase_counts = parser_engine.classify_token_phases(token_ids)
+            if phase_counts is None or not parser_engine.reasoning_transitioned:
+                return phase_counts
+
+            # After the reasoning transition, ordinary content is no longer
+            # forwarded to the legacy reasoning adapter.
+            content = len(reasoning_parser.extract_content_ids(list(token_ids)))
+            return TokenPhaseCounts(
+                reasoning=phase_counts.reasoning,
+                content=max(phase_counts.content, content),
+                unclassified=max(
+                    0,
+                    len(token_ids)
+                    - phase_counts.reasoning
+                    - max(phase_counts.content, content),
+                ),
+            )
+
+        reasoning = reasoning_parser.count_reasoning_tokens(token_ids)
+        counting_engine = getattr(reasoning_parser, "_counting_parser_engine", None)
+        if counting_engine is not None:
+            return counting_engine.classify_token_phases(token_ids)
+        content = len(reasoning_parser.extract_content_ids(list(token_ids)))
+        return TokenPhaseCounts(
+            reasoning=reasoning,
+            content=content,
+            unclassified=max(0, len(token_ids) - reasoning - content),
+        )
+
+    @classmethod
+    def supports_token_phase_classification(cls) -> bool:
+        # Legacy reasoning parsers can count one particular output shape
+        # without being able to classify every shape they accept. For example,
+        # some treat text before a lone closing marker as reasoning while their
+        # token counter requires an opening marker. ParserEngine adapters expose
+        # complete reasoning/content/control accounting and are safe to enable.
+        from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+
+        reasoning_parser_cls = cls.reasoning_parser_cls
+        return (
+            reasoning_parser_cls is not None
+            and cls.tool_parser_cls is None
+            and issubclass(reasoning_parser_cls, ParserEngineReasoningAdapter)
+        )
 
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None

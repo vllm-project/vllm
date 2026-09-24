@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
@@ -71,12 +72,39 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     per_step_drafted: list[int] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TokenPhaseCounts:
+    """Cumulative parser-classified generated-token counts."""
+
+    reasoning: int
+    content: int
+    unclassified: int
+
+
+class OutputTokenCategoryMetrics(OpenAIBaseModel):
+    token_count: int
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
+
+
+class OutputTokenMetrics(OpenAIBaseModel):
+    reasoning: OutputTokenCategoryMetrics
+    content: OutputTokenCategoryMetrics
+    unclassified_token_count: int = 0
+
+
 class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    # Experimental, subject to change.
+    output_token_metrics: OutputTokenMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
 

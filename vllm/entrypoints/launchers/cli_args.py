@@ -140,6 +140,9 @@ class BaseFrontendArgs:
     """If set to True, enable prompt_tokens_details in usage."""
     enable_per_request_metrics: bool = False
     """If set to True, include per-request timing metrics in API responses."""
+    enable_per_request_output_token_metrics: bool = False
+    """If set, include experimental reasoning/content output-token metrics.
+    This also includes the aggregate per-request timing metrics."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
@@ -464,12 +467,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "(0 disables keep-alive comments)."
         )
 
-    if getattr(args, "enable_per_request_metrics", False) and getattr(
-        args, "disable_log_stats", False
-    ):
+    request_metrics_enabled = getattr(
+        args, "enable_per_request_metrics", False
+    ) or getattr(args, "enable_per_request_output_token_metrics", False)
+    if request_metrics_enabled and getattr(args, "disable_log_stats", False):
         raise ValueError(
-            "Error: --enable-per-request-metrics requires engine statistics "
-            "logging; remove --disable-log-stats to enable per-request metrics."
+            "Error: per-request metrics require engine statistics logging; "
+            "remove --disable-log-stats to enable per-request metrics."
         )
 
     if args.data_parallel_multi_port_external_lb:

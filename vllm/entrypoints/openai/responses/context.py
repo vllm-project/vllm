@@ -24,7 +24,8 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall, TokenPhaseCounts
+from vllm.entrypoints.generate.base.serving import OutputTokenMetricsTracker
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -41,11 +42,10 @@ from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.v1.metrics.stats import RequestStateStats
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
-
-    from vllm.v1.metrics.stats import RequestStateStats
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,33 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+    _output_token_metrics: OutputTokenMetricsTracker | None = None
+    _accumulated_token_ids: list[int]
+
+    def record_output_token_metrics(
+        self, output: RequestOutput, *, include_batch_timing: bool = True
+    ) -> None:
+        if not output.outputs:
+            return
+        if self._output_token_metrics is None:
+            self._output_token_metrics = OutputTokenMetricsTracker()
+
+        parser = self.response_parser
+        if parser is None:
+            counts = None
+        else:
+            counts = parser.classify_token_phases(self._accumulated_token_ids)
+            if not isinstance(counts, TokenPhaseCounts):
+                counts = None
+        metrics = None
+        if include_batch_timing and isinstance(output.metrics, RequestStateStats):
+            metrics = output.metrics
+        self._output_token_metrics.update(metrics, counts)
+
+    def build_output_token_metrics(self):
+        if self._output_token_metrics is None:
+            return None
+        return self._output_token_metrics.build()
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -637,6 +664,7 @@ class HarmonyContext(ConversationContext):
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        self._accumulated_token_ids: list[int] = []
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -653,6 +681,7 @@ class HarmonyContext(ConversationContext):
             self._update_prefill_token_usage(output)
 
         output_token_ids = output.outputs[0].token_ids
+        self._accumulated_token_ids.extend(output_token_ids)
         result = self.response_parser.process_chunk(output_token_ids)
         segments = result.segments
         self.num_reasoning_tokens += result.reasoning_token_count
