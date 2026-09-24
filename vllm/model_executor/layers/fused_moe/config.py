@@ -1282,6 +1282,7 @@ class FusedMoEConfig:
     elastic_ep_max_dp_size: int | None = None
     has_bias: bool = False
     is_lora_enabled: bool = False
+    has_hash_routing: bool = False
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
