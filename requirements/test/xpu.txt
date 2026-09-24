@@ -636,7 +636,7 @@ opentelemetry-semantic-conventions-ai==0.5.1
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
-oss-harmony==0.0.11
+oss-harmony==0.0.9
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

@@ -731,7 +731,7 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.11.5
     # via genai-perf
-oss-harmony==0.0.11
+oss-harmony==0.0.9
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
