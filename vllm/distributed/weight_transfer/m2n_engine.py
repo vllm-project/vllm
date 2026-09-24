@@ -394,8 +394,7 @@ class M2NWeightTransferEngine(
                     yield name, buffer
 
         has_fallback = any(
-            self._parameter_destinations[index].tensor is None
-            for _, index in requested
+            self._parameter_destinations[index].tensor is None for _, index in requested
         )
         with disable_mtp_completeness_check():
             received_weights = reshard_requested_weights()

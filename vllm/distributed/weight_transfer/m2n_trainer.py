@@ -15,7 +15,7 @@ in every caller.
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 from typing_extensions import Self
@@ -27,7 +27,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
 )
 from vllm.distributed.weight_transfer.m2n_common import (
-    REPLICATED,
     M2NMesh,
     M2NParamMeta,
     Placements,
@@ -89,7 +88,7 @@ class M2NTrainerInitInfo(TrainerInitInfo):
     def destination_mesh_dims(self) -> tuple[int, int]:
         """`dst_mesh_dims`, or a flat mesh over every inference worker."""
         if self.dst_mesh_dims is not None:
-            return tuple(self.dst_mesh_dims)
+            return self.dst_mesh_dims
         return (self.world_size - self.num_trainer_ranks, 1)
 
     def __post_init__(self) -> None:
@@ -143,6 +142,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     ) -> None:
         """Hold the client and source; `trainer_init` fills in the group."""
         super().__init__(client=client, source=source, is_sender=is_controller)
+        self.source: M2NWeightSource = source
         self.is_controller = is_controller
         self.num_trainer_ranks = num_trainer_ranks
         self.group: PyNcclCommunicator | None = None
@@ -160,7 +160,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         init_info: M2NTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        source: WeightSource,
+        source: WeightSource | None = None,
     ) -> Self:
         """Build the engine and rendezvous with the inference side.
 
@@ -208,7 +208,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # express is a mismatched collective at send time, which hangs rather
         # than raises -- so every precondition is checked while an exception can
         # still propagate to the caller.
-        engine._metas = source.metadata()
+        engine._metas = cast(list[M2NParamMeta], source.metadata())
         for meta in engine._metas:
             check_transferable(meta.name, meta.dtype, meta.shape)
             mesh, placements = resolve_layout(engine._src_mesh, meta.placements)
@@ -312,6 +312,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
 
     def _worker_init_info(self, init_info: M2NTrainerInitInfo) -> dict[str, Any]:
         """Handshake payload: rendezvous, both meshes, and the transfer plan."""
+        assert self._src_mesh is not None
         payload: dict[str, Any] = {
             "master_address": init_info.master_address,
             "master_port": init_info.master_port,
@@ -324,7 +325,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             "dtype_names": [_dtype_name(m.dtype) for m in self._metas],
             "shapes": [list(m.shape) for m in self._metas],
             "src_placements": [
-                None if m.placements is REPLICATED else list(m.placements)
+                None if m.placements is None else list(m.placements)
                 for m in self._metas
             ],
             "max_cta": init_info.max_cta,
@@ -341,6 +342,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             self.client.start_weight_update()
             # The workers reshard from inside `update_weights`, concurrently
             # with the sends below.
+            assert self._executor is not None
             update = self._executor.submit(
                 self.client.update_weights,
                 {"names": [m.name for m in self._metas]},
@@ -357,6 +359,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
 
     def _send(self) -> None:
         """Reshard each local shard into its worker-planned destination."""
+        assert self.group is not None
+        assert self._src_mesh is not None
+        assert self._dst_mesh is not None
         m2n = self._m2n
         comm = comm_ptr(self.group)
         stream = torch.cuda.current_stream()

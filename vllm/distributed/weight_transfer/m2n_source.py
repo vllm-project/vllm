@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from vllm.distributed.weight_transfer.base import WeightSource
+from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATE,
     REPLICATED,
@@ -44,7 +44,7 @@ class M2NWeightSource(WeightSource):
         """The trainer's rank topology, shared by every parameter."""
         raise NotImplementedError
 
-    def metadata(self) -> list[M2NParamMeta]:
+    def metadata(self) -> list[ParamMeta]:
         """Name, dtype, full shape, and trainer placement for each parameter."""
         raise NotImplementedError
 
@@ -141,7 +141,7 @@ class DTensorModuleSource(M2NWeightSource):
             )
         return meshes.pop() if meshes else M2NMesh((self._num_trainer_ranks, 1), 0)
 
-    def metadata(self) -> list[M2NParamMeta]:
+    def metadata(self) -> list[ParamMeta]:
         """Read global shape/dtype and placements without gathering shards."""
         return [
             M2NParamMeta(name, p.dtype, tuple(p.shape), placements_from_tensor(p))

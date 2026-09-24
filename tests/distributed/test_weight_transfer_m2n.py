@@ -275,9 +275,7 @@ class TestWireTypes:
                 self.calls += 1
                 received = list(weights)
                 if [name for name, _ in received] == ["pair.weight", "pair.scale"]:
-                    self.loaded = [
-                        (name, tensor.clone()) for name, tensor in received
-                    ]
+                    self.loaded = [(name, tensor.clone()) for name, tensor in received]
 
         model = CoupledModel()
         direct = torch.zeros(1)
@@ -310,9 +308,7 @@ class TestWireTypes:
         monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 
         engine.receive_weights(
-            M2NWeightTransferUpdateInfo(
-                names=["pair.weight", "direct", "pair.scale"]
-            )
+            M2NWeightTransferUpdateInfo(names=["pair.weight", "direct", "pair.scale"])
         )
 
         assert model.calls == 1

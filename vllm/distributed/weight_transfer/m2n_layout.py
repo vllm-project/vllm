@@ -207,13 +207,16 @@ def resolve_parameter_destinations(
                     shape, param.shape, declared_dim, shard_axis_size
                 )
 
-        if dim is None or dim == REPLICATE:
+        if dim is None:
             # A replicated parameter is identical on every rank, so it needs no
             # placement of its own — REPLICATED lets resolve_layout spread it
             # over all the workers regardless of how the mesh is factored.
-            tensor = param.data if dim == REPLICATE else None
-            destinations.append(M2NDestination(name, REPLICATED, tensor))
+            destinations.append(M2NDestination(name, REPLICATED, None))
+        elif dim == REPLICATE:
+            assert param is not None
+            destinations.append(M2NDestination(name, REPLICATED, param.data))
         else:
+            assert param is not None
             destinations.append(
                 M2NDestination(name, _destination_placements(dim), param.data)
             )
