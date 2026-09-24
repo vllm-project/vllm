@@ -7,7 +7,13 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 
 
-@triton.jit
+# num_tokens/num_grids vary per request (incl. the ==1 class) and grids_ptr
+# is an offset slice of the packed H2D buffer, so its 16B alignment varies
+# with grid count; without these the kernel recompiles mid-serving.
+@triton.jit(
+    do_not_specialize=["num_tokens", "num_grids"],
+    do_not_specialize_on_alignment=["grids_ptr"],
+)
 def _vit_mrope_setup_kernel(
     inv_freq_t_ptr,
     inv_freq_h_ptr,
