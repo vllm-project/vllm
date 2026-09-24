@@ -1,5 +1,5 @@
 # Base UBI image
-ARG BASE_UBI_IMAGE_TAG=9.6-1754584681
+ARG BASE_UBI_IMAGE_TAG=9.8
 
 ###############################################################
 #                       BUILDER  STAGE                        #
@@ -7,7 +7,7 @@ ARG BASE_UBI_IMAGE_TAG=9.6-1754584681
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS builder-base
 
-ARG VLLM_VERSION="0.22.1"
+ARG VLLM_VERSION="0.0.0.dev"
 ARG PYTHON_VERSION=3.12
 ARG VLLM_TARGET_DEVICE=cpu
 
@@ -44,10 +44,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # copy vllm source code to build cache
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-14/enable && \
-    pip install -U uv
-
 # build & install vLLM so that all transitive dependencies are build/downloaded into the uv cache
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-14/enable && \
@@ -62,7 +58,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export DNNL_ARCH_OPT_FLAGS="-mcpu=power10 -mtune=power10" && \
     export C_INCLUDE_PATH=/usr/local/include:$C_INCLUDE_PATH && \
     export CPLUS_INCLUDE_PATH=/usr/local/include:$CPLUS_INCLUDE_PATH && \
-    uv pip install 'setuptools>=78.1.1' && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/OpenBLAS/lib/:/usr/local/lib64:/usr/local/lib && \
     export LIBGOMP=/opt/rh/gcc-toolset-14/root/usr/lib/gcc/ppc64le-redhat-linux/14/libgomp.so && \
 
@@ -74,7 +69,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     find /root/.cache/uv -name "*.whl" && \
     SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION" uv build \
       --wheel --out-dir ${WHEEL_DIR} --no-build-isolation && \
-    uv pip install "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh
+    uv pip install "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh && \
+    uv pip install "setuptools==80.10.2" && \
+    uv pip uninstall -y pip cmake meson-python scikit-build-core maturin build wheel auditwheel pybind11 nanobind cython setuptools-rust && \
+    # Remove packaged test suites
+    find ${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages \
+        -type d \( -name tests -o -name test \) -exec rm -rf {} + && \
+    find ${VIRTUAL_ENV} -name "__pycache__" -type d -exec rm -rf {} + && \
+    find ${VIRTUAL_ENV} -name "*.pyc" -delete && \
+    rm -f ${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages/xgrammar/lib/libxgrammar.a
 
 ###############################################################
 #                   FINAL VLLM IMAGE STAGE                    #
@@ -102,7 +105,7 @@ ENV UV_INDEX_STRATEGY=first-match
 RUN --mount=type=cache,target=/root/.cache/uv \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     microdnf install --nodocs -y \
-    libomp libicu tar autoconf automake libtool findutils openssl numactl numactl-devel \
+    libomp libicu tar autoconf automake libtool findutils openssl openblas-devel numactl numactl-devel \
     pkgconfig xsimd gcc-toolset-14 libsndfile \
     libtiff libjpeg openjpeg2 zlib zeromq \
     freetype lcms2 libwebp tcl tk utf8proc \
@@ -152,5 +155,3 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 USER 2000
 
 ENTRYPOINT ["vllm", "serve"]
-
- 
