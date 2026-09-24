@@ -13,6 +13,8 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     _replace_layer_index,
@@ -37,7 +39,9 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_mxfp8_rows,
     rocm_inverse_rope_rows_,
+    rocm_mxfp8_wo_a_bmm,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -663,7 +667,40 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             transpose_scale=False,
         )
 
-    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _alloc_attn_out(
+        self, num_tokens: int, hidden_states: torch.Tensor
+    ) -> torch.Tensor | QuantizedActivation:
+        if not _ON_GFX950:
+            return super()._alloc_attn_out(num_tokens, hidden_states)
+        # wo_a's MXFP8 input: the decode reduce writes it directly, prefill
+        # rows are rotated and quantized after their bf16 attention.
+        width = self.n_local_heads * self.head_dim
+        data = torch.empty(
+            (num_tokens, width), dtype=torch.float8_e4m3fn, device=hidden_states.device
+        )
+        scale = torch.empty(
+            (num_tokens, width // 32), dtype=torch.uint8, device=hidden_states.device
+        )
+        return QuantizedActivation(
+            data=data,
+            scale=scale,
+            orig_dtype=hidden_states.dtype,
+            orig_shape=data.shape,
+            quant_key=kMxfp8Dynamic,
+        )
+
+    def _o_proj(
+        self, attn_out: torch.Tensor | QuantizedActivation, positions: torch.Tensor
+    ) -> torch.Tensor:
+        if isinstance(attn_out, QuantizedActivation):
+            z = rocm_mxfp8_wo_a_bmm(
+                attn_out.data,
+                attn_out.scale,
+                self.wo_a,
+                self.n_local_groups,
+                self.o_lora_rank,
+            )
+            return self._wo_b_after_wo_a(z)
         o = attn_out[:, : self.n_local_heads, :]
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
         z = rocm_inv_rope_einsum(
@@ -676,26 +713,29 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.wo_a,
             inverse_rope=False,
         )
-        zf = z.flatten(1)
+        return self._wo_b_after_wo_a(z.flatten(1))
+
+    def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
         if self._wo_b_scale is not None and zf.dim() == 2:
-            result = self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
-        else:
-            result = self.wo_b(zf)
-        return result
+            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+        return self.wo_b(zf)
 
     def forward_mqa(
         self,
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor | QuantizedActivation,
     ) -> None:
-        assert output.shape == q.shape, (
-            f"output buffer shape {output.shape} must match q shape {q.shape}"
-        )
-        assert output.dtype == q.dtype, (
-            f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
-        )
+        mxfp8_out = output if isinstance(output, QuantizedActivation) else None
+        if mxfp8_out is None:
+            assert isinstance(output, torch.Tensor)
+            assert output.shape == q.shape, (
+                f"output buffer shape {output.shape} must match q shape {q.shape}"
+            )
+            assert output.dtype == q.dtype, (
+                f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
+            )
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -713,9 +753,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             M = N + self.window_size + self.max_num_batched_tokens
             current_workspace_manager().get_simultaneous(
-                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                *self._prefill_workspace_shapes(M, self.max_num_batched_tokens, q)
             )
-            output.zero_()
+            if mxfp8_out is None:
+                output.zero_()
+            else:
+                mxfp8_out.data.zero_()
+                mxfp8_out.scale.zero_()
             return
 
         assert isinstance(attn_metadata, dict)
@@ -745,10 +789,41 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 positions=positions[num_decode_tokens:],
                 compressed_k_cache=self_kv_cache,
                 swa_k_cache=swa_kv_cache,
-                output=output[num_decode_tokens:],
+                output=(
+                    output[num_decode_tokens:]
+                    if isinstance(output, torch.Tensor)
+                    else None
+                ),
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
+                mxfp8_out=(
+                    None
+                    if mxfp8_out is None
+                    else (
+                        mxfp8_out.data[num_decode_tokens:],
+                        mxfp8_out.scale[num_decode_tokens:],
+                    )
+                ),
             )
+        if mxfp8_out is not None:
+            # The reduce epilogue rotates and quantizes every decode row and
+            # the prefill path already did its own, so nothing is owed here.
+            if num_decodes > 0:
+                self._forward_decode(
+                    q=q[:num_decode_tokens],
+                    positions=positions[:num_decode_tokens],
+                    kv_cache=self_kv_cache,
+                    swa_metadata=swa_metadata,
+                    attn_metadata=rocm_metadata,
+                    swa_only=swa_only,
+                    output=None,
+                    output_mxfp8=(
+                        mxfp8_out.data[:num_decode_tokens],
+                        mxfp8_out.scale[:num_decode_tokens],
+                    ),
+                )
+            return
+        assert isinstance(output, torch.Tensor)
         rotated = 0
         if num_decodes > 0:
             rotated = self._forward_decode(
@@ -816,7 +891,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
-        output: torch.Tensor,
+        output: torch.Tensor | None,
+        output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> int:
         """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
@@ -856,6 +932,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            output_mxfp8=output_mxfp8,
             inv_rope_positions=positions,
             inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
@@ -871,10 +948,16 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         compressed_k_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor | None,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
+        """Sparse prefill into bf16 ``output``, or into ``mxfp8_out``.
+
+        With ``mxfp8_out`` the rows go to a bf16 workspace first and are then
+        inverse-RoPE'd and quantized into it in one pass.
+        """
         swa_only = attn_metadata is None
 
         num_prefills = swa_metadata.num_prefills
@@ -910,10 +993,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.PREFILL_CHUNK_SIZE
         )
 
-        workspace_manager = current_workspace_manager()
-        kv = workspace_manager.get_simultaneous(
-            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-        )[0]
+        workspace = current_workspace_manager().get_simultaneous(
+            *self._prefill_workspace_shapes(M, num_prefill_tokens, q)
+        )
+        kv = workspace[0]
+        if mxfp8_out is not None:
+            output = workspace[1]
+        assert output is not None
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
@@ -978,3 +1064,31 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_sink=self.attn_sink,
                 output=output[query_start:query_end],
             )
+        if mxfp8_out is not None:
+            rocm_inverse_rope_mxfp8_rows(
+                output,
+                positions[:num_prefill_tokens],
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+                mxfp8_out[0][:num_prefill_tokens],
+                mxfp8_out[1][:num_prefill_tokens],
+            )
+
+    def _prefill_workspace_shapes(
+        self, M: int, num_prefill_tokens: int, q: torch.Tensor
+    ) -> list[tuple[tuple[int, ...], torch.dtype]]:
+        """The prefill gather buffer, plus bf16 rows for the MXFP8 output.
+
+        One ``get_simultaneous`` call: separate calls alias the same memory.
+        """
+        shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
+            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
+        ]
+        if _ON_GFX950:
+            shapes.append(
+                (
+                    (num_prefill_tokens, self.n_local_heads, self.head_dim),
+                    torch.bfloat16,
+                )
+            )
+        return shapes
