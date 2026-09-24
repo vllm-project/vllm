@@ -3289,6 +3289,103 @@ def test_kv_cache_events(blocks_to_cache: int):
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
 
 
+def test_block_removed_event_waits_for_last_duplicate():
+    """Duplicate blocks share a hash. Evicting one copy while another copy
+    still serves prefix-cache hits must not emit BlockRemoved."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(2 * block_size))
+    # Two identical prompts computed without a lookup (as with concurrent
+    # prefills): each of the 2 hashes gets two physical copies.
+    req0 = make_request("0", tokens, block_size, sha256)
+    req1 = make_request("1", tokens, block_size, sha256)
+    manager.allocate_slots(req0, len(tokens))
+    manager.allocate_slots(req1, len(tokens))
+    manager.free(req0)
+    manager.free(req1)
+    manager.take_events()
+    prompt_hashes = {
+        kv_cache_utils.maybe_convert_block_hash(h) for h in req0.block_hashes
+    }
+    probe = make_request("probe", tokens + [0], block_size, sha256)
+
+    def removed_prompt_hashes() -> set:
+        return {
+            h
+            for event in manager.take_events()
+            if isinstance(event, BlockRemoved)
+            for h in event.block_hashes
+            if h in prompt_hashes
+        }
+
+    # Free queue: 6 never-used blocks, then req0's copies, then req1's copies.
+    # Evict the 6 never-used blocks and both copies owned by req0.
+    filler_tokens = list(range(1000, 1000 + 8 * block_size))
+    filler = make_request("f0", filler_tokens, block_size, sha256)
+    manager.allocate_slots(filler, len(filler_tokens))
+    assert removed_prompt_hashes() == set()
+    assert manager.get_computed_blocks(probe)[1] == len(tokens)
+
+    # Evict the last copies: now the hashes are gone.
+    filler_tokens = list(range(3000, 3000 + 2 * block_size))
+    filler = make_request("f1", filler_tokens, block_size, sha256)
+    manager.allocate_slots(filler, len(filler_tokens))
+    assert removed_prompt_hashes() == prompt_hashes
+    assert manager.get_computed_blocks(probe)[1] == 0
+
+
+def test_block_stored_event_skips_duplicate_copies():
+    """A copy of an already cached hash emits no BlockStored. The events
+    around it stay contiguous chains with their own parent and tokens."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 20),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    to_ext = kv_cache_utils.maybe_convert_block_hash
+
+    def stored_events() -> list[BlockStored]:
+        return [e for e in manager.take_events() if isinstance(e, BlockStored)]
+
+    tokens = list(range(4 * block_size))
+    req0 = make_request("0", tokens[: 3 * block_size], block_size, sha256)
+    manager.allocate_slots(req0, 3 * block_size)
+    (event,) = stored_events()
+    hashes = [to_ext(h) for h in req0.block_hashes]
+    assert event.block_hashes == hashes and event.parent_block_hash is None
+
+    # The same 3 blocks computed again without a lookup: all duplicates.
+    req1 = make_request("1", tokens[: 3 * block_size], block_size, sha256)
+    manager.allocate_slots(req1, 3 * block_size)
+    assert stored_events() == []
+
+    # Duplicates, then a new block: the last duplicate is the parent.
+    req2 = make_request("2", tokens, block_size, sha256)
+    manager.allocate_slots(req2, len(tokens))
+    (event,) = stored_events()
+    assert event.block_hashes == [to_ext(req2.block_hashes[3])]
+    assert event.parent_block_hash == hashes[2]
+    assert list(event.token_ids) == tokens[3 * block_size :]
+
+    # A new block between duplicates: its own event, parent and tokens.
+    manager.evict_blocks({manager.get_block_ids(r)[0][1] for r in ("0", "1", "2")})
+    req3 = make_request("3", tokens, block_size, sha256)
+    manager.allocate_slots(req3, len(tokens))
+    (event,) = stored_events()
+    assert event.block_hashes == [hashes[1]]
+    assert event.parent_block_hash == hashes[0]
+    assert list(event.token_ids) == tokens[block_size : 2 * block_size]
+
+
 def test_null_parent_block_hash():
     block_size = 1
     num_cached_blocks = 2
