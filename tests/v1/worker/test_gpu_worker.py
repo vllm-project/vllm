@@ -258,3 +258,40 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+@pytest.mark.parametrize("kv_bytes", [None, GiB_bytes])
+def test_deep_gemm_warmup_precedes_memory_profile(monkeypatch, kv_bytes):
+    """Synthetic warmup peaks must not reduce the inferred KV-cache capacity."""
+    from contextlib import contextmanager
+
+    events = []
+
+    class ProfileReached(Exception):
+        pass
+
+    def profile_run():
+        events.append("forward")
+        raise ProfileReached
+
+    @contextmanager
+    def memory_profiling(*args, **kwargs):
+        events.append("measure")
+        yield None
+
+    worker = _plan_worker(kv_bytes=kv_bytes)
+    worker.get_model = lambda: object()
+    worker.scheduler_config = SimpleNamespace(max_num_batched_tokens=16)
+    worker.model_runner = SimpleNamespace(profile_run=profile_run, model_memory_usage=0)
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(gpu_worker, "is_deep_gemm_supported", lambda: True)
+    monkeypatch.setattr(gpu_worker.envs, "VLLM_DEEP_GEMM_WARMUP", "relax")
+    monkeypatch.setattr(
+        gpu_worker, "deep_gemm_warmup", lambda *_: events.append("warmup")
+    )
+    monkeypatch.setattr(gpu_worker, "memory_profiling", memory_profiling)
+    with pytest.raises(ProfileReached):
+        gpu_worker.Worker.determine_available_memory(worker)
+    assert events == (
+        ["warmup", "measure", "forward"] if kv_bytes is None else ["warmup", "forward"]
+    )
