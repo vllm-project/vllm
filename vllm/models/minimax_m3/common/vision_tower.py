@@ -22,89 +22,15 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
+    vit_mrope_setup,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
-from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
-
-# Initial sizes of the per-axis RoPE cos/sin tables. 512 covers the t bound
-# (500-frame processor cap / temporal_patch_size=2) and 4096 covers h/w
-# (pixel-count caps with MAX_RATIO=200 give h/w <= ~680); tables are grown
-# on demand since max_pixels is request-overridable.
-_ROPE_TABLE_T = 512
-_ROPE_TABLE_HW = 4096
-
-
-@triton.jit
-def _mrope_3d_setup_kernel(
-    cos_t_ptr,
-    cos_h_ptr,
-    cos_w_ptr,
-    sin_t_ptr,
-    sin_h_ptr,
-    sin_w_ptr,
-    cos_out_ptr,
-    sin_out_ptr,
-    cu_seqlens_ptr,  # (G + 1,) int32 token boundaries per grid
-    grids_ptr,  # (G, 3) int32: t, h, w per grid
-    num_tokens,
-    num_grids,
-    half_rot: tl.constexpr,
-    spatial_merge: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """Build triton_mrope's (3, N, half_rot) cos/sin t/h/w planes in one
-    launch: compute each token's (t, h, w) position arithmetically and
-    gather the section-padded table rows."""
-    pid = tl.program_id(0)
-    tok = pid * BLOCK_N + tl.arange(0, BLOCK_N)
-    tok_mask = tok < num_tokens
-
-    # Grid (segment) index per token; cu_seqlens is nondecreasing.
-    seg = tl.zeros([BLOCK_N], dtype=tl.int32)
-    for g in range(num_grids):
-        end = tl.load(cu_seqlens_ptr + g + 1)
-        seg += (tok >= end).to(tl.int32)
-
-    seg_start = tl.load(cu_seqlens_ptr + seg, mask=tok_mask, other=0)
-    grid_h = tl.load(grids_ptr + seg * 3 + 1, mask=tok_mask, other=1)
-    grid_w = tl.load(grids_ptr + seg * 3 + 2, mask=tok_mask, other=1)
-
-    local = tok - seg_start
-    rem = local % (grid_h * grid_w)
-    tpos = local // (grid_h * grid_w)
-    # Within a frame tokens are ordered by spatial-merge block (bh, bw, mh,
-    # mw), matching the reference _get_3d_rope_embed permute.
-    bh = rem // (spatial_merge * grid_w)
-    r = rem % (spatial_merge * grid_w)
-    bw = r // (spatial_merge * spatial_merge)
-    r2 = r % (spatial_merge * spatial_merge)
-    hpos = bh * spatial_merge + r2 // spatial_merge
-    wpos = bw * spatial_merge + r2 % spatial_merge
-
-    d = tl.arange(0, BLOCK_D)
-    m2 = tok_mask[:, None] & (d < half_rot)[None, :]
-    row = (tok * half_rot)[:, None] + d[None, :]
-    plane = num_tokens * half_rot
-
-    cos_t = tl.load(cos_t_ptr + tpos[:, None] * half_rot + d[None, :], mask=m2)
-    cos_h = tl.load(cos_h_ptr + hpos[:, None] * half_rot + d[None, :], mask=m2)
-    cos_w = tl.load(cos_w_ptr + wpos[:, None] * half_rot + d[None, :], mask=m2)
-    sin_t = tl.load(sin_t_ptr + tpos[:, None] * half_rot + d[None, :], mask=m2)
-    sin_h = tl.load(sin_h_ptr + hpos[:, None] * half_rot + d[None, :], mask=m2)
-    sin_w = tl.load(sin_w_ptr + wpos[:, None] * half_rot + d[None, :], mask=m2)
-
-    tl.store(cos_out_ptr + row, cos_t, mask=m2)
-    tl.store(cos_out_ptr + plane + row, cos_h, mask=m2)
-    tl.store(cos_out_ptr + 2 * plane + row, cos_w, mask=m2)
-    tl.store(sin_out_ptr + row, sin_t, mask=m2)
-    tl.store(sin_out_ptr + plane + row, sin_h, mask=m2)
-    tl.store(sin_out_ptr + 2 * plane + row, sin_w, mask=m2)
 
 
 class MiniMaxVLPatchEmbed(nn.Module):
@@ -427,23 +353,6 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.register_buffer("inv_freq_h", inv_freq_h, persistent=False)
         self.register_buffer("inv_freq_w", inv_freq_w, persistent=False)
 
-        # Vision analog of the text model's cos_sin_cache: per-axis cos/sin
-        # tables indexed by position. Each row is padded to half_rot_dim with
-        # the axis's values at its mrope section columns, so assembling the
-        # kernel's (3, N, half_rot_dim) t/h/w planes is one gather per plane.
-        half_t, half_h = self.t_dim // 2, self.h_dim // 2
-        self.half_rot_dim = half_t + half_h + self.w_dim // 2
-        self._rope_section_start = {"t": 0, "h": half_t, "w": half_t + half_h}
-        cos_t, sin_t = self._build_rope_table(_ROPE_TABLE_T, inv_freq_t, "t")
-        cos_h, sin_h = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_h, "h")
-        cos_w, sin_w = self._build_rope_table(_ROPE_TABLE_HW, inv_freq_w, "w")
-        self.register_buffer("rope_cos_t", cos_t, persistent=False)
-        self.register_buffer("rope_sin_t", sin_t, persistent=False)
-        self.register_buffer("rope_cos_h", cos_h, persistent=False)
-        self.register_buffer("rope_sin_h", sin_h, persistent=False)
-        self.register_buffer("rope_cos_w", cos_w, persistent=False)
-        self.register_buffer("rope_sin_w", sin_w, persistent=False)
-
         self.embeddings = MiniMaxVLPatchEmbed(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -467,83 +376,6 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
         # out_hidden_size needed by run_dp_sharded_mrope_vision_model
         self.out_hidden_size = embed_dim
-
-    # ── RoPE helpers ─────────────────────────────────────────────────────
-
-    def _build_rope_table(
-        self, n: int, inv_freq: torch.Tensor, axis: str
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        freqs = torch.outer(
-            torch.arange(n, device=inv_freq.device, dtype=inv_freq.dtype), inv_freq
-        )
-        half = inv_freq.numel()
-        col0 = self._rope_section_start[axis]
-        cos = freqs.new_zeros(n, self.half_rot_dim)
-        sin = freqs.new_zeros(n, self.half_rot_dim)
-        cos[:, col0 : col0 + half] = freqs.cos()
-        sin[:, col0 : col0 + half] = freqs.sin()
-        return cos, sin
-
-    def _grow_rope_table(
-        self, axis: str, inv_freq: torch.Tensor, min_positions: int
-    ) -> None:
-        n = getattr(self, f"rope_cos_{axis}").shape[0]
-        if min_positions <= n:
-            return
-        cos, sin = self._build_rope_table(max(min_positions, 2 * n), inv_freq, axis)
-        setattr(self, f"rope_cos_{axis}", cos)
-        setattr(self, f"rope_sin_{axis}", sin)
-
-    def _get_rope_embed_3d(
-        self, grid_thw: list[list[int]], spatial_merge_size: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """(3, total_N, half_rot_dim) fp32 cos/sin t/h/w planes for
-        triton_mrope: one fused kernel computes each token's (t, h, w)
-        position arithmetically and gathers the section-padded table rows
-        (each axis's values sit at its section columns of its own plane;
-        the mrope kernel's per-axis masks read only those columns)."""
-        self._grow_rope_table("t", self.inv_freq_t, max(t for t, _, _ in grid_thw))
-        self._grow_rope_table("h", self.inv_freq_h, max(h for _, h, _ in grid_thw))
-        self._grow_rope_table("w", self.inv_freq_w, max(w for _, _, w in grid_thw))
-
-        device = self.rope_cos_t.device
-        cu = [0]
-        for t, h, w in grid_thw:
-            cu.append(cu[-1] + t * h * w)
-        n = cu[-1]
-        g = len(grid_thw)
-        # grid_thw is per-request host metadata, so one H2D is unavoidable;
-        # pack cu_seqlens and grids into a single pinned async copy.
-        buf = async_tensor_h2d(
-            cu + [d for grid in grid_thw for d in grid],
-            device=device,
-            dtype=torch.int32,
-        )
-        cu_seqlens = buf[: g + 1]
-        grids = buf[g + 1 :].view(g, 3)
-
-        cos = torch.empty(3, n, self.half_rot_dim, device=device, dtype=torch.float32)
-        sin = torch.empty(3, n, self.half_rot_dim, device=device, dtype=torch.float32)
-        _mrope_3d_setup_kernel[(triton.cdiv(n, 128),)](
-            self.rope_cos_t,
-            self.rope_cos_h,
-            self.rope_cos_w,
-            self.rope_sin_t,
-            self.rope_sin_h,
-            self.rope_sin_w,
-            cos,
-            sin,
-            cu_seqlens,
-            grids,
-            n,
-            len(grid_thw),
-            half_rot=self.half_rot_dim,
-            spatial_merge=spatial_merge_size,
-            BLOCK_N=128,
-            BLOCK_D=triton.next_power_of_2(self.half_rot_dim),
-            num_warps=4,
-        )
-        return cos, sin
 
     # ── Frame-limit helper (mirrors the reference) ───────────────────────
 
@@ -600,13 +432,15 @@ class MiniMaxVLVisionTransformer(nn.Module):
         )
 
         # 3D RoPE cos/sin: (3, total_N, half_rot_dim) fp32 t/h/w planes for
-        # triton_mrope, gathered from the cached per-axis tables. Kept fp32
-        # so the kernel computes the rotation in fp32, matching the reference.
-        rotary_cos, rotary_sin = self._get_rope_embed_3d(
-            limited, self.spatial_merge_size
+        # triton_mrope from one fused setup kernel. Kept fp32 so the kernel
+        # computes the rotation in fp32, matching the reference.
+        rotary_cos, rotary_sin = vit_mrope_setup(
+            self.inv_freq_t,
+            self.inv_freq_h,
+            self.inv_freq_w,
+            limited,
+            self.spatial_merge_size,
         )
-        rotary_cos = rotary_cos.to(device=hidden.device)
-        rotary_sin = rotary_sin.to(device=hidden.device)
 
         # Encoder expects (N, 1, hidden_size) — add batch dim
         hidden = hidden.unsqueeze(1)
