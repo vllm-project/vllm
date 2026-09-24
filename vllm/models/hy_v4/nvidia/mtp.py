@@ -885,10 +885,13 @@ class HYV4MTP(nn.Module):
 
             if "learnable_sink_param" in name:
                 if name in params_dict:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
+                    param = params_dict[name]
                     with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
+                        local_weight = loaded_weight[head_rank_start:head_rank_end]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, local_weight)
                     loaded_params.add(name)
                 continue
 
