@@ -178,6 +178,30 @@ def _gluon_mla_decode_supported() -> bool:
     return on_gfx950()
 
 
+# Past 2 GiB, mla_gluon swaps its masked buffer_load for an unmasked
+# global_load that reads outside the cache and aborts the process. Mirrors the
+# kernel's own within_2gb bound, so the fallback engages exactly where it does.
+_GLUON_MAX_KV_CACHE_BYTES = 1 << 31
+
+
+def _gluon_kv_cache_in_bounds(kv_cache_bytes: int | None) -> bool:
+    """Whether this layer's KV cache keeps Gluon on its bounds-checked path.
+
+    The cache is one flat tensor per layer, so the bound disqualifies the layer
+    outright; no batch shape brings an oversized cache back in range. ``None``
+    is the not-yet-sized case during profiling, before any kernel runs.
+    """
+    if kv_cache_bytes is None or kv_cache_bytes <= _GLUON_MAX_KV_CACHE_BYTES:
+        return True
+    logger.warning_once(
+        "KV cache is %.1f GiB per layer, past the 2 GiB where the Gluon MLA "
+        "kernel drops its KV bounds mask; using the padded ASM decode instead. "
+        "Lower --gpu-memory-utilization or --max-model-len to get Gluon back.",
+        kv_cache_bytes / (1 << 30),
+    )
+    return False
+
+
 @functools.lru_cache(maxsize=1)
 def _get_segmented_mla_decode():
     """Load AITER's segmented MLA decode with unreduced partial output."""
@@ -258,7 +282,7 @@ class AiterMLABackend(MLACommonBackend):
         return []
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # The aiter MLA decode kernel always operates with page_size=1
         # internally (the wrapper flattens kv_buffer via .view(-1, 1, 1, H)).
         # We support any kernel_block_size by expanding block-level indices
@@ -564,6 +588,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # _build_decode needs the cache dtype to pick the decode kernel; keep
         # the normalized string instead of dropping it at the end of __init__.
         self._kv_cache_dtype_str = kv_cache_dtype_str
+        # Sized per layer, matching the flat KV tensor the kernel is handed.
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+        self._kv_cache_bytes = (
+            None
+            if num_gpu_blocks is None
+            else num_gpu_blocks * kv_cache_spec.page_size_bytes
+        )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (
@@ -772,9 +803,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
 
-        max_num_partial_tiles = reduce_partial_map_size
+        # AITER metadata sizing assumes all requests can carry max_prefill_qlen tokens,
+        # which is a loose worst case in the number of QO tiles. Rather, the sum of
+        # qlens is bounded by max_num_batched_tokens. Manually compute the number of
+        # qo tiles to avoid OOM at startup.
+        # TODO: AITER should give us this budget constrained value
+        qo_tile_cnt = (
+            cdiv(max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_reqs - 1
+        )
+        max_num_partial_tiles = qo_tile_cnt + current_platform.num_compute_units()
         reservations: list[tuple[tuple[int, ...], torch.dtype]] = [
             (
                 (max_num_partial_tiles * _FP8_PREFILL_TILE_Q, num_head_k, v_head_dim),
@@ -1056,6 +1096,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._decode_num_heads,
             int(max_qo_len),
             self._kv_cache_dtype_str,
+            self._kv_cache_bytes,
         )
         use_gluon_verify = AiterMLAHelper.use_gluon_verify(
             self._decode_num_heads,
@@ -1063,6 +1104,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._kv_cache_dtype_str,
             self.dcp_world_size,
             causal,
+            self._kv_cache_bytes,
         )
         use_segmented_dcp_verify = (
             self._supports_segmented_dcp_verify and max_qo_len > 1
@@ -1472,7 +1514,12 @@ class AiterMLAHelper:
         return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse)
 
     @staticmethod
-    def use_gluon_decode(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
+    def use_gluon_decode(
+        num_heads: int,
+        max_qo_len: int,
+        kv_cache_dtype: str,
+        kv_cache_bytes: int | None = None,
+    ) -> bool:
         # Small-head (<16) single-token decode takes either the Gluon kernel or
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
@@ -1488,10 +1535,12 @@ class AiterMLAHelper:
         mode = _aiter_mla_small_head_mode()
         if mode == "asm":
             return False
-        gluon_supported = _gluon_mla_decode_supported()
-        if mode == "gluon":
-            return gluon_supported
-        return m % num_heads == 0 and gluon_supported
+        if not _gluon_mla_decode_supported():
+            return False
+        if mode != "gluon" and m % num_heads != 0:
+            return False
+        # Last, so the size warning only fires where Gluon would have run.
+        return _gluon_kv_cache_in_bounds(kv_cache_bytes)
 
     @staticmethod
     def use_gluon_verify(
@@ -1500,6 +1549,7 @@ class AiterMLAHelper:
         kv_cache_dtype: str,
         dcp_world_size: int = 1,
         causal: bool = True,
+        kv_cache_bytes: int | None = None,
     ) -> bool:
         """Whether a small-head multi-token verify uses native Gluon MTP.
 
@@ -1527,8 +1577,10 @@ class AiterMLAHelper:
             return False
         if not _gluon_mla_decode_supported():
             return False
-        # Same arch and mode gating as use_gluon_decode.
-        return _aiter_mla_small_head_mode() != "asm"
+        # Same arch, mode and cache-size gating as use_gluon_decode.
+        if _aiter_mla_small_head_mode() == "asm":
+            return False
+        return _gluon_kv_cache_in_bounds(kv_cache_bytes)
 
     @staticmethod
     def dcp_local_verify_row_lens(
