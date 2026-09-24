@@ -56,12 +56,12 @@ from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
@@ -242,7 +242,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_enabled():
@@ -722,11 +722,23 @@ class VllmConfig:
         if model_config is not None and current_platform.is_rocm():
             architectures = getattr(model_config, "architectures", ())
             if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
+                # This default is a speed preference, not a claim that V1 can
+                # serve the config, so it yields where V1 cannot. It yields by
+                # falling through to the checks below, not by selecting V2.
+                v1_unsupported = self._get_v1_model_runner_unsupported_features()
+                if not v1_unsupported:
+                    logger.warning_once(
+                        "Defaulting to V1 model runner on ROCm for model "
+                        "architectures: %s",
+                        ", ".join(architectures),
+                    )
+                    return False
                 logger.warning_once(
-                    "Defaulting to V1 model runner on ROCm for model architectures: %s",
+                    "Skipping the ROCm V1 model runner default for %s: V1 does "
+                    "not support %s.",
                     ", ".join(architectures),
+                    ", ".join(v1_unsupported),
                 )
-                return False
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -776,6 +788,45 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
+    def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
+        """Avoid freezing runtime-M tile lookup in compiled forward (#54243).
+        Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
+        at capture; lm_head runs outside compiled forward and does not benefit."""
+        from vllm.model_executor.determinism import batch_invariant_configs as bi
+        from vllm.platforms import current_platform
+
+        model = self.model_config
+        if (
+            not envs.VLLM_BATCH_INVARIANT
+            or model is None
+            or model.enforce_eager
+            or model.dtype != torch.bfloat16
+            or model.quantization is not None
+            or not current_platform.is_cuda()
+            # Sequence parallelism / async TP are torch.compile passes.
+            or self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.fuse_gemm_comms
+        ):
+            return False
+        family = bi._get_tuned_matmul_arch_family(
+            current_platform.get_device_capability()
+        )
+        if family is None or family not in bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
+            return False
+        table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS[family]
+        parallel = self.parallel_config
+        tp = parallel.tensor_parallel_size
+        hidden = model.get_hidden_size()
+        head = model.get_head_size()
+        heads = model.get_num_attention_heads(parallel)
+        kv_heads = model.get_num_kv_heads(parallel)
+        shapes = [((heads + 2 * kv_heads) * head, hidden), (hidden, heads * head)]
+        intermediate = getattr(model.hf_text_config, "intermediate_size", None)
+        # Per-layer sizes (e.g. Gemma3n) are not modeled.
+        if isinstance(intermediate, int):
+            shapes += [(2 * intermediate // tp, hidden), (hidden, intermediate // tp)]
+        return any(shape in table for shape in shapes)
+
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (
             "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
@@ -784,6 +835,16 @@ class VllmConfig:
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
                 "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+            )
+        elif (
+            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+            and envs.VLLM_BATCH_INVARIANT
+            and self._uses_breakable_cudagraph_for_batch_invariance()
+        ):
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
@@ -890,7 +951,7 @@ class VllmConfig:
 
     def with_hf_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         architectures: list[str] | None = None,
     ) -> "VllmConfig":
         if architectures is not None:
@@ -1340,6 +1401,19 @@ class VllmConfig:
 
         self._resolve_mm_encoder_only()
 
+        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
+            # Such an instance publishes encoder embeddings and runs no language
+            # model, so it holds no KV cache for prefix caching to reuse and its
+            # coordinator would have no group to manage. Disable before
+            # `try_verify_and_update_config` so model config hooks (e.g. the
+            # hybrid mamba hook setting `mamba_block_size`) already see prefix
+            # caching as disabled.
+            logger.info(
+                "Disabling prefix caching: this instance runs the "
+                "multi-modal encoder only."
+            )
+            self.cache_config.enable_prefix_caching = False
+
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
@@ -1604,15 +1678,24 @@ class VllmConfig:
             )
 
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.warning_once(
-                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
-                "kernel warmup. This is equivalent to setting -cc.mode=none "
-                "-cc.cudagraph_mode=none and "
-                "--kernel_config.enable_jit_warmup=False"
-            )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            self.kernel_config.enable_jit_warmup = False
+            if self.parallel_config.enable_fault_tolerance:
+                # Keep JIT warmup: in-inference Triton compilation latency
+                # spikes can delay peer-fault detection past its deadline.
+                logger.warning_once(
+                    "Enforce eager set, disabling torch.compile and CUDAGraphs. "
+                    "This is equivalent to setting -cc.mode=none "
+                    "-cc.cudagraph_mode=none"
+                )
+            else:
+                logger.warning_once(
+                    "Enforce eager set, disabling torch.compile, CUDAGraphs, and "
+                    "JIT kernel warmup. This is equivalent to setting "
+                    "-cc.mode=none -cc.cudagraph_mode=none and "
+                    "--kernel_config.enable_jit_warmup=False"
+                )
+                self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -2088,16 +2171,6 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
-
-        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
-            # Such an instance publishes encoder embeddings and runs no language
-            # model, so it holds no KV cache for prefix caching to reuse and its
-            # coordinator would have no group to manage.
-            logger.info(
-                "Disabling prefix caching: this instance runs the "
-                "multi-modal encoder only."
-            )
-            self.cache_config.enable_prefix_caching = False
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
