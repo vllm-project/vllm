@@ -2054,6 +2054,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for states in aux_hidden_states
             ]
 
+        sampler_output, num_sampled, num_rejected = self.sample(
+            hidden_states, input_batch, grammar_output
+        )
+
+        if self.pp_handler is not None:
+            # Broadcast to non-last PP ranks (handles spec decode multi-token).
+            self.pp_handler.broadcast(
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch,
+            )
+
+        assert self.prompt_logprobs_worker is not None
+        prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
+            self.model.compute_logits,
+            hidden_states,
+            input_batch,
+            self.req_states.all_token_ids.gpu,
+            self.req_states.num_computed_tokens.gpu,
+            self.req_states.prompt_len.np,
+        )
+
         hidden_capture_chunks = None
         hidden_capture_errors = None
         if self.hidden_state_capture_plans:
@@ -2086,30 +2109,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     computed,
                     hidden_states,
                     aux_hidden_states,
+                    input_batch.query_start_loc_np,
                 )
-
-        sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
-        )
-
-        if self.pp_handler is not None:
-            # Broadcast to non-last PP ranks (handles spec decode multi-token).
-            self.pp_handler.broadcast(
-                sampler_output.sampled_token_ids,
-                num_sampled,
-                num_rejected,
-                input_batch,
-            )
-
-        assert self.prompt_logprobs_worker is not None
-        prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
-            hidden_states,
-            input_batch,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.num_computed_tokens.gpu,
-            self.req_states.prompt_len.np,
-        )
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(

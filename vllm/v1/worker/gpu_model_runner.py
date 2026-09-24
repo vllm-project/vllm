@@ -4641,6 +4641,7 @@ class GPUModelRunner(
                     computed,
                     hidden_states,
                     aux_hidden_states,
+                    self.query_start_loc.np,
                 )
 
         self._update_states_after_model_execute(

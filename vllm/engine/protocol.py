@@ -24,6 +24,7 @@ from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceR
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
+    from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 
 
 @dataclass
@@ -98,6 +99,7 @@ class EngineClient(ABC):
         session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: "HiddenStateCapturePlan | None" = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...

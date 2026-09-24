@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.sampling_params import SamplingParams
 from vllm.v1.hidden_state_capture import (
     HiddenStateCaptureBuffer,
     HiddenStateCapturePlan,
@@ -15,6 +16,7 @@ from vllm.v1.hidden_state_capture import (
     capture_scheduled_hidden_states,
     drop_incompatible_aux_plans,
     hidden_state_capture_capability,
+    validate_hidden_state_capture,
 )
 
 
@@ -54,6 +56,34 @@ def test_hidden_capture_selects_only_each_requests_window_rows():
     assert after_window == {}
 
 
+def test_hidden_capture_uses_prompt_logprob_batch_row_boundaries():
+    plan = HiddenStateCapturePlan.from_window("b", 2, 1, 3, "collection")
+    hidden = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+    chunks = capture_scheduled_hidden_states(
+        {"b": plan},
+        ["a", "b"],
+        {"a": 3, "b": 3},
+        {"a": 0, "b": 2},
+        hidden,
+        query_start_loc=np.array([0, 3, 6]),
+    )
+    np.testing.assert_array_equal(chunks["b"].positions, [2, 3])
+    torch.testing.assert_close(chunks["b"].hidden_states, hidden[3:5])
+
+
+def test_hidden_capture_rejects_mismatched_runner_row_boundaries():
+    plan = HiddenStateCapturePlan.from_window("a", 1, 0, 1, "collection")
+    with pytest.raises(ValueError, match="row boundaries"):
+        capture_scheduled_hidden_states(
+            {"a": plan},
+            ["a"],
+            {"a": 1},
+            {"a": 0},
+            torch.zeros(2, 1),
+            query_start_loc=np.array([0, 2]),
+        )
+
+
 def test_hidden_capture_discards_rejected_speculative_rows_and_short_samples():
     plan = HiddenStateCapturePlan.from_window(
         "req", 1, 10, 13, "collection", min_rows=2
@@ -74,6 +104,8 @@ def test_hidden_capture_discards_rejected_speculative_rows_and_short_samples():
     torch.testing.assert_close(result.hidden_states, hidden[:2])
     assert (result.hidden_position_start, result.hidden_position_end) == (10, 12)
     assert (result.hidden_window_start, result.hidden_window_end) == (10, 13)
+    assert result.layer_ids == ()
+    assert result.includes_final_layer
 
     early_eos = HiddenStateCaptureBuffer(plan)
     early_eos.add(chunk.accepted(10, 11))
@@ -103,6 +135,8 @@ def test_hidden_capture_preserves_aux_final_layout_and_deduplicates_retries():
     result = buffer.finish()
     assert result is not None
     assert result.hidden_layout == "aux_final"
+    assert result.layer_ids == (3,)
+    assert result.includes_final_layer
     np.testing.assert_array_equal(result.hidden_positions, [0, 1])
     torch.testing.assert_close(result.hidden_states, chunk.hidden_states)
 
@@ -120,6 +154,12 @@ def test_hidden_capture_dflash_layout_excludes_final_state():
         [torch.tensor([[10.0]])],
     )["req"]
     torch.testing.assert_close(chunk.hidden_states, torch.tensor([[10.0]]))
+    buffer = HiddenStateCaptureBuffer(plan)
+    buffer.add(chunk)
+    result = buffer.finish()
+    assert result is not None
+    assert result.layer_ids == (3,)
+    assert not result.includes_final_layer
 
 
 def test_hidden_capture_keeps_bfloat16_on_cpu():
@@ -179,3 +219,21 @@ def test_hidden_capture_fails_closed_for_unmapped_runners():
     config.scheduler_config.async_scheduling = False
     config.device_config.device_type = "npu"
     assert "CUDA" in hidden_state_capture_capability(config)
+
+
+def test_hidden_capture_rejects_unsupported_config_before_admission():
+    config = SimpleNamespace(
+        device_config=SimpleNamespace(device_type="npu"),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(is_encoder_decoder=False),
+        speculative_config=None,
+    )
+    request = SimpleNamespace(
+        request_id="req", prompt_token_ids=[1, 2], prompt_embeds=None
+    )
+    plan = HiddenStateCapturePlan.from_window("req", 2, 0, 1, "collection")
+    with pytest.raises(ValueError, match="only the CUDA GPU"):
+        validate_hidden_state_capture(plan, request, SamplingParams(), config)

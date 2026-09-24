@@ -5,6 +5,7 @@ import time
 import weakref
 from collections.abc import Callable, Mapping
 from copy import copy
+from dataclasses import replace
 from typing import Any
 
 import torch.nn as nn
@@ -34,6 +35,10 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    validate_hidden_state_capture,
+)
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
@@ -232,6 +237,7 @@ class LLMEngine:
         priority: int = 0,
         session_id: str | None = None,
         prompt_text: str | None = None,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -268,7 +274,18 @@ class LLMEngine:
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
+        if hidden_state_capture is not None:
+            if request.hidden_state_capture is not None:
+                raise ValueError("Hidden-state capture plan was supplied twice")
+            request.hidden_state_capture = hidden_state_capture
+        if (plan := request.hidden_state_capture) is not None:
+            validate_hidden_state_capture(plan, request, params, self.vllm_config)
+
         self.input_processor.assign_request_id(request)
+        if request.hidden_state_capture is not None:
+            request.hidden_state_capture = replace(
+                request.hidden_state_capture, request_id=request.request_id
+            )
 
         req_id = request.request_id
 

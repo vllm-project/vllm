@@ -7,6 +7,8 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
+import pybase64
+import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -28,6 +30,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
+    HiddenStateCaptureResponse,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -48,8 +51,14 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 
 logger = init_logger(__name__)
+
+
+def _hidden_states_to_base64(hidden_states: torch.Tensor) -> str:
+    byte_view = hidden_states.detach().cpu().contiguous().view(torch.uint8).numpy()
+    return pybase64.b64encode(memoryview(byte_view)).decode("ascii")
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -139,6 +148,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return result
 
         engine_inputs = result
+        if request.hidden_state_capture is not None and (
+            request.stream
+            or request.use_beam_search
+            or len(engine_inputs) != 1
+            or request.n != 1
+        ):
+            return self.create_error_response(
+                "Hidden-state capture requires one non-streaming completion"
+            )
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -177,6 +195,22 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 )
 
             request_id_item = f"{request_id}-{i}"
+            capture_plan = None
+            if capture := request.hidden_state_capture:
+                try:
+                    capture_plan = HiddenStateCapturePlan.from_window(
+                        request_id=request_id_item,
+                        prompt_len=self._extract_prompt_len(engine_input),
+                        start=capture.start,
+                        end=capture.end,
+                        collection_id=capture.collection_id,
+                        coordinate=capture.coordinate,
+                        min_rows=capture.min_rows,
+                        aux_layer_ids=capture.aux_layer_ids,
+                        hidden_layout=capture.hidden_layout,
+                    )
+                except ValueError as exc:
+                    return self.create_error_response(str(exc))
 
             self._log_inputs(
                 request_id_item,
@@ -211,6 +245,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    hidden_state_capture=capture_plan,
                 )
 
             generators.append(generator)
@@ -647,6 +682,35 @@ class OpenAIServingCompletion(GenerateBaseServing):
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
             metrics=per_request_metrics,
+            hidden_state_capture=(
+                HiddenStateCaptureResponse(
+                    request_id=capture.request_id,
+                    dtype=str(capture.hidden_states.dtype),
+                    hidden_positions=capture.hidden_positions.tolist(),
+                    hidden_states_base64=_hidden_states_to_base64(
+                        capture.hidden_states
+                    ),
+                    hidden_states_shape=tuple(capture.hidden_states.shape),
+                    hidden_position_start=capture.hidden_position_start,
+                    hidden_position_end=capture.hidden_position_end,
+                    hidden_window_start=capture.hidden_window_start,
+                    hidden_window_end=capture.hidden_window_end,
+                    layer_ids=capture.layer_ids,
+                    includes_final_layer=capture.includes_final_layer,
+                    hidden_layout=capture.hidden_layout,
+                    collection_id=capture.collection_id,
+                    copied_bytes=capture.copied_bytes,
+                    copy_ms=capture.copy_ms,
+                )
+                if last_final_res is not None
+                and (capture := last_final_res.hidden_state_capture) is not None
+                else None
+            ),
+            hidden_capture_skip_reason=(
+                last_final_res.hidden_capture_skip_reason
+                if last_final_res is not None
+                else None
+            ),
         )
 
     def _create_completion_logprobs(

@@ -42,7 +42,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
@@ -55,7 +54,7 @@ from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.hidden_state_capture import (
     HiddenStateCapturePlan,
-    hidden_state_capture_capability,
+    validate_hidden_state_capture,
 )
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -470,16 +469,7 @@ class AsyncLLM(EngineClient):
                 raise ValueError("Hidden-state capture plan was supplied twice")
             request.hidden_state_capture = hidden_state_capture
         if (plan := request.hidden_state_capture) is not None:
-            if not isinstance(params, SamplingParams) or params.n != 1:
-                raise ValueError("Hidden-state capture requires a single completion")
-            prompt_len = length_from_prompt_token_ids_or_embeds(
-                request.prompt_token_ids, request.prompt_embeds
-            )
-            if plan.prompt_len != prompt_len or plan.request_id != request.request_id:
-                raise ValueError("Hidden-state capture plan does not match the request")
-            if reason := hidden_state_capture_capability(self.vllm_config):
-                logger.warning_once("Hidden-state capture unavailable: %s", reason)
-                request.hidden_state_capture = None
+            validate_hidden_state_capture(plan, request, params, self.vllm_config)
 
         self.input_processor.assign_request_id(request)
         if request.hidden_state_capture is not None:

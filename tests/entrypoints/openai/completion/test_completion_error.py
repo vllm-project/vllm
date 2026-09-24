@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import base64
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
+import torch
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.completion.serving import (
+    OpenAIServingCompletion,
+    _hidden_states_to_base64,
+)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
@@ -20,6 +26,7 @@ from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.hidden_state_capture import HiddenStateCaptureResult
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
@@ -173,6 +180,50 @@ def test_completion_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+def test_completion_response_includes_capture_positions_and_layer_contract():
+    request_output = _make_metrics_request_output()
+    request_output.hidden_state_capture = HiddenStateCaptureResult(
+        hidden_positions=np.array([2, 3]),
+        hidden_states=torch.tensor([[1.0], [2.0]]),
+        hidden_position_start=2,
+        hidden_position_end=4,
+        hidden_window_start=2,
+        hidden_window_end=5,
+        hidden_layout="final",
+        layer_ids=(),
+        includes_final_layer=True,
+        request_id="test-id",
+        collection_id="collection",
+    )
+    serving = _build_minimal_metrics_serving_completion()
+    response = serving.request_output_to_completion_response(
+        [request_output],
+        CompletionRequest(model=MODEL_NAME, prompt="Test prompt"),
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+    serialized = response.model_dump()
+    assert serialized["hidden_state_capture"]["request_id"] == "test-id"
+    assert serialized["hidden_state_capture"]["dtype"] == "torch.float32"
+    assert serialized["hidden_state_capture"]["hidden_positions"] == [2, 3]
+    assert serialized["hidden_state_capture"]["hidden_states_shape"] == (2, 1)
+    encoded = serialized["hidden_state_capture"]["hidden_states_base64"]
+    decoded = np.frombuffer(base64.b64decode(encoded), dtype=np.float32).reshape(2, 1)
+    np.testing.assert_array_equal(decoded, [[1.0], [2.0]])
+    assert serialized["hidden_state_capture"]["includes_final_layer"]
+
+
+def test_hidden_state_base64_preserves_bfloat16_bits():
+    hidden_states = torch.tensor([[1.0, -2.5]], dtype=torch.bfloat16)
+    encoded = _hidden_states_to_base64(hidden_states)
+    decoded = np.frombuffer(base64.b64decode(encoded), dtype=np.uint16)
+    expected = hidden_states.view(torch.uint16).numpy().reshape(-1)
+    np.testing.assert_array_equal(decoded, expected)
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():

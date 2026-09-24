@@ -15,6 +15,8 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine import EngineCoreRequest
 
 
 class HiddenStateCaptureState(Enum):
@@ -44,6 +46,12 @@ class HiddenStateCapturePlan:
             or self.min_rows > self.window_end_abs - self.window_start_abs
         ):
             raise ValueError("Invalid hidden-state capture plan")
+        if self.hidden_layout not in ("final", "aux_final", "dflash_aux"):
+            raise ValueError("Invalid hidden-state layout")
+        if bool(self.aux_layer_ids) != (self.hidden_layout != "final"):
+            raise ValueError("Hidden-state layout does not match auxiliary layers")
+        if len(set(self.aux_layer_ids)) != len(self.aux_layer_ids):
+            raise ValueError("Duplicate auxiliary hidden-state layers")
 
     @classmethod
     def from_window(
@@ -99,6 +107,27 @@ def hidden_state_capture_capability(vllm_config: VllmConfig) -> str | None:
     ):
         return "adaptive verification changes GPU-side token row allocation"
     return None
+
+
+def validate_hidden_state_capture(
+    plan: HiddenStateCapturePlan,
+    request: EngineCoreRequest,
+    params: SamplingParams,
+    vllm_config: VllmConfig,
+) -> None:
+    """Validate a capture plan before assigning the internal request ID."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils import length_from_prompt_token_ids_or_embeds
+
+    if not isinstance(params, SamplingParams) or params.n != 1:
+        raise ValueError("Hidden-state capture requires a single completion")
+    prompt_len = length_from_prompt_token_ids_or_embeds(
+        request.prompt_token_ids, request.prompt_embeds
+    )
+    if plan.prompt_len != prompt_len or plan.request_id != request.request_id:
+        raise ValueError("Hidden-state capture plan does not match the request")
+    if reason := hidden_state_capture_capability(vllm_config):
+        raise ValueError(f"Hidden-state capture unavailable: {reason}")
 
 
 @dataclass
@@ -160,12 +189,17 @@ def capture_scheduled_hidden_states(
     num_computed_tokens: dict[str, int],
     hidden_states: torch.Tensor,
     aux_hidden_states: list[torch.Tensor] | None = None,
+    query_start_loc: np.ndarray | None = None,
 ) -> dict[str, HiddenStateCaptureChunk]:
     """Copy only scheduled rows inside each request's capture window."""
     chunks: dict[str, HiddenStateCaptureChunk] = {}
     row_offset = 0
-    for req_id in req_ids:
+    for index, req_id in enumerate(req_ids):
         num_rows = num_scheduled_tokens[req_id]
+        if query_start_loc is not None:
+            row_offset = int(query_start_loc[index])
+            if int(query_start_loc[index + 1]) - row_offset != num_rows:
+                raise ValueError("Scheduled hidden-state row boundaries do not match")
         plan = plans.get(req_id)
         if plan is not None:
             start = num_computed_tokens[req_id]
@@ -216,6 +250,8 @@ class HiddenStateCaptureResult:
     hidden_window_start: int
     hidden_window_end: int
     hidden_layout: str
+    layer_ids: tuple[int, ...]
+    includes_final_layer: bool
     request_id: str
     collection_id: str
     copied_bytes: int = 0
@@ -261,6 +297,8 @@ class HiddenStateCaptureBuffer:
             hidden_window_start=self.plan.window_start_abs,
             hidden_window_end=self.plan.window_end_abs,
             hidden_layout=self.plan.hidden_layout,
+            layer_ids=self.plan.aux_layer_ids,
+            includes_final_layer=self.plan.hidden_layout != "dflash_aux",
             request_id=self.plan.request_id,
             collection_id=self.plan.collection_id,
             copied_bytes=self.copied_bytes,

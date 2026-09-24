@@ -53,6 +53,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
@@ -425,6 +426,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan
+        | Sequence[HiddenStateCapturePlan | None]
+        | None = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -453,6 +457,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 at the same index.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
             mm_processor_kwargs: Overrides for `processor.__call__`.
+            hidden_state_capture: Capture plan for each prompt. The request ID
+                is assigned by this method; each plan's prompt length must
+                match its rendered prompt.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -478,6 +485,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
             mm_processor_kwargs=mm_processor_kwargs,
+            hidden_state_capture=hidden_state_capture,
         )
 
     def enqueue(
@@ -489,6 +497,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         use_tqdm: bool | Callable[..., tqdm] = True,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan
+        | Sequence[HiddenStateCapturePlan | None]
+        | None = None,
     ) -> list[str]:
         """Enqueue prompts for generation without waiting for completion.
 
@@ -504,6 +515,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             use_tqdm: If True, shows a tqdm progress bar while adding requests.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
             mm_processor_kwargs: Overrides for `processor.__call__`.
+            hidden_state_capture: Capture plan for each prompt.
 
         Returns:
             A list of request IDs for the enqueued requests.
@@ -523,6 +535,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
+            hidden_state_capture=hidden_state_capture,
         )
 
     @overload
