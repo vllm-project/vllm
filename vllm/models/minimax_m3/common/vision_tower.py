@@ -21,7 +21,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
@@ -126,13 +125,6 @@ class MiniMaxVLAttention(nn.Module):
         axis_dim = 2 * ((rope_dims // 3) // 2)
         self.rotary_dim = 3 * axis_dim
         self.mrope_section = [axis_dim // 2] * 3
-        # CPU fallback only; GPU platforms apply RoPE in place with
-        # triton_mrope (see forward). enable_fp32_compute=True runs the
-        # rotation in fp32 (q/k upcast, fp32 cos/sin), matching the
-        # reference ``_minimax_rope_applier``.
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True, enable_fp32_compute=True
-        )
 
     def forward(
         self,
@@ -150,39 +142,25 @@ class MiniMaxVLAttention(nn.Module):
         qkv = x_qkv.view(seq_len, 3, self.num_heads_per_partition, self.head_dim)
         v = qkv[:, 2].unsqueeze(0)  # (b=1, N, heads, head_dim) strided view
 
-        if x_qkv.is_cuda:
-            # In-place partial 3D RoPE on strided q/k views of the packed qkv
-            # tensor: one kernel launch, no repack/upcast copies. fp32 cos/sin
-            # make the kernel compute in fp32, matching the reference
-            # ``_minimax_rope_applier`` precision.
-            q = qkv[:, 0].reshape(seq_len, -1)
-            k = qkv[:, 1].reshape(seq_len, -1)
-            triton_mrope(
-                q,
-                k,
-                rotary_cos,
-                rotary_sin,
-                self.mrope_section,
-                self.head_dim,
-                self.rotary_dim,
-                mrope_interleaved=False,
-                is_neox_style=True,
-            )
-            q = q.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-            k = k.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        else:
-            # CPU fallback: joint q/k pack through ApplyRotaryEmb.
-            # rotary_cos/sin: (N, half_rot_dim) — ApplyRotaryEmb expands
-            # internally and rotates only the first 2*half_rot_dim dims.
-            qk_reshaped = rearrange(
-                qkv[:, :2], "s two h d -> (two) s h d", two=2
-            ).contiguous()
-            qk_rotated = self.apply_rotary_emb(qk_reshaped, rotary_cos, rotary_sin)
-            q, k = qk_rotated.view(
-                2, seq_len, self.num_heads_per_partition, self.head_dim
-            ).unbind(dim=0)
-            q = q.unsqueeze(0)
-            k = k.unsqueeze(0)
+        # In-place partial 3D RoPE on strided q/k views of the packed qkv
+        # tensor: one kernel launch, no repack/upcast copies. fp32 cos/sin
+        # make the kernel compute in fp32, matching the reference
+        # ``_minimax_rope_applier`` precision.
+        q = qkv[:, 0].reshape(seq_len, -1)
+        k = qkv[:, 1].reshape(seq_len, -1)
+        triton_mrope(
+            q,
+            k,
+            rotary_cos,
+            rotary_sin,
+            self.mrope_section,
+            self.head_dim,
+            self.rotary_dim,
+            mrope_interleaved=False,
+            is_neox_style=True,
+        )
+        q = q.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
 
         # Flash attention → (b, N, heads, head_dim)
         context = self.attn(
@@ -529,18 +507,15 @@ class MiniMaxVLVisionTransformer(nn.Module):
         # 3D RoPE freqs: (total_N, half_rot_dim) fp32
         freqs = self._get_rope_embed_3d(limited, self.spatial_merge_size)
         freqs = freqs.to(device=hidden.device)
-        if hidden.is_cuda:
-            # triton_mrope expects (3, N, half_rot_dim) t/h/w planes and
-            # reads each section from its plane via masks, so broadcasting
-            # the full per-token vector to all three planes is sufficient
-            # (masked-out entries are never loaded). Kept fp32 so the kernel
-            # computes the rotation in fp32, matching the reference precision.
-            # Materialize once per forward so the per-layer contiguous() in
-            # triton_mrope is a no-op.
-            rotary_cos = freqs.cos().unsqueeze(0).expand(3, -1, -1).contiguous()
-            rotary_sin = freqs.sin().unsqueeze(0).expand(3, -1, -1).contiguous()
-        else:
-            rotary_cos, rotary_sin = freqs.cos(), freqs.sin()
+        # triton_mrope expects (3, N, half_rot_dim) t/h/w planes and reads
+        # each section from its plane via masks, so broadcasting the full
+        # per-token vector to all three planes is sufficient (masked-out
+        # entries are never loaded). Kept fp32 so the kernel computes the
+        # rotation in fp32, matching the reference precision. Materialize
+        # once per forward so the per-layer contiguous() in triton_mrope is
+        # a no-op.
+        rotary_cos = freqs.cos().unsqueeze(0).expand(3, -1, -1).contiguous()
+        rotary_sin = freqs.sin().unsqueeze(0).expand(3, -1, -1).contiguous()
 
         # Encoder expects (N, 1, hidden_size) — add batch dim
         hidden = hidden.unsqueeze(1)
