@@ -591,6 +591,57 @@ def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
     assert max_num_seqs in compilation_config.cudagraph_capture_sizes
 
 
+@pytest.mark.parametrize("max_cudagraph_capture_size", [12, 20, 42, 50, 100])
+def test_explicit_off_stride_max_cudagraph_capture_size_is_captured(
+    max_cudagraph_capture_size: int,
+) -> None:
+    """An explicit maximum off the 8/16 grid must itself be captured.
+
+    The grid steps by 8 (16 past 256), so it ends at the last step at or below
+    the maximum. Without the maximum appended, `max_cudagraph_capture_size=12`
+    produced `[1, 2, 4, 8]`, the maximum was silently truncated to 8, and decode
+    batches of 9-12 fell back to eager execution.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        max_cudagraph_capture_size=max_cudagraph_capture_size,
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=256,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert sizes[-1] == max_cudagraph_capture_size
+    assert compilation_config.max_cudagraph_capture_size == max_cudagraph_capture_size
+    assert all(size <= max_cudagraph_capture_size for size in sizes)
+    assert sizes == sorted(set(sizes))
+
+
+def test_off_stride_max_cudagraph_capture_size_stays_within_token_budget() -> None:
+    """The appended maximum is the one already clipped to the token budget."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        max_cudagraph_capture_size=100,
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=60,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=60,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert all(size <= 60 for size in sizes)
+    assert compilation_config.max_cudagraph_capture_size == sizes[-1]
+
+
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
     [

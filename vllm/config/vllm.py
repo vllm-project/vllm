@@ -2522,6 +2522,12 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
+                # ensure the maximum itself is captured. The grid above steps by
+                # 8 (16 past 256), so it stops at the last step at or below the
+                # maximum; an off-grid maximum would otherwise be truncated to
+                # that entry and batches between the two would run eager.
+                if max_cudagraph_capture_size not in cudagraph_capture_sizes:
+                    cudagraph_capture_sizes.append(max_cudagraph_capture_size)
                 # Preserve the platform's default capture ceiling. Larger
                 # uniform decode batches fall back to eager execution unless
                 # users explicitly configure wider capture sizes.
