@@ -72,7 +72,6 @@ class BaseMambaAttentionMetadata:
     last_chunk_indices_p: torch.Tensor | None = None
     # Number of block-aligned SSM states the prefill path writes, i.e.
     # sum(block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p).
-    # From CPU data, so batching those writes needs no D2H sync.
     num_state_writes_p: int = 0
 
     # The following attributes are for triton implementation of causal_conv1d
@@ -352,8 +351,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def _prefill_cpu_metadata(
         self,
-        common: M,
         common_attn_metadata: CommonAttentionMetadata,
+        num_reqs: int,
+        num_prefills: int,
+        num_decode_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prefill context lengths and query offsets, from CPU data only.
 
@@ -365,11 +366,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        num_reqs = common.num_reqs
-        num_prefills = common.num_prefills
         query_start_loc_p_cpu = (
             common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-            - common.num_decode_tokens
+            - num_decode_tokens
         )
         prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
         num_computed_tokens_p_cpu = (
@@ -389,7 +388,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_prefills = common.num_prefills
 
         num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
-            common, common_attn_metadata
+            common_attn_metadata,
+            common.num_reqs,
+            num_prefills,
+            common.num_decode_tokens,
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
@@ -635,8 +637,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 # the mixer needs no D2H read. The -1 in both indices cancels.
                 block_size = self.kv_cache_spec.block_size
                 seq_lens_p_cpu = seq_lens_cpu[num_reqs - num_prefills : num_reqs]
-                num_computed_tokens_p_cpu = seq_lens_p_cpu - (
-                    query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
+                    common_attn_metadata, num_reqs, num_prefills, num_decode_tokens
                 )
                 num_state_writes_p = int(
                     (
