@@ -796,6 +796,26 @@ def test_long_prefill_threshold_applies_with_other_requests():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def test_long_prefill_threshold_floored_by_fair_share():
+    """With the adaptive flag, the effective threshold never falls below the
+    fair share of the token budget: max_num_batched_tokens / num queued +
+    running requests."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=100,
+        long_prefill_token_threshold_adaptive=True,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # 100 is below the fair share (1024 // 2 = 512), so the floor binds.
+    assert output.num_scheduled_tokens[long_req.request_id] == 512
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
@@ -6896,6 +6916,13 @@ def _diffusion_request(req_id: str, extra_args: dict) -> Request:
     return request
 
 
+@pytest.fixture
+def diffusion_model_runner(monkeypatch):
+    # These CPU tests only exercise scheduling, not Triton kernels.
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+
 def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
     scheduler = create_scheduler(
         async_scheduling=True,
@@ -6908,6 +6935,7 @@ def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
     config = create_scheduler(
         async_scheduling=async_scheduling, diffusion_canvas_length=8
@@ -6917,6 +6945,7 @@ def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
     )
 
 
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_narrows_the_canvas_per_request():
     scheduler = _diffusion_scheduler()
     wide = _diffusion_request("wide", {})
@@ -6934,6 +6963,7 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
 
 
 @pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
     """Padded worker drafts must be narrowed before scheduling or grammar validation."""
     scheduler = _diffusion_scheduler()
@@ -6964,6 +6994,7 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
         assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
 
 
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
     scheduler = _diffusion_scheduler()
     one = _diffusion_request(
@@ -6986,6 +7017,7 @@ def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
     assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
 
 
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
     read = _diffusion_request(
