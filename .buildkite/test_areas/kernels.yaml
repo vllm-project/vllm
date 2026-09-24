@@ -144,12 +144,11 @@ steps:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
 
-# Test files at the tests/kernels root that have no dedicated job, listed
-# explicitly. Files with dedicated jobs elsewhere are not listed; the test
-# tethering pre-commit check flags any new root file that no job claims.
-- label: ":nvidia: (B200) Miscellaneous Kernels"
-  key: kernels-root-misc-test-b200
-  timeout_in_minutes: 45
+# Own job so mHC never shares a process with FlashInfer's import-time
+# ptxas override.
+- label: ":nvidia: (B200) mHC Kernels"
+  key: kernels-mhc-test-b200
+  timeout_in_minutes: 25
   device: b200-k8s
   source_file_dependencies:
   - csrc/
@@ -157,8 +156,37 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/kernels/
   commands:
-    # Isolate mHC from FlashInfer's import-time ptxas override.
     - pytest -v -s kernels/test_mhc_kernels.py
+
+- label: ":nvidia: (B200) FLA Ops Kernels"
+  key: kernels-fla-ops-test-b200
+  timeout_in_minutes: 25
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/kernels/
+  commands:
+    - pytest -v -s
+        kernels/test_fla_layernorm_guard.py
+        kernels/test_fused_gdn_post_conv.py
+        kernels/test_fused_recurrent_packed_decode.py
+        kernels/test_fused_sigmoid_gating_delta_rule.py
+
+# Test files at the tests/kernels root that have no dedicated job, listed
+# explicitly. Files with dedicated jobs elsewhere are not listed; the test
+# tethering pre-commit check flags any new root file that no job claims.
+- label: ":nvidia: (B200) Miscellaneous Kernels"
+  key: kernels-root-misc-test-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/kernels/
+  commands:
     - pytest -v -s
         kernels/test_apply_repetition_penalties.py
         kernels/test_awq_int4_to_int8.py
@@ -169,18 +197,14 @@ steps:
         kernels/test_deepseek_v4_cpu_kernels.py
         kernels/test_dsv41_mega_attn_layouts.py
         kernels/test_engram.py
-        kernels/test_fla_layernorm_guard.py
         kernels/test_flashinfer_bf16_gemm.py
         kernels/test_flex_attention.py
         kernels/test_fp32_router_gemm.py
         kernels/test_fused_deepseek_v32_norm_rope.py
-        kernels/test_fused_gdn_post_conv.py
         kernels/test_fused_indexer_q_rope_quant.py
         kernels/test_fused_inv_rope_fp8_quant.py
         kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
         kernels/test_fused_quant_activation.py
-        kernels/test_fused_recurrent_packed_decode.py
-        kernels/test_fused_sigmoid_gating_delta_rule.py
         kernels/test_gate_linear_rocm_dispatch.py
         kernels/test_gemm_rs_ar.py
         kernels/test_kpool_decode_update_batched.py
