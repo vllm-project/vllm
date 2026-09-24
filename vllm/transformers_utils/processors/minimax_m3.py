@@ -18,8 +18,8 @@ import math
 import torch
 from torchvision.transforms import InterpolationMode
 from transformers import AutoTokenizer, BatchFeature
-from transformers.image_processing_utils_fast import (
-    BaseImageProcessorFast,
+from transformers.image_processing_backends import (
+    TorchvisionBackend,
     group_images_by_shape,
     reorder_images,
 )
@@ -156,7 +156,7 @@ class MiniMaxM3VLImageProcessorKwargs(ImagesKwargs, total=False):  # type: ignor
     max_long_side_pixel: int
 
 
-class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
+class MiniMaxM3VLImageProcessor(TorchvisionBackend):
     do_resize = True
     resample = PILImageResampling.BICUBIC
     # required by base-class validation, not used as the resize bound
