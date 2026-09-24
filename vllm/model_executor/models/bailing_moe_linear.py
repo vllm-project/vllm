@@ -5,7 +5,6 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
@@ -19,6 +18,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -229,37 +229,6 @@ class BailingMoeV25MLAAttention(nn.Module):
         return self.mla_attn(positions, hidden_states)
 
 
-class BailingMoEGate(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        params_dtype: torch.dtype | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-        self.params_dtype = params_dtype
-        self.weight = nn.Parameter(
-            torch.empty(
-                (config.num_experts, config.hidden_size),
-                dtype=self.params_dtype,
-            ),
-        )
-        if getattr(config, "moe_router_enable_expert_bias", False):
-            self.expert_bias = nn.Parameter(
-                torch.empty((config.num_experts,), dtype=torch.float32),
-            )
-        else:
-            self.expert_bias = None
-
-    def forward(self, hidden_states):
-        logits = F.linear(hidden_states.to(self.weight.dtype), self.weight, None).to(
-            hidden_states.dtype
-        )
-        return logits
-
-
 class BailingMoeV25(nn.Module):
     """Bailing MoE v2.5 - standalone implementation for linear attention model."""
 
@@ -296,11 +265,19 @@ class BailingMoeV25(nn.Module):
             self.router_dtype = torch.bfloat16
 
         # Gate for routing
-        self.gate = BailingMoEGate(
-            config=config,
+        self.gate = GateLinear(
+            self.hidden_size,
+            self.num_experts,
+            out_dtype=self.router_dtype,
             params_dtype=self.router_dtype,
             prefix=f"{prefix}.gate",
         )
+        if getattr(config, "moe_router_enable_expert_bias", False):
+            self.gate.expert_bias = nn.Parameter(
+                torch.empty((self.num_experts,), dtype=torch.float32),
+            )
+        else:
+            self.gate.expert_bias = None
         correction_bias = (
             self.gate.expert_bias if self.gate.expert_bias is not None else None
         )
@@ -357,7 +334,7 @@ class BailingMoeV25(nn.Module):
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states.to(self.router_dtype))
+        router_logits, _ = self.gate(hidden_states)
         router_logits = router_logits.to(hidden_states.dtype)
 
         final_hidden_states = self.experts(

@@ -522,9 +522,14 @@ class MiniMaxVLProcessor(ProcessorMixin):
         # register() API now stores classes as {"pil": cls} dicts in
         # _extra_content, but get_possibly_dynamic_module() still calls
         # .__name__ on the raw value, crashing with AttributeError on dicts.
-        tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        #
+        # Reuse the tokenizer passed by vLLM instead of loading another one,
+        # and keep it out of the kwargs forwarded to the sub-processor loaders.
+        tokenizer = kwargs.pop("tokenizer", None)
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path, **kwargs
+            )
         image_processor = MiniMaxM3VLImageProcessor.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )

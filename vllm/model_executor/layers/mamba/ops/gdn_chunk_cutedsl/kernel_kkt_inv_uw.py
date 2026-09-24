@@ -573,8 +573,8 @@ class Sm100ChunkUWKernel:
                 for i in cutlass.range_constexpr(4):
                     M[i] = _bf16x2_sub(_bf16x2_neg(eye[i]), M[i])
 
-                # 3 rounds of Newton-Schulz
-                for _ in cutlass.range_constexpr(3):
+                # The fourth round keeps correlated-key KKT blocks stable in BF16.
+                for _ in cutlass.range_constexpr(4):
                     # First MMA: -AiM = Ai @ (-M)
                     cute.copy(stsm_atom, Ai_bf16, sA_ldsm[None, (warp_id_, warp_id_)])
                     cute.arch.sync_warp()

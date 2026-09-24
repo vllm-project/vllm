@@ -147,7 +147,7 @@ With standard decoding, each streamed output usually contains one token, so ITL
 and TPOT are typically similar.
 
 With speculative decoding, one streamed output can contain multiple tokens,
-such as several accepted draft tokens within a single engine tstep. ITL records
+such as several accepted draft tokens within a single engine step. ITL records
 only the gaps between streamed outputs; it does not add zero-duration gaps for
 tokens in the same output. TPOT instead amortizes the request's decoding time
 over every output token.
@@ -451,7 +451,7 @@ vllm bench serve \
     --num-prompts -1
 ```
 
-Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
+Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructured data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
 
 #### BFCL (Tool-Calling) Benchmark
 

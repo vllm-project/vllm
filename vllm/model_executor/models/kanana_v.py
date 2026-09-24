@@ -18,7 +18,7 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -442,7 +442,7 @@ class KananaVDummyInputsBuilder(BaseDummyInputsBuilder[KananaVProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         return {
