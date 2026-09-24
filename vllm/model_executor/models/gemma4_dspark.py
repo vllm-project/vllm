@@ -189,6 +189,7 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
         return self.embed_tokens(input_ids) * self.normalizer
 
     def _build_fused_kv_buffers(self) -> None:
