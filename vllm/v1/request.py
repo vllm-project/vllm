@@ -187,6 +187,12 @@ class Request:
         # Multi-modal related
         self.mm_features = mm_features or []
 
+        # Incremental bookkeeping for strip_covered_mm_data_incremental():
+        # features below _mm_strip_cursor are already present in
+        # _mm_stripped_mm_features (vllm-project/vllm#58324).
+        self._mm_strip_cursor = 0
+        self._mm_stripped_mm_features: list[MultiModalFeatureSpec] = []
+
         # Read-only views
         # Prevent directly appending to these lists since
         # they should also be updated simultaneously.

@@ -34,6 +34,8 @@ from .media import (
 
 if TYPE_CHECKING:
     import torch.types
+
+    from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -243,6 +245,52 @@ def strip_covered_mm_data(
         return replace(f, data=data)
 
     return [maybe_strip(f) for f in mm_features]
+
+
+def strip_covered_mm_data_incremental(
+    request: "Request",
+    *,
+    uses_mrope: bool = False,
+) -> list[MultiModalFeatureSpec]:
+    """Incremental variant of :func:`strip_covered_mm_data` for requests that
+    are re-scheduled step after step (e.g. realtime streaming sessions that
+    append one mm feature per input chunk).
+
+    ``request.mm_features`` grows by appending features whose
+    ``mm_position.offset`` is monotonically increasing, and the computed
+    prefix ``request.num_computed_tokens`` only ever grows. The stripped form
+    of a feature is therefore stable once computed, so the scheduler keeps the
+    already-stripped prefix on the request and only inspects the features
+    appended since the previous scheduling step. This reduces the per-step
+    scheduler cost from O(total features) to O(new features), which otherwise
+    grows quadratically with session length (vllm-project/vllm#58324).
+    """
+    features = request.mm_features
+    stripped_prefix = request._mm_stripped_mm_features
+    cursor = request._mm_strip_cursor
+    num_computed_tokens = request.num_computed_tokens
+
+    while cursor < len(features):
+        f = features[cursor]
+        if f.data is None or "address" in f.data:
+            # Pass-through items keep their identity and are not a boundary:
+            # later features may still fall inside the computed prefix.
+            stripped_prefix.append(f)
+            cursor += 1
+            continue
+        if f.mm_position.offset + f.mm_position.length > num_computed_tokens:
+            break
+
+        data = None
+        if uses_mrope:
+            data = MultiModalKwargsItem(
+                {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
+            )
+        stripped_prefix.append(replace(f, data=data))
+        cursor += 1
+
+    request._mm_strip_cursor = cursor
+    return stripped_prefix + features[cursor:]
 
 
 def group_and_batch_mm_items(
