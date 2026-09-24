@@ -1204,8 +1204,11 @@ def test_sparse_attn_decode_mxfp8_output() -> None:
         (1100, 8),
     ],
 )
+@pytest.mark.parametrize("block_scales", [False, True])
 @torch.inference_mode()
-def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
+def test_rocm_mxfp8_wo_a_bmm(
+    num_tokens: int, n_groups: int, block_scales: bool
+) -> None:
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         _mxfp8_e4m3_quantize_torch,
     )
@@ -1220,6 +1223,9 @@ def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
     w, w_scale = _mxfp8_e4m3_quantize_torch(
         torch.randn(n_groups * o_lora_rank, group_dim, device=device)
     )
+    if block_scales:
+        # A 32x32 checkpoint keeps one scale row per 32 weight rows.
+        w_scale = w_scale[::32].contiguous()
     wo_a = SimpleNamespace(weight=w, weight_scale=w_scale)
 
     out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
@@ -1227,7 +1233,9 @@ def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
     expected = torch.einsum(
         "tgd,grd->tgr",
         _mxfp8_dequant(a, a_scale).view(num_tokens, n_groups, group_dim),
-        _mxfp8_dequant(w, w_scale).view(n_groups, o_lora_rank, group_dim),
+        _mxfp8_dequant(
+            w, w_scale.repeat_interleave(w.shape[0] // w_scale.shape[0], 0)
+        ).view(n_groups, o_lora_rank, group_dim),
     )
     torch.testing.assert_close(out.float(), expected.flatten(1), atol=5e-2, rtol=1e-2)
 
