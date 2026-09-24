@@ -143,9 +143,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
-        # ``CacheConfig.enable_mamba_fine_grained_prefix_cache``, narrowed and set
+        # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
         # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
-        self.fine_grained_prefix_cache = False
+        self.shared_prefix_checkpoint = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -492,6 +492,8 @@ class SingleTypeKVCacheManager(ABC):
                 can resume at, from ``get_replay_boundaries``.
 
         """
+        if not self.kv_cache_spec.prefix_cacheable:
+            return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
@@ -2088,7 +2090,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # running state block, mutated in place, which equals what its key
         # promises only after that step's forward.
         if num_tokens != latest_prompt_hash_boundary and not (
-            self.fine_grained_prefix_cache
+            self.shared_prefix_checkpoint
             and num_tokens == request.shared_prefix_boundary
             and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
         ):
@@ -2498,12 +2500,14 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         del num_tokens_main_model
         assert not new_computed_blocks
         if total_computed_tokens > num_local_computed_tokens:
-            if total_computed_tokens % self.block_size != 0:
-                raise ValueError(
-                    "A host-only HiSparse import must end on a cache-block boundary."
-                )
-            imported_pages = total_computed_tokens // self.block_size
-            return max(cdiv(num_tokens, self.block_size) - imported_pages, 0)
+            # Keep the last imported page writable, including the last-token
+            # replay on a full prompt hit. Only earlier pages stay host-only.
+            imported_pages = cdiv(total_computed_tokens, self.block_size)
+            existing = len(self.req_to_blocks.get(request_id, ()))
+            needs_tail = self.get_resident_page(request_id, imported_pages - 1) is None
+            return int(needs_tail) + max(
+                cdiv(num_tokens, self.block_size) - max(imported_pages, existing), 0
+            )
         existing = len(self.req_to_blocks.get(request_id, ()))
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
@@ -2518,13 +2522,15 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        """Represent imported host history with null resident pages."""
+        """Reserve a writable final page; earlier imported pages stay on host."""
         assert num_external_computed_tokens > 0
         num_tokens = num_local_computed_tokens + num_external_computed_tokens
         blocks = self.req_to_blocks[request_id]
-        tail_page = cdiv(num_tokens, self.block_size) - 1
+        tail_page = (num_tokens - 1) // self.block_size
         if len(blocks) <= tail_page:
             blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
+        if blocks[tail_page].is_null:
+            blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(
         self,

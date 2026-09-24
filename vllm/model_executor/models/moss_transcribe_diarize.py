@@ -20,7 +20,7 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
@@ -423,48 +423,53 @@ class MossTranscribeDiarizeDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         if num_audios == 0:
             return {}
 
         feature_extractor = self.info.get_feature_extractor()
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=_get_max_audio_samples(feature_extractor),
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=mm_options.get("audio"),
             )
         }
-
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-    ) -> ProcessorInputs:
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-        num_audios = mm_counts.get("audio", 0)
-        tokenizer = self.info.get_tokenizer()
-        prompt = cached_encode(
-            tokenizer,
-            AUDIO_PLACEHOLDER * num_audios,
-            add_special_tokens=False,
-        ) or cached_encode(
-            tokenizer,
-            "\n",
-            add_special_tokens=False,
-        )
-        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
 
 
 class MossTranscribeDiarizeMultiModalProcessor(
     BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
 ):
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        builder = self.dummy_inputs
+        tokenizer = self.info.get_tokenizer()
+
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
+        num_audios = mm_counts.get("audio", 0)
+        if num_audios > 0:
+            prompt = cached_encode(
+                tokenizer,
+                AUDIO_PLACEHOLDER * num_audios,
+                add_special_tokens=False,
+            )
+        else:
+            prompt = cached_encode(
+                tokenizer,
+                "\n",
+                add_special_tokens=False,
+            )
+
+        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 

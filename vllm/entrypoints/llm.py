@@ -830,6 +830,14 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """
         self.llm_engine.sleep(level=level, mode=mode)
 
+    def release_kv_cache_memory(self) -> None:
+        """Release the GPU physical memory backing the KV cache.
+
+        Requires a completed ``sleep(level=0)`` and resident executor memory.
+        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        """
+        self.llm_engine.release_kv_cache_memory()
+
     def wake_up(self, tags: list[str] | None = None):
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
         method for more details.

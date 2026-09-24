@@ -14,7 +14,7 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import config, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
@@ -25,8 +25,10 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
+    from vllm.config.vllm import VllmConfig
 else:
     PretrainedConfig = Any
+    VllmConfig = Any
 
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
@@ -371,6 +373,17 @@ def _validate_qwen3_omni_dspark(
         )
 
 
+# (SpeculativeConfig field, VllmConfig sub-config, overridden field)
+_DRAFT_VLLM_CONFIG_OVERRIDES = (
+    # Otherwise the draft inherits the target's --moe-backend, which fails
+    # when the draft is unquantized and that backend is not.
+    ("moe_backend", "kernel_config", "moe_backend"),
+    # Only when set, so the draft keeps a KV cache layout the target shares.
+    ("attention_backend", "attention_config", "backend"),
+    ("kv_cache_dtype", "cache_config", "cache_dtype"),
+)
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -681,8 +694,8 @@ class SpeculativeConfig:
         if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
             # V4.1 has no classic-MTP draft: its checkpoints ship DSpark stages
             # under ``mtp.*``, so only V4 gets an MTP architecture here. The
-            # DSpark path rewrites ``architectures`` itself and needs only
-            # ``n_predict``; ``method="mtp"`` on V4.1 is rejected below.
+            # DSpark path rewrites ``architectures`` itself;
+            # ``method="mtp"`` on V4.1 is rejected below.
             is_v41 = hf_config.model_type == "deepseek_v41"
             hf_config.model_type = "deepseek_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -1427,14 +1440,6 @@ class SpeculativeConfig:
                     draft_hf_config.architectures = [
                         "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
                     ]
-                    if is_v41:
-                        # hf_config_override set n_predict to the number of
-                        # MTP stages (3), but one DSpark round drafts
-                        # dspark_block_size tokens; num_speculative_tokens
-                        # divisibility is checked against n_predict below.
-                        draft_hf_config.n_predict = getattr(
-                            draft_hf_config, "dspark_block_size", None
-                        ) or getattr(draft_hf_config, "n_predict", None)
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
@@ -1451,11 +1456,6 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
-                    if (
-                        getattr(hf, "n_predict", None) is None
-                        and getattr(hf, "block_size", None) is not None
-                    ):
-                        hf.n_predict = hf.block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
@@ -1470,7 +1470,15 @@ class SpeculativeConfig:
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
-                if n_predict is not None:
+                if self.use_dspark():
+                    if self.num_speculative_tokens is None:
+                        # DSpark's parallel width is independent of MTP stages.
+                        hf_config = self.draft_model_config.hf_config
+                        block_size = getattr(hf_config, "block_size", None)
+                        if block_size is None:
+                            block_size = getattr(hf_config, "dspark_block_size", None)
+                        self.num_speculative_tokens = block_size
+                elif n_predict is not None:
                     if self.num_speculative_tokens is None:
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
@@ -1770,6 +1778,18 @@ class SpeculativeConfig:
         )
 
         return draft_parallel_config
+
+    def apply_draft_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
+        """Overlay this config's kernel overrides onto a target VllmConfig.
+
+        Only non-None fields override, so an unset field keeps whatever the
+        target resolved.
+        """
+        for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            if (value := getattr(self, src)) is not None:
+                sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
+                vllm_config = replace(vllm_config, **{config_name: sub_config})
+        return vllm_config
 
     @field_validator("attention_backend", mode="before")
     @classmethod

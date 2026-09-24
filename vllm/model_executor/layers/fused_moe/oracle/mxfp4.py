@@ -31,7 +31,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    mx_scale_kwargs as _mx_scale_kwargs,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
 )
@@ -68,15 +73,6 @@ if triton_kernels_version is not None:
             "version is compatible. Error: %s",
             e,
         )
-
-
-def _mx_scale_kwargs(scale):
-    """PrecisionConfig weight-scale kwargs: 3.8 uses b_mx_scale/b_microblock_size,
-    3.5.1/3.6 use weight_scale.
-    """
-    if triton_kernels_version == "3.8":
-        return {"b_mx_scale": scale, "b_microblock_size": 32}
-    return {"weight_scale": scale}
 
 
 def _pack_deepgemm_mxfp4_scales(
@@ -769,18 +765,31 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
-            activation == MoEActivation.SITU or activation == MoEActivation.SILU
-        ):
-            # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
-            # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
-            # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
-            # which would inflate weights and OOM.
-            intermediate_size = round_up(intermediate_size, 128)
-            hidden_size = round_up(hidden_size, 128)
-        else:
-            intermediate_size = round_up(intermediate_size, 256)
-            hidden_size = round_up(hidden_size, 256)
+        from vllm.platforms.rocm import get_cdna_version
+
+        is_situ_or_silu = activation in (
+            MoEActivation.SITU,
+            MoEActivation.SILU,
+        )
+
+        # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
+        # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128
+        # rather than the generic ROCm 256 round-up, which would inflate
+        # weights and OOM.
+        aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+
+        # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
+        # CDNA4's F16xMXFP4 configuration uses block_k=256.
+        triton_uses_128 = (
+            backend == Mxfp4MoeBackend.TRITON_UNFUSED and get_cdna_version() != 4
+        )
+
+        alignment = (
+            128 if is_situ_or_silu and (aiter_uses_128 or triton_uses_128) else 256
+        )
+
+        intermediate_size = round_up(intermediate_size, alignment)
+        hidden_size = round_up(hidden_size, alignment)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
@@ -835,7 +844,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     sf_block_size = 32  # mxfp4 block size
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -1419,7 +1428,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -1957,7 +1966,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,
         )
 

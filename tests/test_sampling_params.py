@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
 from vllm import SamplingParams
+from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.utils.diffusion import validate_diffusion_sampling_params
+from vllm.v1.engine.input_processor import InputProcessor
 
 
 @dataclass
@@ -13,6 +17,7 @@ class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20
     logits_processors: list | None = None
+    return_sampling_mask: bool = False
 
     def get_vocab_size(self) -> int:
         return 1024
@@ -49,6 +54,191 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_verify_leaves_logits_processors_to_admission():
+    """verify() is runner-agnostic; LP validation lives in the admission
+    layer, so an unimportable FQCN must not fail verify()."""
+    SamplingParams().verify(
+        MockModelConfig(logits_processors=["no.such:Cls"]), None, None, None
+    )
+
+
+def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
+    model_config = MockModelConfig(is_diffusion=True)
+    params.verify(model_config, None, None, None)
+    validate_diffusion_sampling_params(
+        params,
+        canvas_length=canvas_length,
+        vocab_size=model_config.get_vocab_size(),
+        async_scheduling=True,
+    )
+
+
+def test_diffusion_extra_args_are_validated_without_a_served_canvas():
+    # No --diffusion-config: the canvas is unknown, the ids are still checked
+    # and a read-only request is still normalised.
+    params = SamplingParams(
+        max_tokens=64,
+        extra_args={"diffusion_seed_canvas": [0, 1], "diffusion_read_only": True},
+    )
+    _verify_diffusion(params, canvas_length=None)
+    assert params.ignore_eos is True
+
+    bad = SamplingParams(extra_args={"diffusion_seed_canvas": [0, 10**9]})
+    with pytest.raises(VLLMValidationError, match="ids must be in"):
+        _verify_diffusion(bad, canvas_length=None)
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {},
+        {"diffusion_canvas_length": None},
+        {"diffusion_canvas_length": 4},
+        {"diffusion_canvas_length": 8},
+    ],
+)
+def test_narrow_diffusion_canvas_requires_async_scheduling(
+    async_scheduling, extra_args
+):
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(is_diffusion=True),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=DiffusionConfig(canvas_length=8),
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+    )
+    params = SamplingParams(extra_args=extra_args)
+    if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
+        with pytest.raises(VLLMValidationError, match="requires --async-scheduling"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+    else:
+        InputProcessor._validate_params(processor, params, ("generate",))
+
+
+@pytest.mark.parametrize(
+    "extra_args, match",
+    [
+        ({"diffusion_seed_canvas": "abc"}, "list of token ids"),
+        ({"diffusion_seed_canvas": [1, 2.5]}, "list of token ids"),
+        ({"diffusion_seed_canvas": [1, True]}, "list of token ids"),
+        ({"diffusion_seed_canvas": [0, 1024]}, r"in \[0, 1024\)"),
+        ({"diffusion_seed_canvas": [0, -1]}, r"in \[0, 1024\)"),
+        ({"diffusion_max_steps": 0}, "positive integer"),
+        ({"diffusion_max_steps": "1"}, "positive integer"),
+        ({"diffusion_max_steps": True}, "positive integer"),
+        ({"diffusion_read_only": "yes"}, "boolean"),
+        ({"diffusion_read_only": 2}, "boolean"),
+        ({"diffusion_pinned": "0,1"}, "list of canvas positions"),
+        ({"diffusion_pinned": [0, True]}, "list of canvas positions"),
+        ({"diffusion_pinned": [0]}, "needs a diffusion_seed_canvas"),
+    ],
+)
+def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
+    with pytest.raises(VLLMValidationError, match=match):
+        _verify_diffusion(SamplingParams(extra_args=extra_args))
+
+
+def test_diffusion_seed_canvas_must_fill_the_canvas():
+    params = SamplingParams(extra_args={"diffusion_seed_canvas": [0] * 7})
+    with pytest.raises(VLLMValidationError, match="exactly 8 ids, got 7"):
+        _verify_diffusion(params, canvas_length=8)
+    # Without the served diffusion config the canvas length is unknown.
+    _verify_diffusion(params)
+
+
+@pytest.mark.parametrize("max_tokens, expected", [(100, 8), (5, 5), (None, 8)])
+@pytest.mark.parametrize("flag", [True, 1])
+def test_diffusion_read_only_ends_after_one_canvas(max_tokens, expected, flag):
+    params = SamplingParams(
+        max_tokens=max_tokens, extra_args={"diffusion_read_only": flag}
+    )
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == expected
+    assert params.ignore_eos
+
+
+@pytest.mark.parametrize(
+    "width, match",
+    [
+        (0, "positive integer"),
+        ("4", "positive integer"),
+        (True, "positive integer"),
+        (9, "no larger"),
+    ],
+)
+def test_diffusion_rejects_bad_canvas_length(width, match):
+    with pytest.raises(VLLMValidationError, match=match):
+        _verify_diffusion(
+            SamplingParams(extra_args={"diffusion_canvas_length": width}),
+            canvas_length=8,
+        )
+
+
+def test_diffusion_canvas_length_sizes_the_seed_and_the_read():
+    params = SamplingParams(
+        max_tokens=100,
+        extra_args={
+            "diffusion_canvas_length": 4,
+            "diffusion_seed_canvas": [1, 2, 3, 4],
+            "diffusion_read_only": True,
+        },
+    )
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == 4
+
+    params = SamplingParams(
+        extra_args={"diffusion_canvas_length": 4, "diffusion_seed_canvas": [0] * 8}
+    )
+    with pytest.raises(VLLMValidationError, match="exactly 4 ids, got 8"):
+        _verify_diffusion(params, canvas_length=8)
+
+
+def test_diffusion_pinned_positions_stay_inside_the_canvas():
+    seed = [0] * 8
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={"diffusion_seed_canvas": seed, "diffusion_pinned": [7, 8]}
+            ),
+            canvas_length=8,
+        )
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={"diffusion_seed_canvas": seed, "diffusion_pinned": [-1]}
+            )
+        )
+    # A narrower request canvas bounds the positions.
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={
+                    "diffusion_canvas_length": 4,
+                    "diffusion_seed_canvas": seed[:4],
+                    "diffusion_pinned": [4],
+                }
+            ),
+            canvas_length=8,
+        )
+
+
+def test_diffusion_accepts_extra_args():
+    params = SamplingParams(
+        extra_args={
+            "diffusion_seed_canvas": list(range(8)),
+            "diffusion_pinned": [0, 1, 7],
+            "diffusion_max_steps": 4,
+            "diffusion_read_only": True,
+        }
+    )
+    _verify_diffusion(params, canvas_length=8)
 
 
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
