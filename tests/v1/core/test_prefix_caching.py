@@ -179,6 +179,7 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["source"],
             source_spec,
+            enable_kv_transfer=not transfer_device_cache,
             role=KVCacheGroupRole.HISPARSE_SOURCE,
             host_resident=True,
         ),
@@ -537,6 +538,105 @@ def allocate_external_prefix(
         delay_cache_blocks=True,
         full_sequence_must_fit=True,
     )
+
+
+def make_nixl_hisparse_scheduler(manager: KVCacheManager):
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
+    connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
+    connector.hisparse = get_hisparse_coordinator(manager)
+    return connector
+
+
+def test_nixl_hisparse_gpu_landing_only_for_nixl_loads():
+    """Loads served by other connectors keep importing to host."""
+    manager = make_hisparse_kv_cache_manager(32, 16, transfer_device_cache=True)
+    connector = make_nixl_hisparse_scheduler(manager)
+    coordinator = get_hisparse_coordinator(manager)
+    other = make_request("other", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
+    assert connector.get_num_new_matched_tokens(other, 0) == (0, False)
+    assert coordinator.imports_to_host(other.request_id)
+
+    remote = make_request("remote", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
+    remote.kv_transfer_params = {"do_remote_prefill": True}
+    assert connector.get_num_new_matched_tokens(remote, 0) == (32, True)
+    assert not coordinator.imports_to_host(remote.request_id)
+
+
+def test_nixl_hisparse_gpu_landing_skips_local_prefix_pages():
+    """NIXL must not write remote KV into resident pages of the local hit."""
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, transfer_device_cache=True
+    )
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    coordinator = get_hisparse_coordinator(manager)
+    spills = coordinator.build_offload_command().page_transfers
+    spill_counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(spill_counts, spill_counts)
+    _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
+    manager.free(original)
+    manager.block_pool.evict_blocks({indexer_blocks[2].block_id})
+
+    connector = make_nixl_hisparse_scheduler(manager)
+    request = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([0, 1, 2, 3], [4, 5, 6, 7]),
+        "remote_engine_id": "prefill",
+        "remote_request_id": "prefill-request",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+    }
+    blocks, num_local, _ = manager.get_computed_blocks(request)
+    assert num_local == 2 * HISPARSE_BLOCK_SIZE
+    count, is_async = connector.get_num_new_matched_tokens(request, num_local)
+    assert count == 2 * HISPARSE_BLOCK_SIZE and is_async
+    assert (
+        manager.allocate_slots(
+            request,
+            num_new_tokens=0,
+            num_new_computed_tokens=num_local,
+            new_computed_blocks=blocks,
+            num_external_computed_tokens=count,
+            delay_cache_blocks=True,
+        )
+        is not None
+    )
+    assert not coordinator.imports_to_host(request.request_id)
+    connector.update_state_after_alloc(
+        request, manager.get_blocks(request.request_id), count
+    )
+
+    _, indexer, resident, _ = manager.get_blocks(request.request_id).blocks
+    _, local_block_ids, num_computed, _ = connector._reqs_need_recv[request.request_id]
+    assert local_block_ids == (
+        [block.block_id for block in indexer[2:]],
+        [block.block_id for block in resident[2:]],
+    )
+    assert num_computed[1:3] == (2, 2)
+
+
+def test_nixl_hisparse_does_not_export_host_only_pages():
+    """A null resident page would make the peer read block 0."""
+    from vllm.v1.request import RequestStatus
+
+    manager = make_hisparse_kv_cache_manager(32, 16, transfer_device_cache=True)
+    connector = make_nixl_hisparse_scheduler(manager)
+    request = make_request("request", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
+    request.kv_transfer_params = {"do_remote_decode": True}
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+
+    assert connector.request_finished(request, ([], [3, 4], [0, 5], [])) == (
+        False,
+        None,
+    )
+    assert request.request_id not in connector._reqs_need_send
 
 
 @pytest.mark.parametrize("num_tokens", [1, 15, 16, 17, 31, 32, 33, 127])
