@@ -691,8 +691,12 @@ class DecodeBenchConnectorWorker:
 
         finfo = torch.finfo(dtype)
         if fill_std > 0:
-            # Sample in float32, which also covers fp8 dtypes.
-            values = torch.normal(fill_mean, fill_std, size=size, device=device)
+            sample_dtype = torch.float32
+            if dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+                sample_dtype = dtype
+            values = torch.normal(
+                fill_mean, fill_std, size=size, device=device, dtype=sample_dtype
+            )
             return values.clamp_(finfo.min, finfo.max).to(dtype)
         fill_mean = min(max(fill_mean, finfo.min), finfo.max)
         return torch.full(size, fill_mean, dtype=dtype, device=device)

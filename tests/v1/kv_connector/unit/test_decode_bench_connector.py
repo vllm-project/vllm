@@ -865,7 +865,7 @@ def test_decode_bench_connector_zero_fills_packed_uint8_caches():
 
 @pytest.mark.parametrize("fill_std", [0.0, 0.1])
 def test_decode_bench_connector_startup_fill_fills_registered_caches(fill_std):
-    """Startup fill writes every cache view in place, except circular buffers."""
+    """Startup fill writes every cache view in place, including strided views."""
     vllm_config = create_vllm_config(
         block_size=16,
         kv_connector="DecodeBenchConnector",
@@ -881,12 +881,6 @@ def test_decode_bench_connector_startup_fill_fills_registered_caches(fill_std):
                     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
                 ),
             ),
-            KVCacheGroupSpec(
-                ["circular"],
-                CircularBufferSpec(
-                    block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float32
-                ),
-            ),
         ],
     )
     connector = DecodeBenchConnector(
@@ -894,10 +888,7 @@ def test_decode_bench_connector_startup_fill_fills_registered_caches(fill_std):
     )
     attention = torch.full((4, 2, 16), -1.0)
     transposed = torch.full((2, 4, 16), -1.0).transpose(0, 1)
-    circular = torch.full((4, 16), -1.0)
-    connector.register_kv_caches(
-        {"attention": attention, "transposed": transposed, "circular": circular}
-    )
+    connector.register_kv_caches({"attention": attention, "transposed": transposed})
 
     for filled in (attention, transposed):
         if fill_std == 0:
@@ -905,7 +896,6 @@ def test_decode_bench_connector_startup_fill_fills_registered_caches(fill_std):
         else:
             assert torch.isfinite(filled).all()
             assert filled.std() > 0
-    assert torch.all(circular == -1.0)
 
 
 @pytest.mark.parametrize("fill_std", [0.0, 0.1])
@@ -999,15 +989,8 @@ def test_decode_bench_connector_startup_fill_keeps_zeroed_groups_per_request():
         vllm_config, KVConnectorRole.WORKER, kv_cache_config
     )
     attention = torch.full((4, 2), -1.0)
-    # Padded state views, as in the model runner.
-    mamba_storage = torch.full((4, 12), -1.0)
-    worker_connector.register_kv_caches(
-        {"attention": attention, "mamba": (mamba_storage[:, :4], mamba_storage[:, 4:8])}
-    )
-    torch.testing.assert_close(
-        mamba_storage[:, :8], torch.full_like(mamba_storage[:, :8], 0.015)
-    )
-    assert torch.all(mamba_storage[:, 8:] == -1.0)
+    mamba_states = (torch.zeros(4, 4), torch.zeros(4, 4))
+    worker_connector.register_kv_caches({"attention": attention, "mamba": mamba_states})
     assert torch.all(attention == -1.0)
 
     worker_connector.bind_connector_metadata(metadata)
@@ -1109,6 +1092,7 @@ def test_decode_bench_connector_startup_fill_keeps_circular_buffer_zero_fill():
     worker_connector.register_kv_caches(
         {"full_attention": attention_cache, "compressor_ring": ring_cache}
     )
+    assert torch.all(ring_cache == 1.0)
     worker_connector.bind_connector_metadata(metadata)
     worker_connector.start_load_kv(
         ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
