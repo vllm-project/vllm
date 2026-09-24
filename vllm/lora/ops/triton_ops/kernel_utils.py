@@ -299,6 +299,9 @@ def do_shrink_kernel(
         + rbn[None, :] * lora_d1_stride
         + offset_k[:, None] * lora_d2_stride
     )
+    # GDC launch dependents hints the runtime system to launch dependent kernels.
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
 
     # Compute partial/complete block matrix product.
     accumulator = mm_k(
@@ -318,9 +321,6 @@ def do_shrink_kernel(
         False,  # USE_GDC is always False in shrink kernel
         base_k=pid_sk * BLOCK_K,
     )
-    # GDC launch dependents hints the runtime system to launch dependent kernels.
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
     # Identify the C output pointers to store the results of the accumulator.
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_cm = tl.arange(0, BLOCK_M)
