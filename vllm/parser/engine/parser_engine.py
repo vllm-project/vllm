@@ -1014,11 +1014,19 @@ class ParserEngine(Parser):
         if not self._stream_arg_deltas:
             return None
 
+        slot = self._tool_slots[idx]
+        # Structural chars gate the converter call, but a string value can
+        # grow without them.  Only gate when ``string_keys`` is ``set()`` (the
+        # schema has no string fields); ``None`` means no schema, so every
+        # string value is streamable.
         structural = self._arg_structural_chars
-        if structural is not None and structural.isdisjoint(raw_delta):
+        if (
+            structural is not None
+            and slot.string_keys == set()
+            and structural.isdisjoint(raw_delta)
+        ):
             return None
 
-        slot = self._tool_slots[idx]
         try:
             current_json = converter(slot.args, True)
         except (json.JSONDecodeError, ValueError, TypeError):
