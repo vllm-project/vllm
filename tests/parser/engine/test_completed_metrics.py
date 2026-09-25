@@ -8,11 +8,11 @@ import pytest
 from prometheus_client import REGISTRY
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from vllm.entrypoints.generate.base.protocol import FunctionDefinition
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
