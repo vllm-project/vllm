@@ -2943,7 +2943,7 @@ class NixlBaseConnectorWorker:
         self._sync_device_after_direct_recv(direct_device_recving)
 
         # Handle timeout to avoid stranding blocks on remote.
-        self._reap_expired_send_leases(time.perf_counter(), done_sending)
+        self._reap_expired_send_leases(done_sending)
 
         return KVConnectorTransferResults(
             finished_sending=done_sending,
@@ -2971,7 +2971,7 @@ class NixlBaseConnectorWorker:
         """
         raise NotImplementedError
 
-    def _reap_expired_send_leases(self, now: float, done_sending: set[str]) -> None:
+    def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into ``done_sending``.
 
         ``_reqs_to_send`` is not ordered by expiry: heartbeats update the
@@ -2979,6 +2979,9 @@ class NixlBaseConnectorWorker:
         entry can sit in front of already-expired ones. Scan every entry
         rather than stopping at the first still-live request.
         """
+        if not self._reqs_to_send:
+            return
+        now = time.perf_counter()
         expired = [
             req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
         ]

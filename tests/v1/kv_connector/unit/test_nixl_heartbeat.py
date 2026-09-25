@@ -194,7 +194,8 @@ def test_reaper_reclaims_expired_leases_behind_heartbeated_head(monkeypatch):
     assert w._reqs_to_send["A"] == pytest.approx(100.0)
 
     done: set[str] = set()
-    w._reap_expired_send_leases(50.0, done)
+    now["t"] = 50.0
+    w._reap_expired_send_leases(done)
 
     assert done == {"B", "C"}
     assert list(w._reqs_to_send) == ["A"]
@@ -203,21 +204,26 @@ def test_reaper_reclaims_expired_leases_behind_heartbeated_head(monkeypatch):
 
     # now == expires is expired (now >= expires): A is due at 100.
     done_eq: set[str] = set()
-    w._reap_expired_send_leases(100.0, done_eq)
+    now["t"] = 100.0
+    w._reap_expired_send_leases(done_eq)
     assert done_eq == {"A"}
     assert not w._reqs_to_send
     assert not w._reqs_to_process
     assert w.xfer_stats.record_kv_expired_req.call_count == 3
 
 
-def test_reaper_reclaims_when_now_equals_expiry():
+def test_reaper_reclaims_when_now_equals_expiry(monkeypatch):
     """The reaper must reclaim on the now == expires boundary."""
     w = _worker_stub()
     w._reqs_to_process.add("eq")
     w._reqs_to_send = {"eq": 50.0}
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: 50.0)
+
     done: set[str] = set()
-    w._reap_expired_send_leases(50.0, done)
+    w._reap_expired_send_leases(done)
 
     assert done == {"eq"}
     assert not w._reqs_to_send
@@ -225,7 +231,7 @@ def test_reaper_reclaims_when_now_equals_expiry():
     w.xfer_stats.record_kv_expired_req.assert_called_once()
 
 
-def test_reaper_reclaims_shorter_lease_behind_later_deadline():
+def test_reaper_reclaims_shorter_lease_behind_later_deadline(monkeypatch):
     """A later-inserted longer TTL must not block an earlier-expiring entry.
 
     Delete+reinsert on heartbeat cannot restore expiry order in this case
@@ -235,8 +241,12 @@ def test_reaper_reclaims_shorter_lease_behind_later_deadline():
     w._reqs_to_process.update(("X", "Y"))
     w._reqs_to_send = {"X": 55.0, "Y": 46.0}
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: 50.0)
+
     done: set[str] = set()
-    w._reap_expired_send_leases(50.0, done)
+    w._reap_expired_send_leases(done)
 
     assert done == {"Y"}
     assert list(w._reqs_to_send) == ["X"]
