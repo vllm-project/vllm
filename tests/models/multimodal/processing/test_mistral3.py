@@ -8,13 +8,13 @@ from PIL import Image
 from transformers import AutoProcessor, BatchFeature
 from transformers.models.pixtral import PixtralProcessor
 
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.lightonocr import (
     LightOnOCRForConditionalGeneration,
     LightOnOCRProcessingInfo,
 )
 from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
-from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 
@@ -156,6 +156,7 @@ def test_processor_size_override(
     assert prompt_update_tokens == hf_placeholder_tokens
 
 
+@pytest.mark.usefixtures("default_vllm_config")
 def test_mm_device_do_normalize():
     ctx = build_model_context(
         _MODEL_ID,
@@ -181,7 +182,7 @@ def test_mm_device_do_normalize():
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
     assert all(value.dtype == torch.uint8 for value in raw_values)
 
-    input_norm = FusedInputNorm.from_model_config(ctx.model_config)
+    input_norm = build_mm_input_norm(ctx.model_config)
     for raw, normalized in zip(raw_values, normalized_values):
         output = input_norm(raw, normalized.dtype)
         torch.testing.assert_close(output, normalized, rtol=1e-5, atol=1e-6)

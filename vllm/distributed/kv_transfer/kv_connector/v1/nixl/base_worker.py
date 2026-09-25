@@ -75,6 +75,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
@@ -1566,7 +1567,13 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
-                storage_is_block_major = num_blocks * block_stride == registration_len
+                # A connector that registers the backing as one memory region
+                # may need its length rounded up to a page boundary. Such a tail
+                # is shorter than one block, so it cannot make the storage
+                # segmented.
+                storage_is_block_major = (
+                    0 <= registration_len - num_blocks * block_stride < block_stride
+                )
                 # A view with a contiguous page can own a strided region even
                 # when sibling layers share the same backing allocation.
                 page_contiguous = (
@@ -1588,7 +1595,9 @@ class NixlBaseConnectorWorker:
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
-                    storage_block_len = registration_len // num_blocks
+                    # The complete storage row is one block stride. Dividing the
+                    # registered length instead would fold the padding tail in.
+                    storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
@@ -2431,6 +2440,18 @@ class NixlBaseConnectorWorker:
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
         if (
+            (self.dcp_size > 1 or remote_dcp_size > 1)
+            and self.region_group_ids
+            and self.region_group_ids != self.dst_region_group_ids[remote_engine_id]
+            and (
+                self._physical_blocks_per_logical_kv_block != 1
+                or remote_physical_per_logical != 1
+            )
+        ):
+            raise NotImplementedError(
+                "DCP region pulls require matching logical and physical block sizes"
+            )
+        if (
             self._has_mamba
             and remote_physical_per_logical
             != self._physical_blocks_per_logical_kv_block
@@ -3234,11 +3255,14 @@ class NixlBaseConnectorWorker:
         local_dcp_rank: int,
         remote_dcp_size: int,
         local_num_computed_blocks: int,
+        num_remote_blocks: int | None = None,
     ) -> tuple[list[int], list[int]]:
         """Match local and remote block IDs by global DCP position.
 
         ``local_ids`` excludes blocks already satisfied by the local prefix
         cache, while ``remote_ids`` contains the full transferable remote list.
+        ``num_remote_blocks``, when provided, is the global block count before
+        DCP partitioning and excludes allocation padding.
 
         Example:
             local DCP size 2, rank 0 owns *global positions*=[0, 2, 4, 6]
@@ -3254,6 +3278,9 @@ class NixlBaseConnectorWorker:
 
         """
         local_size, remote_size = local_dcp_size, remote_dcp_size
+        if num_remote_blocks is not None:
+            num_local = cdiv(num_remote_blocks - local_dcp_rank, local_size)
+            local_ids = local_ids[: max(0, num_local - local_num_computed_blocks)]
 
         if local_size == remote_size:
             local_slice = local_ids
@@ -3274,6 +3301,8 @@ class NixlBaseConnectorWorker:
             remote_slice = remote_ids[start_remote::k]
 
         matched_blocks = min(len(local_slice), len(remote_slice))
+        if num_remote_blocks is not None and matched_blocks < len(local_slice):
+            raise ValueError("Remote KV pages do not cover the requested range")
         return local_slice[:matched_blocks], remote_slice[:matched_blocks]
 
     @staticmethod
@@ -3290,13 +3319,15 @@ class NixlBaseConnectorWorker:
             block_ids_by_region.append(list(block_ids[group_id]))
         return block_ids_by_region
 
-    @staticmethod
     def _apply_prefix_caching_by_region(
+        self,
         decode_block_ids: BlockIds,
         prefill_block_ids: BlockIds,
         *,
         num_computed_blocks: list[int] | None = None,
         num_remote_blocks: int | None = None,
+        remote_rank: int = 0,
+        remote_dcp_size: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
@@ -3310,13 +3341,18 @@ class NixlBaseConnectorWorker:
             for decode_region, prefill_region, start in zip(
                 decode_block_ids, prefill_block_ids, num_computed_blocks, strict=True
             ):
-                count = min(len(decode_region), max(num_remote_blocks - start, 0))
-                if start + count > len(prefill_region):
-                    raise ValueError("Remote KV pages do not cover the requested range")
-                # An extra producer page can be allocation padding, not a
-                # cached prefix. Select by token position instead of list length.
-                matched_decode.append(list(decode_region[:count]))
-                matched_prefill.append(list(prefill_region[start : start + count]))
+                local, remote = self._apply_dcp_prefix_caching(
+                    decode_region,
+                    prefill_region,
+                    remote_rank,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    remote_dcp_size,
+                    start,
+                    num_remote_blocks=num_remote_blocks,
+                )
+                matched_decode.append(local)
+                matched_prefill.append(remote)
             return matched_decode, matched_prefill
 
         trimmed_prefill: list[list[int]] = []

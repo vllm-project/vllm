@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -57,7 +58,6 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import FusedInputNorm
 
 TRANSFORMERS_SUPPORTS_PIXTRAL_IMAGE_ONLY = Version(transformers.__version__) >= Version(
     "5.15.0"
@@ -473,7 +473,7 @@ class Mistral3ForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
-                input_norm=FusedInputNorm.from_model_config(vllm_config.model_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )

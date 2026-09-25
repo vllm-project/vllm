@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, ove
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -845,12 +846,15 @@ def get_request_block_hasher(
             return []
 
         curr_mm_idx = 0
-        if start_token_idx > 0:
-            # Set curr_mm_idx = -1 to indicate the last mm input.
-            # Note that since we reach to this branch only when the block is
-            # completed with generated tokens, we only need to consider the
-            # last mm input.
-            curr_mm_idx = -1
+        mm_features = request.mm_features
+        if start_token_idx > 0 and mm_features:
+            last_mm_pos = mm_features[-1].mm_position
+            if last_mm_pos.offset + last_mm_pos.length > start_token_idx:
+                curr_mm_idx, _ = get_mm_features_in_window(
+                    mm_features,
+                    start_token_idx,
+                    start_token_idx + hash_block_size,
+                )
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None
@@ -1604,23 +1608,17 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    hot_page_sizes = [
+    alignments = [
         group.kv_cache_spec.page_size_bytes
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     ]
-    if hot_page_sizes:
-        bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
-    stride_alignments = [
-        spec.block_stride_alignment
+    alignments.extend(
+        _get_per_layer_spec(group, layer_name).block_stride_alignment or 1
         for group in kv_cache_groups
         for layer_name in group.layer_names
-        if isinstance(spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec)
-        and spec.block_stride_alignment
-    ]
-    if stride_alignments:
-        bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
-    return bytes_per_block
+    )
+    return round_up(bytes_per_block, math.lcm(*alignments))
 
 
 def validate_kv_cache_layout(
@@ -2117,16 +2115,24 @@ def _get_packed_kv_cache_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=_is_deepseek_v4_eagle(vllm_config),
+        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
-def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
+def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
+    """Whether the drafter's KV layers can be located positionally.
+
+    MTP drafters register their KV layers after the target layers, without a
+    distinguishing spec marker. DeepseekV4/V4.1 do this with ``dspark`` too.
+    The annotator separately checks that the groups partition the layers exactly.
+    """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle():
         return False
+    if spec_config.method == "mtp":
+        return True
     model_config = vllm_config.model_config
     return model_config is not None and model_config.hf_config.model_type in (
         "deepseek_v4",
@@ -2134,11 +2140,24 @@ def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _groups_partition_layers_exactly(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    """Whether the groups cover every layer of ``kv_cache_spec`` exactly once.
+
+    The trailing-layer draft fallback is only meaningful when the last
+    registered layer is guaranteed to appear in exactly one group.
+    """
+    names = [name for group in kv_cache_groups for name in group.layer_names]
+    return len(names) == len(kv_cache_spec) and set(names) == set(kv_cache_spec)
+
+
 def _annotate_eagle_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     kv_cache_groups: list[KVCacheGroupSpec],
-    use_deepseek_v4_fallback: bool = False,
+    use_trailing_layer_fallback: bool = False,
 ) -> None:
     """Flag the KV cache groups that hold drafter attention layers.
 
@@ -2151,14 +2170,14 @@ def _annotate_eagle_groups(
        spec merging, wherever grouping happens to land. It is sufficient but
        not necessary: a drafter whose spec is indistinguishable from the
        target's cannot be found this way.
-    2. Model-scoped positional fallback for DeepseekV4/V4.1, whose MTP block
-       reuses the target's own decoder layer and so carries no spec marker. Its
-       draft attention layer is always the last registered layer, so flag whichever
-       group holds it. This rule is only valid where the groups partition
-       exactly the layers of ``kv_cache_spec``, which is true on the packed
-       grouping path and not in general; other callers must leave
-       ``use_deepseek_v4_fallback`` False. The caller gates this fallback on
-       the configured model type.
+    2. Positional fallback for MTP drafters (including DeepseekV4/V4.1 DSpark), whose
+       MTP block reuses the target's own decoder layer and so carries no spec
+       marker. Their draft attention layers always register after every
+       target layer, so flag whichever group holds the last registered layer.
+       This rule is only valid where the groups partition exactly the layers
+       of ``kv_cache_spec``, which is re-checked here before applying it.
+       When a drafter's trailing caches span several groups, this rule flags
+       only the group holding the very last layer and must be generalized.
        FIXME(yifan): avoid/generalize this hacky check.
 
     Args:
@@ -2166,8 +2185,8 @@ def _annotate_eagle_groups(
         kv_cache_spec: The kv cache spec of each attention layer, in layer
             registration order. Only read by rule 2.
         kv_cache_groups: Groups to annotate in place.
-        use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4/V4.1 packed
-            group.
+        use_trailing_layer_fallback: Enable rule 2. Callers gate this on
+            ``_uses_trailing_mtp_layers``.
 
     """
     spec_config = vllm_config.speculative_config
@@ -2181,7 +2200,9 @@ def _annotate_eagle_groups(
         ):
             group.is_eagle_group = True
 
-    if not use_deepseek_v4_fallback:
+    if not use_trailing_layer_fallback:
+        return
+    if not _groups_partition_layers_exactly(kv_cache_spec, kv_cache_groups):
         return
     last_layer = next(reversed(kv_cache_spec))
     for group in kv_cache_groups:
@@ -2352,7 +2373,12 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
-    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
+    _annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
+    )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
