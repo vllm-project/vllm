@@ -46,6 +46,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     masked_amax_scale,
     moe_kernel_quantize_input,
@@ -2571,3 +2574,94 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+@pytest.mark.parametrize("weight_on_input", [False, True])
+def test_static_int8_modular_matches_legacy(
+    workspace_init, dtype, per_out_ch_quant, weight_on_input
+):
+    """Match legacy static scales, bias and router order for both GEMMs."""
+    experts, hidden, tokens = 3, 128, 4
+    moe = make_dummy_moe_config(
+        num_experts=experts, hidden_dim=hidden, intermediate_size=hidden, in_dtype=dtype
+    )
+    rng = torch.Generator(device="cuda").manual_seed(7)
+
+    def weights(rows):
+        return torch.randint(
+            -3,
+            4,
+            (experts, rows, hidden),
+            generator=rng,
+            device="cuda",
+            dtype=torch.int8,
+        )
+
+    def scales(rows, low, high):
+        channels = rows if per_out_ch_quant else 1
+        return torch.linspace(low, high, experts * channels, device="cuda").reshape(
+            experts, channels, 1
+        )
+
+    w1, w2 = weights(2 * hidden), weights(hidden)
+    qc = FusedMoEQuantConfig.make(
+        torch.int8,
+        w1_scale=scales(2 * hidden, 0.002, 0.018),
+        w2_scale=scales(hidden, 0.003, 0.021),
+        a1_scale=torch.tensor(0.035, device="cuda"),
+        a2_scale=torch.tensor(0.02, device="cuda"),
+        w1_bias=torch.linspace(
+            -0.25, 0.25, experts * 2 * hidden, device="cuda"
+        ).reshape(experts, 2 * hidden),
+        w2_bias=torch.linspace(-0.125, 0.125, experts * hidden, device="cuda").reshape(
+            experts, hidden
+        ),
+        per_out_ch_quant=per_out_ch_quant,
+    )
+    kernel = mk.FusedMoEKernel(
+        MoEPrepareAndFinalizeNoDPEPModular(),
+        TritonExperts(moe, qc),
+    )
+    x = torch.randn((tokens, hidden), device="cuda", dtype=dtype, generator=rng)
+    ids = torch.tensor([[0], [2], [1], [2]], device="cuda", dtype=torch.int32)
+    router = torch.tensor([[0.0], [0.37], [0.9], [1.0]], device="cuda")
+
+    def modular(inputs, topk_weights, topk_ids):
+        return kernel.apply(
+            hidden_states=inputs,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=experts,
+            expert_map=None,
+            apply_router_weight_on_input=weight_on_input,
+        )
+
+    with set_current_vllm_config(VllmConfig()):
+        expected = fused_moe_module.fused_experts(
+            x,
+            w1,
+            w2,
+            router,
+            ids,
+            apply_router_weight_on_input=weight_on_input,
+            quant_config=qc,
+        )
+        actual = modular(x, router, ids)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        empty = modular(x[:0], router[:0], ids[:0])
+        assert empty.shape == (0, hidden)
+        assert empty.dtype == dtype
+
+        if dtype == torch.bfloat16 and per_out_ch_quant and weight_on_input:
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = modular(x, router, ids)
+            graph.replay()
+            torch.testing.assert_close(captured, actual, rtol=0, atol=0)

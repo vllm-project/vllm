@@ -1622,18 +1622,14 @@ def test_quark_int8_moe_scale_layout_flags(
     """
     static_act = act_key.scale.static
     moe_config = _make_test_moe_config()
-    # Pin the dynamic-activation backend so the test does not depend on the
-    # platform's backend priority.
+    # Pin the backend so this scale layout test is platform independent.
     with patch(
         "vllm.model_executor.layers.quantization.quark.quark_moe."
         "select_int8_moe_backend",
         return_value=(Int8MoeBackend.TRITON, MagicMock()),
     ):
         method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, act_key)
-    if static_act:
-        assert method.int8_backend is None  # static activations: legacy path
-    else:
-        assert method.int8_backend == Int8MoeBackend.TRITON
+    assert method.int8_backend == Int8MoeBackend.TRITON
 
     intermediate = moe_config.intermediate_size
     layer = SimpleNamespace(

@@ -1063,22 +1063,29 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         self.int8_backend: Int8MoeBackend | None = None
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
 
-        # Dynamic-activation INT8 MoE goes through the oracle + modular kernel.
-        # The modular TritonExperts kernel consumes float activations and
-        # quantizes them to int8 itself, so it cannot apply a loaded static
-        # activation scale (this matches CompressedTensorsW8A8Int8MoEMethod).
-        # TODO: Static-activation INT8 therefore stays on the legacy fused_experts
-        # path (see apply()) for now, preserving pre-refactor behavior.
-        # Needs to be migrated to expert backend.
-        if not self.static_input_scales:
-            # Map the Quark weight scheme to oracle quant keys. Per-channel
-            # weights pair with dynamic per-token activations; per-tensor
-            # weights with dynamic per-tensor activations.
+        if self.static_input_scales and moe.is_lora_enabled:
+            raise NotImplementedError(
+                "Quark static INT8 MoE does not support LoRA with input-side "
+                "router weighting."
+            )
+
+        parallel = moe.moe_parallel_config
+        self.use_legacy_static_path = self.static_input_scales and (
+            parallel.use_passthrough_all2all
+            or (parallel.use_all2all_kernels and not parallel.use_ag_rs_all2all_kernels)
+        )
+        if not self.use_legacy_static_path:
             self.int8_backend, self.experts_cls = select_int8_moe_backend(
                 config=moe,
                 weight_key=self.weight_quant_key,
                 activation_key=self.activation_quant_key,
             )
+
+    @property
+    def is_monolithic(self) -> bool:
+        if self.use_legacy_static_path:
+            return False
+        return super().is_monolithic
 
     def create_weights(
         self,
@@ -1302,9 +1309,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
 
             replace_parameter(layer, "w13_weight_scale", max_w13_scales)
 
-        # Dynamic activations run through the oracle's modular kernel; static
-        # activations use the legacy fused_experts path in apply().
-        if not self.static_input_scales:
+        if not self.use_legacy_static_path:
             assert self.int8_backend is not None
             assert self.experts_cls is not None
             w13, w2 = convert_to_int8_moe_kernel_format(
@@ -1320,7 +1325,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
 
-        if not self.static_input_scales:
+        if not self.use_legacy_static_path:
             assert self.int8_backend is not None
             assert self.experts_cls is not None
             self.moe_kernel = make_int8_moe_kernel(
@@ -1341,8 +1346,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         per_act_token_quant = activation_quant_key.scale.group_shape.is_per_token()
         per_out_ch_quant = self.weight_quant_key.scale.group_shape.is_per_channel()
 
-        # Static-activation INT8 has no oracle backend (it uses the legacy
-        # fused_experts path); build its config directly.
         if self.int8_backend is None:
             return int8_w8a8_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
@@ -1387,11 +1390,11 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
+                shared_experts=shared_experts,
                 shared_experts_input=shared_experts_input,
             )
 
-        # Static-activation INT8 MoE: legacy monolithic path (the modular kernel
-        # quantizes activations dynamically and cannot apply a loaded scale).
+        # Backends outside the static migration still use the legacy path.
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(

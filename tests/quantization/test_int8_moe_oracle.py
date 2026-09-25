@@ -7,6 +7,8 @@ so they run on any platform where the Triton INT8 MoE kernel is available —
 CUDA (SM >= 7.5), ROCm, or XPU — not just gfx950.
 """
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -19,6 +21,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
     select_int8_moe_backend,
+)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTensorSym,
@@ -78,10 +83,20 @@ def _make_int8_moe_config(moe_backend: MoEBackend = "auto") -> FusedMoEConfig:
             kInt8DynamicTensorSym,
             id="per_tensor_weight-per_tensor_act",
         ),
+        pytest.param(
+            kInt8StaticChannelSym,
+            kInt8StaticTensorSym,
+            id="per_channel_weight-static_tensor_act",
+        ),
+        pytest.param(
+            kInt8StaticTensorSym,
+            kInt8StaticTensorSym,
+            id="per_tensor_weight-static_tensor_act",
+        ),
     ],
 )
-def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
-    """Both dynamic-activation INT8 MoE schemes select the Triton backend."""
+def test_int8_schemes_dispatch_to_triton(weight_key, activation_key):
+    """Supported dynamic and static INT8 schemes select Triton."""
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
         config, weight_key=weight_key, activation_key=activation_key
@@ -135,3 +150,38 @@ def test_int8_unsupported_moe_backend_raises():
             weight_key=kInt8StaticChannelSym,
             activation_key=kInt8DynamicTokenSym,
         )
+
+
+@requires_int8_moe
+def test_static_int8_triton_rejects_lora():
+    config = _make_int8_moe_config(moe_backend="triton")
+    config.is_lora_enabled = True
+    with pytest.raises(
+        ValueError, match="static INT8 activation quantization with LoRA"
+    ):
+        select_int8_moe_backend(config, kInt8StaticChannelSym, kInt8StaticTensorSym)
+    with pytest.raises(NotImplementedError, match="Quark static INT8 MoE"):
+        QuarkW8A8Int8MoEMethod(config, kInt8StaticChannelSym, kInt8StaticTensorSym)
+
+
+@pytest.mark.parametrize("weight_key", [kInt8StaticTensorSym, kInt8StaticChannelSym])
+def test_quark_static_int8_legacy_dispatch_preserves_scale_layout(weight_key):
+    config = _make_int8_moe_config()
+    config.moe_parallel_config = replace(
+        config.moe_parallel_config,
+        dp_size=2,
+        ep_size=2,
+        use_ep=True,
+        all2all_backend="deepep_high_throughput",
+    )
+    method = QuarkW8A8Int8MoEMethod(config, weight_key, kInt8StaticTensorSym)
+    layer = torch.nn.Module()
+    method.create_weights(layer, 8, 256, 256, torch.bfloat16)
+    quant_config = method.get_fused_moe_quant_config(layer)
+
+    # The runner must reach the legacy routed-expert call when no oracle is used.
+    assert method.int8_backend is None
+    assert not method.is_monolithic
+    assert quant_config is not None
+    assert quant_config.per_act_token_quant is False
+    assert quant_config.per_out_ch_quant is (weight_key == kInt8StaticChannelSym)
