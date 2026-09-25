@@ -111,11 +111,51 @@ class AnthropicJsonOutputFormat(BaseModel):
     type: Literal["json_schema"] = "json_schema"
 
 
+AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
+# reasoning_effort sent to the chat template for thinking.type=disabled.
+AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
+AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
+AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
+
+
 class AnthropicOutputConfig(BaseModel):
     """Configuration options for the model's output, such as the output format."""
 
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: AnthropicEffort | None = None
     format: AnthropicJsonOutputFormat | None = None
+
+
+class AnthropicThinkingConfigEnabled(BaseModel):
+    """Extended thinking with a fixed token budget.
+
+    ``display`` is accepted but ignored: reasoning is always returned.
+    """
+
+    type: Literal["enabled"]
+    budget_tokens: int = Field(ge=1024)
+    display: AnthropicThinkingDisplay | None = None
+
+
+class AnthropicThinkingConfigDisabled(BaseModel):
+    type: Literal["disabled"]
+
+
+class AnthropicThinkingConfigAdaptive(BaseModel):
+    """Extended thinking whose depth the model chooses.
+
+    ``display`` is accepted but ignored: reasoning is always returned.
+    """
+
+    type: Literal["adaptive"]
+    display: AnthropicThinkingDisplay | None = None
+
+
+AnthropicThinkingConfig = Annotated[
+    AnthropicThinkingConfigEnabled
+    | AnthropicThinkingConfigDisabled
+    | AnthropicThinkingConfigAdaptive,
+    Field(discriminator="type"),
+]
 
 
 class AnthropicMessagesRequest(BaseModel):
@@ -126,6 +166,7 @@ class AnthropicMessagesRequest(BaseModel):
     max_tokens: int
     metadata: dict[str, Any] | None = None
     output_config: AnthropicOutputConfig | None = None
+    thinking: AnthropicThinkingConfig | None = None
     stop_sequences: (
         Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
     ) = None
@@ -189,6 +230,15 @@ class AnthropicMessagesRequest(BaseModel):
         if v <= 0:
             raise ValueError("max_tokens must be positive")
         return v
+
+    @model_validator(mode="after")
+    def validate_thinking_budget(self) -> "AnthropicMessagesRequest":
+        if (
+            isinstance(self.thinking, AnthropicThinkingConfigEnabled)
+            and self.thinking.budget_tokens >= self.max_tokens
+        ):
+            raise ValueError("thinking.budget_tokens must be less than max_tokens")
+        return self
 
 
 class AnthropicDelta(BaseModel):
