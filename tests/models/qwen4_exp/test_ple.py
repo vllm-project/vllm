@@ -14,11 +14,13 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -33,6 +35,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
@@ -396,7 +399,6 @@ def test_ple_fp8_embedding_uses_int8_for_parallel_reduce(monkeypatch) -> None:
 def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         ignored_layers=[],
         weight_block_size=[128, 128],
     )
@@ -422,12 +424,11 @@ def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
     with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
 
-    dynamic_fp8_config = Fp8Config(
-        is_checkpoint_fp8_serialized=False,
-        ignored_layers=[],
+    online_fp8_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear="fp8_per_tensor")
     )
-    with pytest.raises(NotImplementedError, match="serialized FP8"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(dynamic_fp8_config, prefix)
+    with pytest.raises(NotImplementedError, match="OnlineQuantizationConfig"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(online_fp8_config, prefix)
 
 
 def test_ple_embedding_respects_modelopt_exclusion() -> None:
@@ -883,6 +884,40 @@ def test_fused_ngram_ids_correctness(
     offsets = params["ngram_heads_offsets"]
     sizes = params["ngram_heads_vocab_sizes"]
     assert torch.all((actual >= offsets) & (actual < offsets + sizes))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
+def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
+    """Eager breaks hand the side-stream lookup weak refs, so the ids must stay
+    valid after start_prefetch returns rather than be reused from the pool."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    input_ids = torch.arange(20, 25, dtype=torch.int32, device=device)
+    ngram_context = torch.tensor([[11, 12], [13, 14]], dtype=torch.int32, device=device)
+    params = _ngram_hash_params(device, ngram_context.shape[1])
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    for name in ("layer_multipliers", "ngram_heads_vocab_sizes", "ngram_heads_offsets"):
+        module.register_buffer(name, params[name])
+    module.eos_token_id = params["eos_token_id"]
+    module.heads_per_ngram = params["heads_per_ngram"]
+    num_heads = params["ngram_heads_vocab_sizes"].numel()
+    module._prefetch_ids = torch.empty(8, num_heads, dtype=torch.long, device=device)
+    prefetched: list[torch.Tensor] = []
+    module.ngram_embedding = SimpleNamespace(
+        supports_prefetch=True,
+        start_prefetch=lambda _, ids: prefetched.append(weak_ref_tensor(ids)),
+    )
+    expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+
+    # A fresh pool makes the next same-size allocation reuse any freed ids,
+    # like a later CUDA graph segment would.
+    pool = torch.cuda.MemPool()
+    with torch.cuda.use_mem_pool(pool):
+        module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
+        torch.full_like(expected, -1)
+
+    assert torch.equal(prefetched[0], expected)
 
 
 def _short_conv_dilated_decode_pytorch(
