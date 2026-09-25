@@ -154,7 +154,6 @@ def test_custom_allreduce_filters_dtype(
     communicator._ptr = 0
     communicator.world_size = 2
     communicator.max_size = 1024
-    communicator.batch_invariant = False
 
     assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
 

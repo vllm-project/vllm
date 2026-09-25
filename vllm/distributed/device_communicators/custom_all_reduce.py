@@ -119,6 +119,7 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8, 16]
+    batch_invariant = False
     _DEFAULT_ALL_GATHER_MAX_SIZE = 2 * 1024 * 1024
     _DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES = {
         2: 8 * 1024 * 1024,
