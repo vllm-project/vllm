@@ -1085,6 +1085,10 @@ class FusedMoEParallelConfig:
     def use_deepep_v2_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
 
+    @property
+    def use_moonep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "moonep"
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -1278,6 +1282,7 @@ class FusedMoEConfig:
     elastic_ep_max_dp_size: int | None = None
     has_bias: bool = False
     is_lora_enabled: bool = False
+    has_hash_routing: bool = False
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
@@ -1309,6 +1314,8 @@ class FusedMoEConfig:
 
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
+    # Use the allocated width as the checkpoint TP stride, including for scales.
+    tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
 
@@ -1470,6 +1477,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.moe_parallel_config.use_deepep_v2_kernels
+
+    @property
+    def use_moonep_kernels(self):
+        return self.moe_parallel_config.use_moonep_kernels
 
     @property
     def needs_round_robin_routing_tables(self):

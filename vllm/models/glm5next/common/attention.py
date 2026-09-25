@@ -296,7 +296,7 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
-        self.max_model_len = vllm_config.model_config.max_model_len
+        self.max_pool_len = vllm_config.model_config.max_model_len // self.index_kpool
         self.prefix = prefix
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
@@ -307,7 +307,7 @@ class Indexer(nn.Module):
             self.scale_fmt,
             self.topk_tokens,
             self.head_dim,
-            self.max_model_len,
+            self.max_pool_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
             tail_cache=self.tail_cache,
@@ -496,9 +496,9 @@ class Glm5NextMLAAttention(nn.Module):
             assert config.rope_parameters is not None
             if config.rope_parameters["rope_type"] != "default":
                 config.rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if config.rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+                    "deepseek_llama_scaling"
+                    if config.rope_parameters.get("attention_factor") == 1.0
+                    else "deepseek_yarn"
                 )
 
             self.rotary_emb: RotaryEmbedding | None = get_rope(

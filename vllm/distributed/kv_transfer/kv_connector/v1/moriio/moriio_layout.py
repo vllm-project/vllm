@@ -2,14 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -27,6 +31,85 @@ class LayerTransferGeometry(NamedTuple):
     transfers_per_block: int
     regions_per_block: int
     split_kv_regions: bool
+
+
+class MambaTransferGeometry(NamedTuple):
+    """Geometry of a hybrid (mamba/KDA) layer's recurrent state.
+
+    A KDA layer's packed page is exposed as ``conv_state`` and ``ssm_state``
+    views. Each is slot-strided, so a slot's bytes live at
+    ``slot * slot_stride * element_size`` and span ``slot_bytes``. The two
+    tensors are registered as two separate MoRIIO regions per layer.
+    """
+
+    conv_slot_stride: int
+    ssm_slot_stride: int
+    ssm_slot_bytes: int
+    conv_element_size: int
+    ssm_element_size: int
+    conv_region_len: int
+    ssm_region_len: int
+
+
+def get_mamba_transfer_geometry(
+    conv: torch.Tensor,
+    ssm: torch.Tensor,
+) -> MambaTransferGeometry:
+    """Derive the slot-strided geometry of a KDA layer's conv + ssm state.
+
+    ``conv``/``ssm`` are zero-copy views over the layer's packed page. Slot byte
+    offset is ``slot * slot_stride * element_size`` and each
+    slot spans ``subtensor[0].numel() * element_size`` bytes; the whole tensor
+    is registered as one region (``*_region_len`` bytes).
+    """
+    if conv.ndim == 0 or ssm.ndim == 0 or conv.shape[0] == 0 or ssm.shape[0] == 0:
+        raise ValueError("KDA conv/ssm caches must contain at least one slot")
+    if conv.shape[0] != ssm.shape[0]:
+        raise ValueError(
+            f"KDA conv/ssm slot count mismatch: {conv.shape[0]} != {ssm.shape[0]}"
+        )
+    conv_slot_bytes = conv[0].numel() * conv.element_size()
+    ssm_slot_bytes = ssm[0].numel() * ssm.element_size()
+    conv_available_bytes = (
+        conv.untyped_storage().nbytes() - conv.storage_offset() * conv.element_size()
+    )
+    ssm_available_bytes = (
+        ssm.untyped_storage().nbytes() - ssm.storage_offset() * ssm.element_size()
+    )
+    if conv.shape[0]:
+        conv_required_bytes = (conv.shape[0] - 1) * conv.stride(
+            0
+        ) * conv.element_size() + conv_slot_bytes
+        ssm_required_bytes = (ssm.shape[0] - 1) * ssm.stride(
+            0
+        ) * ssm.element_size() + ssm_slot_bytes
+        if conv_required_bytes > conv_available_bytes:
+            raise ValueError("KDA conv slots exceed the registered storage extent")
+        if ssm_required_bytes > ssm_available_bytes:
+            raise ValueError("KDA ssm slots exceed the registered storage extent")
+
+    return MambaTransferGeometry(
+        conv_slot_stride=conv.stride(0),
+        ssm_slot_stride=ssm.stride(0),
+        ssm_slot_bytes=ssm_slot_bytes,
+        conv_element_size=conv.element_size(),
+        ssm_element_size=ssm.element_size(),
+        # Registered region must span the full slot-strided extent: stride(0)
+        # may exceed the per-slot element count, so numel() would under-size the
+        # region and truncate the highest-slot transfers. shape[0]*stride(0)
+        # covers every byte a ``slot * slot_stride * elem`` offset can address.
+        # Cap at the bytes remaining from each view's storage offset. A packed
+        # conv+ssm page places ssm at a non-zero intra-buffer offset,
+        # so do not register past the end of the shared backing allocation.
+        conv_region_len=min(
+            conv.shape[0] * conv.stride(0) * conv.element_size(),
+            conv_available_bytes,
+        ),
+        ssm_region_len=min(
+            ssm.shape[0] * ssm.stride(0) * ssm.element_size(),
+            ssm_available_bytes,
+        ),
+    )
 
 
 def build_layer_to_spec(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
@@ -99,10 +182,10 @@ def get_layer_transfer_geometry(
     layer_to_spec: Mapping[str, KVCacheSpec],
     remote_num_blocks: int | None = None,
 ) -> LayerTransferGeometry:
+    spec = layer_to_spec[layer_name]
     shape = kv_cache.shape
     stride = kv_cache.stride()
     element_size = kv_cache.element_size()
-    spec = layer_to_spec[layer_name]
     is_mla_cache = is_mla_cache_layer(layer_to_spec, layer_name)
 
     if not is_mla_cache and len(shape) == 5 and shape[0] == 2:
@@ -238,12 +321,60 @@ def get_layer_transfer_geometry(
     )
 
 
+def kda_conv_ssm(
+    kv_cache: torch.Tensor,
+    spec: MambaSpec,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return zero-copy conv and SSM views over a packed two-state page."""
+    from math import prod
+
+    from vllm.utils.torch_utils import get_dtype_size
+
+    if len(spec.shapes) != 2 or len(spec.dtypes) != 2:
+        raise ValueError(
+            "MoRIIO KDA transfer requires exactly two states (conv and SSM)"
+        )
+    if kv_cache.element_size() != 1:
+        raise ValueError("MoRIIO KDA packed cache must use a byte-sized dtype")
+    if kv_cache.ndim != 4 or kv_cache.shape[1:3] != (1, 1) or kv_cache.stride(3) != 1:
+        raise ValueError(
+            "MoRIIO KDA packed cache must have shape [B, 1, 1, C] with "
+            "a contiguous byte dimension"
+        )
+    # Mirror MambaBase.bind_kv_cache: blocks may be strided within a shared
+    # multi-layer allocation, while every individual byte page is contiguous.
+    pages = kv_cache.squeeze(dim=(1, 2))
+    states: list[torch.Tensor] = []
+    offset = 0
+    for shp, dt in zip(spec.shapes, spec.dtypes, strict=True):
+        nbytes = prod(shp) * get_dtype_size(dt)
+        if offset + nbytes > pages.shape[1]:
+            raise ValueError(
+                "MoRIIO KDA state layout exceeds the packed cache page size"
+            )
+        state = pages[:, offset : offset + nbytes].view(dt)
+        states.append(state.view(-1, *shp))
+        offset += nbytes
+    return states[0], states[1]
+
+
 def iter_layer_registration_regions(
     layer_name: str,
     kv_cache: torch.Tensor,
     layer_to_spec: Mapping[str, KVCacheSpec],
 ) -> list[tuple[torch.Tensor, int]]:
-    geometry = get_layer_transfer_geometry(layer_name, kv_cache, layer_to_spec)
+    spec = layer_to_spec[layer_name]
+    if isinstance(spec, MambaSpec):
+        # KDA layer: register the conv and ssm tensors as two whole-tensor
+        # regions (the conv 3-subprojection split is expressed as transfer
+        # offset triples, not extra registrations).
+        conv, ssm = kda_conv_ssm(kv_cache, spec)
+        geom = get_mamba_transfer_geometry(conv, ssm)
+        return [(conv, geom.conv_region_len), (ssm, geom.ssm_region_len)]
+    geometry = cast(
+        LayerTransferGeometry,
+        get_layer_transfer_geometry(layer_name, kv_cache, layer_to_spec),
+    )
     region_len = geometry.num_blocks * geometry.regions_per_block * geometry.block_len
     if geometry.regions_per_block == 1:
         # With padded or interleaved pages the block stride exceeds the
@@ -311,9 +442,36 @@ def compute_block_transfer_offsets(
             "local_block_ids longer than remote_block_ids: "
             f"{len(local_block_ids)} > {len(remote_block_ids)}"
         )
-    geometry = get_layer_transfer_geometry(
-        layer_name, kv_cache, layer_to_spec, remote_num_blocks
+    geometry = cast(
+        LayerTransferGeometry,
+        get_layer_transfer_geometry(
+            layer_name, kv_cache, layer_to_spec, remote_num_blocks
+        ),
     )
+    invalid_local = next(
+        (
+            block_id
+            for block_id in local_block_ids
+            if not 0 <= block_id < geometry.num_blocks
+        ),
+        None,
+    )
+    if invalid_local is not None:
+        raise ValueError(
+            f"local block id {invalid_local} is outside [0, {geometry.num_blocks})"
+        )
+    invalid_remote = next(
+        (
+            block_id
+            for block_id in remote_block_ids
+            if not 0 <= block_id < remote_num_blocks
+        ),
+        None,
+    )
+    if invalid_remote is not None:
+        raise ValueError(
+            f"remote block id {invalid_remote} is outside [0, {remote_num_blocks})"
+        )
     element_size = kv_cache.element_size()
     transfer_size_byte = geometry.block_len
     per_block = geometry.transfers_per_block
@@ -339,3 +497,125 @@ def compute_block_transfer_offsets(
             w += 1
 
     return merge_fn(offset_local, offset_remote, sizes)
+
+
+class MambaOffsetTemplate(NamedTuple):
+    """Slot-independent conv+ssm offset decomposition for a KDA layer.
+
+    Homogeneous-TP geometry (conv/ssm slot strides, conv sub-projection
+    offsets, ssm per-slot size) is identical across requests and across the
+    homogeneous GDN layers, so it is computed once and reused; only the
+    per-request slot bases vary (see ``apply_mamba_offset_template``).
+    """
+
+    num_slots: int
+    conv_slot_stride_bytes: int
+    ssm_slot_stride_bytes: int
+    ssm_read_bytes: int
+    conv_subprojs: tuple[tuple[int, int, int], ...]
+
+
+def build_mamba_offset_template(
+    conv: torch.Tensor,
+    ssm: torch.Tensor,
+    split_info: MambaConvSplitInfo,
+    tp_ratio: int,
+) -> MambaOffsetTemplate:
+    """Precompute the slot-independent conv+ssm offset decomposition.
+
+    Only homogeneous TP (``tp_ratio == 1``) is supported; heterogeneous TP is
+    gated with ``NotImplementedError`` (see the design doc). The returned
+    template is a pure function of the layer geometry and ``split_info``, so it
+    can be cached and reused across requests without recomputation.
+    """
+    if tp_ratio != 1:
+        # Heterogeneous-TP recurrent-state transfer needs the remote page's
+        # slot stride (which differs from the local page) and, for
+        # P_TP > D_TP, a multi-rank gather of conv/ssm slices. Both are
+        # follow-ups. The mamba path bypasses the attention KV-head validator,
+        # so fail loudly here instead of silently transferring wrong bytes.
+        raise NotImplementedError(
+            "heterogeneous-TP mamba/KDA transfer is not supported yet "
+            f"(tp_ratio={tp_ratio}); use equal prefill/decode TP for "
+            "hybrid models"
+        )
+    geom = get_mamba_transfer_geometry(conv, ssm)
+    conv_local_offsets = split_info.local_conv_offsets
+    conv_remote_offsets = split_info.remote_conv_offsets(0, 1)
+    ssm_read_bytes = geom.ssm_slot_bytes
+    conv_subprojs = tuple(
+        (loff, roff, rsz)
+        for (loff, _lsz), (roff, rsz) in zip(conv_local_offsets, conv_remote_offsets)
+    )
+    return MambaOffsetTemplate(
+        num_slots=conv.shape[0],
+        conv_slot_stride_bytes=geom.conv_slot_stride * geom.conv_element_size,
+        ssm_slot_stride_bytes=geom.ssm_slot_stride * geom.ssm_element_size,
+        ssm_read_bytes=ssm_read_bytes,
+        conv_subprojs=conv_subprojs,
+    )
+
+
+def apply_mamba_offset_template(
+    template: MambaOffsetTemplate,
+    local_slots: list[int],
+    remote_slots: list[int],
+) -> tuple[list[int], list[int], list[int]]:
+    """Apply per-request slot bases to a cached ``MambaOffsetTemplate``.
+
+    Conv sub-projection entries (all slots) come first, followed by one ssm
+    entry per slot.
+    """
+    if len(local_slots) != len(remote_slots):
+        raise ValueError(
+            "local and remote mamba slot counts must match: "
+            f"{len(local_slots)} != {len(remote_slots)}"
+        )
+    invalid_local = next(
+        (slot for slot in local_slots if not 0 <= slot < template.num_slots), None
+    )
+    if invalid_local is not None:
+        raise ValueError(
+            f"local mamba slot {invalid_local} is outside [0, {template.num_slots})"
+        )
+    invalid_remote = next((slot for slot in remote_slots if slot < 0), None)
+    if invalid_remote is not None:
+        raise ValueError(f"remote mamba slot {invalid_remote} must be non-negative")
+    # The peer's KDA slot count is not part of MoRIIOAgentMetadata yet. Do not
+    # compare remote slot IDs against the local pool size: two otherwise
+    # compatible engines may reserve different numbers of slots.
+    local_offs: list[int] = []
+    remote_offs: list[int] = []
+    sizes: list[int] = []
+
+    # Conv sub-projections (region 0), all slots first.
+    conv_slot_stride_bytes = template.conv_slot_stride_bytes
+    for ls, rs in zip(local_slots, remote_slots):
+        lbase = ls * conv_slot_stride_bytes
+        rbase = rs * conv_slot_stride_bytes
+        for loff, roff, rsz in template.conv_subprojs:
+            local_offs.append(lbase + loff)
+            remote_offs.append(rbase + roff)
+            sizes.append(rsz)
+
+    # SSM temporal state (region 1), one entry per slot.
+    ssm_slot_stride_bytes = template.ssm_slot_stride_bytes
+    ssm_read_bytes = template.ssm_read_bytes
+    for ls, rs in zip(local_slots, remote_slots):
+        local_offs.append(ls * ssm_slot_stride_bytes)
+        remote_offs.append(rs * ssm_slot_stride_bytes)
+        sizes.append(ssm_read_bytes)
+
+    return local_offs, remote_offs, sizes
+
+
+def compute_mamba_conv_split_count(
+    local_slots: list[int],
+    split_info: MambaConvSplitInfo,
+) -> int:
+    """Number of leading conv entries in a KDA layer transfer plan.
+
+    Entries ``[:count]`` are conv sub-projections (conv region/session);
+    entries ``[count:]`` are the per-slot ssm state (ssm region/session).
+    """
+    return len(local_slots) * len(split_info.local_conv_offsets)

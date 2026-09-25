@@ -15,6 +15,7 @@ use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
@@ -127,12 +128,38 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub mm_cache_miss_hashes: Option<Vec<String>>,
     #[serde(default)]
-    pub new_sampling_mask: Option<OpaqueValue>,
+    pub new_sampling_mask: Option<MaybeWireSamplingMask>,
     /// Per-request speculative-decoding acceptance metrics, set on the final
-    /// output when `--per-request-spec-decode-metrics` is enabled. Opaque here;
-    /// the Rust frontend does not yet surface it in responses.
+    /// output when `--per-request-spec-decode-metrics` is enabled.
     #[serde(default)]
-    pub spec_decode_metrics: Option<OpaqueValue>,
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+}
+
+/// Raw per-sequence speculative-decoding accumulator.
+///
+/// Python models this as a plain `@dataclass`, so it is serialized by msgspec
+/// as a map (named fields). Derived values such as acceptance rates are
+/// computed by the frontend, not carried on the wire.
+///
+/// Original Python definition: `RequestSpecDecodeMetrics` in
+/// `vllm/v1/metrics/stats.py`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestSpecDecodeMetrics {
+    /// Configured `num_speculative_tokens`.
+    #[serde(default)]
+    pub num_spec_tokens: u64,
+    /// Verify-step counts indexed by accepted draft-token count.
+    #[serde(default)]
+    pub histogram: Vec<u64>,
+    /// Total proposed draft tokens.
+    #[serde(default)]
+    pub num_draft_tokens: u64,
+    /// Accepted draft count per verify step; empty unless `detailed`.
+    #[serde(default)]
+    pub per_step_accepted: Vec<u64>,
+    /// Proposed draft count per verify step; empty unless `detailed`.
+    #[serde(default)]
+    pub per_step_drafted: Vec<u64>,
 }
 
 impl EngineCoreOutput {
@@ -149,6 +176,9 @@ impl EngineCoreOutput {
             .transpose()?;
         self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
             .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
+            .transpose()?;
+        self.new_sampling_mask = (self.new_sampling_mask.take())
+            .map(|value| value.resolve(frames, "new_sampling_mask"))
             .transpose()?;
         Ok(())
     }

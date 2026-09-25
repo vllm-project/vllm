@@ -17,12 +17,7 @@ if TYPE_CHECKING:
 
 
 class InputBuffers:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
@@ -125,13 +120,14 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -168,7 +164,7 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
-        input_buffers.is_padding[:num_tokens].fill_(True)
+        input_buffers.is_padding[:num_tokens].fill_(is_padding)
         is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
@@ -473,11 +469,7 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -710,9 +702,7 @@ def expand_idx_mapping(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(
-        total_num_logits, dtype=torch.int32, device=idx_mapping.device
-    )
+    expanded_local_pos = idx_mapping.new_empty(total_num_logits)
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

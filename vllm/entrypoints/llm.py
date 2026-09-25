@@ -76,8 +76,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     Args:
         model: The name or path of a HuggingFace Transformers model.
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
-        tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
-            if available, and "slow" will always use the slow tokenizer.
+        tokenizer_mode: The tokenizer mode. See
+            [ModelConfig.tokenizer_mode][vllm.config.ModelConfig.tokenizer_mode].
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer. Expect valid prompt_token_ids and None for prompt
             from the input.
@@ -829,6 +829,14 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         """
         self.llm_engine.sleep(level=level, mode=mode)
+
+    def release_kv_cache_memory(self) -> None:
+        """Release the GPU physical memory backing the KV cache.
+
+        Requires a completed ``sleep(level=0)`` and resident executor memory.
+        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        """
+        self.llm_engine.release_kv_cache_memory()
 
     def wake_up(self, tags: list[str] | None = None):
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]

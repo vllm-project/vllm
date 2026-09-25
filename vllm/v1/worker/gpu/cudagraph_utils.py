@@ -40,7 +40,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
@@ -643,8 +643,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.intermediate_tensors[k][:num_tokens] = v
 
         def create_forward_fn(
-            desc: BatchExecutionDescriptor,
-            warmup: bool,
+            desc: BatchExecutionDescriptor, warmup: bool
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
@@ -662,6 +661,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             model_inputs = {
                 "input_ids": input_buffers.input_ids[:num_tokens],
                 "positions": input_buffers.positions[:num_tokens],
+                "intermediate_tensors": None,
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
             if not self.is_first_pp_rank:
@@ -704,7 +704,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                max_query_len=desc.max_query_len,
+                max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
             )
 
@@ -775,6 +775,10 @@ def prepare_inputs_to_capture(
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
+    if full_cudagraph and max_query_len is None:
+        # Mixed graphs can replay a single prefill spanning the entire batch,
+        # even when the dummy batch distributes one token to each request.
+        max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
@@ -788,15 +792,16 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        block_tables.cp_size,
-        block_tables.cp_rank,
-        block_tables.cp_interleave,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
+    if block_tables.cp_size > 1:
+        input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            input_batch.num_reqs,
+            block_tables.cp_size,
+            block_tables.cp_rank,
+            block_tables.cp_interleave,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
