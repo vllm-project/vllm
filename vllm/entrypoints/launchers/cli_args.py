@@ -14,6 +14,9 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+)
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
@@ -181,6 +184,13 @@ class BaseFrontendArgs:
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
     explicit request-level ``chat_template_kwargs.cohere_format`` takes
     priority."""
+    anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
+    """Anthropic ``/v1/messages`` only. The ``reasoning_effort`` used for
+    requests with ``thinking: {"type": "disabled"}``. ``none`` turns thinking
+    off for models that support it; ``low`` suits models that always think
+    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
+    ``low`` when the renderer rejects ``none`` or renders it the same as a
+    thinking effort, and ``none`` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False

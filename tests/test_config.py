@@ -1530,26 +1530,32 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, accelerator, supported",
+    "architecture, ple_layers, platform, supported",
     [
-        ("DeepseekV41ForCausalLM", [1], True, True),
-        ("DeepseekV41ForCausalLM", [], True, False),
-        ("DeepseekV41ForCausalLM", [1], False, False),
-        ("Qwen4ExpForCausalLM", [1], True, True),
-        ("Qwen4ExpForConditionalGeneration", [1], True, True),
-        ("Qwen4ExpForCausalLM", [], True, False),
-        ("Qwen4ExpForCausalLM", None, True, False),
-        ("Qwen4ExpForCausalLM", [1], False, False),
-        ("LlamaForCausalLM", [1], True, False),
-        ("Qwen4ExpMTP", [], True, False),
-        (None, None, True, False),
+        ("DeepseekV41ForCausalLM", [1], "cuda", True),
+        ("DeepseekV41ForCausalLM", [1], "rocm", True),
+        ("DeepseekV41ForCausalLM", [], "cuda", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cuda", True),
+        ("Qwen4ExpForCausalLM", [1], "rocm", True),
+        ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
+        ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
+        ("Qwen4ExpForCausalLM", [], "cuda", False),
+        ("Qwen4ExpForCausalLM", None, "cuda", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("LlamaForCausalLM", [1], "cuda", False),
+        ("Qwen4ExpMTP", [], "cuda", False),
+        (None, None, "cuda", False),
     ],
 )
 def test_engram_model_support(
-    monkeypatch, architecture, ple_layers, accelerator, supported
+    monkeypatch, architecture, ple_layers, platform, supported
 ):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: platform == "cuda")
+    monkeypatch.setattr(
+        current_platform, "is_cuda_alike", lambda: platform in ("cuda", "rocm")
+    )
     model = (
         cast(
             ModelConfig,
