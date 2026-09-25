@@ -71,7 +71,7 @@ def fused_mm_input_norm_triton(
     outputs: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
-):
+) -> torch.Tensor:
     """Fused per-channel affine transform for normalisation.
 
     Args:
