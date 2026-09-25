@@ -160,9 +160,13 @@ class PPHandler:
             if exclude_mask.all():
                 # No states require update anymore.
                 return None
-            # Filter excluded request indices.
+            # Filter excluded request indices. Match the serving path's int32
+            # idx_mapping so this cannot spawn another `_post_update_kernel`
+            # specialization mid-serving.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=torch.int32
+            )
 
         self.main_stream.wait_event(slot.event)
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:

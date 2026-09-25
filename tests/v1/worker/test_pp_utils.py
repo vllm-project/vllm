@@ -160,7 +160,10 @@ def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
     idx_mapping, _, _, output_bin_counts = args[:4]
     sampled_tokens, num_sampled, num_rejected, query_start_loc = args[4:8]
     broadcast_drafts, draft_tokens_out = args[10:12]
-    assert idx_mapping.tolist() == [-1] and idx_mapping.dtype == torch.int64
+    # Serving always passes an int32 idx_mapping (both the unfiltered path and
+    # the freed-request filtered path); an int64 warmup tensor would compile a
+    # specialization that serving never reuses.
+    assert idx_mapping.tolist() == [-1] and idx_mapping.dtype == torch.int32
     assert output_bin_counts is None
     assert query_start_loc is None
     assert sampled_tokens.shape == (1, 3) and sampled_tokens.dtype == torch.int64
