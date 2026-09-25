@@ -10,7 +10,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
@@ -387,10 +386,10 @@ def test_condense_clears_stale_allowed_token_ids_mask(device: str):
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=VOCAB_SIZE,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
 
     def _make_req(suffix: int, allowed_token_ids=None) -> CachedRequestState:
