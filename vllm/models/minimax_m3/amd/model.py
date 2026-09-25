@@ -1369,7 +1369,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank or spec_decode_needs_target_embed(
-            vllm_config, include_mtp=True
+            vllm_config, include_mtp=vllm_config.use_v2_model_runner
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,

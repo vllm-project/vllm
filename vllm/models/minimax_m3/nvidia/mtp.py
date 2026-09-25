@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -145,6 +146,13 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
 class MiniMaxM3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        if vllm_config.use_v2_model_runner and get_pp_group().world_size > 1:
+            # Sharded loaders require a complete state, including embeddings.
+            self.has_own_embed_tokens = vllm_config.load_config.load_format in (
+                "sharded_state",
+                "runai_streamer_sharded",
+            )
 
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -315,5 +323,9 @@ class MiniMaxM3MTP(nn.Module):
                     f"Failed to load MTP layer {layer_idx} weights from checkpoint."
                 )
 
-        self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded_params
+        if (
+            hasattr(self, "has_own_embed_tokens")
+            and "model.embed_tokens.weight" in loaded_params
+        ):
+            self.has_own_embed_tokens = True
         return loaded_params
