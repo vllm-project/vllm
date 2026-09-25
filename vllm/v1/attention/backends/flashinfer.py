@@ -695,6 +695,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
+        self._num_speculative_tokens = vllm_config.num_speculative_tokens
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
@@ -1408,10 +1409,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         if needs_seq_lens_cpu:
             if (
-                self.model_config.runner_type == "pooling"
+                self._num_speculative_tokens == 0
                 and common_attn_metadata.seq_lens_cpu_upper_bound is not None
             ):
-                # Pooling has no speculative tokens, so this upper bound is exact.
+                # No speculative token accounting, so the upper bound is exact.
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             else:
                 with gpu_sync_allowed():

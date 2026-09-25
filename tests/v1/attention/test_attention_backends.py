@@ -17,7 +17,12 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.config import ModelConfig, set_current_vllm_config
+from vllm.config import (
+    DiffusionConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    set_current_vllm_config,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -1072,13 +1077,25 @@ def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
     reason="FlashInfer with CUDA is required.",
 )
 @pytest.mark.parametrize(
-    "runner_type,has_upper_bound,expected_copies",
-    [("pooling", True, 0), ("pooling", False, 1), ("generate", True, 1)],
+    "runner_type,spec_kind,has_upper_bound,expected_copies",
+    [
+        ("generate", None, True, 0),
+        ("pooling", None, True, 0),
+        ("generate", None, False, 1),
+        ("generate", "spec_decode", True, 1),
+        ("generate", "diffusion", True, 1),
+    ],
 )
-def test_flashinfer_pooling_metadata_avoids_seq_lens_copy(
-    monkeypatch, runner_type, has_upper_bound, expected_copies
+def test_flashinfer_avoids_seq_lens_copy_without_spec_tokens(
+    monkeypatch, runner_type, spec_kind, has_upper_bound, expected_copies
 ):
-    """Only pooling with exact CPU lengths can skip the copy during planning."""
+    """Planning reuses the host seq_lens bound only when it is exact.
+
+    Without speculative token accounting (no spec-decode drafts, no dLLM
+    canvas tokens) scheduled tokens always land in KV, so the CPU upper bound
+    is exact regardless of runner type. Any speculative accounting keeps the
+    bound optimistic (rejected tokens are in-flight) and forces the copy.
+    """
     import unittest.mock
 
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
@@ -1099,6 +1116,12 @@ def test_flashinfer_pooling_metadata_avoids_seq_lens_copy(
     )
     config.model_config.runner_type = runner_type
     config.attention_config.use_trtllm_attention = False
+    if spec_kind == "spec_decode":
+        config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=3
+        )
+    elif spec_kind == "diffusion":
+        config.diffusion_config = DiffusionConfig(canvas_length=8)
     device = torch.device(f"{DEVICE_TYPE}:0")
     # Include a one-token final chunk and both partial and full KV pages.
     common_attn_metadata = create_common_attn_metadata(
@@ -1106,8 +1129,8 @@ def test_flashinfer_pooling_metadata_avoids_seq_lens_copy(
     )
     if not has_upper_bound:
         common_attn_metadata.seq_lens_cpu_upper_bound = None
-    elif runner_type == "generate":
-        # Simulate a rejected speculative token: CPU says 18, GPU says 17.
+    elif spec_kind is not None:
+        # Simulate rejected speculative tokens: CPU says 18, GPU says 17.
         assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
         common_attn_metadata.seq_lens_cpu_upper_bound[0] += 1
 
