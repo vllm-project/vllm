@@ -23,6 +23,9 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    fused_recurrent_kda as fused_recurrent_kda_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
@@ -44,9 +47,11 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
     fused_kda_gate,
-    fused_recurrent_kda,
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
+)
+from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
+    fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -65,6 +70,10 @@ pytestmark = pytest.mark.skipif(
 PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
+}
+SPEC_DECODE_IMPLS = {
+    "nvidia": fused_recurrent_kda_nvidia,
+    "amd": fused_recurrent_kda_amd,
 }
 
 
@@ -468,17 +477,51 @@ def test_packed_kda_decode_correctness(
 
 
 @pytest.mark.parametrize(
-    ("H", "fuse_gate"),
-    [(12, True), (12, False), (12, None), (96, None)],
+    ("impl", "H", "fuse_gate", "num_seqs", "query_len"),
+    [
+        *[
+            pytest.param(
+                impl,
+                H,
+                fuse_gate,
+                3,
+                3,
+                id=f"{impl}-H{H}-fuse-{fuse_gate}",
+            )
+            for impl in SPEC_DECODE_IMPLS
+            for H, fuse_gate in [
+                (12, True),
+                (12, False),
+                (12, None),
+                (96, None),
+            ]
+        ],
+        pytest.param("amd", 12, True, 1, 1, id="amd-single-token"),
+        pytest.param("amd", 12, True, 1, 8, id="amd-single-sequence-short"),
+        pytest.param(
+            "amd",
+            96,
+            None,
+            1,
+            8,
+            id="amd-single-sequence-many-heads",
+        ),
+        pytest.param("amd", 12, True, 2, 4, id="amd-uniform-two-sequences"),
+        pytest.param("amd", 12, True, 4, 4, id="amd-uniform-four-sequences"),
+        pytest.param("amd", 12, True, 8, 7, id="amd-uniform-eight-sequences"),
+    ],
 )
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
 @torch.inference_mode()
 def test_kda_spec_decode_correctness(
     H: int,
     fuse_gate: bool | None,
+    num_seqs: int,
+    query_len: int,
     lower_bound: float | None,
+    impl: str,
 ):
-    num_seqs, query_len, D = 3, 3, 128
+    D = 128
     T = num_seqs * query_len
     torch.manual_seed(1234)
 
@@ -522,10 +565,8 @@ def test_kda_spec_decode_correctness(
         dtype=torch.int32,
         device=DEVICE,
     ).view(num_seqs, query_len)
-    num_accepted_tokens = torch.tensor(
-        [1, 2, 3],
-        dtype=torch.int32,
-        device=DEVICE,
+    num_accepted_tokens = (
+        torch.arange(num_seqs, dtype=torch.int32, device=DEVICE) % query_len + 1
     )
     state_storage = 0.01 * torch.randn(
         T + 1,
@@ -578,7 +619,12 @@ def test_kda_spec_decode_correctness(
     expected = torch.cat(expected_outputs, dim=1)
 
     actual_state = state.clone()
-    actual, _ = fused_recurrent_kda(
+    extra_args = (
+        {"uniform_sequence_length": query_len}
+        if impl == "amd" and num_seqs in (2, 4, 8)
+        else {}
+    )
+    actual, _ = SPEC_DECODE_IMPLS[impl](
         q=q,
         k=k,
         v=v,
@@ -593,6 +639,7 @@ def test_kda_spec_decode_correctness(
         num_accepted_tokens=num_accepted_tokens,
         out=output,
         fuse_gate=fuse_gate,
+        **extra_args,
     )
 
     assert actual.data_ptr() == output.data_ptr()
