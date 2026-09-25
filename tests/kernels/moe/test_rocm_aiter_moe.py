@@ -1332,15 +1332,19 @@ def test_aiter_moe_roundup_is_not_applied_to_other_backends(
 
 
 @pytest.mark.parametrize("intermediate", [224, 448])
-def test_aiter_moe_padded_weights_are_zero_initialized(
+def test_aiter_moe_reload_zeroes_intermediate_padding(
     intermediate,
+    monkeypatch,
     default_vllm_config,
 ):
-    """Pad lanes must be zero, not ``torch.empty`` garbage.
+    """A reload must re-zero pad lanes left dirty in the weight storage.
 
-    The weight loader only fills the unpadded rows, so anything left in the
-    tail flows through ``silu`` into the stage-2 accumulation.
+    The reload writes back only the logical slices, so the pad lanes hold
+    garbage (NaN here) that the AITER conversion must zero. Two passes also
+    cover reloading into storage that already holds a previous conversion.
     """
+    from unittest.mock import MagicMock
+
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         aiter_moe_intermediate_alignment,
     )
@@ -1350,8 +1354,12 @@ def test_aiter_moe_padded_weights_are_zero_initialized(
     assert padded != intermediate
 
     moe_config = _make_alignment_moe_config(intermediate)
+    assert moe_config.is_act_and_mul
     method = _make_aiter_method(moe_config)
+    # RoutedExperts records the rounded-up size after maybe_roundup_sizes.
+    moe_config.intermediate_size_per_partition = padded
     layer = torch.nn.Module()
+    layer.moe_config = moe_config
 
     method.create_weights(
         layer=layer,
@@ -1361,14 +1369,42 @@ def test_aiter_moe_padded_weights_are_zero_initialized(
         params_dtype=torch.float32,
     )
 
-    assert layer.w13_weight.shape == (
-        ALIGNMENT_NUM_EXPERTS,
-        2 * padded,
-        ALIGNMENT_HIDDEN,
+    # Identity shuffle keeps pad lanes sliceable; both stubs need real ROCm.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized"
+        ".rocm_aiter_ops.shuffle_weights",
+        lambda w13, w2: (w13, w2),
     )
-    assert layer.w2_weight.shape == (ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, padded)
-    assert torch.all(layer.w13_weight == 0)
-    assert torch.all(layer.w2_weight == 0)
+    monkeypatch.setattr(
+        method,
+        "_init_moe_kernel",
+        lambda _layer: setattr(method, "moe_kernel", MagicMock()),
+    )
+
+    up = padded  # up projection starts one padded block into the fused rows
+
+    for _ in range(2):
+        gate = torch.randn(ALIGNMENT_NUM_EXPERTS, intermediate, ALIGNMENT_HIDDEN)
+        up_proj = torch.randn(ALIGNMENT_NUM_EXPERTS, intermediate, ALIGNMENT_HIDDEN)
+        down = torch.randn(ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, intermediate)
+
+        # NaN the pads, then write only the logical slices like the loader.
+        layer.w13_weight.data.fill_(float("nan"))
+        layer.w2_weight.data.fill_(float("nan"))
+        layer.w13_weight.data[:, :intermediate].copy_(gate)
+        layer.w13_weight.data[:, up : up + intermediate].copy_(up_proj)
+        layer.w2_weight.data[:, :, :intermediate].copy_(down)
+
+        method.process_weights_after_loading(layer)
+
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        assert torch.equal(w13[:, :intermediate], gate)
+        assert torch.equal(w13[:, up : up + intermediate], up_proj)
+        assert torch.equal(w2[:, :, :intermediate], down)
+        assert torch.all(w13[:, intermediate:up] == 0)
+        assert torch.all(w13[:, up + intermediate :] == 0)
+        assert torch.all(w2[:, :, intermediate:] == 0)
 
 
 def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:

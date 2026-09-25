@@ -83,14 +83,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         unpadded_hidden = self.moe.hidden_dim_unpadded
         assert unpadded_hidden is not None
         unpadded_up = unpadded_intermediate * (2 if self.moe.is_act_and_mul else 1)
-        requires_zero_alloc = (
-            self.unquantized_backend == UnquantizedMoeBackend.AITER
-            and intermediate_size_per_partition != unpadded_intermediate
-        )
-        alloc = torch.zeros if requires_zero_alloc else torch.empty
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
-            alloc(
+            torch.empty(
                 num_experts,
                 w13_up_dim,
                 hidden_size,
@@ -111,7 +106,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_bias.weight_loader_numel = num_experts * unpadded_up
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
-            alloc(
+            torch.empty(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
