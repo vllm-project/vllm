@@ -431,24 +431,49 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # we need to create qkvz_proj adaptively here.
         # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
         # in_proj_qkv and in_proj_z are created separately instead.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
-        )
-
-        # ba_proj doesn't support blockwise fp8 quantization.
-        # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
-        # layouts, so we use a factory method to create the projection.
-        self.in_proj_ba = self.create_ba_proj(
-            hidden_size=self.hidden_size,
-            num_v_heads=self.num_v_heads,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_ba",
-        )
-        self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+        # Non-interleaved (Qwen3.5 / Qwen3.8): fuse in_proj_qkvz + in_proj_ba
+        # into a single MergedColumnParallelLinear so the two input
+        # projections are one GEMM instead of two (saves a kernel launch).
+        # Both are column-parallel TP-sharded, so merging is valid. It also
+        # makes the Marlin MIN_THREAD_N workaround on the (formerly tiny)
+        # standalone ba GEMM unnecessary, since the ba rows now sit inside a
+        # GEMM whose per-rank N is far above the threshold.
+        #
+        # Interleaved (Qwen3-Next): keep the two separate projections; its
+        # checkpoint packs qkvz and ba as single tensors.
+        self._use_fused_in_proj = not self.gqa_interleaved_layout
+        if self._use_fused_in_proj:
+            self.in_proj_qkvzba = MergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[
+                    self.key_dim,
+                    self.key_dim,
+                    self.value_dim,
+                    self.value_dim,
+                    self.num_v_heads,
+                    self.num_v_heads,
+                ],
+                bias=False,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_qkvzba",
+            )
+        else:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
+            self.in_proj_ba = self.create_ba_proj(
+                hidden_size=self.hidden_size,
+                num_v_heads=self.num_v_heads,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_ba",
+            )
+        self.disable_tp_for_ba_proj = self.maybe_disable_tp(
+            self.quant_config
+        ) and not self._use_fused_in_proj
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -638,6 +663,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b = b[:, ba_start : ba_start + ba_chunk]
             a = a[:, ba_start : ba_start + ba_chunk]
         return b, a
+
+    def _input_projections(self, hidden_states: torch.Tensor):
+        """Return (qkvz, ba) from the input projections.
+
+        When the two projections are fused into one GEMM (non-interleaved),
+        this is a single GEMM split back into the qkvz and ba parts (made
+        contiguous). Otherwise it is the two separate GEMMs.
+        """
+        if getattr(self, "_use_fused_in_proj", False):
+            projected, _ = self.in_proj_qkvzba(hidden_states)
+            projected = projected.view(hidden_states.size(0), -1)
+            ba_cols = (2 * self.num_v_heads) // self.tp_size
+            qkvz = projected[:, : projected.shape[1] - ba_cols].contiguous()
+            ba = projected[:, projected.shape[1] - ba_cols:].contiguous()
+            return qkvz, ba
+        qkvz, _ = self.in_proj_qkvz(hidden_states)
+        ba, _ = self.in_proj_ba(hidden_states)
+        return qkvz, ba
 
     def fix_query_key_value_ordering(
         self,
@@ -864,8 +907,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
-            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            projected_states_qkvz, projected_states_ba = self._input_projections(
+                hidden_states
+            )
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(
@@ -905,8 +949,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._input_projections(hidden_states)
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
@@ -983,8 +1026,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        projected_states_qkvz, projected_states_ba = self._input_projections(
+            hidden_states
+        )
 
         # ============================================================
         # Part 2: Core Attention
@@ -1015,8 +1059,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._input_projections(hidden_states)
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
