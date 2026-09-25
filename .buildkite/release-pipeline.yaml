@@ -959,10 +959,14 @@ steps:
 
       # ROCm Job 5: Generate Root Index for ROCm Wheels (for release only)
       # This is the job to create https://wheels.vllm.ai/rocm/ index allowing
-      # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`
+      # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`.
+      # The root index serves the default ROCm 10.0 (rocm100) wheels; ROCm 7.2 stays
+      # available at https://wheels.vllm.ai/rocm/<version>/rocm723/.
       - block: "Generate Root Index for ROCm Wheels for Release"
         key: block-generate-root-index-rocm-wheels
-        depends_on: upload-rocm-wheels
+        depends_on:
+          - upload-rocm-wheels
+          - upload-rocm100-wheels
 
       - label: ":package: Generate Root Index for ROCm Wheels for Release"
         depends_on: block-generate-root-index-rocm-wheels
@@ -973,7 +977,7 @@ steps:
           - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
         env:
           S3_BUCKET: "vllm-wheels"
-          VARIANT: "rocm723"
+          VARIANT: "rocm100"
 
       # ROCm Job 6: Build ROCm Release Docker Image
       - label: ":docker: Build release image - x86_64 - ROCm 7.2"
@@ -1096,8 +1100,8 @@ steps:
     key: "build-rock-image"
     depends_on: ~
     steps:
-      # ROCm 10.0 Job 1: Build ROCm 10.0 Base Image (with ECR caching)
-      - label: ":rocm: Build ROCm 10.0 Base Image"
+      # ROCm 10.0 Job 1: Build ROCm 10.0 Base Image & Wheels (ECR + S3 caching)
+      - label: ":rocm: Build ROCm 10.0 Base Image & Wheels"
         id: build-rock-base-image
         depends_on: ~
         agents:
@@ -1126,7 +1130,7 @@ steps:
             if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
               echo "ECR image cache HIT"
             else
-              echo "CACHE MISS - Building from scratch..."
+              echo "Image CACHE MISS - Building from scratch..."
 
               DOCKER_BUILDKIT=1 docker buildx build \
                 --file docker/Dockerfile.rocm_base \
@@ -1139,12 +1143,120 @@ steps:
                 .
             fi
 
+            # Base wheels for the rocm100 index are cached in S3 separately, keyed
+            # on the Dockerfile and the TheRock repack helper.
+            if [ "$$(.buildkite/scripts/cache-rocm-base-wheels.sh check)" = "hit" ]; then
+              echo "S3 wheels cache HIT"
+              .buildkite/scripts/cache-rocm-base-wheels.sh download
+            else
+              echo "Wheels CACHE MISS - Building debs_wheel_release..."
+              DOCKER_BUILDKIT=1 docker buildx build \
+                --file docker/Dockerfile.rocm_base \
+                --tag rocm100-base-debs:$${BUILDKITE_BUILD_NUMBER} \
+                --target debs_wheel_release \
+                --build-arg USE_SCCACHE=1 \
+                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+                --build-arg SCCACHE_REGION_NAME=us-west-2 \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --load \
+                .
+              mkdir -p "$${ROCM_BASE_WHEELS_DIR}"
+              cid=$$(docker create rocm100-base-debs:$${BUILDKITE_BUILD_NUMBER})
+              docker cp $${cid}:/app/debs/. "$${ROCM_BASE_WHEELS_DIR}/"
+              docker rm $${cid}
+              .buildkite/scripts/cache-rocm-base-wheels.sh upload
+            fi
+
             # Save ECR tag for downstream jobs
             buildkite-agent meta-data set "rock-base-image-tag" "$${ECR_CACHE_TAG}"
+        artifact_paths:
+          - "artifacts/rocm100-base-wheels/*.whl"
+        env:
+          DOCKER_BUILDKIT: "1"
+          S3_BUCKET: "vllm-wheels"
+          ROCM_WHEEL_CACHE_DOCKERFILE: "docker/Dockerfile.rocm_base"
+          ROCM_WHEEL_CACHE_INPUTS: "tools/vllm-rocm/therock_wheels.py"
+          ROCM_BASE_WHEELS_DIR: "artifacts/rocm100-base-wheels"
+
+      # ROCm 10.0 Job 2: Build vLLM ROCm 10.0 Wheel
+      - label: ":python: Build vLLM ROCm 10.0 Wheel - x86_64"
+        id: build-rocm100-vllm-wheel
+        depends_on:
+          - step: build-rock-base-image
+            allow_failure: false
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 180
+        commands:
+          - |
+            set -euo pipefail
+
+            # Buildkite's default fetch doesn't update moved tags; version detection needs them
+            git fetch --tags --force origin
+
+            buildkite-agent artifact download "artifacts/rocm100-base-wheels/*.whl" .
+
+            ECR_IMAGE_TAG="$$(buildkite-agent meta-data get rock-base-image-tag 2>/dev/null || echo '')"
+            if [ -z "$${ECR_IMAGE_TAG}" ]; then
+              echo "ERROR: rock-base-image-tag metadata not found"
+              echo "This should have been set by the build-rock-base-image job"
+              exit 1
+            fi
+
+            aws ecr-public get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+            docker pull "$${ECR_IMAGE_TAG}"
+
+            mkdir -p docker/context/base-wheels
+            touch docker/context/base-wheels/.keep
+            cp artifacts/rocm100-base-wheels/*.whl docker/context/base-wheels/
+            ls -lh docker/context/base-wheels/
+
+            DOCKER_BUILDKIT=1 docker build \
+              --file docker/Dockerfile.rocm \
+              --target export_vllm_wheel_release \
+              --output type=local,dest=rocm-dist \
+              --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
+              --build-arg REMOTE_VLLM=0 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+              --build-arg SCCACHE_REGION_NAME=us-west-2 \
+              --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+              .
+            mkdir -p artifacts/rocm100-vllm-wheel
+            cp rocm-dist/*.whl artifacts/rocm100-vllm-wheel/
+            ls -lh artifacts/rocm100-vllm-wheel/
+        artifact_paths:
+          - "artifacts/rocm100-vllm-wheel/*.whl"
         env:
           DOCKER_BUILDKIT: "1"
 
-      # ROCm 10.0 Job 2: Build ROCm 10.0 Release Docker Image
+      # ROCm 10.0 Job 3: Upload wheels to S3 as the rocm100 index. TheRock's SDK,
+      # device kernels and torchvision/torchaudio are linked rather than hosted.
+      - label: ":s3: Upload ROCm 10.0 Wheels to S3"
+        id: upload-rocm100-wheels
+        depends_on:
+          - step: build-rocm100-vllm-wheel
+            allow_failure: false
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 60
+        commands:
+          - |
+            set -euo pipefail
+            buildkite-agent artifact download "artifacts/rocm100-base-wheels/*.whl" .
+            buildkite-agent artifact download "artifacts/rocm100-vllm-wheel/*.whl" .
+            python3 tools/vllm-rocm/therock_wheels.py external-links > therock-external-links.txt
+            cat therock-external-links.txt
+            ROCM_EXTERNAL_LINKS=therock-external-links.txt \
+              bash .buildkite/scripts/upload-rocm-wheels.sh
+        env:
+          S3_BUCKET: "vllm-wheels"
+          ROCM_WHEEL_DIRS: "artifacts/rocm100-base-wheels artifacts/rocm100-vllm-wheel"
+          ROCM_WHEEL_SUBDIR: "rocm100-wheels"
+
+      # ROCm 10.0 Job 4: Build ROCm 10.0 Release Docker Image
       - label: ":docker: Build release image - x86_64 - ROCm 10.0"
         id: build-rock-release-image
         depends_on:
