@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from contextlib import nullcontext
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
@@ -32,10 +32,18 @@ from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
 
 
-def _bind_profiler_mode_helper(worker) -> None:
-    worker._use_dp_synchronized_profiler_iterations = MethodType(
-        Worker._use_dp_synchronized_profiler_iterations, worker
+def _make_worker(profiler, *, synchronize_iterations=False, dp_size=1) -> Worker:
+    worker = object.__new__(Worker)
+    worker.rank = 0
+    worker.profiler = profiler
+    worker.profiler_config = ProfilerConfig(
+        profiler="cuda",
+        synchronize_iterations_across_dp=synchronize_iterations,
     )
+    worker.vllm_config = SimpleNamespace(profiler_config=worker.profiler_config)
+    worker.parallel_config = SimpleNamespace(data_parallel_size=dp_size)
+    worker._dp_profiler_requested = False
+    return worker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -524,12 +532,8 @@ class TestAnnotateProfile:
     """Tests for Worker.annotate_profile() annotation string formatting."""
 
     def _annotate(self, detailed: bool) -> str:
-        worker = MagicMock()
+        worker = _make_worker(MagicMock())
         worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
-        worker.profiler_config.synchronize_iterations_across_dp = False
-        worker.parallel_config.data_parallel_size = 1
-        worker.profiler = MagicMock()
-        _bind_profiler_mode_helper(worker)
 
         ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
         cached = CachedRequestData(
@@ -562,12 +566,9 @@ class TestAnnotateProfile:
         )
 
     def test_skips_annotation_work_when_profiler_does_not_annotate(self):
-        worker = MagicMock()
+        worker = _make_worker(MagicMock())
         worker.profiler.should_annotate = False
-        worker.profiler_config.synchronize_iterations_across_dp = False
-        worker.parallel_config.data_parallel_size = 1
         worker.profiler.is_running = False
-        _bind_profiler_mode_helper(worker)
 
         with patch(
             "vllm.v1.worker.gpu_worker.compute_iteration_details"
@@ -580,12 +581,9 @@ class TestAnnotateProfile:
         assert isinstance(context, nullcontext)
 
     def test_synchronized_mode_suppresses_rank_local_step(self):
-        worker = MagicMock()
-        worker.profiler_config.synchronize_iterations_across_dp = True
-        worker.parallel_config.data_parallel_size = 2
+        worker = _make_worker(MagicMock(), synchronize_iterations=True, dp_size=2)
         worker.profiler.is_running = False
         worker.profiler.should_annotate = False
-        _bind_profiler_mode_helper(worker)
 
         Worker.annotate_profile(worker, scheduler_output=None)
 
@@ -594,10 +592,8 @@ class TestAnnotateProfile:
 
 class TestDPSynchronizedProfiler:
     def _worker(self, profiler):
-        worker = MagicMock()
-        worker.profiler = profiler
+        worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
         worker._dp_profiler_requested = True
-        worker._dp_profiler_session_started = False
         return worker
 
     def test_waits_until_every_rank_is_ready(self, default_profiler_config):
@@ -615,13 +611,7 @@ class TestDPSynchronizedProfiler:
         assert profiler._active_iteration_count == 1
 
     def test_profile_request_arms_without_starting_locally(self):
-        worker = MagicMock()
-        worker.rank = 0
-        worker.profiler = MagicMock()
-        worker.profiler_config.synchronize_iterations_across_dp = True
-        worker.parallel_config.data_parallel_size = 2
-        worker._dp_profiler_requested = False
-        _bind_profiler_mode_helper(worker)
+        worker = _make_worker(MagicMock(), synchronize_iterations=True, dp_size=2)
 
         with patch(
             "vllm.distributed.utils.get_worker_rank_suffix",
@@ -634,15 +624,9 @@ class TestDPSynchronizedProfiler:
 
     @pytest.mark.parametrize("synchronize_iterations", [False, True])
     def test_single_rank_keeps_rank_local_profiling(self, synchronize_iterations):
-        worker = MagicMock()
-        worker.rank = 0
-        worker.profiler_config = ProfilerConfig(
-            profiler="cuda",
-            synchronize_iterations_across_dp=synchronize_iterations,
+        worker = _make_worker(
+            MagicMock(), synchronize_iterations=synchronize_iterations
         )
-        worker.parallel_config.data_parallel_size = 1
-        worker._dp_profiler_requested = False
-        _bind_profiler_mode_helper(worker)
 
         with (
             patch(
@@ -683,7 +667,6 @@ class TestDPSynchronizedProfiler:
         assert not profiler.is_armed
         assert profiler.stop_call_count == 1
         assert worker._dp_profiler_requested is False
-        assert worker._dp_profiler_session_started is False
 
     def test_restart_after_auto_stop(self, default_profiler_config):
         default_profiler_config.max_iterations = 1
@@ -696,7 +679,7 @@ class TestDPSynchronizedProfiler:
         Worker._advance_dp_synchronized_profiler(worker, True)
 
         assert profiler.start_call_count == 2
-        assert worker._dp_profiler_session_started is True
+        assert profiler.is_armed
 
     def test_peer_stop_ends_local_capture(self, default_profiler_config):
         profiler = ConcreteWorkerProfiler(default_profiler_config)
@@ -707,7 +690,7 @@ class TestDPSynchronizedProfiler:
 
         assert profiler.stop_call_count == 1
         assert worker._dp_profiler_requested is False
-        assert worker._dp_profiler_session_started is False
+        assert not profiler.is_armed
 
 
 class _BoundaryObserved(Exception):
@@ -1437,7 +1420,6 @@ def test_gpu_worker_creates_proton_profiler():
     worker.profiler_config = MagicMock(profiler="proton")
     worker.profiler_config.synchronize_iterations_across_dp = False
     worker.parallel_config = SimpleNamespace(data_parallel_size=1)
-    _bind_profiler_mode_helper(worker)
 
     with (
         patch(
@@ -1461,7 +1443,6 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
     worker.profiler_config = MagicMock(profiler="proton")
     worker.profiler_config.synchronize_iterations_across_dp = False
     worker.parallel_config = SimpleNamespace(data_parallel_size=1)
-    _bind_profiler_mode_helper(worker)
 
     with (
         patch(
