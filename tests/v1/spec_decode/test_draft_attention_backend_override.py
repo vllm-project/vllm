@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.config import LoadConfig
+from vllm.config import LoadConfig, SpeculativeConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
@@ -37,6 +37,9 @@ class _SpeculativeConfig:
     moe_backend: str | None = None
     kv_cache_dtype: str | None = None
     draft_model_config: object = None
+    draft_load_config: object = None
+
+    apply_draft_overrides = SpeculativeConfig.apply_draft_overrides
 
 
 @dataclass
