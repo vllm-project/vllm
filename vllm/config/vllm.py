@@ -618,6 +618,8 @@ class VllmConfig:
             self.speculative_config is not None
             and self.speculative_config.num_speculative_tokens is not None
         ):
+            if self.speculative_config.is_dspark_prefill_only():
+                return 0
             return self.speculative_config.num_speculative_tokens
         if (
             self.diffusion_config is not None
@@ -666,7 +668,11 @@ class VllmConfig:
         their own per-method lookahead, so those components cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None or not speculative_config.use_eagle():
+        if (
+            speculative_config is None
+            or not speculative_config.use_eagle()
+            or speculative_config.is_dspark_prefill_only()
+        ):
             return 0
         if speculative_config.use_multi_module_mtp():
             # Each MTP module reads one token further ahead than the one before
