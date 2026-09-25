@@ -8,10 +8,8 @@ from vllm.model_executor.models.minicpmv4_7 import (
     MiniCPMV4_7ForConditionalGeneration,
     MiniCPMV4_7MultiModalProcessor,
     MiniCPMV4_7ProcessingInfo,
-    _stack_vit_merger_qkv,
-)
-from vllm.model_executor.models.mrope_minicpmv4_7 import (
     _compute_canvas_single,
+    _stack_vit_merger_qkv,
     build_image_bounds,
     canvas_rope_delta,
 )
