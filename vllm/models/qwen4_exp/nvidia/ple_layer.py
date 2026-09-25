@@ -17,6 +17,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -71,8 +72,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         layer_idx: int = 0,
         ple_dense_layer_id: int | None = None,
         prefix: str = "",
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.use_sequence_parallel = use_sequence_parallel
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -102,8 +105,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             prefix=f"{prefix}.ple_embedding",
             quant_config=quant_config,
             params_dtype=model_config.dtype,
+            use_sequence_parallel=self.use_sequence_parallel,
         )
-        # The PLE cache is TP-replicated, so this merged projection is too.
+        # Projection weights stay replicated even when their token rows are sharded.
         self.kv_proj = MergedColumnParallelLinear(
             int(config.ple_embed_dim),
             [self.hc_hidden_size, self.hidden_size],
@@ -153,18 +157,12 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
     def start_prefetch(
         self,
-        hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> None:
         """Start the pinned PLE lookup while the preceding decoder layer runs."""
-        self.ple_embedding.start_prefetch(
-            hidden_states,
-            input_ids,
-            query_start_loc,
-            ngram_context,
-        )
+        self.ple_embedding.start_prefetch(input_ids, query_start_loc, ngram_context)
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
@@ -194,7 +192,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
-        outer_residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
@@ -209,7 +207,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         has_non_spec = has_prefill or has_decode
         inputs = inputs[: metadata.num_actual_tokens]
         residual = residual[: metadata.num_actual_tokens]
-        outer_residual = outer_residual[: metadata.num_actual_tokens]
+        if outer_residual is not None:
+            outer_residual = outer_residual[: metadata.num_actual_tokens]
 
         spec_token_indices = None
         non_spec_token_indices = None
@@ -261,11 +260,14 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 residual_d, residual_p = torch.split(
                     residual, [num_decode_tokens, num_prefill_tokens], dim=0
                 )
-                outer_residual_d, outer_residual_p = torch.split(
-                    outer_residual,
-                    [num_decode_tokens, num_prefill_tokens],
-                    dim=0,
-                )
+                outer_residual_d: torch.Tensor | None = None
+                outer_residual_p: torch.Tensor | None = None
+                if outer_residual is not None:
+                    outer_residual_d, outer_residual_p = torch.split(
+                        outer_residual,
+                        [num_decode_tokens, num_prefill_tokens],
+                        dim=0,
+                    )
                 token_indices_d = None
                 token_indices_p = None
             else:
@@ -339,14 +341,16 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
-        outer_residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
     ) -> None:
+        """Update convolution state, optionally fusing both residual additions."""
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         # Profiling omits all metadata or this Mamba entry. Short convolution
         # is a no-op there, but preserve the outer residual addition.
         if attn_metadata is None:
-            residual.add_(outer_residual)
+            if outer_residual is not None:
+                residual.add_(outer_residual)
             return
 
         if not isinstance(attn_metadata, dict):
@@ -357,7 +361,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
-            residual.add_(outer_residual)
+            if outer_residual is not None:
+                residual.add_(outer_residual)
             return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
@@ -399,7 +404,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
         input_ids = input_ids.reshape(-1)
-        if input_ids.shape[0] != hidden_states.shape[0]:
+        if (
+            not self.use_sequence_parallel
+            and input_ids.shape[0] != hidden_states.shape[0]
+        ):
             raise ValueError(
                 "PLE expects input_ids and hidden_states to have the same "
                 f"token length, got {input_ids.shape[0]} and "
@@ -411,6 +419,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             query_start_loc,
             ngram_context,
         )
+        assert embeddings.shape[0] == hidden_states.shape[0]
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
@@ -423,9 +432,16 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
-        # State routing depends on runtime request metadata and remains outside
-        # the graph; short convolution accumulates into gated_output.
-        self._short_conv(conv_input, gated_output, hidden_states)
+        if self.use_sequence_parallel:
+            # Only convolution needs full tokens. Add residuals on local shards.
+            conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
+            # Metadata may omit padding tokens or all tokens during profiling.
+            conv_output = torch.zeros_like(conv_input)
+            self._short_conv(conv_input, conv_output, outer_residual=None)
+            gated_output.add_(sp_shard(conv_output))
+            gated_output.add_(hidden_states)
+        else:
+            self._short_conv(conv_input, gated_output, hidden_states)
         return gated_output
 
 

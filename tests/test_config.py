@@ -3925,3 +3925,35 @@ def test_revision_resolved_for_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    "architecture,is_cuda,supported",
+    [
+        ("Qwen4ExpForCausalLM", True, True),
+        ("Qwen4ExpForConditionalGeneration", True, True),
+        ("Qwen4ExpMTP", True, True),
+        ("Qwen4ExpForCausalLM", False, False),
+        ("DeepseekV4ForCausalLM", True, False),
+    ],
+)
+def test_hc_sp_model_support(architecture, is_cuda, supported):
+    """Accept HC SP for target and MTP models only on supported platforms."""
+    model = SimpleNamespace(
+        architecture=architecture,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=8),
+        multimodal_config=None,
+    )
+    parallel = SimpleNamespace(
+        enable_hc_sp=True,
+        tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        enable_expert_parallel=False,
+        decode_context_parallel_size=1,
+    )
+    with patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda):
+        if supported:
+            ModelConfig.verify_with_parallel_config(model, parallel)
+        else:
+            with pytest.raises(ValueError, match="requires Qwen4Exp on CUDA"):
+                ModelConfig.verify_with_parallel_config(model, parallel)
