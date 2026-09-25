@@ -222,6 +222,10 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                 owned = (tokens + 7 - split) // 8
                 mbarrier.arrive_expect_tx(reduced, owned * 128 * 8 * 4)
             cute.arch.cluster_wait()
+            # quack's mixed const_expr-if rewrite (installed process-wide once
+            # quack is imported) can leave these unbound after the dynamic path
+            # above; bind them so the regions below join on one type.
+            amax, exponent, inv = Float32(0), Uint32(0), Float32(0)
             if tid < 128:
                 acc = cute.make_rmem_tensor(acc_cols, Float32)
                 if cutlass.const_expr(tokens == 1):
