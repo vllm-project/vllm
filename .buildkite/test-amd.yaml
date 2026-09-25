@@ -262,7 +262,7 @@ steps:
   commands:
   - pytest -v -s tools/test_docker_build_metadata_args.py
 
-- label: ":computer: (CPU) Torch Stable ABI Audit" # TBD
+- label: ":amd: (MI250) Torch Stable ABI Audit" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false

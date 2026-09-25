@@ -14,7 +14,7 @@ steps:
   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
   mirror:
     amd:
-      label: ":computer: (CPU) Torch Stable ABI Audit"
+      label: ":amd: (MI250) Torch Stable ABI Audit"
       dind: false
       device: mi300_1
       timeout_in_minutes: 35
