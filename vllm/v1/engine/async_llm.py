@@ -28,7 +28,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, PromptType
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
@@ -304,7 +304,13 @@ class AsyncLLM(EngineClient):
     def get_num_queued_tokens(self) -> int:
         return self.output_processor.get_num_queued_tokens()
 
-    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+    def check_admission(
+        self,
+        n: int = 1,
+        request_id: str | None = None,
+        *,
+        external_request_id: str | None = None,
+    ) -> None:
         """Reject the request if it would exceed queue limits.
 
         Both limits return HTTP 503 (Service Unavailable) so that load
@@ -324,7 +330,8 @@ class AsyncLLM(EngineClient):
 
         Args:
             n: Number of sequences the request will occupy.
-            request_id: Request id, used for logging only.
+            request_id: Internal request ID, used for logging only.
+            external_request_id: External ID for log correlation, if available.
 
         Raises:
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
@@ -339,7 +346,7 @@ class AsyncLLM(EngineClient):
                 else self.get_num_unfinished_requests()
             )
             if current_requests + n > max_num_reqs:
-                logger.info(
+                bind_external_request_id(logger, external_request_id).info(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -353,7 +360,7 @@ class AsyncLLM(EngineClient):
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                bind_external_request_id(logger, external_request_id).info(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
@@ -512,7 +519,11 @@ class AsyncLLM(EngineClient):
             child_request.sampling_params = child_params
             child_requests.append(child_request)
 
-        self.check_admission(parent_params.n, parent_request.request_id)
+        self.check_admission(
+            parent_params.n,
+            parent_request.request_id,
+            external_request_id=parent_request.external_req_id,
+        )
         try:
             for idx, child_request in enumerate(child_requests):
                 self.output_processor.add_request(
@@ -522,7 +533,10 @@ class AsyncLLM(EngineClient):
             for child_request in child_requests:
                 await self.engine_core.add_request_async(child_request)
                 if self.log_requests:
-                    logger.info("Added request %s.", child_request.request_id)
+                    request_log = bind_external_request_id(
+                        logger, child_request.external_req_id
+                    )
+                    request_log.info("Added request %s.", child_request.request_id)
         except BaseException:
             await self.abort(parent_request.request_id, internal=True)
             raise
@@ -539,7 +553,10 @@ class AsyncLLM(EngineClient):
         if parent_req is None and not self.output_processor.has_request(
             request.request_id
         ):
-            self.check_admission(request_id=request.request_id)
+            self.check_admission(
+                request_id=request.request_id,
+                external_request_id=request.external_req_id,
+            )
 
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
@@ -548,7 +565,9 @@ class AsyncLLM(EngineClient):
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            bind_external_request_id(logger, request.external_req_id).info(
+                "Added request %s.", request.request_id
+            )
 
     async def _add_streaming_input_request(
         self,
@@ -706,6 +725,12 @@ class AsyncLLM(EngineClient):
             >>> gen = self.generate(engine_input, sampling_params, request_id)
 
         """
+        external_request_id = (
+            (prompt.external_req_id or prompt.request_id)
+            if isinstance(prompt, EngineCoreRequest)
+            else request_id
+        )
+        request_log = bind_external_request_id(logger, external_request_id)
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -746,19 +771,23 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
-                logger.info("Request %s aborted.", request_id)
+                request_log.info("Request %s aborted.", external_request_id)
             raise
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
             if self.log_requests:
-                logger.info("Request %s failed (engine dead).", request_id)
+                request_log.info(
+                    "Request %s failed (engine dead).", external_request_id
+                )
             raise
 
         # Request validation error or admission control rejection.
         except (VLLMClientError, GracefulHTTPError) as e:
             if self.log_requests:
-                logger.info("Request %s failed (bad request): %s.", request_id, e)
+                request_log.info(
+                    "Request %s failed (bad request): %s.", external_request_id, e
+                )
             raise
 
         # Error from input stream generator - propagate directly.
@@ -766,7 +795,9 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
-                logger.info("Request %s failed (input error): %s.", request_id, e)
+                request_log.info(
+                    "Request %s failed (input error): %s.", external_request_id, e
+                )
             raise e.cause from e
 
         # Unexpected error in the generate() task (possibly recoverable).
@@ -782,7 +813,7 @@ class AsyncLLM(EngineClient):
                         "error during printing an exception of class"
                         + e2.__class__.__name__
                     )
-                logger.info("Request %s failed due to %s.", request_id, s)
+                request_log.info("Request %s failed due to %s.", external_request_id, s)
             raise EngineGenerateError() from e
         finally:
             if q is not None:
@@ -878,11 +909,19 @@ class AsyncLLM(EngineClient):
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
-        await self.engine_core.abort_requests_async(all_request_ids)
+        (
+            aborted_internal_ids,
+            aborted_external_ids,
+        ) = self.output_processor.abort_requests(request_ids, internal)
+        await self.engine_core.abort_requests_async(aborted_internal_ids)
 
         if self.log_requests:
-            logger.info("Aborted request(s) %s.", ",".join(request_ids))
+            for internal_id, external_id in zip(
+                aborted_internal_ids, aborted_external_ids, strict=True
+            ):
+                bind_external_request_id(logger, external_id).info(
+                    "Aborted request %s.", internal_id
+                )
 
     async def notify_kv_transfer_request_rejected(
         self,
@@ -987,6 +1026,7 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
+        request_log = bind_external_request_id(logger, request_id)
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -1019,19 +1059,19 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
-                logger.info("Request %s aborted.", request_id)
+                request_log.info("Request %s aborted.", request_id)
             raise
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
             if self.log_requests:
-                logger.info("Request %s failed (engine dead).", request_id)
+                request_log.info("Request %s failed (engine dead).", request_id)
             raise
 
         # Request validation error or admission control rejection.
         except (VLLMClientError, GracefulHTTPError):
             if self.log_requests:
-                logger.info("Request %s failed (bad request).", request_id)
+                request_log.info("Request %s failed (bad request).", request_id)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
@@ -1039,7 +1079,7 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
-                logger.info("Request %s failed.", request_id)
+                request_log.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
         finally:
             if q is not None:

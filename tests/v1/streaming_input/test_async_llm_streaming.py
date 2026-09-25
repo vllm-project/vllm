@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from vllm.engine.protocol import StreamingInput
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
@@ -92,6 +95,34 @@ async def test_generate_normal_flow(mock_async_llm):
     assert len(outputs) == 2
     assert outputs[0].finished is False
     assert outputs[1].finished is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [("generate", SamplingParams()), ("encode", PoolingParams())],
+)
+async def test_failed_request_log_has_external_id(
+    mock_async_llm, method, params, caplog_vllm
+):
+    mock_async_llm.log_requests = True
+    mock_async_llm.add_request = AsyncMock(
+        side_effect=VLLMValidationError("invalid prompt")
+    )
+    request_method = getattr(AsyncLLM, method).__get__(mock_async_llm, AsyncLLM)
+
+    with (
+        caplog_vllm.at_level(logging.INFO, logger="vllm"),
+        pytest.raises(VLLMValidationError),
+    ):
+        await anext(request_method("prompt", params, "external-123"))
+
+    record = next(
+        record
+        for record in caplog_vllm.records
+        if "failed (bad request)" in record.getMessage()
+    )
+    assert record.request_id == "external-123"
 
 
 def make_output(request_id: str, finished: bool) -> RequestOutput:

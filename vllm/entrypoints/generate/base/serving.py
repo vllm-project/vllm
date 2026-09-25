@@ -25,10 +25,13 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.utils.request_id import (
+    bind_external_request_id_from_request,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
@@ -205,7 +208,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
         """Raise GenerationError if finish_reason indicates an error."""
         if finish_reason == "error":
-            logger.error(
+            bind_external_request_id(logger, request_id).error(
                 "Request %s failed with an internal error during generation",
                 request_id,
             )
@@ -315,7 +318,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                         data_parallel_rank=self._get_data_parallel_rank(raw_request),
                     )
                 except Exception:
-                    logger.warning(
+                    bind_external_request_id_from_request(logger, raw_request).warning(
                         "Failed to notify KV connector about rejected request %s",
                         request.request_id,
                         exc_info=True,

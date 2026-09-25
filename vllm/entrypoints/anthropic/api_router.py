@@ -25,7 +25,10 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.logger import init_logger
+from vllm.entrypoints.serve.utils.request_id import (
+    bind_external_request_id_from_request,
+)
+from vllm.logger import bind_external_request_id, init_logger
 
 logger = init_logger(__name__)
 
@@ -72,7 +75,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     try:
         generator = await handler.create_messages(request, raw_request)
     except Exception as e:
-        logger.exception("Error in create_messages: %s", e)
+        bind_external_request_id_from_request(logger, raw_request).exception(
+            "Error in create_messages: %s", e
+        )
         return translate_error_response(create_error_response(e))
 
     if isinstance(generator, ErrorResponse):
@@ -80,7 +85,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
     elif isinstance(generator, AnthropicMessagesResponse):
         resp = generator.model_dump(exclude_none=True)
-        logger.debug("Anthropic Messages Response: %s", resp)
+        bind_external_request_id(logger, generator.id).debug(
+            "Anthropic Messages Response: %s", resp
+        )
         return JSONResponse(content=resp)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -110,7 +117,9 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
     try:
         response = await handler.count_tokens(request, raw_request)
     except Exception as e:
-        logger.exception("Error in count_tokens: %s", e)
+        bind_external_request_id_from_request(logger, raw_request).exception(
+            "Error in count_tokens: %s", e
+        )
         return translate_error_response(create_error_response(e))
 
     if isinstance(response, ErrorResponse):

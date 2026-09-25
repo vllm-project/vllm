@@ -87,7 +87,9 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
+from vllm.entrypoints.serve.utils.request_id import get_external_request_id
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.logger import bind_external_request_id
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.cohere import (
     MESSAGES_CITATIONS_KEY,
@@ -315,7 +317,10 @@ class CohereServingChatV2(OpenAIServingChat):
             case ChatCompletionResponse():
                 return self._chat_completion_to_v2(generator, request)
             case _:
-                return self._chat_completion_stream_to_v2(generator, request)
+                request_id = get_external_request_id(raw_request)
+                return self._chat_completion_stream_to_v2(
+                    generator, request, request_id=request_id
+                )
 
     def to_chat_completion_request(
         self, request: CohereChatV2Request
@@ -1401,6 +1406,7 @@ class CohereServingChatV2(OpenAIServingChat):
         self,
         generator: AsyncGenerator[str, None],
         request: CohereChatV2Request,
+        request_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Translate an OpenAI-style chat completion SSE stream into Cohere's
         v2 stream-event format.
@@ -1484,7 +1490,9 @@ class CohereServingChatV2(OpenAIServingChat):
                         yield ev
 
         except Exception as exc:
-            logger.exception("Error converting chat completion stream to v2")
+            bind_external_request_id(logger, request_id).exception(
+                "Error converting chat completion stream to v2"
+            )
             if state.started and not state.ended:
                 yield _sse(
                     json.dumps(

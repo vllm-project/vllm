@@ -14,6 +14,7 @@ These tests cover:
 
 import argparse
 import asyncio
+import logging
 import multiprocessing
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
@@ -365,7 +366,11 @@ async def test_concurrent_single_request_admission_respects_limit():
     llm.log_requests = False
 
     requests = [
-        SimpleNamespace(request_id=f"request-{idx}", prompt_token_ids=[idx])
+        SimpleNamespace(
+            request_id=f"request-{idx}",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=[idx],
+        )
         for idx in range(2)
     ]
     results = await asyncio.gather(
@@ -403,6 +408,130 @@ async def test_parallel_admission_is_all_or_nothing(first_n: int):
     assert isinstance(results[1], QueueOverflowError)
     assert llm.output_processor.get_num_unfinished_requests() == first_n
     assert llm.engine_core.add_request_async.await_count == first_n
+
+
+def _make_logging_test_llm() -> AsyncLLM:
+    llm = _make_request_test_llm(10, AsyncMock())
+    llm.log_requests = True
+
+    def assign_request_id(request):
+        request.external_req_id = request.request_id
+        request.request_id = "internal-123"
+
+    llm.input_processor.assign_request_id.side_effect = assign_request_id
+    return llm
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize(
+    ("limit", "error"),
+    [
+        ({"max_num_queued_reqs": 0}, QueueOverflowError),
+        ({"max_num_queued_tokens": 0}, MaxQueuedTokensError),
+    ],
+)
+async def test_admission_rejection_keeps_internal_id_and_correlates_external(
+    n, limit, error, caplog_vllm
+):
+    llm = _make_logging_test_llm()
+    for name, value in limit.items():
+        setattr(llm.scheduler_config, name, value)
+    request = _make_engine_request("external-123", n)
+
+    with caplog_vllm.at_level(logging.INFO, logger="vllm"), pytest.raises(error):
+        await llm.add_request("external-123", request, request.params)
+
+    record = next(
+        record
+        for record in caplog_vllm.records
+        if "rejecting request" in record.getMessage()
+    )
+    assert record.request_id == "external-123"
+    assert "internal-123" in record.getMessage()
+    assert "external-123" not in record.getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+async def test_added_request_logs_external_id_when_internal_id_differs(n, caplog_vllm):
+    llm = _make_logging_test_llm()
+    request = _make_engine_request("external-123", n)
+
+    with caplog_vllm.at_level(logging.INFO, logger="vllm"):
+        await llm.add_request("external-123", request, request.params)
+
+    records = [
+        record
+        for record in caplog_vllm.records
+        if record.getMessage().startswith("Added request ")
+    ]
+    assert len(records) == n
+    assert all(record.request_id == "external-123" for record in records)
+    assert all("internal-123" in record.getMessage() for record in records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize("internal", [False, True])
+async def test_abort_log_uses_external_request_id(n, internal, caplog_vllm):
+    llm = _make_logging_test_llm()
+    request = _make_engine_request("external-123", n)
+    await llm.add_request("external-123", request, request.params)
+
+    with caplog_vllm.at_level(logging.INFO, logger="vllm"):
+        await llm.abort(
+            "internal-123" if internal else "external-123", internal=internal
+        )
+
+    records = [
+        record
+        for record in caplog_vllm.records
+        if record.getMessage().startswith("Aborted request ")
+    ]
+    internal_ids = (
+        {"internal-123"} if n == 1 else {f"{index}_internal-123" for index in range(n)}
+    )
+    assert {record.getMessage() for record in records} == {
+        f"Aborted request {internal_id}." for internal_id in internal_ids
+    }
+    assert all(record.request_id == "external-123" for record in records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reused_external_id", [False, True])
+async def test_multi_abort_logs_each_internal_request(reused_external_id, caplog_vllm):
+    llm = _make_request_test_llm(10, AsyncMock())
+    llm.log_requests = True
+    internal_ids = iter(["internal-1", "internal-2"])
+
+    def assign_request_id(request):
+        request.external_req_id = request.request_id
+        request.request_id = next(internal_ids)
+
+    llm.input_processor.assign_request_id.side_effect = assign_request_id
+    external_ids = (
+        ["external-123", "external-123"]
+        if reused_external_id
+        else ["external-1", "external-2"]
+    )
+    for external_id in external_ids:
+        request = _make_engine_request(external_id, 1)
+        await llm.add_request(external_id, request, request.params)
+
+    with caplog_vllm.at_level(logging.INFO, logger="vllm"):
+        await llm.abort(external_ids[0] if reused_external_id else external_ids)
+
+    records = [
+        record
+        for record in caplog_vllm.records
+        if record.getMessage().startswith("Aborted request ")
+    ]
+    assert [record.getMessage() for record in records] == [
+        "Aborted request internal-1.",
+        "Aborted request internal-2.",
+    ]
+    assert [record.request_id for record in records] == external_ids
 
 
 @pytest.mark.asyncio

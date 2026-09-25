@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from logging import LoggerAdapter
+
 import pydantic
 from fastapi import Request
 from starlette.concurrency import iterate_in_threadpool
 
+from vllm.entrypoints.serve.utils.request_id import (
+    bind_external_request_id_from_request,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -92,7 +97,9 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
     return ""
 
 
-def _log_streaming_response(response, response_body: list) -> None:
+def _log_streaming_response(
+    response, response_body: list, request_log: LoggerAdapter
+) -> None:
     """Log streaming response with robust SSE parsing."""
     sse_decoder = SSEDecoder()
     chunk_count = 0
@@ -118,33 +125,36 @@ def _log_streaming_response(response, response_body: list) -> None:
                         # Truncate if too long
                         if len(full_content) > 2048:
                             full_content = full_content[:2048] + "...[truncated]"
-                        logger.info(
+                        request_log.info(
                             "response_body={streaming_complete: content=%r, chunks=%d}",
                             full_content,
                             chunk_count,
                         )
                     else:
-                        logger.info(
+                        request_log.info(
                             "response_body={streaming_complete: no_content, chunks=%d}",
                             chunk_count,
                         )
                     return
 
     response.body_iterator = iterate_in_threadpool(buffered_iterator())
-    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
+    request_log.info("response_body={streaming_started: chunks=%d}", len(response_body))
 
 
-def _log_non_streaming_response(response_body: list) -> None:
+def _log_non_streaming_response(
+    response_body: list, request_log: LoggerAdapter
+) -> None:
     """Log non-streaming response."""
     try:
         decoded_body = response_body[0].decode()
-        logger.info("response_body={%s}", decoded_body)
+        request_log.info("response_body={%s}", decoded_body)
     except UnicodeDecodeError:
-        logger.info("response_body={<binary_data>}")
+        request_log.info("response_body={<binary_data>}")
 
 
 async def log_response(request: Request, call_next):
     response = await call_next(request)
+    request_log = bind_external_request_id_from_request(logger, request)
     response_body = [section async for section in response.body_iterator]
     response.body_iterator = iterate_in_threadpool(iter(response_body))
     # Check if this is a streaming response by looking at content-type
@@ -153,9 +163,9 @@ async def log_response(request: Request, call_next):
 
     # Log response body based on type
     if not response_body:
-        logger.info("response_body={<empty>}")
+        request_log.info("response_body={<empty>}")
     elif is_streaming:
-        _log_streaming_response(response, response_body)
+        _log_streaming_response(response, response_body, request_log)
     else:
-        _log_non_streaming_response(response_body)
+        _log_non_streaming_response(response_body, request_log)
     return response
