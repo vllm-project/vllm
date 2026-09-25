@@ -98,7 +98,9 @@ if current_platform.is_cuda():
         ]
     )
 elif current_platform.is_rocm():
-    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [MLAPrefillBackendEnum.ROCM_AITER_FA, MLAPrefillBackendEnum.FLASH_ATTN]
+    )
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),

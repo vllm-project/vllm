@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 
@@ -40,6 +41,12 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLEX_ATTENTION,
     AttentionBackendEnum.TRITON_ATTN,
     "FLEX_ATTENTION_SLOW",
+]
+
+ROCM_BACKENDS_TO_TEST = [
+    AttentionBackendEnum.ROCM_ATTN,
+    AttentionBackendEnum.ROCM_AITER_FA,
+    AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
 ]
 
 
@@ -129,6 +136,8 @@ def create_and_prepopulate_kv_cache(
     layout: KVCacheLayout,
     randomize_blocks: bool = True,
     kv_cache_dtype: str = "auto",
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
@@ -147,6 +156,8 @@ def create_and_prepopulate_kv_cache(
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
         kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
+        k_scale: Scale used to quantize keys stored in an fp8 cache
+        v_scale: Scale used to quantize values stored in an fp8 cache
 
     Returns:
         A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
@@ -188,6 +199,9 @@ def create_and_prepopulate_kv_cache(
     start_block_idx = 1
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
+        if fp8_kv_cache:
+            k_context = k_context / k_scale
+            v_context = v_context / v_scale
         t = torch.arange(k_context.shape[0], device=device)
         blk = start_block_idx + t // block_size
         off = t % block_size
@@ -243,6 +257,8 @@ def create_and_prepopulate_kv_cache(
 class MockAttentionLayer:
     """A mock attention layer for testing."""
 
+    layer_name: str
+
     def __init__(
         self,
         device: torch.device,
@@ -292,6 +308,7 @@ def run_attention_backend(
     use_cuda_graph: bool = False,
     layer_k_scale: float = 1.0,
     layer_v_scale: float = 1.0,
+    context_kv: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
@@ -300,6 +317,27 @@ def run_attention_backend(
     backend = _actual_backend(backend)
 
     builder_cls, impl_cls = try_get_attention_backend(backend)
+
+    # AITER's builder reads the registered layer to plan sliding-window
+    # extends and allocate shuffled-cache scales, as it does during serving.
+    if backend == AttentionBackendEnum.ROCM_AITER_FA:
+        from vllm.model_executor.layers.attention import Attention
+
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        with set_current_vllm_config(vllm_config):
+            layer = Attention(
+                num_heads=model_config.get_num_attention_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                scale=model_config.get_head_size() ** -0.5,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                cache_config=vllm_config.cache_config,
+                per_layer_sliding_window=sliding_window,
+                prefix=layer_names[0],
+                attn_backend=backend.get_class(),
+                **({"sinks": sinks} if sinks is not None else {}),
+            )
+        layer.kv_cache = kv_cache
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if backend == AttentionBackendEnum.FLASHINFER:
@@ -350,20 +388,24 @@ def run_attention_backend(
     scale = 1.0 / (head_size**0.5)
     # Impls capture the current vllm config at construction, as in model loading.
     with set_current_vllm_config(vllm_config):
-        impl = impl_cls(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-            alibi_slopes=None,
-            sliding_window=sliding_window,
-            attn_type=attn_type,
-            kv_cache_dtype=kv_cache_dtype,
-            **({"sinks": sinks} if sinks is not None else {}),
-        )
+        if backend == AttentionBackendEnum.ROCM_AITER_FA:
+            impl = layer.impl
+        else:
+            impl = impl_cls(
+                num_heads=num_heads,
+                head_size=head_size,
+                scale=scale,
+                num_kv_heads=num_kv_heads,
+                alibi_slopes=None,
+                sliding_window=sliding_window,
+                attn_type=attn_type,
+                kv_cache_dtype=kv_cache_dtype,
+                **({"sinks": sinks} if sinks is not None else {}),
+            )
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device, layer_k_scale, layer_v_scale)
+    mock_layer.layer_name = layer_names[0]
     output = torch.empty_like(query)
 
     if is_quantized_kv_cache(kv_cache_dtype) and impl.supports_quant_query_input:
@@ -372,6 +414,11 @@ def run_attention_backend(
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
+    if context_kv is not None and context_kv[0].shape[0] > 0:
+        context_key, context_value, context_slots = context_kv
+        impl.do_kv_cache_update(
+            mock_layer, context_key, context_value, kv_cache, context_slots
+        )
     if not try_backend_includes_kv_cache_update(backend):
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
@@ -424,6 +471,7 @@ def _test_backend_correctness(
     max_num_batched_tokens: int | None = None,
     layer_k_scale: float = 1.0,
     layer_v_scale: float = 1.0,
+    quantize_query: bool = True,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
@@ -529,9 +577,21 @@ def _test_backend_correctness(
         v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
         if fp8_kv_cache:
-            q_ref = q.to(query_fp8_dtype).to(dtype)
-            k_ref = k_full.to(kv_fp8_dtype).to(dtype)
-            v_ref = v_full.to(kv_fp8_dtype).to(dtype)
+            q_ref = q.to(query_fp8_dtype).to(dtype) if quantize_query else q
+            k_ref = (k_full / layer_k_scale).to(kv_fp8_dtype).to(dtype)
+            v_ref = (v_full / layer_v_scale).to(kv_fp8_dtype).to(dtype)
+            k_ref = k_ref * layer_k_scale
+            v_ref = v_ref * layer_v_scale
+            # Native ROCm prefill and AITER's direct prefill/extend suffix
+            # consume the incoming K/V, before cache quantization. AITER's
+            # sliding-window extends instead gather all K/V from the cache.
+            direct_prefill_kv = backend_to_test == [AttentionBackendEnum.ROCM_ATTN] or (
+                backend_to_test == [AttentionBackendEnum.ROCM_AITER_FA]
+                and (context_len == 0 or sliding_window is None)
+            )
+            if q_len > 1 and direct_prefill_kv:
+                k_ref[context_len:] = k_full[context_len:]
+                v_ref[context_len:] = v_full[context_len:]
         else:
             q_ref, k_ref, v_ref = q, k_full, v_full
 
@@ -638,6 +698,8 @@ def _test_backend_correctness(
         layout=layout,
         randomize_blocks=True,
         kv_cache_dtype=kv_cache_dtype,
+        k_scale=layer_k_scale,
+        v_scale=layer_v_scale,
     )
 
     # 4. Run vLLM backends and compare
@@ -682,9 +744,43 @@ def _test_backend_correctness(
         # the physical order of the test cache.
         vllm_config.cache_config.kv_cache_layout = backend_layout.name
 
+        backend_kv_cache_spec = kv_cache_spec
+        context_kv = None
+        if backend_name in ROCM_BACKENDS_TO_TEST:
+            # Allocate the backend's real cache spec, including ROCM_ATTN's
+            # packed K/V groups and AITER's optional shuffled layout. Populate
+            # context through its writer using the randomized block table.
+            backend_kv_cache_spec = backend_cls.customize_spec(
+                replace(kv_cache_spec, dtype=kv_cache.dtype)
+            )
+            shape = (
+                kv_cache.shape[0],
+                backend_kv_cache_spec.num_heads,
+                block_size,
+                backend_kv_cache_spec.state_content_size_bytes
+                // kv_cache.element_size(),
+            )
+            kv_cache_for_backend = _clone_kv_cache_in_layout(
+                torch.zeros(shape, dtype=kv_cache.dtype, device=device),
+                backend_layout,
+            )
+            context_slots = []
+            for i, k_context in enumerate(k_contexts):
+                offsets = torch.arange(k_context.shape[0], device=device)
+                context_slots.append(
+                    common_attn_metadata.block_table_tensor[i, offsets // block_size]
+                    * block_size
+                    + offsets % block_size
+                )
+            context_kv = (
+                torch.cat(k_contexts),
+                torch.cat(v_contexts),
+                torch.cat(context_slots).to(torch.int64),
+            )
+
         backend_output = run_attention_backend(
             backend_name,
-            kv_cache_spec,
+            backend_kv_cache_spec,
             ["placeholder"],
             vllm_config,
             device,
@@ -700,6 +796,7 @@ def _test_backend_correctness(
             use_cuda_graph=use_cuda_graph,
             layer_k_scale=layer_k_scale,
             layer_v_scale=layer_v_scale,
+            context_kv=context_kv,
         )
 
         # Check shape and dtype consistency
@@ -839,6 +936,91 @@ def test_causal_backend_correctness(
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+
+@pytest.fixture
+def rocm_dense_model(tmp_path, sliding_window):
+    """Provide head geometry and window settings without downloading weights."""
+    from transformers import LlamaConfig
+
+    config = LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=1024,
+        intermediate_size=2048,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        max_position_embeddings=2048,
+        vocab_size=32,
+        sliding_window=sliding_window,
+    )
+    config.save_pretrained(tmp_path)
+    return str(tmp_path)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize("backend", ROCM_BACKENDS_TO_TEST, ids=lambda b: b.name)
+@pytest.mark.parametrize(
+    "batch_spec",
+    [
+        pytest.param(BATCH_SPECS["small_decode"], id="decode"),
+        pytest.param(BatchSpec(seq_lens=[32, 40], query_lens=[32, 40]), id="prefill"),
+        pytest.param(BATCH_SPECS["small_prefill"], id="chunked_prefill"),
+        pytest.param(
+            BatchSpec(seq_lens=[32, 40, 48, 56, 24], query_lens=[1, 1, 5, 5, 24]),
+            id="mixed",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "model_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"]
+)
+@pytest.mark.parametrize("sliding_window", [None, 16], ids=["full", "sliding"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype,layer_k_scale,layer_v_scale",
+    [("auto", 1.0, 1.0), ("fp8", 1.0, 1.0), ("fp8_e4m3", 0.25, 0.5)],
+)
+def test_rocm_dense_backend_correctness(
+    default_vllm_config,
+    monkeypatch,
+    rocm_dense_model,
+    backend: AttentionBackendEnum,
+    batch_spec: BatchSpec,
+    model_dtype: torch.dtype,
+    sliding_window: int | None,
+    kv_cache_dtype: str,
+    layer_k_scale: float,
+    layer_v_scale: float,
+):
+    """Native ROCm builders, cache writers and forwards match causal attention."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+
+    if backend != AttentionBackendEnum.ROCM_ATTN and not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", False)
+
+    def mask_mod(b, h, q_idx, kv_idx, *, context_len):
+        relative_pos = q_idx + context_len - kv_idx
+        mask = relative_pos >= 0
+        if sliding_window is not None:
+            mask = mask & (relative_pos < sliding_window)
+        return mask
+
+    _test_backend_correctness(
+        batch_spec,
+        rocm_dense_model,
+        [backend],
+        mask_mod,
+        # Unified attention uses 64-token pages in production.
+        block_size=64
+        if backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+        else 16,
+        model_dtype=model_dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        layer_k_scale=layer_k_scale,
+        layer_v_scale=layer_v_scale,
+        quantize_query=backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+    )
 
 
 @pytest.mark.skipif(

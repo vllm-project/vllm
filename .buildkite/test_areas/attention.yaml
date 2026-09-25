@@ -42,6 +42,35 @@ steps:
     - tests/v1/attention
   commands:
     - pytest -v -s v1/attention/sparse_mla
+  mirror:
+    amd:
+      label: ':amd: (MI355) V1 Attention / Sparse MLA'
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/attention.yaml
+      - tests/v1/attention/
+      - tests/conftest.py
+      - tests/utils.py
+      - vllm/config/
+      - vllm/model_executor/layers/attention/
+      - vllm/v1/attention/
+      - vllm/models/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      commands:
+      - export VLLM_ROCM_USE_AITER=1
+      - pytest -v -s v1/attention/sparse_mla
+      - pytest -v -s kernels/attention/test_rocm_triton_attn_dsv4.py -k dspark
+      parallelism: 1
 
 - label: ":nvidia: (B200) V1 Attention / MLA Correctness Shard %N"
   key: v1-attention-b200-mla-correctness
@@ -55,6 +84,31 @@ steps:
   commands:
     - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 3
+  mirror:
+    amd:
+      label: ':amd: (MI355) V1 Attention / MLA Correctness Shard %N'
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/attention.yaml
+      - tests/v1/attention/
+      - tests/conftest.py
+      - tests/utils.py
+      - vllm/config/
+      - vllm/model_executor/layers/attention/
+      - vllm/v1/attention/
+      - vllm/models/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_ROCM_USE_AITER=1
+      - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (B200) V1 Attention / Dense and SSM"
   key: v1-attention-b200-dense-ssm
@@ -67,6 +121,34 @@ steps:
     - tests/v1/attention
   commands:
     - pytest -v -s v1/attention/dense v1/attention/ssm
+  mirror:
+    amd:
+      label: ':amd: (MI355) V1 Attention / Dense and SSM'
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/attention.yaml
+      - tests/v1/attention/
+      - tests/conftest.py
+      - tests/utils.py
+      - vllm/config/
+      - vllm/model_executor/layers/attention/
+      - vllm/v1/attention/
+      - vllm/models/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/mamba/
+      - vllm/third_party/flash_linear_attention/
+      commands:
+      - export VLLM_ROCM_USE_AITER=1
+      - pytest -v -s v1/attention/dense v1/attention/ssm
+      parallelism: 1
 
 - label: ":nvidia: (B200) V1 Attention / DCP, MLA Backends and ROCm"
   key: v1-attention-b200-dcp-mla-backends-rocm
@@ -83,3 +165,32 @@ steps:
     - pytest -v -s v1/attention/dcp
     - pytest -v -s v1/attention/mla/backends
     - pytest -v -s v1/attention/rocm
+  mirror:
+    amd:
+      label: ':amd: (MI355) V1 Attention / DCP, MLA Backends and ROCm'
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/attention.yaml
+      - tests/v1/attention/
+      - tests/conftest.py
+      - tests/utils.py
+      - vllm/config/
+      - vllm/model_executor/layers/attention/
+      - vllm/v1/attention/
+      - vllm/models/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      - vllm/distributed/
+      commands:
+      - export VLLM_ROCM_USE_AITER=1
+      - pytest -v -s v1/attention/dcp
+      - pytest -v -s v1/attention/mla/backends
+      - pytest -v -s v1/attention/rocm
+      parallelism: 1

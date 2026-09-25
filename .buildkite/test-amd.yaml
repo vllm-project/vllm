@@ -4994,24 +4994,126 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
-- label: ":amd: (MI355) V1 Attention Shard %N" # TBD
-  timeout_in_minutes: 125
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+- label: ':amd: (MI355) V1 Attention / Sparse MLA'
+  timeout_in_minutes: 65
+  mirror_hardwares:
+  - amdexperimental
+  - amdproduction
+  - amdgfx950nightly
+  - amdmi355
   dind: false
   agent_pool: mi355_1
-  parallelism: 2
-  working_dir: "/vllm-workspace/tests"
+  num_gpus: 1
+  parallelism: 1
+  optional: true
+  working_dir: /vllm-workspace/tests
   source_file_dependencies:
-  - vllm/config/attention.py
-  - vllm/model_executor/layers/attention
-  - vllm/v1/attention
-  - tests/v1/attention
+  - .buildkite/test_areas/attention.yaml
+  - tests/v1/attention/
+  - tests/conftest.py
+  - tests/utils.py
+  - vllm/config/
+  - vllm/model_executor/layers/attention/
+  - vllm/v1/attention/
+  - vllm/models/
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
-  optional: true
+  - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
   commands:
-  - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - export VLLM_ROCM_USE_AITER=1
+  - pytest -v -s v1/attention/sparse_mla
+  - pytest -v -s kernels/attention/test_rocm_triton_attn_dsv4.py -k dspark
+- label: ':amd: (MI355) V1 Attention / MLA Correctness Shard %N'
+  timeout_in_minutes: 65
+  mirror_hardwares:
+  - amdexperimental
+  - amdproduction
+  - amdgfx950nightly
+  - amdmi355
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  parallelism: 3
+  optional: true
+  working_dir: /vllm-workspace/tests
+  source_file_dependencies:
+  - .buildkite/test_areas/attention.yaml
+  - tests/v1/attention/
+  - tests/conftest.py
+  - tests/utils.py
+  - vllm/config/
+  - vllm/model_executor/layers/attention/
+  - vllm/v1/attention/
+  - vllm/models/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_ROCM_USE_AITER=1
+  - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+- label: ':amd: (MI355) V1 Attention / Dense and SSM'
+  timeout_in_minutes: 65
+  mirror_hardwares:
+  - amdexperimental
+  - amdproduction
+  - amdgfx950nightly
+  - amdmi355
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  parallelism: 1
+  optional: true
+  working_dir: /vllm-workspace/tests
+  source_file_dependencies:
+  - .buildkite/test_areas/attention.yaml
+  - tests/v1/attention/
+  - tests/conftest.py
+  - tests/utils.py
+  - vllm/config/
+  - vllm/model_executor/layers/attention/
+  - vllm/v1/attention/
+  - vllm/models/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/mamba/
+  - vllm/third_party/flash_linear_attention/
+  commands:
+  - export VLLM_ROCM_USE_AITER=1
+  - pytest -v -s v1/attention/dense v1/attention/ssm
+- label: ':amd: (MI355) V1 Attention / DCP, MLA Backends and ROCm'
+  timeout_in_minutes: 65
+  mirror_hardwares:
+  - amdexperimental
+  - amdproduction
+  - amdgfx950nightly
+  - amdmi355
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  parallelism: 1
+  optional: true
+  working_dir: /vllm-workspace/tests
+  source_file_dependencies:
+  - .buildkite/test_areas/attention.yaml
+  - tests/v1/attention/
+  - tests/conftest.py
+  - tests/utils.py
+  - vllm/config/
+  - vllm/model_executor/layers/attention/
+  - vllm/v1/attention/
+  - vllm/models/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/distributed/
+  commands:
+  - export VLLM_ROCM_USE_AITER=1
+  - pytest -v -s v1/attention/dcp
+  - pytest -v -s v1/attention/mla/backends
+  - pytest -v -s v1/attention/rocm
 
 - label: ":amd: (MI355) V1 Core"
   timeout_in_minutes: 60

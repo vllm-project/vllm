@@ -1674,6 +1674,181 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize("model_version", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.parametrize("causal", [True, False], ids=["target", "dspark-draft"])
+@torch.inference_mode()
+def test_dspark_swa_window_matches_reference_on_graph_replay(
+    model_version: str, causal: bool
+) -> None:
+    """Target and draft windows exclude padding and refresh on graph replay."""
+    from vllm.models.deepseek_v4.amd.rocm import (
+        DeepseekV4ROCMAiterSparseSWAMetadataBuilder as V4Builder,
+    )
+    from vllm.models.deepseek_v41.amd.rocm import (
+        DeepseekV4ROCMAiterSparseSWAMetadataBuilder as V41Builder,
+    )
+    from vllm.platforms.rocm import get_cdna_version
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_sparse_attn_decode
+    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+
+    if get_cdna_version() not in (3, 4):
+        pytest.skip("DSv4 sparse decode requires CDNA 3 or 4")
+
+    device = torch.device("cuda")
+    block_size = window_size = 128
+    num_tokens, num_heads = 9, 16
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=384,
+            hf_config=SimpleNamespace(sliding_window=window_size),
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=num_tokens, max_num_seqs=3
+        ),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=4,
+            parallel_drafting=False,
+            use_dspark=lambda: True,
+        ),
+    )
+    spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+        sliding_window=window_size,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    builder_cls = V4Builder if model_version == "deepseek_v4" else V41Builder
+    builder = builder_cls(spec, ["swa"], config, device)
+    # Request pages are deliberately discontiguous and out of order.
+    pages = [[4, 0, 7], [5, 2, 8], [1, 6, 3]]
+    block_table = torch.tensor(pages, dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slot_mapping[-1] = -1
+
+    def build_metadata(context_lens, query_lens):
+        seq_lens_cpu = torch.tensor(
+            [c + q for c, q in zip(context_lens, query_lens)], dtype=torch.int32
+        )
+        query_start_loc_cpu = torch.tensor(
+            [0, *torch.tensor(query_lens).cumsum(0).tolist()], dtype=torch.int32
+        )
+        common = CommonAttentionMetadata(
+            query_start_loc=query_start_loc_cpu.to(device),
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens_cpu.to(device),
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            num_reqs=3,
+            num_actual_tokens=num_tokens,
+            max_query_len=max(query_lens),
+            max_seq_len=int(seq_lens_cpu.max()),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=causal,
+        )
+        metadata = builder.build(0, common)
+        rows = []
+        for req, (context_len, query_len) in enumerate(zip(context_lens, query_lens)):
+            for token in range(query_len):
+                end = context_len + token + 1 if causal else context_len + query_len
+                start = (
+                    max(end - window_size, 0)
+                    if causal
+                    else max(context_len - window_size, 0)
+                )
+                rows.append(
+                    [
+                        pages[req][pos // block_size] * block_size + pos % block_size
+                        for pos in range(start, end)
+                    ]
+                )
+        rows[-1] = []
+        assert (
+            _rows_from_ragged(
+                metadata.decode_swa_ragged_indices, metadata.decode_swa_ragged_indptr
+            )
+            == rows
+        )
+        assert metadata.decode_swa_lens.tolist() == [len(row) for row in rows]
+        assert (metadata.decode_swa_indices[-1] == -1).all()
+        if not causal:
+            assert metadata.decode_swa_width > window_size
+            assert max(map(len, rows)) > window_size
+        return metadata, rows
+
+    torch.manual_seed(29)
+    q = torch.randn(
+        num_tokens, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    use_fnuz = current_platform.is_fp8_fnuz()
+    cache = _pack_fp8_ds_mla_cache(
+        torch.randn(9 * block_size, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        * 0.5,
+        block_size,
+        use_fnuz=use_fnuz,
+    )
+    output = torch.empty_like(q)
+    metadata, rows = build_metadata([20, 257, 0], [5, 3, 1])
+
+    def forward():
+        rocm_sparse_attn_decode(
+            q=q,
+            kv_cache=None,
+            swa_k_cache=cache,
+            swa_only=True,
+            topk_indices=None,
+            topk_lens=None,
+            swa_indices=metadata.decode_swa_indices,
+            swa_lens=metadata.decode_swa_lens,
+            swa_ragged_indices=metadata.decode_swa_ragged_indices,
+            swa_ragged_indptr=metadata.decode_swa_ragged_indptr,
+            topk_ragged_indices=None,
+            topk_ragged_indptr=None,
+            attn_sink=None,
+            scale=HEAD_DIM**-0.5,
+            head_dim=HEAD_DIM,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            output=output,
+        )
+
+    def check_output():
+        expected = _ref_sparse_decode_ragged(
+            q, cache, rows, HEAD_DIM**-0.5, None, block_size, main_use_fnuz=use_fnuz
+        )
+        torch.testing.assert_close(output, expected, atol=2e-3, rtol=2e-2)
+        assert torch.count_nonzero(output[-1]) == 0
+
+    forward()
+    check_output()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
+
+    original_metadata = metadata
+    metadata, rows = build_metadata([7, 128, 0], [3, 5, 1])
+    assert metadata.decode_swa_ragged_indices.data_ptr() == (
+        original_metadata.decode_swa_ragged_indices.data_ptr()
+    )
+    assert metadata.decode_swa_ragged_indptr.data_ptr() == (
+        original_metadata.decode_swa_ragged_indptr.data_ptr()
+    )
+    q.copy_(torch.randn_like(q))
+    cache.copy_(
+        _pack_fp8_ds_mla_cache(
+            torch.randn(9 * block_size, HEAD_DIM, dtype=torch.bfloat16, device=device)
+            * 0.5,
+            block_size,
+            use_fnuz=use_fnuz,
+        )
+    )
+    graph.replay()
+    check_output()
+
+
 # ---------------------------------------------------------------------------
 # o-projection: fused inverse-RoPE + cached bf16 wo_a (rocm_inv_rope_einsum)
 # ---------------------------------------------------------------------------
