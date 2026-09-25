@@ -153,13 +153,19 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
     def _resolve_max_slice_nums(
         self,
         mm_kwargs: Mapping[str, object],
+        modality: str = "image",
     ) -> int | None:
         # Per-request max_slice_nums. None keeps the processor default.
-        # This must match what `process_images` passes to the image processor:
-        # the placeholder count and the visual token count are derived from it
-        # separately, so they diverge (and the engine aborts) if the two sides
-        # read different values.
-        max_slice = mm_kwargs.get("max_slice_nums")
+        # Resolved like `downsample_mode` so the nested per-modality form
+        # (`images_kwargs` / `videos_kwargs`) is honoured too. This must match
+        # what `process_images` passes to the image processor: the placeholder
+        # count and the visual token count are derived from it separately, so
+        # they diverge (and the engine aborts) if the two sides read different
+        # values.
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        merged = info.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
+        max_slice = merged.get("max_slice_nums")
         if max_slice is None:
             return None
         return int(max_slice)
@@ -255,6 +261,12 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         patch_size = image_processor.patch_size
         ds_mode = self._resolve_downsample_mode(mm_kwargs, modality="image")
         image_proc_kwargs = _flat_processor_kwargs(mm_kwargs, ds_mode)
+        # `_flat_processor_kwargs` drops the nested form, so the value resolved
+        # from it has to be pinned back for the processor and the prompt text
+        # to agree on the slice count.
+        image_max_slice = self._resolve_max_slice_nums(mm_kwargs, modality="image")
+        if image_max_slice is not None:
+            image_proc_kwargs["max_slice_nums"] = image_max_slice
         per_image_pixel_values: list[torch.Tensor] = []
         per_image_tgt_sizes: list[torch.Tensor] = []
         for image in parsed_images:

@@ -24,6 +24,8 @@ _VOCAB = {
     "<think>": 10,
     "</think>": 11,
     "<|im_end|>": 12,
+    "<tool_call>": 13,
+    "</tool_call>": 14,
 }
 
 
@@ -128,6 +130,20 @@ class TestNonThinking:
         assert reasoning == ""
         assert content == "reasoningfinal answer"
 
+    def test_tool_calls_are_parsed(self, parser, request_obj):
+        """Thinking is off by default, and tool calls must still be parsed."""
+        reasoning, content, tool_calls = parser.parse(
+            "<tool_call><function=get_weather>"
+            "<parameter=city>SF</parameter></function></tool_call>",
+            request_obj,
+        )
+
+        assert reasoning is None
+        assert not content
+        assert tool_calls is not None
+        assert tool_calls[0].name == "get_weather"
+        assert "SF" in tool_calls[0].arguments
+
 
 class TestThinking:
     def test_standard_think_tags_are_parsed(self, mock_tokenizer):
@@ -210,6 +226,20 @@ class TestNewlineRecovery:
         actual = "".join(normalizer.feed(char) for char in text)
         actual += normalizer.feed("", final=True)
         assert actual == expected
+
+    def test_backslash_runs_stay_consistent_across_splits(self):
+        # A run of backslashes can be split over chunks. Its parity decides
+        # whether a following `n` is a newline, so streaming and non-streaming
+        # must agree for every split point.
+        for count in range(1, 7):
+            text = "\\" * count + "n"
+            expected = recover_newlines(text)
+
+            for split in range(len(text) + 1):
+                normalizer = EscapedNewlineNormalizer()
+                actual = normalizer.feed(text[:split])
+                actual += normalizer.feed(text[split:], final=True)
+                assert actual == expected, (count, split)
 
     def test_streaming_recovers_reasoning_and_content(self):
         normalizer = MiniCPMVOutputNormalizer()

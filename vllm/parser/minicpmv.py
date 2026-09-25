@@ -43,34 +43,26 @@ _IM_END = "<|im_end|>"
 
 @functools.cache
 def minicpmv_config(thinking: bool) -> ParserEngineConfig:
-    if thinking:
-        base = qwen3_config(thinking=True, name="minicpmv")
-    else:
-        base = ParserEngineConfig(
-            name="minicpmv_no_thinking",
-            initial_state=ParserState.CONTENT,
-            terminals={
-                "THINK_START": "<think>",
-                "THINK_END": "</think>",
-            },
-            token_id_terminals={
-                "THINK_START": "<think>",
-                "THINK_END": "</think>",
-            },
-            transitions={
-                (ParserState.CONTENT, "THINK_START"): Transition(ParserState.REASONING),
-                (ParserState.REASONING, "THINK_START"): Transition(
-                    ParserState.REASONING
-                ),
-                (ParserState.REASONING, "THINK_END"): Transition(ParserState.CONTENT),
-                (ParserState.CONTENT, "THINK_END"): Transition(ParserState.CONTENT),
-            },
-            strip_trailing_reasoning_whitespace=False,
+    """MiniCPM-V grammar: the qwen3 grammar plus MiniCPM-V markers.
+
+    Both modes keep the qwen3 tool call terminals and transitions, so
+    ``<tool_call>`` output is parsed whether or not thinking is enabled.
+    """
+    name = "minicpmv" if thinking else "minicpmv_no_thinking"
+    base = qwen3_config(thinking=thinking, name=name)
+
+    transitions = dict(base.transitions)
+    if not thinking:
+        # Default mode: the model answers directly, so `<think>` must not open
+        # a reasoning span that would swallow the answer. A stray
+        # `<think>...</think>` in the output is still dropped, not printed.
+        transitions[(ParserState.CONTENT, "THINK_START")] = Transition(
+            ParserState.REASONING
         )
+        base = replace(base, strip_trailing_reasoning_whitespace=False)
 
     terminals = dict(base.terminals)
     token_id_terminals = dict(base.token_id_terminals)
-    transitions = dict(base.transitions)
     terminals["IM_END"] = _IM_END
     token_id_terminals["IM_END"] = _IM_END
     for state in (ParserState.CONTENT, ParserState.REASONING):
@@ -167,6 +159,12 @@ class EscapedNewlineNormalizer:
             while slash_end < len(text) and text[slash_end] == "\\":
                 slash_end += 1
             if slash_end - index > 1:
+                if not final and slash_end == len(text):
+                    # The run may still grow, and its parity decides whether a
+                    # following `n` is a newline or stays literal. Hold it until
+                    # the run is complete.
+                    self._pending = text[index:slash_end]
+                    break
                 output.append(text[index:slash_end])
                 index = slash_end
                 continue
