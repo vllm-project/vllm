@@ -727,6 +727,8 @@ def check_deferred_moe_finalize(
     the router's weights back as-is. A call the experts split across kernel
     launches finalizes instead.
     """
+    # The deferred output views the router's buffer, so compare with a copy.
+    expected_weights = None if router_weights is None else router_weights.clone()
     finalized = run()
     assert isinstance(finalized, torch.Tensor)
     moe_config.defer_moe_finalize()
@@ -737,9 +739,9 @@ def check_deferred_moe_finalize(
         return
 
     assert isinstance(output, UnfinalizedMoEOutput)
-    if router_weights is not None:
+    if expected_weights is not None:
         torch.testing.assert_close(
-            output.expert_weights, router_weights, atol=0, rtol=0
+            output.expert_weights, expected_weights, atol=0, rtol=0
         )
     torch.testing.assert_close(finalize_moe_output(output), finalized, atol=0, rtol=0)
 

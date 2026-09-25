@@ -139,11 +139,14 @@ def finalize_moe_output(routed: UnfinalizedMoEOutput) -> torch.Tensor:
     gemm2_permuted = routed.gemm2_permuted
     num_tokens = routed.expanded_idx_to_permuted_idx.shape[0]
     output = gemm2_permuted.new_empty(num_tokens, gemm2_permuted.shape[1])
+    # The kernel reads the valid row count through this pointer either way.
+    num_rows = gemm2_permuted.new_full((1,), gemm2_permuted.shape[0], dtype=torch.int64)
     moe_unpermute(
         output,
         gemm2_permuted,
         routed.expert_weights.float(),
         routed.expanded_idx_to_permuted_idx,
+        expert_first_token_offset=num_rows,
     )
     return output
 
