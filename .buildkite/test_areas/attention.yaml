@@ -45,9 +45,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI355) V1 Attention Shard %N"
+      label: ":amd: (MI355 DPX) V1 Attention Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 125
       depends_on:
       - image-build-amd
