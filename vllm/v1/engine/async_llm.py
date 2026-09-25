@@ -444,8 +444,9 @@ class AsyncLLM(EngineClient):
             request_params = request.params
             if isinstance(request_params, SamplingParams):
                 # This request object is owned by the engine from here on.
-                request_params.watermarking = self.input_processor.resolve_watermarking(
-                    request_params
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
                 )
         else:
             if isinstance(prompt, dict) and "type" in prompt:

@@ -331,6 +331,7 @@ class SamplingParams(
     output_text_buffer_length: int = 0
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
+    _watermarking_skipped: bool = False
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None

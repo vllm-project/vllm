@@ -208,6 +208,7 @@ def test_direct_engine_trace_replay_warns_and_disables(
 
     assert "trace replay requests will run without watermarking" in caplog_vllm.text
     assert request.sampling_params.watermarking is False
+    assert request.sampling_params._watermarking_skipped is True
     assign_request_id.assert_called_once_with(request)
 
 
@@ -227,6 +228,7 @@ def test_direct_engine_request_uses_embedded_opt_out(monkeypatch):
         SamplingParams(temperature=0),
     )
 
+    assert request.sampling_params._watermarking_skipped is False
     assign_request_id.assert_called_once_with(request)
 
 
@@ -259,6 +261,7 @@ def test_direct_async_engine_trace_replay_warns_and_disables(
 
     assert "trace replay requests will run without watermarking" in caplog_vllm.text
     assert request.sampling_params.watermarking is False
+    assert request.sampling_params._watermarking_skipped is True
 
 
 def test_direct_async_engine_greedy_request_warns_and_disables_watermarking(
@@ -292,6 +295,29 @@ def test_direct_async_engine_greedy_request_warns_and_disables_watermarking(
         caplog_vllm.text
     )
     assert request.sampling_params.watermarking is False
+    assert request.sampling_params._watermarking_skipped is True
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "server_uses_watermarking", "skipped"),
+    [
+        ({}, True, False),
+        ({"temperature": 0}, True, True),
+        ({"temperature": 0, "watermarking": False}, True, False),
+        ({"temperature": 0}, False, False),
+    ],
+)
+def test_apply_watermarking_records_skipped_requests(
+    kwargs, server_uses_watermarking, skipped, reset_warning_once
+):
+    params = SamplingParams(**kwargs)
+    processor = _input_processor(server_uses_watermarking)
+    processor.apply_watermarking(params, processor.resolve_watermarking(params))
+    assert params._watermarking_skipped is skipped
+
+    # Resolving an already resolved request keeps the flag.
+    processor.apply_watermarking(params, processor.resolve_watermarking(params))
+    assert params._watermarking_skipped is skipped
 
 
 def test_shared_sampling_params_are_not_rewritten_by_admission(reset_warning_once):

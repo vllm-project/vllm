@@ -121,6 +121,20 @@ class InputProcessor:
         """
         return self.vllm_config._check_supports_watermarking(params)
 
+    def apply_watermarking(self, params: SamplingParams, watermarking: bool) -> None:
+        """Store the resolved `watermarking` on request-local params.
+
+        Also records whether watermarking was requested on a watermarking
+        engine but could not be applied, as opposed to an explicit opt-out.
+        """
+        # Sticky, so resolving an already resolved request keeps the flag.
+        params._watermarking_skipped = params._watermarking_skipped or (
+            self.vllm_config.watermark_config is not None
+            and params.watermarking is not False
+            and not watermarking
+        )
+        params.watermarking = watermarking
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -423,7 +437,7 @@ class InputProcessor:
             sampling_params = params.clone()
             # Resolve on the request-local copy: `params` may be shared across
             # prompts, requests and even engines by the caller.
-            sampling_params.watermarking = watermarking
+            self.apply_watermarking(sampling_params, watermarking)
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
