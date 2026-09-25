@@ -182,10 +182,25 @@ def test_mm_device_do_normalize():
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
     assert all(value.dtype == torch.uint8 for value in raw_values)
 
-    input_norm = build_mm_input_norm(ctx.model_config, input_layout="chw")
+    input_norm = build_mm_input_norm(ctx.model_config)
+    patch_size = processor.info.get_hf_config().vision_config.patch_size
+
+    def pack_patches(image: torch.Tensor) -> torch.Tensor:
+        channels, height, width = image.shape
+        rows = height // patch_size
+        cols = width // patch_size
+        return (
+            image[:, : rows * patch_size, : cols * patch_size]
+            .reshape(channels, rows, patch_size, cols, patch_size)
+            .permute(1, 3, 0, 2, 4)
+            .reshape(-1, channels * patch_size**2)
+        )
+
     for raw, normalized in zip(raw_values, normalized_values):
-        output = input_norm(raw, normalized.dtype)
-        torch.testing.assert_close(output, normalized, rtol=1e-5, atol=1e-6)
+        output = input_norm(pack_patches(raw), normalized.dtype)
+        torch.testing.assert_close(
+            output, pack_patches(normalized), rtol=1e-5, atol=1e-6
+        )
 
 
 def test_lightonocr_keeps_vision_config_image_size():

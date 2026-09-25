@@ -18,7 +18,7 @@ where::
 """
 
 import math
-from typing import Any, Literal, NamedTuple, get_args
+from typing import Any, NamedTuple
 
 import torch
 from torch import nn
@@ -27,8 +27,6 @@ from vllm.config import ModelConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.transformers_utils.processor import cached_get_processor, get_processor_config
 from vllm.triton_utils import tl, triton
-
-InputLayout = Literal["lcp", "chw"]
 
 
 @triton.jit
@@ -66,66 +64,6 @@ def _fused_mm_input_norm_kernel(
         mask=mask,
         eviction_policy="evict_first",
     )
-
-
-@triton.jit
-def _fused_mm_input_norm_chw_kernel(
-    x_ptr,
-    y_ptr,
-    w_ptr,
-    b_ptr,
-    numel,
-    H,
-    W,
-    stride_c,
-    stride_h,
-    stride_w,
-    BLOCK: tl.constexpr,
-):
-    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < numel
-    c = offs // (H * W)
-    h = (offs // W) % H
-    w = offs % W
-    x_offs = (
-        c.to(tl.int64) * stride_c
-        + h.to(tl.int64) * stride_h
-        + w.to(tl.int64) * stride_w
-    )
-    x = tl.load(x_ptr + x_offs, mask=mask, other=0).to(tl.float32)
-    weight = tl.load(w_ptr + c, mask=mask, other=0).to(tl.float32)
-    bias = tl.load(b_ptr + c, mask=mask, other=0).to(tl.float32)
-    tl.store(y_ptr + offs, x * weight + bias, mask=mask)
-
-
-def fused_mm_input_norm_chw_triton(
-    inputs: torch.Tensor,
-    outputs: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-) -> torch.Tensor:
-    """Normalize a CHW image, including cropped or strided views."""
-    assert inputs.ndim == 3
-    C, H, W = inputs.shape
-    assert outputs.shape == inputs.shape and outputs.is_contiguous()
-    assert weight.numel() == bias.numel() == C
-    numel = C * H * W
-    assert numel < 2**31
-
-    block_size = 1024
-    _fused_mm_input_norm_chw_kernel[(triton.cdiv(numel, block_size),)](
-        inputs,
-        outputs,
-        weight,
-        bias,
-        numel,
-        H,
-        W,
-        *inputs.stride(),
-        BLOCK=block_size,
-        num_warps=4,
-    )
-    return outputs
 
 
 def fused_mm_input_norm_triton(
@@ -294,7 +232,6 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
-        input_layout: InputLayout = "lcp",
     ):
         super().__init__()
 
@@ -303,11 +240,8 @@ class FusedMMInputNorm(CustomOp):
             f"got {len(image_mean)} / {len(image_std)}"
         )
         assert rescale_factor != 0.0, "rescale_factor must be non-zero"
-        if input_layout not in get_args(InputLayout):
-            raise ValueError(f"Unsupported input layout: {input_layout}")
 
         self.channel = channel
-        self.input_layout = input_layout
 
         # Model construction can set the accelerator as PyTorch's default
         # device; build the buffers on CPU first, then move them over.
@@ -339,10 +273,6 @@ class FusedMMInputNorm(CustomOp):
         This is the semantic reference implementation and the fallback used
         on any platform without a specialised kernel.
         """
-        if self.input_layout == "chw":
-            x = pixel_values * self.weight[:, None, None]
-            return (x + self.bias[:, None, None]).to(visual_dtype)
-
         patches, size = pixel_values.shape
         patch_size = self._patch_size(size)
 
@@ -357,14 +287,6 @@ class FusedMMInputNorm(CustomOp):
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
-        if self.input_layout == "chw":
-            output = torch.empty(
-                pixel_values.shape, dtype=visual_dtype, device=pixel_values.device
-            )
-            return fused_mm_input_norm_chw_triton(
-                pixel_values, output, self.weight, self.bias
-            )
-
         patches, size = pixel_values.shape
         patch_size = self._patch_size(size)
 
@@ -386,9 +308,6 @@ class FusedMMInputNorm(CustomOp):
         bandwidth saving of transferring uint8 pixel_values. The fused
         kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         """
-        if self.input_layout == "chw":
-            return self.forward_native(pixel_values, visual_dtype)
-
         # The out-of-tree XPU kernel only supports the uint8 input that
         # device-side normalisation guarantees; fail loudly otherwise.
         assert pixel_values.dtype == torch.uint8, (
@@ -405,20 +324,13 @@ class FusedMMInputNorm(CustomOp):
         return self.forward_native(pixel_values, visual_dtype)
 
 
-def build_mm_input_norm(
-    model_config: ModelConfig,
-    input_layout: InputLayout = "lcp",
-) -> nn.Module:
-    """Build the input normalization module for a model.
+def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
+    """Build the input normalisation module for a model.
 
-    Args:
-        model_config: Model whose processor supplies normalization parameters.
-        input_layout: ``lcp`` for flattened patch rows or ``chw`` for images.
-
-    Returns:
-        An identity module when normalization is disabled or unnecessary;
-        otherwise, a fused input norm module.
-
+    Returns an ``IdentityInputNorm`` when device-side normalisation is
+    disabled or the processor's rescale/normalise is numerically the identity
+    transform; otherwise a ``FusedMMInputNorm`` built from the processor's
+    parameters.
     """
     mm_config = getattr(model_config, "multimodal_config", None)
     if not getattr(mm_config, "mm_device_do_normalize", False):
@@ -437,5 +349,4 @@ def build_mm_input_norm(
         image_std=params.image_std,
         rescale_factor=params.rescale_factor,
         channel=len(params.image_mean),
-        input_layout=input_layout,
     )

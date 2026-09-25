@@ -5,14 +5,15 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     IdentityInputNorm,
     NormParams,
-    fused_mm_input_norm_chw_triton,
     fused_mm_input_norm_triton,
 )
+from vllm.model_executor.models.pixtral import pixtral_patch_embed
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
@@ -56,6 +57,59 @@ def _reference_input_norm(
 _RGB_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _RGB_STD = [0.26862954, 0.26130258, 0.27577711]
 _RGB_RESCALE = 1.0 / 255.0
+
+
+@requires_vllm_config
+@requires_triton
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize(("channels", "patch_shape"), [(3, (4, 4)), (2, (2, 4))])
+def test_pixtral_patch_embed_preserves_image_order_and_strides(
+    dtype: torch.dtype,
+    normalize: bool,
+    channels: int,
+    patch_shape: tuple[int, int],
+):
+    """Packed projection matches CHW normalization and patch convolution."""
+    norm = (
+        FusedMMInputNorm(
+            _RGB_MEAN[:channels],
+            _RGB_STD[:channels],
+            _RGB_RESCALE,
+            channel=channels,
+        ).to(_DEVICE)
+        if normalize
+        else IdentityInputNorm()
+    )
+    weight = torch.randn(32, channels, *patch_shape, device=_DEVICE, dtype=dtype)
+    images = [
+        torch.randint(0, 256, (channels, 17, 18), device=_DEVICE, dtype=torch.uint8),
+        torch.randint(0, 256, (channels, 25, 17), device=_DEVICE, dtype=torch.uint8)[
+            :, 1:17, 1:17
+        ],
+        torch.randint(0, 256, (channels, 19, 20), device=_DEVICE, dtype=torch.uint8)[
+            :, 1:17, 2:18
+        ],
+    ]
+    reference = []
+    for image in images:
+        if normalize:
+            normalized = (
+                image.float() * norm.weight[:, None, None] + norm.bias[:, None, None]
+            )
+        else:
+            normalized = image
+        reference.append(
+            F.conv2d(normalized.to(dtype).unsqueeze(0), weight, stride=patch_shape)
+        )
+    packed, actual = pixtral_patch_embed(images, weight, norm)
+    for expected, result in zip(reference, actual):
+        torch.testing.assert_close(result, expected, rtol=0.01, atol=0.02)
+    expected_packed = torch.cat(
+        [result.flatten(2).transpose(1, 2) for result in reference], dim=1
+    )
+    torch.testing.assert_close(packed, expected_packed, rtol=0.01, atol=0.02)
 
 
 def _check_against_reference(
@@ -182,10 +236,6 @@ class TestFusedMMInputNormShapes:
 # ===========================================================================
 @requires_vllm_config
 class TestFusedMMInputNormInputHandling:
-    def test_invalid_input_layout_is_rejected(self):
-        with pytest.raises(ValueError, match="Unsupported input layout"):
-            FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, input_layout="hwc")
-
     def test_non_contiguous_input_matches_reference(self):
         set_random_seed(0)
         base = torch.randint(
@@ -196,27 +246,6 @@ class TestFusedMMInputNormInputHandling:
 
         _check_against_reference(non_contig, torch.float32)
 
-    @pytest.mark.parametrize("non_contiguous", [False, True])
-    @pytest.mark.parametrize("width", [3, 4, 47])
-    def test_chw_image_matches_reference(self, non_contiguous: bool, width: int):
-        pixel_values = torch.randint(
-            0, 256, (3, 31, width, 2), dtype=torch.uint8, device=_DEVICE
-        )[..., 0]
-        if not non_contiguous:
-            pixel_values = pixel_values.contiguous()
-
-        norm = FusedMMInputNorm(
-            _RGB_MEAN, _RGB_STD, _RGB_RESCALE, input_layout="chw"
-        ).to(_DEVICE)
-        output = norm(pixel_values, visual_dtype=torch.bfloat16)
-
-        mean = torch.tensor(_RGB_MEAN, device=_DEVICE).view(3, 1, 1)
-        std = torch.tensor(_RGB_STD, device=_DEVICE).view(3, 1, 1)
-        expected = (pixel_values.to(torch.float32) * _RGB_RESCALE - mean) / std
-        torch.testing.assert_close(
-            output, expected.to(torch.bfloat16), rtol=1e-2, atol=1e-2
-        )
-
 
 # ===========================================================================
 # Raw kernel entry point
@@ -224,20 +253,6 @@ class TestFusedMMInputNormInputHandling:
 @requires_accelerator
 @requires_triton
 class TestFusedMMInputNormKernel:
-    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
-    @pytest.mark.parametrize("cropped", [False, True])
-    def test_chw_image_strides(self, cropped: bool):
-        base = torch.randint(0, 256, (3, 32, 64), dtype=torch.uint8, device=_DEVICE)
-        image = base[:, 1:32, 2:49] if cropped else base[:, :31, :47].contiguous()
-        weight = torch.tensor([0.5, 0.25, 0.125], device=_DEVICE)
-        bias = torch.tensor([-1.0, 0.25, 1.0], device=_DEVICE)
-        output = torch.empty(image.shape, dtype=torch.float32, device=_DEVICE)
-
-        fused_mm_input_norm_chw_triton(image, output, weight, bias)
-
-        expected = image.to(torch.float32) * weight[:, None, None] + bias[:, None, None]
-        torch.testing.assert_close(output, expected)
-
     @pytest.mark.parametrize(
         "N, C, L",
         [
