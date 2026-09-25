@@ -107,6 +107,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
     """
 
+    requires_kv_cache_zeroing: ClassVar[bool] = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -193,6 +194,8 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekSparseSWAMetadataBuilde
 
 
 class DeepseekSparseSWAFlashInferBackend(DeepseekSparseSWABackend):
+    requires_kv_cache_zeroing: ClassVar[bool] = True
+
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashInferMetadataBuilder]:
         return DeepseekSparseSWAFlashInferMetadataBuilder
