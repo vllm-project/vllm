@@ -22,12 +22,12 @@ from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     from vllm.config.vllm import VllmConfig
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
     VllmConfig = Any
 
     me_quant = LazyLoader(
@@ -657,7 +657,7 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
@@ -694,8 +694,8 @@ class SpeculativeConfig:
         if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
             # V4.1 has no classic-MTP draft: its checkpoints ship DSpark stages
             # under ``mtp.*``, so only V4 gets an MTP architecture here. The
-            # DSpark path rewrites ``architectures`` itself and needs only
-            # ``n_predict``; ``method="mtp"`` on V4.1 is rejected below.
+            # DSpark path rewrites ``architectures`` itself;
+            # ``method="mtp"`` on V4.1 is rejected below.
             is_v41 = hf_config.model_type == "deepseek_v41"
             hf_config.model_type = "deepseek_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -1066,16 +1066,16 @@ class SpeculativeConfig:
 
     @staticmethod
     def _apply_composed_hf_override(
-        target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
-        hf_config: PretrainedConfig,
-    ) -> PretrainedConfig:
+        target_hf_overrides: Callable[[PreTrainedConfig], PreTrainedConfig],
+        hf_config: PreTrainedConfig,
+    ) -> PreTrainedConfig:
         hf_config = SpeculativeConfig.hf_config_override(hf_config)
         return target_hf_overrides(hf_config)
 
     @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
-    ) -> Callable[[PretrainedConfig], PretrainedConfig]:
+    ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
         """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
         Callable overrides on the target are config-to-config transforms
@@ -1440,14 +1440,6 @@ class SpeculativeConfig:
                     draft_hf_config.architectures = [
                         "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
                     ]
-                    if is_v41:
-                        # hf_config_override set n_predict to the number of
-                        # MTP stages (3), but one DSpark round drafts
-                        # dspark_block_size tokens; num_speculative_tokens
-                        # divisibility is checked against n_predict below.
-                        draft_hf_config.n_predict = getattr(
-                            draft_hf_config, "dspark_block_size", None
-                        ) or getattr(draft_hf_config, "n_predict", None)
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
@@ -1464,11 +1456,6 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
-                    if (
-                        getattr(hf, "n_predict", None) is None
-                        and getattr(hf, "block_size", None) is not None
-                    ):
-                        hf.n_predict = hf.block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
@@ -1483,7 +1470,15 @@ class SpeculativeConfig:
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
-                if n_predict is not None:
+                if self.use_dspark():
+                    if self.num_speculative_tokens is None:
+                        # DSpark's parallel width is independent of MTP stages.
+                        hf_config = self.draft_model_config.hf_config
+                        block_size = getattr(hf_config, "block_size", None)
+                        if block_size is None:
+                            block_size = getattr(hf_config, "dspark_block_size", None)
+                        self.num_speculative_tokens = block_size
+                elif n_predict is not None:
                     if self.num_speculative_tokens is None:
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
@@ -1672,7 +1667,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def _maybe_override_draft_max_position_embeddings(
-        draft_hf_config: PretrainedConfig,
+        draft_hf_config: PreTrainedConfig,
         target_max_model_len: int,
     ) -> None:
         """Raise an EAGLE draft's max_position_embeddings up to the target's.
@@ -1709,7 +1704,7 @@ class SpeculativeConfig:
     def _verify_and_get_draft_tp(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int | None,
-        draft_hf_config: PretrainedConfig,
+        draft_hf_config: PreTrainedConfig,
     ) -> int:
         """Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
