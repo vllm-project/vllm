@@ -47,10 +47,14 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -575,11 +579,25 @@ def _engram_head_shard_weight_loader(
     param.data.copy_(shard)
 
 
+@triton.jit
+def _mxfp8_scale_offset(row, group, NUM_GROUPS: tl.constexpr):
+    """Offset of (row, group) in FlashInfer's F8_128x4 MXFP8 scale layout:
+    [row/128, group/4, row%32, row%128/32, group%4]."""
+    return (
+        row // 128 * (128 * NUM_GROUPS)
+        + group // 4 * 512
+        + row % 32 * 16
+        + row % 128 // 32 * 4
+        + group % 4
+    )
+
+
 @triton.jit(
     do_not_specialize=[
         "vocab_start",
         "vocab_end",
         "num_rows",
+        "num_out_rows",
         "ids_stride_t",
         "ids_stride_h",
         "GRID",
@@ -590,9 +608,11 @@ def _engram_lookup_kernel(
     scales,
     ids,
     out,
+    out_scales,
     vocab_start,
     vocab_end,
     num_rows,
+    num_out_rows,
     ids_stride_t,
     ids_stride_h,
     HEAD_START: tl.constexpr,
@@ -602,15 +622,22 @@ def _engram_lookup_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID,
+    DEQUANT: tl.constexpr,
+    SWIZZLE: tl.constexpr,
 ):
-    """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
+    """Gather fp8 rows with their ue8m0 block scales.
+
+    DEQUANT writes bf16. Otherwise the table's bytes are copied as they are:
+    SWIZZLE puts the scales at their F8_128x4 offsets in `out_scales`, padding
+    the last 128-token tile with zero rows up to `num_out_rows`; without it
+    each row's scales follow its values in `out`, so one collective moves both.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA.
     """
     cols = tl.arange(0, DIM)
-    scale_cols = cols // QUANT_BLOCK
-    for base in tl.range(tl.program_id(0) * BLOCK_R, num_rows, GRID * BLOCK_R):
+    GROUPS: tl.constexpr = DIM // QUANT_BLOCK
+    for base in tl.range(tl.program_id(0) * BLOCK_R, num_out_rows, GRID * BLOCK_R):
         rows = base + tl.arange(0, BLOCK_R)
         valid = rows < num_rows
         head = HEAD_START + rows % LOCAL_HEADS
@@ -628,18 +655,120 @@ def _engram_lookup_kernel(
             mask=owned[:, None],
             other=0.0,
         )
-        scale = tl.load(
-            scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
-            mask=owned[:, None],
-            other=0,
+        if DEQUANT:
+            scale = tl.load(
+                scales + local[:, None] * GROUPS + (cols // QUANT_BLOCK)[None, :],
+                mask=owned[:, None],
+                other=0,
+            )
+            # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
+            scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            tl.store(
+                out + rows[:, None] * DIM + cols[None, :],
+                (values.to(tl.float32) * scale).to(tl.bfloat16),
+                mask=valid[:, None],
+            )
+        else:
+            groups = tl.arange(0, GROUPS)
+            scale = tl.load(
+                scales + local[:, None] * GROUPS + groups[None, :],
+                mask=owned[:, None],
+                other=0,
+            )
+            if SWIZZLE:
+                tl.store(
+                    out + rows[:, None] * DIM + cols[None, :],
+                    values,
+                    mask=valid[:, None],
+                )
+                group = (rows % LOCAL_HEADS)[:, None] * GROUPS + groups[None, :]
+                tl.store(
+                    out_scales
+                    + _mxfp8_scale_offset(token[:, None], group, LOCAL_HEADS * GROUPS),
+                    scale,
+                    mask=(rows < num_out_rows)[:, None],
+                )
+            else:
+                row = out + rows.to(tl.int64)[:, None] * (DIM + GROUPS)
+                tl.store(row + cols[None, :], values, mask=valid[:, None])
+                tl.store(row + DIM + groups[None, :], scale, mask=valid[:, None])
+
+
+@triton.jit(do_not_specialize=["num_src_tokens", "token_start", "num_tokens"])
+def _engram_packed_to_mxfp8_kernel(
+    src,
+    values,
+    scales,
+    num_src_tokens,
+    token_start,
+    num_tokens,
+    LOCAL_HEADS: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    GROUPS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    tokens = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    head = tl.program_id(1)
+    source = (token_start + tokens).to(tl.int64)
+    present = (tokens < num_tokens) & (source < num_src_tokens)
+    row_bytes: tl.constexpr = DIM + GROUPS
+    rank = head // LOCAL_HEADS
+    row = src + ((rank * num_src_tokens + source) * LOCAL_HEADS) * row_bytes
+    row += head % LOCAL_HEADS * row_bytes
+    cols = tl.arange(0, DIM)
+    out = values + tokens.to(tl.int64)[:, None] * (NUM_HEADS * DIM) + head * DIM
+    tl.store(
+        out + cols[None, :],
+        tl.load(row[:, None] + cols[None, :], mask=present[:, None], other=0),
+        mask=(tokens < num_tokens)[:, None],
+    )
+    groups = tl.arange(0, GROUPS)
+    scale = tl.load(row[:, None] + DIM + groups[None, :], present[:, None], other=0)
+    offsets = _mxfp8_scale_offset(
+        tokens[:, None], head * GROUPS + groups[None, :], NUM_HEADS * GROUPS
+    )
+    tl.store(scales + offsets, scale)
+
+
+def _engram_packed_to_mxfp8(
+    gathered: torch.Tensor,
+    num_ranks: int,
+    token_start: int,
+    num_tokens: int,
+    num_heads: int,
+    dim: int,
+) -> QuantizedActivation:
+    """Split packed rows into the wkv GEMM's MXFP8 input.
+
+    `gathered` is rank-major [ranks * tokens, local heads, dim + dim // 32]:
+    the rows keep tokens [token_start, token_start + num_tokens), zero past
+    the source tokens, and lay the ranks' heads side by side.
+    """
+    assert gathered.is_contiguous() and gathered.shape[0] % num_ranks == 0
+    groups = dim // 32
+    values = gathered.new_empty((num_tokens, num_heads * dim))
+    padded_tokens = round_up(num_tokens, 128)
+    scales = gathered.new_empty(padded_tokens * num_heads * groups)
+    if padded_tokens:
+        block_t = 32
+        _engram_packed_to_mxfp8_kernel[(padded_tokens // block_t, num_heads)](
+            gathered,
+            values,
+            scales,
+            gathered.shape[0] // num_ranks,
+            token_start,
+            num_tokens,
+            LOCAL_HEADS=gathered.shape[1],
+            NUM_HEADS=num_heads,
+            DIM=dim,
+            GROUPS=groups,
+            BLOCK_T=block_t,
         )
-        # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
-        scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-        tl.store(
-            out + rows[:, None] * DIM + cols[None, :],
-            (values.to(tl.float32) * scale).to(tl.bfloat16),
-            mask=valid[:, None],
-        )
+    values = values.view(torch.float8_e4m3fn)
+    return QuantizedActivation(
+        values, scales, torch.bfloat16, values.shape, kMxfp8Dynamic
+    )
 
 
 class ParallelEngramEmbedding(nn.Module):
@@ -704,28 +833,46 @@ class ParallelEngramEmbedding(nn.Module):
         return self.weight.data, self.weight_scale_inv.data
 
     def lookup(
-        self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
+        self,
+        indices: torch.Tensor,
+        out: torch.Tensor,
+        background: bool = False,
+        out_scales: torch.Tensor | None = None,
     ) -> None:
-        """Look up local heads of [T, heads] into [T, local_heads, dim] bf16.
+        """Look up local heads of [T, heads] into `out`.
 
+        A bf16 `out` [T, local_heads, dim] gets dequantized rows. Otherwise the
+        rows stay MXFP8: a uint8 `out` [T, local_heads, dim + dim // block]
+        packs each row's scales after its values for collectives, while with
+        `out_scales` (unsharded heads only) `out` gets the [T, heads, dim] fp8
+        values and `out_scales` the scales in the GEMM's F8_128x4 layout.
         `background` limits the grid to leave SMs for concurrent work.
         """
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
             return
         weight, scales = self._storage()
+        dequant = out.dtype == torch.bfloat16
+        out_rows = rows
+        if out_scales is not None:
+            assert self.part_n_hash_cols == self.n_hash_cols
+            out_rows = round_up(indices.shape[0], 128) * self.part_n_hash_cols
+        if not dequant:
+            weight, out = weight.view(torch.uint8), out.view(torch.uint8)
         # The table dwarfs TLB reach, so a persistent grid near the SM count
         # beats one program per row; halve it to leave SMs for the main stream.
-        tiles = triton.cdiv(rows, 16)
+        tiles = triton.cdiv(out_rows, 16)
         grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
         _engram_lookup_kernel[(grid,)](
             weight,
             scales,
             indices,
             out,
+            out_scales,
             self.vocab_start_idx,
             self.vocab_end_idx,
             rows,
+            out_rows,
             indices.stride(0),
             indices.stride(1),
             HEAD_START=self.head_start,
@@ -735,6 +882,8 @@ class ParallelEngramEmbedding(nn.Module):
             QUANT_BLOCK=self.block_size,
             BLOCK_R=16,
             GRID=grid,
+            DEQUANT=dequant,
+            SWIZZLE=out_scales is not None,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -899,7 +1048,14 @@ class Engram(nn.Module):
     hc copy plus a shared value. The gate is a normalized dot product of the
     stream against the key, signed-sqrt'ed before the sigmoid (matching the
     training kernel).
+
+    When `wkv` consumes F8_128x4-swizzled MXFP8 activations, the table's own
+    FP8 rows and ue8m0 scales are its input, skipping a dequant and requant.
     """
+
+    # Defaults for the bf16 path, which dequantizes the rows for wkv.
+    mxfp8_rows: bool = False
+    staged_scales: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -939,6 +1095,12 @@ class Engram(nn.Module):
             torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16),
             requires_grad=False,
         )
+        # The swizzle writes whole 128-wide K tiles, leaving no padded scales.
+        self.mxfp8_rows = (
+            n_hash_cols * layout.head_dim % 128 == 0
+            and self.embed_tokens.block_size == 32
+            and can_fuse_query_quant([self.wkv])
+        )
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         self._init_staging(max_tokens, layout.head_dim)
@@ -954,25 +1116,43 @@ class Engram(nn.Module):
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         # Persistent storage keeps lookup addresses stable across graph replays.
-        self.staged_rows = torch.empty(
-            max_tokens,
-            self.embed_tokens.part_n_hash_cols,
-            head_dim,
-            dtype=torch.bfloat16,
-        )
+        local_heads = self.embed_tokens.part_n_hash_cols
+        if not self.mxfp8_rows:
+            self.staged_rows = torch.empty(
+                max_tokens, local_heads, head_dim, dtype=torch.bfloat16
+            )
+        elif local_heads < self.embed_tokens.n_hash_cols:
+            # Sharded heads are gathered first; packing scales into each row
+            # keeps that to one collective.
+            self.staged_rows = torch.empty(
+                max_tokens, local_heads, head_dim + head_dim // 32, dtype=torch.uint8
+            )
+        else:
+            self.staged_rows = torch.empty(
+                max_tokens, local_heads, head_dim, dtype=torch.float8_e4m3fn
+            )
+            self.staged_scales = torch.empty(
+                round_up(max_tokens, 128) * local_heads * head_dim // 32,
+                dtype=torch.uint8,
+            )
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Look up rows before the decoder layers consume them."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
-        self.embed_tokens.lookup(hash_ids, rows)
+        self.embed_tokens.lookup(hash_ids, rows, out_scales=self.staged_scales)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
         return self.staged_rows[:num_tokens]
 
-    def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
-        """Gather heads, returning only local tokens when SP is enabled."""
+    def embed(self, hash_ids: torch.Tensor) -> torch.Tensor | QuantizedActivation:
+        """Gather heads, returning only local tokens when SP is enabled.
+
+        MXFP8 rows come back as wkv's [tokens, heads * dim] quantized input.
+        """
         rows = self._ready_rows(hash_ids.shape[0])
+        if self.mxfp8_rows:
+            return self._mxfp8_input(rows)
         if self.embed_tokens.tp_size == 1:
             return rows[:, : self.embed_tokens.n_hash_cols]
         if self.use_sequence_parallel:
@@ -992,6 +1172,36 @@ class Engram(nn.Module):
         rows = tensor_model_parallel_all_gather(rows, dim=1)
         return rows[:, : self.embed_tokens.n_hash_cols]
 
+    def _mxfp8_input(self, rows: torch.Tensor) -> QuantizedActivation:
+        num_tokens = rows.shape[0]
+        if self.staged_scales is not None:
+            values = rows.flatten(-2)
+            num_scales = round_up(num_tokens, 128) * values.shape[1] // 32
+            return QuantizedActivation(
+                values,
+                self.staged_scales[:num_scales],
+                torch.bfloat16,
+                values.shape,
+                kMxfp8Dynamic,
+            )
+        tp_size = self.embed_tokens.tp_size
+        num_ranks, token_start, num_local = 1, 0, num_tokens
+        if tp_size > 1:
+            # The split reads the rank-major gather in place.
+            rows = tensor_model_parallel_all_gather(rows, dim=0)
+            num_ranks = tp_size
+            if self.use_sequence_parallel:
+                num_local = triton.cdiv(num_tokens, tp_size)
+                token_start = get_tensor_model_parallel_rank() * num_local
+        return _engram_packed_to_mxfp8(
+            rows,
+            num_ranks,
+            token_start,
+            num_local,
+            self.embed_tokens.n_hash_cols,
+            self.embed_tokens.dim,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1001,7 +1211,10 @@ class Engram(nn.Module):
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
-        kv = self.wkv(self.embed(hash_ids).flatten(-2))
+        rows = self.embed(hash_ids)
+        if isinstance(rows, torch.Tensor):
+            rows = rows.flatten(-2)
+        kv = self.wkv(rows)
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:

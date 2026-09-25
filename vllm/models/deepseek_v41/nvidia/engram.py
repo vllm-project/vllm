@@ -478,7 +478,9 @@ class Engram(BaseEngram):
         # Keep temporary hash storage alive until lookup finishes reading it.
         hash_ids.record_stream(stream)
         with torch.cuda.stream(stream):
-            self.embed_tokens.lookup(hash_ids, rows, background=True)
+            self.embed_tokens.lookup(
+                hash_ids, rows, background=True, out_scales=self.staged_scales
+            )
             assert self._prefetch_done is not None
             self._prefetch_done.record(stream)
 
