@@ -1608,23 +1608,17 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    hot_page_sizes = [
+    alignments = [
         group.kv_cache_spec.page_size_bytes
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     ]
-    if hot_page_sizes:
-        bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
-    stride_alignments = [
-        spec.block_stride_alignment
+    alignments.extend(
+        _get_per_layer_spec(group, layer_name).block_stride_alignment or 1
         for group in kv_cache_groups
         for layer_name in group.layer_names
-        if isinstance(spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec)
-        and spec.block_stride_alignment
-    ]
-    if stride_alignments:
-        bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
-    return bytes_per_block
+    )
+    return round_up(bytes_per_block, math.lcm(*alignments))
 
 
 def validate_kv_cache_layout(
