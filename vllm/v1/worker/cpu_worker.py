@@ -176,6 +176,8 @@ class CPUWorker(Worker):
         else:
             self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
+        self._configure_dp_synchronized_profiler()
+
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass

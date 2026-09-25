@@ -220,6 +220,8 @@ class XPUWorker(Worker):
             self.vllm_config, self.device
         )
 
+        self._configure_dp_synchronized_profiler()
+
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
