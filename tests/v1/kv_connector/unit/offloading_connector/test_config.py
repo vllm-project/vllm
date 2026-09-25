@@ -889,6 +889,102 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
     assert not _replicated_layout(kv_cache_config), case
 
 
+@pytest.mark.parametrize(
+    ("kv_cache_config", "case"),
+    [
+        (
+            KVCacheConfig(
+                num_blocks=4,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=_MLA_PAGE * 4,
+                        layers=["layer"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
+                    )
+                ],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer"],
+                        SlidingWindowMLASpec(
+                            block_size=16,
+                            num_kv_heads=1,
+                            head_size=512,
+                            dtype=torch.float32,
+                            sliding_window=128,
+                        ),
+                    )
+                ],
+            ),
+            "sliding-window-mla",
+        ),
+        (
+            # One group, two page sizes: layer1's run starts past layer0's region.
+            KVCacheConfig(
+                num_blocks=4,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
+                        layers=["layer0"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
+                    ),
+                    KVCacheTensor(
+                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
+                        layers=["layer1"],
+                        layer_stride=_HALF_MLA_PAGE * 4,
+                        block_stride=_HALF_MLA_PAGE,
+                        offset=_MLA_PAGE * 4,
+                    ),
+                ],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer0", "layer1"],
+                        UniformTypeKVCacheSpecs(
+                            block_size=16,
+                            kv_cache_specs={
+                                "layer0": _mla_spec(),
+                                "layer1": _mla_spec(head_size=256),
+                            },
+                        ),
+                    )
+                ],
+            ),
+            "uniform-wrapper",
+        ),
+        (
+            KVCacheConfig(
+                num_blocks=4,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=_MLA_PAGE * 4,
+                        layers=[layer],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
+                    )
+                    for layer in ("layer0", "layer1")
+                ],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(["layer0"], _mla_spec()),
+                    KVCacheGroupSpec(["layer1"], _mla_spec()),
+                ],
+            ),
+            "multi-group-mla",
+        ),
+    ],
+    ids=[
+        "sliding-window-mla",
+        "uniform-wrapper",
+        "multi-group-mla",
+    ],
+)
+def test_replicated_layout_supported_cache_shapes(
+    kv_cache_config: KVCacheConfig,
+    case: str,
+):
+    assert _replicated_layout(kv_cache_config), case
+
+
 def test_replicated_layout_bare_mla_with_packed_indexer_qualifies():
     num_blocks = 4
     main_spec = _mla_spec(head_size=512)
