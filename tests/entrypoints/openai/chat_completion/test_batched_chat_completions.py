@@ -325,21 +325,15 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     assert response.choices[0].message.content == "PREFIX ASSISTANT ANSWER"
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        {"prompt_token_ids": [10, 20, 30]},
-        {"kv_transfer_params": {"prompt_token_ids": [10, 20, 30]}},
-    ],
-)
-def test_batch_rejects_prompt_token_ids(extra):
+@pytest.mark.skip_global_cleanup
+def test_batch_rejects_kv_transfer_prompt_token_ids():
     """One pre-tokenized prompt cannot stand in for every conversation."""
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(VLLMValidationError, match="parameter=kv_transfer_params"):
         BatchChatCompletionRequest(
             model="test-model",
             messages=[
                 [{"role": "user", "content": "first"}],
                 [{"role": "user", "content": "second"}],
             ],
-            **extra,
+            kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
         )

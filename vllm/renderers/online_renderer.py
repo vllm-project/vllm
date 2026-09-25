@@ -101,33 +101,35 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 def _reused_prompt_token_ids(request: Any) -> list[int] | None:
-    """Return the pre-tokenized prompt attached to a chat request, if any.
+    """Pop prompt token ids forwarded for decode-side reuse, if any.
 
-    ``prompt_token_ids`` is the public request field. Disaggregated serving may
-    instead forward the prefill stage's ids in ``kv_transfer_params``; that key
-    is popped to keep the id list out of the engine's sampling metadata.
-    ``ChatCompletionRequest`` copies the key into the field, so its schema has
-    validated both spellings; other request types carry the key unvalidated
-    and are checked here.
+    Disaggregated serving carries the prefill stage's ids in
+    ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
+    the key keeps the id list out of the engine's sampling metadata.
     """
     kv = getattr(request, "kv_transfer_params", None)
-    kv_ids = kv.pop("prompt_token_ids", None) if isinstance(kv, dict) else None
-    if isinstance(request, ChatCompletionRequest):
-        return request.prompt_token_ids
-    if kv_ids is None:
+    if not isinstance(kv, dict):
         return None
-    # bool is an int subclass, hence the exact type check
+    ids = kv.pop("prompt_token_ids", None)
+    if ids is None:
+        return None
+    # bool is an int subclass, hence the exact type check.
     if (
-        not isinstance(kv_ids, list)
-        or not kv_ids
-        or any(type(x) is not int or x < 0 for x in kv_ids)
+        not isinstance(ids, list)
+        or not ids
+        or any(type(x) is not int or x < 0 for x in ids)
     ):
         raise VLLMValidationError(
             "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
             "of non-negative integers.",
             parameter="kv_transfer_params",
         )
-    return kv_ids
+    if getattr(request, "echo", False):
+        raise VLLMValidationError(
+            "`echo` is not supported with `kv_transfer_params['prompt_token_ids']`.",
+            parameter="echo",
+        )
+    return ids
 
 
 class OnlineRenderer:
@@ -197,11 +199,11 @@ class OnlineRenderer:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
 
-        Pre-tokenized prompts (``prompt_token_ids``, or ids forwarded in
-        ``kv_transfer_params`` for decode-side reuse) are handled deeper, in
-        ``preprocess_chat`` / ``_make_request_with_harmony``, so they skip only
-        templating and tokenization while tool-choice validation and
-        ``adjust_request`` still run and the output is detokenized (text-out).
+        Decode-side token reuse (ids forwarded in ``kv_transfer_params``) is
+        handled deeper, in ``preprocess_chat`` / ``_make_request_with_harmony``,
+        so it skips only templating and tokenization while tool-choice
+        validation and ``adjust_request`` still run and the output is
+        detokenized (text-out).
         """
         tokenizer = self.renderer.tokenizer
 
@@ -510,16 +512,9 @@ class OnlineRenderer:
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         reuse_ids = _reused_prompt_token_ids(request)
         if reuse_ids:
-            # Pre-tokenized prompt: bound the ids by the model's context length
-            # and honor truncate_prompt_tokens, neither of which Harmony
-            # rendering does. Harmony has no adjust_request hook to preserve.
-            tok_params = request.build_tok_params(self.model_config)
-            prompt = tok_params.apply_post_tokenization(
-                self.renderer.tokenizer, TokensPrompt(prompt_token_ids=reuse_ids)
-            )
-            engine_input = tokens_input(
-                prompt["prompt_token_ids"], cache_salt=request.cache_salt
-            )
+            # Decode-side token reuse: feed the forwarded ids straight to the
+            # engine. Harmony has no adjust_request hook to preserve.
+            engine_input = tokens_input(reuse_ids, cache_salt=request.cache_salt)
             return [], [engine_input]
 
         messages: list[OpenAIMessage] = []
@@ -709,10 +704,10 @@ class OnlineRenderer:
 
         reuse_ids = _reused_prompt_token_ids(request)
         if reuse_ids:
-            # Pre-tokenized prompt: skip templating and tokenization and run
-            # the ids through the completions path so length validation and
-            # truncation still apply. ``messages`` are not rendered, so the
-            # conversation is empty. The adjust_request tail below still runs.
+            # Decode-side token reuse: skip templating and tokenization, but
+            # keep the length checks and truncation of preprocess_cmpl.
+            # ``messages`` are not tokenized, so conversation is empty. The
+            # adjust_request tail below still runs.
             conversation: list[ConversationMessage] = []
             (engine_input,) = await self.preprocess_cmpl(
                 request,

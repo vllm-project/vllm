@@ -460,23 +460,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "exactly what was fed into the model."
         ),
     )
-    prompt_token_ids: list[Annotated[int, Field(ge=0)]] | None = Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Pre-tokenized prompt. When set, chat-template rendering and "
-            "tokenization of ``messages`` are skipped and these token IDs are "
-            "used as the prompt, still subject to the model's context length "
-            "and to ``truncate_prompt_tokens``. ``messages`` is still required "
-            "and is used for tool and reasoning parser configuration and for "
-            "the response role. This lets a routing layer that already applies "
-            "the chat template and tokenizes the prompt (e.g. for "
-            "prefix-cache-aware routing) avoid tokenizing twice. Because the "
-            "IDs bypass the server's chat template, they are not supported "
-            "together with non-text message content or ``echo``, and no "
-            "``prompt_text`` is returned."
-        ),
-    )
 
     cache_salt: str | None = Field(
         default=None,
@@ -1020,78 +1003,34 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_prompt_token_ids(cls, data):
-        """Validate a pre-tokenized prompt against the rest of the request.
-
-        A pre-tokenized prompt skips rendering, so anything derived from the
-        rendered prompt is unavailable: non-text parts of ``messages`` would
-        never reach the multimodal processor, and ``echo`` has no prompt text
-        to echo. The older ``kv_transfer_params`` spelling is copied into the
-        field so both go through its schema. Runs before validation because
-        the media keys of a content part written without a ``type`` do not
-        survive it.
-        """
+    def check_kv_transfer_prompt_token_ids(cls, data):
+        # The forwarded ids replace the rendered prompt, so media in `messages`
+        # would be dropped. Runs before validation, which loses the media keys
+        # of some parts.
         if not isinstance(data, dict):
             return data
-        prompt_token_ids = data.get("prompt_token_ids")
         kv_transfer_params = data.get("kv_transfer_params")
-        kv_ids = (
-            kv_transfer_params.get("prompt_token_ids")
-            if isinstance(kv_transfer_params, dict)
-            else None
-        )
-        if prompt_token_ids is None and kv_ids is None:
-            return data
-
-        if prompt_token_ids is None:
-            data["prompt_token_ids"] = kv_ids
-        elif kv_ids is not None and kv_ids != prompt_token_ids:
-            raise VLLMValidationError(
-                "`prompt_token_ids` and `kv_transfer_params['prompt_token_ids']` "
-                "must match when both are set.",
-                parameter="prompt_token_ids",
-            )
-
-        if data.get("echo"):
-            raise VLLMValidationError(
-                "`echo` is not supported with `prompt_token_ids` because the "
-                "prompt is not rendered from `messages`.",
-                parameter="echo",
-            )
-
         messages = data.get("messages")
-        if isinstance(messages, list) and not messages:
-            raise VLLMValidationError(
-                "`messages` must not be empty when `prompt_token_ids` is set.",
-                parameter="messages",
-            )
-
-        for msg in messages or []:
-            if not isinstance(msg, dict):
+        if (
+            not isinstance(kv_transfer_params, dict)
+            or kv_transfer_params.get("prompt_token_ids") is None
+            or not isinstance(messages, list)
+        ):
+            return data
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
                 continue
-            content = msg.get("content")
-            parts = [content] if isinstance(content, dict) else content
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                # A media key identifies a part whatever its 'type' says,
-                # mirroring _parse_chat_message_content_mm_part.
-                non_text = next(
-                    (key for key in _MEDIA_CONTENT_PART_KEYS if key in part), None
-                )
-                if non_text is None:
-                    part_type = part.get("type")
-                    if part_type is None or part_type in _TEXT_CONTENT_PART_TYPES:
-                        # Carries no media: the ids are authoritative anyway.
-                        continue
-                    non_text = part_type
-                raise VLLMValidationError(
-                    "`prompt_token_ids` is not supported together with non-text "
-                    f"message content (found a {non_text!r} part).",
-                    parameter="prompt_token_ids",
-                )
+            for part in content:
+                if isinstance(part, dict) and (
+                    any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
+                    or part.get("type", "text") not in _TEXT_CONTENT_PART_TYPES
+                ):
+                    raise VLLMValidationError(
+                        "`kv_transfer_params['prompt_token_ids']` is not supported "
+                        "together with non-text message content.",
+                        parameter="messages",
+                    )
         return data
 
     @model_validator(mode="before")
@@ -1236,14 +1175,15 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 parameter="logprob_token_ids",
             )
         kv_transfer_params = data.get("kv_transfer_params")
-        if data.get("prompt_token_ids") is not None or (
+        if (
             isinstance(kv_transfer_params, dict)
             and kv_transfer_params.get("prompt_token_ids") is not None
         ):
             raise VLLMValidationError(
-                "Batch chat completions do not support `prompt_token_ids`: one "
-                "pre-tokenized prompt cannot serve several conversations.",
-                parameter="prompt_token_ids",
+                "Batch chat completions do not support "
+                "`kv_transfer_params['prompt_token_ids']`: one pre-tokenized "
+                "prompt cannot serve several conversations.",
+                parameter="kv_transfer_params",
             )
         response_format = data.get("response_format")
         if response_format is not None:

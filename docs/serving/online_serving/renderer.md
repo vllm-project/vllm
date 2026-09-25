@@ -80,23 +80,6 @@ for the existing authentication boundaries.
 
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
 
-## Pre-tokenized prompts on `/v1/chat/completions`
-
-A frontend that has already applied the chat template and tokenized the prompt
-(for example a router that tokenizes once for prefix-cache-aware scheduling)
-does not need the token-in / token-out engine to avoid a second tokenization.
-It can send the ids in the `prompt_token_ids` field of a regular
-`/v1/chat/completions` request, alongside the original `messages`. vLLM then
-skips templating and tokenization and uses the ids verbatim, while tool and
-reasoning parsing, streaming, and the chat-shaped response are unchanged.
-`messages` is still required and multimodal content is not supported with
-`prompt_token_ids`. Template parameters are not applied to the ids:
-`continue_final_message`, `chat_template` and `documents` have no effect,
-`add_generation_prompt` still selects the response role, and
-`chat_template_kwargs` is still passed to the reasoning parser. `echo` is
-rejected and `return_prompt_text` returns no text. The Rust frontend
-(`VLLM_USE_RUST_FRONTEND=1`) rejects the field.
-
 ## Multimodal Render Features
 
 Multimodal render responses include a `features` object with per-modality
