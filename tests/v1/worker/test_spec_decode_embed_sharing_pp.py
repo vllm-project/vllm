@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 
+from vllm.config import LoadConfig
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     spec_decode_needs_target_embed,
@@ -108,3 +110,53 @@ def test_target_embedding_provisioning(
     speculative_config = None if method is None else SimpleNamespace(method=method)
     config = SimpleNamespace(speculative_config=speculative_config)
     assert spec_decode_needs_target_embed(config) is expected
+
+
+@pytest.mark.parametrize(
+    "pp_size,is_last_rank,expected",
+    [(2, True, True), (2, False, False), (1, True, False)],
+)
+def test_mtp_target_embedding_requires_model_opt_in(
+    monkeypatch, pp_size, is_last_rank, expected
+):
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_pp_group",
+        _fake_pp(pp_size, is_last_rank),
+    )
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="mtp"))
+    assert spec_decode_needs_target_embed(config, include_mtp=True) is expected
+    assert not spec_decode_needs_target_embed(config)
+
+
+@pytest.mark.parametrize("owns_embedding", [False, True])
+def test_mtp_loader_preserves_checkpoint_embedding(monkeypatch, owns_embedding):
+    """Share a missing MTP embedding, but preserve distinct checkpoint weights."""
+    from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
+
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(spec_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(
+        "vllm.compilation.backends.set_model_tag", lambda _: nullcontext()
+    )
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(),
+            draft_load_config=None,
+            apply_draft_overrides=lambda c: c,
+        ),
+        load_config=LoadConfig(load_format="safetensors"),
+    )
+    target_embed = _embed(fill=2.0)
+    draft_embed = _embed(fill=1.0)
+    target = nn.Module()
+    target.model = _inner(target_embed)
+    draft = nn.Module()
+    draft.model = _inner(draft_embed)
+    draft.has_own_embed_tokens = owns_embedding
+    monkeypatch.setattr(eagle_utils, "get_model", lambda **kwargs: draft)
+
+    loaded = eagle_utils.load_eagle_model(target, config)
+
+    assert loaded.model.embed_tokens is (
+        draft_embed if owns_embedding else target_embed
+    )

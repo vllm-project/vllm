@@ -333,4 +333,5 @@ class MiniMaxM3MTP(nn.Module):
                     f"Failed to load MTP layer {layer_idx} weights from checkpoint."
                 )
 
+        self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded_params
         return loaded_params

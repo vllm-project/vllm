@@ -845,17 +845,24 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
-    """Whether the last PP rank needs the target input embedding."""
+def spec_decode_needs_target_embed(
+    vllm_config: VllmConfig, *, include_mtp: bool = False
+) -> bool:
+    """Whether the last PP rank needs the target input embedding.
+
+    MTP targets opt in when their drafter supports sharing this embedding.
+    """
     from vllm.distributed.parallel_state import get_pp_group
 
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or speculative_config.method not in (
+    if speculative_config is None:
+        return False
+    if speculative_config.method not in (
         "eagle",
         "eagle3",
         "dflash",
         "dspark",
-    ):
+    ) and not (include_mtp and speculative_config.method == "mtp"):
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank
