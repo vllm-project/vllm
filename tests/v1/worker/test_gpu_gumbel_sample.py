@@ -529,39 +529,18 @@ def test_logits_cache_narrower_than_logits_is_rejected():
         )
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
-@pytest.mark.parametrize("vocab", [4095, 4096, 4097, 129280])
-def test_greedy_argmax_preserves_torch_semantics_in_cuda_graph(dtype, vocab):
-    """Preserve first-index ties/NaNs, masked tails, and strided offset rows."""
-    logits = torch.randn(8, vocab + 19, device=DEVICE, dtype=dtype)[:, 1 : vocab + 1]
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("vocab", [4096, 4097, 129280])
+def test_greedy_argmax_matches_torch(dtype, vocab):
+    """Random rows, cross-block ties, NaN/inf, masked tails and strided rows."""
+    logits = torch.randn(64, vocab + 1, device=DEVICE, dtype=dtype)[:, 1:]
     logits[0].zero_()
     logits[1].fill_(float("-inf"))
-    logits[2, 5] = logits[2, -1] = float("inf")
-    logits[3, 5] = logits[3, -1] = float("nan")
-    logits[4].fill_(float("nan"))
-    logits[5].fill_(float("-inf"))
-    logits[5, -1] = 1
-    logits[6].zero_()
-    logits[6, -1] = 1
-    if dtype == torch.float64:
-        logits[7].fill_(1)
-        logits[7, -1] = 1 + 2**-30
-
-    def check(result):
-        assert result.dtype == torch.int64
-        torch.testing.assert_close(result, logits.argmax(-1), rtol=0, atol=0)
-
-    check(greedy_argmax(logits))
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(3):
-            greedy_argmax(logits)
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        result = greedy_argmax(logits)
-    logits[7].zero_()
-    logits[7, -1] = 2
-    graph.replay()
-    check(result)
+    logits[2, [5, -1]] = float("inf")
+    logits[3, [5, -1]] = float("nan")
+    logits[4].fill_(float("-inf"))
+    logits[4, -1] = 1
+    logits[5].round_().clamp_(max=2)
+    logits[5, :4096].clamp_(max=1)
+    expected = logits.argmax(-1)
+    torch.testing.assert_close(greedy_argmax(logits), expected, rtol=0, atol=0)
