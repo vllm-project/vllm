@@ -7,6 +7,11 @@ import pytest
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -34,12 +39,28 @@ def make_request(
     hash_block_size: int,
     hash_fn: Callable,
     session_id: str | None = None,
+    mm_positions: list[PlaceholderRange] | None = None,
+    mm_hashes: list[str] | None = None,
 ) -> Request:
+    mm_features = []
+    if mm_positions is not None:
+        for j, position in enumerate(mm_positions):
+            identifier = mm_hashes[j] if mm_hashes else f"hash_{j}"
+            mm_features.append(
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    mm_position=position,
+                    identifier=identifier,
+                    modality="image",
+                )
+            )
+
     sampling_params = SamplingParams(max_tokens=17)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
+        mm_features=mm_features if mm_features else None,
         sampling_params=sampling_params,
         pooling_params=None,
         block_hasher=get_request_block_hasher(hash_block_size, hash_fn),
@@ -171,6 +192,54 @@ def test_cache_partial_block_kv_cache_events():
     assert isinstance(removed_event, BlockRemoved)
     assert removed_event.block_hashes == stored_event.block_hashes
     assert removed_event.group_idx == kv_cache_group_id
+
+
+def test_cache_partial_block_event_keeps_every_mm_feature():
+    """The event window can reach into more than one multimodal feature.
+
+    ``cache_partial_block`` builds the ``BlockStored`` extra keys over
+    ``[(num_hash_blocks - 1) * hash_block_size, num_tokens)``. Starting that
+    scan at the last feature drops any earlier one that also reaches into the
+    window, so two requests differing only in that feature would be published
+    under the same key.
+    """
+    hash_block_size = 4
+    block_size = 8
+    num_tokens = 12
+    # The event window is tokens [8, 12): "A" ends inside it and "B" sits
+    # entirely within it.
+    mm_positions = [
+        PlaceholderRange(offset=6, length=3),
+        PlaceholderRange(offset=10, length=2),
+    ]
+
+    pool = BlockPool(
+        num_gpu_blocks=2,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_partial_mm",
+        prompt_token_ids=list(range(num_tokens)),
+        hash_block_size=hash_block_size,
+        hash_fn=sha256,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+
+    assert pool.cache_partial_block(
+        request=req,
+        block=pool.get_new_blocks(1)[0],
+        num_tokens=num_tokens,
+        kv_cache_group_id=0,
+        block_size=block_size,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].extra_keys == [(("A", -2), ("B", 2))]
 
 
 def test_partial_block_replacement_emits_remove_then_store_events():
