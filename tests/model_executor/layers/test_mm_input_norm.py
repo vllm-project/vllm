@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     IdentityInputNorm,
     NormParams,
+    fused_mm_input_norm_chw_triton,
     fused_mm_input_norm_triton,
 )
 from vllm.platforms import current_platform
@@ -181,6 +182,20 @@ class TestFusedMMInputNormShapes:
 # ===========================================================================
 @requires_vllm_config
 class TestFusedMMInputNormInputHandling:
+    def test_hwc_image_is_not_supported(self):
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
+        image = torch.zeros((31, 47, 3), dtype=torch.uint8, device=_DEVICE)
+
+        with pytest.raises(ValueError, match="HWC"):
+            norm(image, visual_dtype=torch.float32)
+
+    def test_chw_image_rejects_wrong_channel_count(self):
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
+        image = torch.zeros((4, 31, 47), dtype=torch.uint8, device=_DEVICE)
+
+        with pytest.raises(AssertionError):
+            norm(image, visual_dtype=torch.float32)
+
     def test_non_contiguous_input_matches_reference(self):
         set_random_seed(0)
         base = torch.randint(
@@ -216,6 +231,20 @@ class TestFusedMMInputNormInputHandling:
 @requires_accelerator
 @requires_triton
 class TestFusedMMInputNormKernel:
+    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
+    @pytest.mark.parametrize("cropped", [False, True])
+    def test_chw_image_strides(self, cropped: bool):
+        base = torch.randint(0, 256, (3, 32, 64), dtype=torch.uint8, device=_DEVICE)
+        image = base[:, 1:32, 2:49] if cropped else base[:, :31, :47].contiguous()
+        weight = torch.tensor([0.5, 0.25, 0.125], device=_DEVICE)
+        bias = torch.tensor([-1.0, 0.25, 1.0], device=_DEVICE)
+        output = torch.empty(image.shape, dtype=torch.float32, device=_DEVICE)
+
+        fused_mm_input_norm_chw_triton(image, output, weight, bias)
+
+        expected = image.to(torch.float32) * weight[:, None, None] + bias[:, None, None]
+        torch.testing.assert_close(output, expected)
+
     @pytest.mark.parametrize(
         "N, C, L",
         [

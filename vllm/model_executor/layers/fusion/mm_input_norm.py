@@ -66,6 +66,66 @@ def _fused_mm_input_norm_kernel(
     )
 
 
+@triton.jit
+def _fused_mm_input_norm_chw_kernel(
+    x_ptr,
+    y_ptr,
+    w_ptr,
+    b_ptr,
+    numel,
+    H,
+    W,
+    stride_c,
+    stride_h,
+    stride_w,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    c = offs // (H * W)
+    h = (offs // W) % H
+    w = offs % W
+    x_offs = (
+        c.to(tl.int64) * stride_c
+        + h.to(tl.int64) * stride_h
+        + w.to(tl.int64) * stride_w
+    )
+    x = tl.load(x_ptr + x_offs, mask=mask, other=0).to(tl.float32)
+    weight = tl.load(w_ptr + c, mask=mask, other=0).to(tl.float32)
+    bias = tl.load(b_ptr + c, mask=mask, other=0).to(tl.float32)
+    tl.store(y_ptr + offs, x * weight + bias, mask=mask)
+
+
+def fused_mm_input_norm_chw_triton(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    """Normalize a CHW image, including cropped or strided views."""
+    assert inputs.ndim == 3
+    C, H, W = inputs.shape
+    assert outputs.shape == inputs.shape and outputs.is_contiguous()
+    assert weight.numel() == bias.numel() == C
+    numel = C * H * W
+    assert numel < 2**31
+
+    block_size = 1024
+    _fused_mm_input_norm_chw_kernel[(triton.cdiv(numel, block_size),)](
+        inputs,
+        outputs,
+        weight,
+        bias,
+        numel,
+        H,
+        W,
+        *inputs.stride(),
+        BLOCK=block_size,
+        num_warps=4,
+    )
+    return outputs
+
+
 def fused_mm_input_norm_triton(
     inputs: torch.Tensor,
     outputs: torch.Tensor,
@@ -270,6 +330,21 @@ class FusedMMInputNorm(CustomOp):
         )
         return size // self.channel
 
+    def _is_chw_image(self, pixel_values: torch.Tensor) -> bool:
+        if pixel_values.ndim != 3:
+            return False
+
+        # Match ImageProcessorItems.get_image_size in vllm/multimodal/parse.py:
+        # a 3D image with 1, 3, or 4 values on the last axis is HWC.
+        if pixel_values.shape[-1] in (1, 3, 4):
+            raise ValueError("HWC images are not supported by FusedMMInputNorm")
+
+        assert pixel_values.shape[0] == self.channel, (
+            f"Expected CHW image with {self.channel} channels, "
+            f"got shape {tuple(pixel_values.shape)}"
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Platform-specific implementations
     # ------------------------------------------------------------------
@@ -282,8 +357,7 @@ class FusedMMInputNorm(CustomOp):
         This is the semantic reference implementation and the fallback used
         on any platform without a specialised kernel.
         """
-        if pixel_values.ndim == 3:
-            assert pixel_values.shape[0] == self.channel
+        if self._is_chw_image(pixel_values):
             x = pixel_values * self.weight[:, None, None]
             return (x + self.bias[:, None, None]).to(visual_dtype)
 
@@ -301,8 +375,13 @@ class FusedMMInputNorm(CustomOp):
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
-        if pixel_values.ndim == 3:
-            return self.forward_native(pixel_values, visual_dtype)
+        if self._is_chw_image(pixel_values):
+            output = torch.empty(
+                pixel_values.shape, dtype=visual_dtype, device=pixel_values.device
+            )
+            return fused_mm_input_norm_chw_triton(
+                pixel_values, output, self.weight, self.bias
+            )
 
         patches, size = self._unpack_2d(pixel_values)
         patch_size = self._patch_size(size)
@@ -325,7 +404,7 @@ class FusedMMInputNorm(CustomOp):
         bandwidth saving of transferring uint8 pixel_values. The fused
         kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         """
-        if pixel_values.ndim == 3:
+        if self._is_chw_image(pixel_values):
             return self.forward_native(pixel_values, visual_dtype)
 
         # The out-of-tree XPU kernel only supports the uint8 input that
