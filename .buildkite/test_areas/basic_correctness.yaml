@@ -16,9 +16,9 @@ steps:
   - pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness Models %N"
+      label: ":amd: (MI355 DPX) Basic Correctness Models %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -33,9 +33,9 @@ steps:
   - pytest -v -s basic_correctness/memory/cumem
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness CuMem"
+      label: ":amd: (MI355 DPX) Basic Correctness CuMem"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -50,9 +50,9 @@ steps:
   - pytest -v -s basic_correctness/memory/sleep_mode
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness Sleep Mode"
+      label: ":amd: (MI355 DPX) Basic Correctness Sleep Mode"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -67,9 +67,9 @@ steps:
   - pytest -v -s basic_correctness/cpu_offload
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness CPU Offload"
+      label: ":amd: (MI355 DPX) Basic Correctness CPU Offload"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -84,9 +84,9 @@ steps:
   - pytest -v -s basic_correctness/prefetch_offload
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness Prefetch Offload"
+      label: ":amd: (MI355 DPX) Basic Correctness Prefetch Offload"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
