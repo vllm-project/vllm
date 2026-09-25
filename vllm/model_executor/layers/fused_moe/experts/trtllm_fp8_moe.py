@@ -12,6 +12,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -273,7 +277,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> UnfinalizedMoEOutput | None:
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
@@ -297,7 +301,9 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale)
 
-        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+        num_tokens = hidden_states.shape[0]
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
@@ -321,9 +327,20 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
-            output=output,
+            do_finalize=not defer,
+            output=None if defer else output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
+        if not defer:
+            return None
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=False,
+            num_tokens=num_tokens,
+            top_k=topk_ids.size(1),
+        )
+        assert isinstance(routed_output, UnfinalizedMoEOutput)
+        return routed_output
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
