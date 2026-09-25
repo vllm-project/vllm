@@ -278,13 +278,36 @@ def test_pack_indices_replays_with_updated_offsets(width):
         assert (state.kv_indices[expected.numel() :] == -99).all()
 
 
-def test_kv_lens_host_formula():
+def test_kv_lens_host_formula(monkeypatch):
     """Per-row host lengths: context == position + 1; capped at
-    index_topk + trailing-pool remainder past the sparse threshold."""
-    builder = object.__new__(FlashInferMLASparseSM90Builder)
-    builder._index_topk = 2048
-    builder._index_kpool = 4
-    builder._async_scheduling = False
+    index_topk + the indexer's trailing-pool remainder."""
+    impl, _ = make_impl(0)
+    layer = SimpleNamespace(impl=impl)
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"model.layers.0.attn": layer}
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=16, async_scheduling=False
+        ),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(index_topk=2048, index_kpool=4)
+        ),
+    )
+    kv_cache_spec = SimpleNamespace(dtype=torch.bfloat16, tokens_per_state=1)
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "__init__",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(sm90_mod, "_SM90State", lambda *_args, **_kwargs: object())
+    builder = FlashInferMLASparseSM90Builder(
+        kv_cache_spec,
+        ["model.layers.0.attn"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+    assert builder._index_kpool == 4
     cam = SimpleNamespace(
         num_reqs=3,
         query_start_loc_cpu=torch.tensor([0, 5, 7, 10], dtype=torch.int32),
@@ -297,6 +320,8 @@ def test_kv_lens_host_formula():
     # req0: positions 95..99 -> ctx 96..100 (all <= 2048: full context)
     # req1: positions 7,8 -> ctx 8,9
     # req2: positions 2997..2999 -> ctx 2998..3000 (> 2048: topk + ctx%4)
+    # The main MLA cache spec is token-granular; its tokens_per_state=1 is
+    # unrelated to the separate indexer's pool expansion.
     assert lens.tolist() == [96, 97, 98, 99, 100, 8, 9, 2050, 2051, 2048]
 
 
