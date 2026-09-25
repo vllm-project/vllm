@@ -195,6 +195,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
+        if self.use_m_major_input_scale:
+            self.generic_compute_config_str = json.dumps(
+                {**self.compute_config, "use_m_major_input_scale": False}
+            )
 
     def process_input(
         self,
@@ -206,6 +210,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation: MoEActivation | None = None,
         scatter_idx: torch.Tensor | None = None,
         num_valid_tokens: torch.Tensor | None = None,
+        use_m_major_input_scale: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         from vllm.model_executor.layers.quantization.utils.humming.activation import (
             get_humming_activation,
@@ -214,11 +219,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         quant_config = self.quant_config
         config = self.humming_configs[sublayer_name]
+        if use_m_major_input_scale is None:
+            use_m_major_input_scale = self.use_m_major_input_scale
         if input_scale is not None:
             assert scatter_idx is None
             if activation is not None:
                 raise ValueError("Cannot apply activation to prequantized input")
-            if self.use_m_major_input_scale:
+            if use_m_major_input_scale:
                 # Pre-dispatch FP8 quantization provides [M, K/128] scales;
                 # Humming's optimized grouped kernel reads K-group-major scales.
                 rows = input_scale.size(0)
@@ -280,7 +287,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             expert_tokens=expert_tokens if layout == "grouped_mask" else None,
             scatter_idx=scatter_idx,
             num_valid_tokens=num_valid_tokens,
-            m_major_scale=self.use_m_major_input_scale,
+            m_major_scale=use_m_major_input_scale,
             **activation_kwargs,
         )
         input_scale = group_scales if mode.has_group_scale else token_scales
@@ -961,16 +968,27 @@ class HummingGroupedExperts(HummingExpertsBase):
         """
         assert not apply_router_weight_on_input
 
-        # Expanded prefill has exact local rows. A present metadata object in
-        # CUDA-graph decode has no counts and still describes a padded buffer.
-        if (
+        # Only DeepEP v2's expanded, exact-row layout uses the specialized
+        # W4A8 path. Other backends and padded decode use generic Humming.
+        use_optimized_expanded = (
             self.use_m_major_input_scale
             and expert_tokens_meta is not None
+            and expert_tokens_meta.deepep_v2_do_expand
             and expert_tokens_meta.expert_num_tokens is not None
-        ):
+        )
+        if use_optimized_expanded:
             valid_shape_m = topk_ids.numel()
         else:
             valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
+        if self.use_m_major_input_scale and not use_optimized_expanded:
+            compute_config_str = self.generic_compute_config_str
+            # Humming infers and caches the generic grouped schedule.
+            w13_tuning_config_str = None
+            w2_tuning_config_str = None
+        else:
+            compute_config_str = self.compute_config_str
+            w13_tuning_config_str = self.w13_tuning_config_str
+            w2_tuning_config_str = self.w2_tuning_config_str
 
         buffers = self.prepare_buffers(
             workspace13,
@@ -1010,6 +1028,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             quanted_input=buffers.get("quanted_gate_up_input", None),
             scatter_idx=scatter_idx,
             num_valid_tokens=num_valid_tokens,
+            use_m_major_input_scale=use_optimized_expanded,
         )
 
         self.humming_forward(
@@ -1021,8 +1040,8 @@ class HummingGroupedExperts(HummingExpertsBase):
             outputs=buffers["gate_up_output"],
             valid_shape_m=valid_shape_m,
             expert_layout=expert_offsets,
-            compute_config=self.compute_config_str,
-            tuning_config=self.w13_tuning_config_str,
+            compute_config=compute_config_str,
+            tuning_config=w13_tuning_config_str,
         )
 
         inputs, input_scale, input_scale_2 = self.process_input(
@@ -1031,6 +1050,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             quanted_input=buffers["quanted_down_input"],
             activation=activation,
             num_valid_tokens=expert_offsets[-1:],
+            use_m_major_input_scale=use_optimized_expanded,
         )
 
         self.humming_forward(
@@ -1042,8 +1062,8 @@ class HummingGroupedExperts(HummingExpertsBase):
             outputs=buffers["down_output"],
             valid_shape_m=valid_shape_m,
             expert_layout=expert_offsets,
-            compute_config=self.compute_config_str,
-            tuning_config=self.w2_tuning_config_str,
+            compute_config=compute_config_str,
+            tuning_config=w2_tuning_config_str,
         )
 
         moe_unpermute(

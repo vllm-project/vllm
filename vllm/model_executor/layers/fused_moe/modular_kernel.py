@@ -100,6 +100,7 @@ class ExpertTokensMetadata:
     expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
     psum_recv_per_rank: torch.Tensor | None = None
+    deepep_v2_do_expand: bool = False
 
     @staticmethod
     def make_from_list(
