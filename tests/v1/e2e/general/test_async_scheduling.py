@@ -15,6 +15,7 @@ from tests.utils import (
 from tests.v1.e2e.general.async_scheduling_utils import (
     AccuracyTolerance,
     check_accuracy_budget,
+    check_first_divergence,
     check_greedy_token,
     check_logprobs,
     check_request_accuracy,
@@ -22,13 +23,14 @@ from tests.v1.e2e.general.async_scheduling_utils import (
 )
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.reader import Metric
 
 MODEL = "Qwen/Qwen3-0.6B"
-MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+EAGLE3_TARGET_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 # Need to enforce eager for MRV2 while we sort out cudagraph issues.
 ENFORCE_EAGER = os.getenv("ENFORCE_EAGER", "0") == "1"
@@ -59,9 +61,9 @@ def test_without_spec_decoding(
     struct_outputs = StructuredOutputsParams(json=sample_json_schema)
     test_sampling_params: list[dict[str, Any]] = [
         dict(),
-        # dict(min_tokens=20),
         dict(frequency_penalty=-1.0),
         dict(bad_words=["the", " the"]),
+        dict(bad_words=["the", " the"], logprobs=2),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
         dict(prompt_logprobs=2),
@@ -107,7 +109,6 @@ def test_with_eagle3_spec_decoding(
     sample_json_schema,
 ):
     """Check accuracy and acceptance, including drafts that exceed model length."""
-
     spec_config = {
         "method": "eagle3",
         "num_speculative_tokens": 2,
@@ -122,6 +123,7 @@ def test_with_eagle3_spec_decoding(
         dict(),
         dict(frequency_penalty=-1.0),
         dict(bad_words=["the", " the"]),
+        dict(bad_words=["the", " the"], logprobs=2),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
         dict(prompt_logprobs=2),
@@ -150,9 +152,12 @@ def test_with_eagle3_spec_decoding(
         (True, "uni", True, spec_config_short, True),
     ]
 
-    run_tests(vllm_runner, hf_runner, MTP_MODEL, test_configs, test_sampling_params)
+    run_tests(
+        vllm_runner, hf_runner, EAGLE3_TARGET_MODEL, test_configs, test_sampling_params
+    )
 
 
+@single_gpu_only
 @pytest.mark.skipif(
     current_platform.is_xpu(),
     reason=("XPU matmul/attention kernels are not batch-invariant"),
@@ -161,8 +166,6 @@ def test_with_ngram_gpu_spec_decoding(
     vllm_runner: type[VllmRunner], hf_runner: type[HfRunner]
 ):
     """Check ngram accuracy and acceptance across scheduling configurations."""
-
-    # Variant with larger speculation window
     ngram_gpu_config = {
         "method": "ngram_gpu",
         "num_speculative_tokens": 3,
@@ -170,7 +173,6 @@ def test_with_ngram_gpu_spec_decoding(
         "prompt_lookup_min": 2,
     }
 
-    # Test configurations covering various scenarios
     # test_preemption, executor, async_scheduling,
     # spec_config, test_prefill_chunking
     test_configs = [
@@ -183,9 +185,7 @@ def test_with_ngram_gpu_spec_decoding(
         (True, "mp", True, ngram_gpu_config, True),
     ]
 
-    # Use MODEL (Qwen) for ngram_gpu tests as it's lighter weight
-    # and ngram_gpu doesn't require a specific draft model
-    run_tests(vllm_runner, hf_runner, MODEL, test_configs, [{}])
+    run_tests(vllm_runner, hf_runner, MODEL, test_configs, [{}, dict(logprobs=2)])
 
 
 def run_tests(
@@ -195,7 +195,10 @@ def run_tests(
     test_configs: list[tuple],
     test_sampling_params: list[dict[str, Any]],
 ):
-    """Validate every original batch against an independent target model."""
+    """Compare the shared prefix and independently validate every continuation."""
+    assert test_configs[0] == (False, "mp", False, None, False), (
+        "The baseline must use synchronous target-only decoding"
+    )
     outputs = []
     for n, config in enumerate(test_configs, 1):
         outputs.append(
@@ -208,10 +211,10 @@ def run_tests(
             )
         )
 
-    # Natural BF16 continuations can diverge at near ties, even between two
-    # synchronous calls. Score each actual history instead of comparing text
-    # generated from different histories. Neither engine forces an attention
-    # backend, model dtype, or matmul precision.
+    baseline_config, baseline_batches, _ = outputs[0]
+    # Compare vLLM's own decisions at the first divergence, where histories
+    # still match. HF then scores each continuation, including after divergence.
+    # Neither engine forces an attention backend, dtype, or matmul precision.
     # Qwen/Llama BF16 controls and Qwen holdouts measured max score error <0.38,
     # per-stream request mean <0.073, max greedy gap 0.125, and request sum 0.25.
     # Per-request budgets also reject systematic errors below the scalar bounds.
@@ -221,37 +224,50 @@ def run_tests(
         hf.model.eval()
         for config, batches, _ in outputs:
             assert len(batches) == len(test_sampling_params)
-            for batch, overrides in zip(batches, test_sampling_params, strict=True):
+            for baseline_batch, batch, overrides in zip(
+                baseline_batches, batches, test_sampling_params, strict=True
+            ):
                 assert len(batch) == len(example_prompts), config
                 params = SamplingParams(**default_params, **overrides)
-                for i, (request, prompt) in enumerate(
-                    zip(batch, example_prompts, strict=True)
+                for i, (baseline, request, prompt) in enumerate(
+                    zip(baseline_batch, batch, example_prompts, strict=True)
                 ):
                     assert request.prompt_token_ids == hf.tokenizer.encode(prompt)
+                    context = f"config=[{config}], params={overrides}, request={i}"
+                    if params.logprobs is not None:
+                        check_first_divergence(
+                            baseline,
+                            request,
+                            params,
+                            tolerance,
+                            f"baseline=[{baseline_config}], {context}",
+                        )
                     check_request_accuracy(
                         hf,
                         request,
                         params,
                         tolerance,
-                        f"config=[{config}], params={overrides}, request={i}",
+                        context,
                     )
                 print(f"ACCURACY PASSED: config=[{config}], params={overrides}")
 
     baseline_acceptances = next((o[2] for o in outputs if o[2] is not None), None)
     if baseline_acceptances is not None:
-        for config, _, acceptances in outputs:
+        for settings, (config, _, acceptances) in zip(
+            test_configs, outputs, strict=True
+        ):
             if acceptances is None:
                 continue
+            test_preemption, _, _, spec_config, _ = settings
+            assert spec_config is not None
             for baseline, actual, params in zip(
                 baseline_acceptances, acceptances, test_sampling_params, strict=True
             ):
                 context = f"config=[{config}], params={params}"
-                if "spec_mml=None" in config:
+                if spec_config.get("max_model_len") is None:
                     # Keep the original acceptance-quality floor per batch.
                     relative_drop = (
-                        0.10
-                        if current_platform.is_rocm() and "preemption=True" in config
-                        else 0.05
+                        0.10 if current_platform.is_rocm() and test_preemption else 0.05
                     )
                     assert actual >= baseline * (1 - relative_drop), (
                         f"{context}: acceptance={actual}, baseline={baseline}"
@@ -438,14 +454,41 @@ def test_accuracy_checks_distinguish_ties_from_wrong_tokens():
     check_logprobs(scores, reference, 0, 2, tolerance, "masked top-k")
 
 
-def test_accuracy_checks_reject_continuing_after_eos():
+def test_accuracy_checks_reject_incorrect_stopping():
     params = SamplingParams(max_tokens=3)
-    stop_ids = {2}
-    check_stopping([0, 1, 2], "stop", stop_ids, params, "EOS at length cap")
-    check_stopping([0, 1, 0], "length", stop_ids, params, "length cap")
-    for tokens, reason in [([0, 2, 1], "length"), ([0, 1, 2], "length")]:
+    stop_ids = {2, 3}
+    for tokens, reason, stop_reason in [
+        ([0, 1, 2], "stop", None),
+        ([0, 1, 3], "stop", 3),
+        ([0, 1, 0], "length", None),
+    ]:
+        check_stopping(
+            tokens,
+            reason,
+            stop_ids,
+            params,
+            "valid stopping at length cap",
+            eos_token_id=2,
+            stop_reason=stop_reason,
+        )
+    for tokens, reason, stop_reason in [
+        ([0, 2, 1], "length", None),
+        ([0, 1, 2], "length", None),
+        ([0, 1, 2], "stop", 2),
+        ([0, 1, 3], "stop", None),
+        ([0, 1, 3], "stop", 2),
+        ([0, 1, 0], "length", 3),
+    ]:
         with pytest.raises(AssertionError):
-            check_stopping(tokens, reason, stop_ids, params, "incorrect stopping")
+            check_stopping(
+                tokens,
+                reason,
+                stop_ids,
+                params,
+                "incorrect stopping",
+                eos_token_id=2,
+                stop_reason=stop_reason,
+            )
 
 
 def test_accuracy_checks_reject_systematic_sub_bound_errors():
@@ -463,3 +506,114 @@ def test_accuracy_checks_reject_systematic_sub_bound_errors():
     check_accuracy_budget(
         [torch.tensor([0.03, 0.07])], [0.125, 0.125], tolerance, "control variation"
     )
+
+
+def _divergence_request(
+    tokens: list[int], scores: dict[int, float], position: int = 0
+) -> RequestOutput:
+    logprobs: list[dict[int, Logprob]] = [{} for _ in tokens]
+    logprobs[position] = {
+        token: Logprob(score, rank)
+        for rank, (token, score) in enumerate(
+            sorted(scores.items(), key=lambda item: item[1], reverse=True), 1
+        )
+    }
+    return RequestOutput(
+        request_id="test",
+        prompt=None,
+        prompt_token_ids=[0, 0, 0],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=tokens,
+                cumulative_logprob=None,
+                logprobs=logprobs,
+                finish_reason="length",
+            )
+        ],
+        finished=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "base_scores,actual_scores,error",
+    [
+        ({0: -0.8, 1: -0.9}, {0: -0.9, 1: -0.8}, None),
+        ({0: -0.8, 1: -0.8}, {0: -0.8, 1: -0.8}, None),
+        ({0: -0.8, 1: -0.9}, {0: -0.8, 1: -0.9}, "actual.*below"),
+        ({0: -0.9, 1: -0.8}, {0: -0.9, 1: -0.8}, "baseline.*below"),
+        ({0: -0.8, 1: -1.1}, {0: -0.9, 1: -0.8}, "baseline.*near-tie"),
+        ({0: -0.8, 1: -0.9}, {0: -1.1, 1: -0.8}, "actual.*near-tie"),
+        ({0: -0.8, 2: -0.9}, {0: -0.9, 1: -0.8}, None),
+        ({0: -0.8, 2: -1.1}, {0: -0.9, 1: -0.8}, "baseline.*lower bound"),
+        ({0: -0.8, 1: -0.9}, {1: -0.8, 2: -1.1}, "actual.*lower bound"),
+    ],
+    ids=[
+        "near-tie-rank-reversal",
+        "exact-tie",
+        "wrong-near-tie-actual-choice",
+        "wrong-near-tie-baseline-choice",
+        "decisive-baseline",
+        "decisive-actual",
+        "missing-candidate-inconclusive",
+        "missing-candidate-decisive-baseline",
+        "missing-candidate-decisive-actual",
+    ],
+)
+def test_first_divergence_checks_engine_preferences(base_scores, actual_scores, error):
+    baseline = _divergence_request([0], base_scores)
+    actual = _divergence_request([1], actual_scores)
+    args = (
+        baseline,
+        actual,
+        SamplingParams(temperature=0, logprobs=2),
+        AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25),
+        "paired engines",
+    )
+    if error is None:
+        check_first_divergence(*args)
+    else:
+        with pytest.raises(AssertionError, match=error):
+            check_first_divergence(*args)
+
+
+@pytest.mark.parametrize("missing_alternative", [False, True])
+def test_first_divergence_uses_generated_penalty_history(missing_alternative):
+    # Raw ordering favors token 1; one generated 0 reverses the penalized order.
+    # The prompt contains three more 0s which must not contribute to penalties.
+    base_scores = {0: -1.5, 1: -0.6}
+    if missing_alternative:
+        # The selected 0 is outside top-2. Use the top-k boundary (-0.6),
+        # excluding the additional sampled token (-1.5), for the missing 1.
+        base_scores = {0: -1.5, 2: -0.5, 3: -0.6}
+    baseline = _divergence_request([0, 0, 2], base_scores, position=1)
+    actual = _divergence_request([0, 1, 3, 4], {0: -1.6, 1: -0.5}, position=1)
+    check_first_divergence(
+        baseline,
+        actual,
+        SamplingParams(temperature=0, logprobs=2, frequency_penalty=-1),
+        AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25),
+        "different later histories are validated separately",
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["length", "finish_reason", "prompt"])
+def test_first_divergence_rejects_mismatches_without_a_token_change(mismatch):
+    baseline = _divergence_request([0, 1], {})
+    actual = _divergence_request([0, 1], {})
+    if mismatch == "length":
+        actual.outputs[0].token_ids = [0]
+    elif mismatch == "finish_reason":
+        actual.outputs[0].finish_reason = "stop"
+    else:
+        actual.prompt_token_ids = [1]
+    with pytest.raises(AssertionError):
+        check_first_divergence(
+            baseline,
+            actual,
+            SamplingParams(temperature=0, logprobs=2),
+            AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25),
+            mismatch,
+        )

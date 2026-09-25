@@ -3,6 +3,7 @@
 """Numerical checks against an independent, teacher-forced target model."""
 
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -28,6 +29,90 @@ class AccuracyTolerance:
 
     def logprob_error(self, reference: torch.Tensor) -> torch.Tensor:
         return torch.full_like(reference, self.logprob_atol)
+
+
+def check_first_divergence(
+    baseline: RequestOutput,
+    actual: RequestOutput,
+    params: SamplingParams,
+    tolerance: AccuracyTolerance,
+    context: str,
+) -> None:
+    """Require the two engines' scores to justify their first different choice."""
+    assert baseline.finished and actual.finished, context
+    assert len(baseline.outputs) == len(actual.outputs) == 1, context
+    assert baseline.prompt_token_ids is not None, context
+    assert baseline.prompt_token_ids == actual.prompt_token_ids, context
+    base, other = baseline.outputs[0], actual.outputs[0]
+    position = next(
+        (i for i, (a, b) in enumerate(zip(base.token_ids, other.token_ids)) if a != b),
+        None,
+    )
+    if position is None:
+        assert len(base.token_ids) == len(other.token_ids), (
+            f"{context}: one completion is a strict prefix of the other"
+        )
+        assert (base.finish_reason, base.stop_reason) == (
+            other.finish_reason,
+            other.stop_reason,
+        ), f"{context}: identical tokens have different stopping reasons"
+        return
+
+    assert params.logprobs is not None and params.logprobs > 0, context
+    assert params.temperature == 0.0, context
+    assert params.presence_penalty == 0.0 and params.repetition_penalty == 1.0
+    assert not params.logit_bias, context
+    a, b = base.token_ids[position], other.token_ids[position]
+    counts = Counter(base.token_ids[:position])
+    context = (
+        f"{context}, first divergence position={position}, "
+        f"baseline token={a}, actual token={b}"
+    )
+    for side, completion, selected, alternative in (
+        ("baseline", base, a, b),
+        ("actual", other, b, a),
+    ):
+        assert completion.logprobs is not None, context
+        assert len(completion.logprobs) == len(completion.token_ids), context
+        scores = completion.logprobs[position]
+        assert selected in scores, f"{context}, {side}: missing selected token score"
+        chosen = scores[selected].logprob
+        assert math.isfinite(chosen), f"{context}, {side}: non-finite selected score"
+        known = alternative in scores
+        if known:
+            competing = scores[alternative].logprob
+            assert math.isfinite(competing), (
+                f"{context}, {side}: divergent token has a non-finite score"
+            )
+        else:
+            # The sampled token may be returned in addition to the requested
+            # top-k. An omitted token's raw score is bounded by the kth score.
+            top_scores = [
+                score.logprob
+                for token, score in scores.items()
+                if len(scores) == params.logprobs or token != selected
+            ]
+            assert len(top_scores) == params.logprobs, context
+            assert not any(math.isnan(score) for score in top_scores), context
+            competing = min(top_scores)
+
+        # Both candidates were emitted with the same history and constraints;
+        # frequency penalties are the only supported transform changing their
+        # finite score difference. Prompt tokens do not contribute to counts.
+        chosen -= params.frequency_penalty * counts[selected]
+        competing -= params.frequency_penalty * counts[alternative]
+        gap = chosen - competing
+        detail = (
+            f"{context}, {side}: selected={selected}, alternative={alternative}, "
+            f"{'gap' if known else 'gap lower bound'}={gap}"
+        )
+        if known:
+            # Log-softmax and reconstructing penalties may round in FP32, but
+            # a near tie cannot excuse selecting the engine's own worse token.
+            assert gap >= -1e-5, f"{detail}: selected token is below its alternative"
+        assert gap <= tolerance.greedy_atol, (
+            f"{detail}: divergence exceeds near-tie bound={tolerance.greedy_atol}"
+        )
 
 
 def check_logprobs(
@@ -183,7 +268,14 @@ def check_request_accuracy(
     logits = hf.model(input_ids=inputs, use_cache=False).logits[0].float()
     # Use the existing byte-fallback handling with an independent request
     # history; numerical scores always come from the HF model above.
-    decoder = LogprobsProcessor(hf.tokenizer, None, None, None, None, None)
+    decoder = LogprobsProcessor(
+        tokenizer=hf.tokenizer,
+        logprobs=None,
+        prompt_logprobs=None,
+        cumulative_logprob=None,
+        num_logprobs=None,
+        num_prompt_logprobs=None,
+    )
     # Prompt token i is predicted by the causal logits at position i - 1.
     if params.prompt_logprobs is None:
         assert request.prompt_logprobs is None, context
@@ -244,11 +336,26 @@ def check_request_accuracy(
     # is allowed at max_tokens, but every emitted token must remain valid.
     reference.accept_history(tokens)
     check_stopping(
-        tokens, completion.finish_reason, reference.stop_ids, params, context
+        tokens,
+        completion.finish_reason,
+        reference.stop_ids,
+        params,
+        context,
+        eos_token_id=hf.tokenizer.eos_token_id,
+        stop_reason=completion.stop_reason,
     )
 
 
-def check_stopping(tokens, finish_reason, stop_ids, params, context):
+def check_stopping(
+    tokens,
+    finish_reason,
+    stop_ids,
+    params,
+    context,
+    *,
+    eos_token_id: int | None,
+    stop_reason: int | str | None,
+):
     assert not params.ignore_eos and not params.stop, context
     assert not stop_ids.intersection(tokens[:-1]), (
         f"{context}: generation continued after a stop token"
@@ -257,8 +364,13 @@ def check_stopping(tokens, finish_reason, stop_ids, params, context):
         assert finish_reason == "stop", (
             f"{context}: stop token did not terminate output"
         )
+        expected_stop_reason = None if tokens[-1] == eos_token_id else tokens[-1]
+        assert stop_reason == expected_stop_reason, (
+            f"{context}: stop reason={stop_reason}, expected={expected_stop_reason}"
+        )
     else:
         assert finish_reason == "length" and len(tokens) == params.max_tokens, context
+        assert stop_reason is None, f"{context}: length cap has a stop reason"
 
 
 @lru_cache(maxsize=4)

@@ -21,6 +21,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+    kda_prefill_checkpoint_alignment,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -49,7 +53,6 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
     flashinfer_recurrent_kda,
@@ -57,7 +60,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -389,69 +391,6 @@ def _flashinfer_kda_prefill(
     return output, initial_state
 
 
-@triton.jit
-def _store_cache_checkpoints_kernel(
-    x_ptr,
-    conv_state_ptr,
-    recurrent_checkpoint_ptr,
-    recurrent_state_ptr,
-    query_start_loc_ptr,
-    checkpoint_offsets_ptr,
-    checkpoint_state_indices_ptr,
-    x_stride_0: tl.constexpr,
-    x_stride_1: tl.constexpr,
-    state_stride_0: tl.constexpr,
-    state_stride_1: tl.constexpr,
-    state_stride_2: tl.constexpr,
-    checkpoint_stride_0: tl.constexpr,
-    recurrent_state_stride_0: tl.constexpr,
-    checkpoint_offset_stride: tl.constexpr,
-    STATE_LEN: tl.constexpr,
-    WIDTH: tl.constexpr,
-    RECURRENT_ROW_SIZE: tl.constexpr,
-    NULL_STATE_IDX: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    # store checkpoints to cache
-    seq_idx = tl.program_id(0)
-    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx)
-    checkpoint_offset = tl.load(
-        checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
-    )
-    valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
-    valid_conv = (
-        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
-    )
-    width_idx = cols // STATE_LEN
-    history_idx = cols % STATE_LEN
-    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
-    token_idx = checkpoint_end - STATE_LEN + history_idx
-    values = tl.load(
-        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
-        mask=valid_conv,
-    )
-    tl.store(
-        conv_state_ptr
-        + state_idx * state_stride_0
-        + width_idx * state_stride_1
-        + history_idx * state_stride_2,
-        values,
-        mask=valid_conv,
-    )
-
-    valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
-    recurrent = tl.load(
-        recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
-        mask=valid_recurrent,
-    )
-    tl.store(
-        recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
-        recurrent,
-        mask=valid_recurrent,
-    )
-
-
 def resolve_kda_prefill_backend(
     backend: str,
     head_dim: int,
@@ -735,6 +674,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
             None
         )
+        self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
         if self.kda_prefill_backend == "flashkda":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
@@ -748,6 +688,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
         elif self.kda_prefill_backend == "flashinfer":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             H, D = self.local_num_heads, self.head_dim
@@ -783,7 +724,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         self.gemm_rs_ar = None
         if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -800,12 +741,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
+        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
         return replace(
             spec,
-            num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
-            prefill_checkpoint_alignment=(
-                16 if self.kda_prefill_backend == "flashkda" else None
-            ),
+            num_prefill_checkpoint_blocks=int(alignment is not None),
+            prefill_checkpoint_alignment=alignment,
         )
 
     def forward(
@@ -869,7 +809,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
-            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
+            return self.gemm_rs_ar.apply(core_attn_out, self.o_proj)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
@@ -903,6 +843,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         non_spec_state_indices_tensor = m.non_spec_state_indices_tensor
         spec_token_indx = m.spec_token_indx
         non_spec_token_indx = m.non_spec_token_indx
+        spec_token_start = m.spec_token_start
+        non_spec_token_start = m.non_spec_token_start
         spec_state_indices_tensor = m.spec_state_indices_tensor
         spec_query_start_loc = m.spec_query_start_loc
         num_accepted_tokens = m.num_accepted_tokens
@@ -981,6 +923,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 mixed_qkv_spec = mixed_qkv
                 g1_spec, beta_spec = g1, beta
                 mixed_qkv_ns = g1_ns = beta_ns = None
+            elif spec_token_start is not None:
+                assert non_spec_token_start is not None
+                spec_end = spec_token_start + m.num_spec_decode_tokens
+                non_spec_end = (
+                    non_spec_token_start + m.num_prefill_tokens + m.num_decode_tokens
+                )
+                spec_slice = slice(spec_token_start, spec_end)
+                non_spec_slice = slice(non_spec_token_start, non_spec_end)
+                mixed_qkv_spec = mixed_qkv[spec_slice]
+                g1_spec, beta_spec = g1[:, spec_slice], beta[:, spec_slice]
+                mixed_qkv_ns = mixed_qkv[non_spec_slice]
+                g1_ns, beta_ns = g1[:, non_spec_slice], beta[:, non_spec_slice]
             else:
                 assert spec_token_indx is not None
                 assert non_spec_token_indx is not None
@@ -1029,6 +983,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if m.num_prefills == 0 and m.num_decodes == 0
                 else None
             )
+            if spec_token_start is not None:
+                spec_out = core_attn_out[:, spec_slice]
             if self.use_recoverssm:
                 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
                     kda_recoverssm_verify,
@@ -1076,6 +1032,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         core_attn_out_non_spec = None
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
+            non_spec_out = None
+            if non_spec_token_start is not None:
+                non_spec_out = core_attn_out[:, non_spec_slice]
             if m.num_prefills > 0:
                 q_ns, k_ns, v_ns = mixed_qkv_ns.split(
                     self.local_projection_size, dim=-1
@@ -1126,6 +1085,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     flashkda_out = (
                         workspace_out if has_spec_decode else core_attn_out
                     )[:, : q_ns.shape[1]]
+                    if non_spec_out is not None:
+                        flashkda_out = non_spec_out
                     if checkpoint is not None:
                         assert non_spec_query_start_loc is not None
                         num_sequences = initial_state.shape[0]
@@ -1152,39 +1113,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         )
                         core_attn_out_non_spec = flashkda_out
                         last_recurrent_state = final_state
-                        state_len = conv_state.shape[-1]
-                        width = mixed_qkv_ns.shape[-1]
-                        recurrent_row_size = checkpoint_state[0].numel()
-                        block_size = 256
-                        _store_cache_checkpoints_kernel[
-                            (
-                                checkpoint_offsets.numel(),
-                                triton.cdiv(
-                                    max(width * state_len, recurrent_row_size),
-                                    block_size,
-                                ),
-                            )
-                        ](
-                            mixed_qkv_ns,
-                            conv_state,
-                            checkpoint_state,
-                            recurrent_state,
-                            non_spec_query_start_loc,
-                            checkpoint_offsets,
-                            checkpoint.state_indices,
-                            mixed_qkv_ns.stride(0),
-                            mixed_qkv_ns.stride(1),
-                            conv_state.stride(0),
-                            conv_state.stride(1),
-                            conv_state.stride(2),
-                            checkpoint_state.stride(0),
-                            recurrent_state.stride(0),
-                            checkpoint_offsets.stride(0),
-                            state_len,
-                            width,
-                            recurrent_row_size,
-                            NULL_BLOCK_ID,
-                            block_size,
+                        assert self._checkpoint_exporter is not None
+                        self._checkpoint_exporter.export(
+                            checkpoint,
+                            raw_qkv=mixed_qkv_ns,
+                            conv_state=conv_state,
+                            recurrent_checkpoint=checkpoint_state,
+                            recurrent_state=recurrent_state,
+                            cu_seqlens=non_spec_query_start_loc,
                         )
                     else:
                         (
@@ -1211,7 +1147,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     if q_ns.shape[1] > initial_state.shape[0]:
                         assert m.flashinfer_prefill_seq_order is not None
                     flashinfer_out = core_attn_out[:, : q_ns.shape[1]]
-                    if has_spec_decode:
+                    if non_spec_out is not None:
+                        flashinfer_out = non_spec_out
+                    elif has_spec_decode:
                         assert self._flashinfer_kda_output_spec is not None
                         (workspace_out,) = current_workspace_manager().get_simultaneous(
                             self._flashinfer_kda_output_spec
@@ -1251,6 +1189,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         output_final_state=True,
                         use_qk_l2norm_in_kernel=True,
                         cu_seqlens=non_spec_query_start_loc,
+                        out=non_spec_out,
                     )
                 recurrent_state[non_spec_state_indices_tensor] = (
                     last_recurrent_state.to(recurrent_state.dtype)
@@ -1284,12 +1223,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     lower_bound=self.gate_lower_bound,
                     initial_state=recurrent_state,
                     state_indices=decode_conv_indices,
+                    out=non_spec_out,
                 )
 
         # Restore the scheduler's original token order for mixed batches.
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            if spec_token_start is None:
+                assert spec_token_indx is not None
+                assert non_spec_token_indx is not None
+                core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+                core_attn_out.index_copy_(
+                    1, non_spec_token_indx, core_attn_out_non_spec
+                )
         elif core_attn_out_non_spec is not None:
             if (
                 self.kda_prefill_backend not in ("flashkda", "flashinfer")

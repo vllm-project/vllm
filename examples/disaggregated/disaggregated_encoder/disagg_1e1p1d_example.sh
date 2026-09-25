@@ -189,17 +189,34 @@ wait_for_server "$DECODE_PORT"
 ###############################################################################
 # Proxy
 ###############################################################################
+PROXY_ARGS=()
+if [[ "${DYNAMIC_REGISTRATION:-0}" == "1" ]]; then
+    : "${ADMIN_API_KEY:?Set ADMIN_API_KEY for dynamic registration}"
+    export ADMIN_API_KEY
+    PROXY_ARGS=(--dynamic-registration)
+else
+    PROXY_ARGS=(
+        --encode-servers-urls "http://localhost:$ENCODE_PORT"
+        --prefill-servers-urls "http://localhost:$PREFILL_PORT"
+        --decode-servers-urls "http://localhost:$DECODE_PORT"
+    )
+fi
 python disagg_epd_proxy.py \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
-    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
-    --prefill-servers-urls "http://localhost:$PREFILL_PORT" \
-    --decode-servers-urls "http://localhost:$DECODE_PORT" \
+    "${PROXY_ARGS[@]}" \
     >"${PROXY_LOG}" 2>&1 &
 
 PIDS+=($!)
 
 wait_for_server "$PROXY_PORT"
+if [[ "${DYNAMIC_REGISTRATION:-0}" == "1" ]]; then
+    for endpoint in "encode:$ENCODE_PORT" "prefill:$PREFILL_PORT" "decode:$DECODE_PORT"; do
+        curl --fail-with-body "http://127.0.0.1:$PROXY_PORT/instances" \
+            -H "X-API-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+            -d "{\"role\":\"${endpoint%%:*}\",\"url\":\"http://127.0.0.1:${endpoint#*:}\"}"
+    done
+fi
 echo "All services are up!"
 
 ###############################################################################

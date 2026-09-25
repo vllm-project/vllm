@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -22,6 +22,9 @@ else:
 
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
+
+    requires_device_loading: bool = True
+    """Whether post-load processing requires parameters on the target device."""
 
     uses_meta_device: bool = False
     """
@@ -83,8 +86,7 @@ class QuantizeMethodBase(ABC):
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
-    """
-    Not all quant methods have embedding implemented, so we need to check that
+    """Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
     has been changed from the base implementation.
     """
@@ -155,8 +157,7 @@ class QuantizationConfig(ABC):
         user_quant: str | None,
         hf_config: Any = None,
     ) -> QuantizationMethods | None:
-        """
-        Detects if this quantization method can support a given checkpoint
+        """Detects if this quantization method can support a given checkpoint
         format by overriding the user specified quantization method --
         this method should only be overwritten by subclasses in exceptional
         circumstances.
@@ -166,6 +167,7 @@ class QuantizationConfig(ABC):
             user_quant: The user-specified quantization method string.
             hf_config: The HuggingFace model config object (e.g. for
                 model_type checks). May be None if not available.
+
         """
         return None
 
@@ -200,6 +202,7 @@ class QuantizationConfig(ABC):
         Returns:
             The quantize method. None if the given layer doesn't support quant
             method.
+
         """
         raise NotImplementedError
 
@@ -238,16 +241,23 @@ class QuantizationConfig(ABC):
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 
+    @staticmethod
+    def get_checkpoint_weight_mapper() -> "WeightsMapper":
+        """Discard activation-order metadata unused by supported kernels."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper(orig_to_new_suffix={".g_idx": None})
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
-        """
-        Interface for models to update module names referenced in
+        """Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
         Args:
             hf_to_vllm_mapper: maps from hf model structure (the assumed
                 structure of the qconfig) to vllm model structure
+
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
@@ -255,17 +265,17 @@ class QuantizationConfig(ABC):
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
-        """
-        Interface to update values after config initialization.
+        """Interface to update values after config initialization.
 
         Args:
             model_name: The name of the model
             hf_config: The Hugging Face config of the model
             revision: The revision of the model
         Returns:
+
         """
         # TODO: revision is never passed currently in vllm.py,
         # but is used in subclasses, should we remove this parameter?

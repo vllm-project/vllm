@@ -3,7 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any, cast
 
 import torch
@@ -116,7 +116,7 @@ from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
+from vllm.utils.torch_utils import aux_stream, is_meta_module
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (
@@ -160,54 +160,23 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
     # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
+    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_ENABLE_GEMM_RS
     if not enabled:
         return False
 
-    parallel_config = vllm_config.parallel_config
-    tp_size = parallel_config.tensor_parallel_size
-    if parallel_config.use_ubatching:
-        reason = "ubatching is enabled"
-    elif vllm_config.model_config.dtype != torch.bfloat16:
-        reason = "the model dtype is not BF16"
-    elif not current_platform.is_cuda():
-        reason = "the device is not CUDA"
-    elif not current_platform.is_device_capability_family(100):
-        reason = "the device is not SM100-family"
-    elif not 1 < tp_size <= 16:
-        reason = "TP size is not in the supported range 2-16"
-    elif 128 % tp_size != 0:
-        reason = "TP size does not divide 128"
-    else:
-        reason = None
-
-    if reason is not None:
-        logger.warning_once("%s is disabled because %s.", mode, reason)
-        return False
-
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
+    # The kernel module pulls in cute_dsl, so import it only once the flag
+    # asks for it.
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+        maybe_init_gemm_rs_ar as maybe_init_shared_gemm_rs_ar,
+    )
 
     config = vllm_config.model_config.hf_text_config
-    try:
-        init_gemm_rs_ar(
-            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-            N=config.hidden_size,
-            all_reduce=all_reduce,
-        )
-    except RuntimeError as e:
-        logger.warning_once(
-            "%s is disabled because initialization failed: %s. This may mean "
-            "the TP ranks do not share one NVLink domain.",
-            mode,
-            e,
-        )
+    if not maybe_init_shared_gemm_rs_ar(
+        vllm_config, N=config.hidden_size, all_reduce=all_reduce
+    ):
         return False
-    if all_reduce:
-        logger.info_once(
-            "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
-        )
-    else:
-        logger.info_once("GEMM-RS is enabled.")
+    flag = "VLLM_KIMI_K3_GEMM_AR" if all_reduce else "VLLM_ENABLE_GEMM_RS"
+    logger.info_once("To disable %s, set %s=0.", mode, flag)
     return True
 
 
@@ -276,7 +245,7 @@ class KimiMLP(nn.Module):
             not use_sequence_parallel and reduce_results
         )
         if use_gemm_rs_ar and run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -309,7 +278,7 @@ class KimiMLP(nn.Module):
         x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
-            return self.gemm_rs_ar(x, self.down_proj.weight)
+            return self.gemm_rs_ar.apply(x, self.down_proj)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
@@ -339,6 +308,7 @@ class KimiRoutedOutputTransform(nn.Module):
             residual: Optional tensor of the up-projection's output shape to
                 accumulate into. It is consumed in the GEMM's beta-add
                 epilogue, so adding it costs no extra kernel.
+
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
@@ -366,6 +336,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
+        self.register_buffer("_mega_l1_packed", None, persistent=False)
+        self.register_buffer("_mega_l1_scale", None, persistent=False)
+        self.register_buffer("_mega_l2_packed", None, persistent=False)
+        self.register_buffer("_mega_l2_scale", None, persistent=False)
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -379,6 +353,14 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
 
     def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
         if self._transformed_l1_weights is not None:
+            return
+
+        # Weight cache IPC engine: the daemon exported the transformed
+        # buffers; reuse them zero-copy and drop the raw packed params.
+        if self._mega_l1_packed is not None:
+            self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
+            self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
+            self._drop_raw_mega_weights()
             return
 
         self._check_runtime_supported()
@@ -406,6 +388,15 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 activation=self.activation,
             )
         )
+        l1_packed, l1_scale = self._transformed_l1_weights
+        l2_packed, l2_scale = self._transformed_l2_weights
+        self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
+        self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
+        self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
+        self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
+        self._drop_raw_mega_weights()
+
+    def _drop_raw_mega_weights(self) -> None:
         self.w13_weight = None
         self.w13_weight_scale = None
         self.w2_weight = None
@@ -511,8 +502,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer,
             activation_clamp=activation_clamp,
             activation=self.activation,
-            situ_beta=self.activation_beta,
-            situ_linear_beta=self.activation_linear_beta,
+            # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
+            # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
+            activation_alpha=self.activation_beta or 1.0,
+            activation_beta=self.activation_linear_beta or 0.0,
             fast_math=fast_math,
         )
         return y
@@ -653,7 +646,7 @@ class KimiMoE(nn.Module):
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
             self.routed_expert_norm = (
@@ -670,7 +663,7 @@ class KimiMoE(nn.Module):
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
 
@@ -737,6 +730,7 @@ class KimiMoE(nn.Module):
                 routed_input_transform=None,
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
+                skip_padding=True,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
@@ -773,6 +767,7 @@ class KimiMoE(nn.Module):
             ``router_output`` holds the grouped top-k weights and ``topk_ids``
             the selected experts; otherwise ``router_output`` holds the raw gate
             logits and ``topk_ids`` is ``None``.
+
         """
 
         def _router(
@@ -896,14 +891,12 @@ class KimiDecoderLayer(nn.Module):
                     aux_stream=aux_stream,
                     run_gemm_rs_ar=run_gemm_rs_ar,
                 )
-                self._self_attn_writes_output = False
             else:
                 self.self_attn = KimiLinearGatedDeltaNetAttention(
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
                 )
-                self._self_attn_writes_output = True
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -933,7 +926,6 @@ class KimiDecoderLayer(nn.Module):
                 aux_stream=aux_stream,
                 run_gemm_rs_ar=run_gemm_rs_ar,
             )
-            self._self_attn_writes_output = False
 
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
@@ -999,14 +991,6 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self._self_attn_writes_output:
-            output = torch.empty_like(hidden_states)
-            self.self_attn(
-                hidden_states=hidden_states,
-                positions=positions,
-                output=output,
-            )
-            return output
         return self.self_attn(
             hidden_states=hidden_states,
             positions=positions,
@@ -1705,12 +1689,15 @@ class KimiLinearForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights)
+        return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        # A parent AutoWeightsLoader may invoke load_weights repeatedly for
+        # non-contiguous streamed prefixes. Finalize only after the full stream.
         self.model.finalize_mega_moe_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
         # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
         # hook for any AttentionLayerBase, so no manual trigger is needed here.
-        return loaded
 
 
 def get_spec_layer_idx_from_weight_name(
@@ -1790,7 +1777,9 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if self._maybe_ignore_quant_config(quant_config) is not None:
+            if is_meta_module(self.vision_tower):
+                pass
+            elif self._maybe_ignore_quant_config(quant_config) is not None:
                 self.vision_tower = self.vision_tower.to(device=self.device)
             else:
                 self.vision_tower = self.vision_tower.to(
@@ -1830,9 +1819,10 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
-            self.mm_projector = self.mm_projector.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if not is_meta_module(self.mm_projector):
+                self.mm_projector = self.mm_projector.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
         self.quant_config = quant_config
         with self._mark_language_model(vllm_config):
@@ -1945,6 +1935,7 @@ class KimiK3ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -2155,3 +2146,6 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()

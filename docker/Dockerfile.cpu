@@ -105,6 +105,11 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
+ENV TARGETARCH=${TARGETARCH}
+
+######################### COMMON BASE IMAGE + PYTHON DEPS #########################
+FROM base-common AS base-common-pydeps
+
 # PyTorch provides its own indexes for standard and nightly builds.
 # PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
 # GPU torch-nightly lane); default 0 keeps the pinned release CPU build.
@@ -114,10 +119,10 @@ ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
 # Copy requirements files for installation
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cpu.txt requirements/cpu.txt
-COPY use_existing_torch.py use_existing_torch.py
+COPY tools/use_existing_torch.py tools/use_existing_torch.py
 
 # For nightly: install torch nightly (CPU) first, strip torch pins from the
-# requirements via use_existing_torch.py so they can't pull it back to a release
+# requirements via tools/use_existing_torch.py so they can't pull it back to a release
 # build, then install the rest from the nightly CPU index (no --torch-backend,
 # which would force the stable channel). Release path is unchanged.
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -126,22 +131,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         echo "Installing torch nightly (CPU)..." \
         && uv pip install torch torchaudio torchvision torchcodec --pre \
             --index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu \
-        && python3 use_existing_torch.py --prefix \
+        && python3 tools/use_existing_torch.py --prefix \
         && uv pip install -r requirements/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
         uv pip install -r requirements/cpu.txt --torch-backend cpu; \
     fi
 
-ENV TARGETARCH=${TARGETARCH}
-
 ######################### x86_64 BASE IMAGE #########################
-FROM base-common AS base-amd64
+FROM base-common-pydeps AS base-amd64
 
 ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
 
 ######################### arm64 BASE IMAGE #########################
-FROM base-common AS base-arm64
+FROM base-common-pydeps AS base-arm64
 
 ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
 
@@ -180,12 +183,12 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 # Avoid port collision with vllm-build's own sccache daemon.
 ENV SCCACHE_SERVER_PORT=4227
 
-# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# Copy only the Rust build inputs; tools/build_rust.sh publishes artifacts needed
 # by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
-COPY build_rust.sh build_rust.sh
+COPY tools/build_rust.sh tools/build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
@@ -207,8 +210,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
         fi; \
         sccache --show-stats; \
     fi && \
-    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh && \
+    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash tools/build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+
+# tools/build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
+# child stage below finds it on disk instead of re-downloading it.
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
@@ -216,7 +223,7 @@ FROM rust-build-cache AS rust-build
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash build_rust.sh
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 
 ######################### SOURCE PREP IMAGE #########################
 # Shared prep (source, rust artifacts, build deps) for both vllm-build and
@@ -255,7 +262,7 @@ COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        python3 /workspace/use_existing_torch.py --prefix \
+        python3 /workspace/tools/use_existing_torch.py --prefix \
         && uv pip install -r requirements/build/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
@@ -280,7 +287,7 @@ RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 # now-unpinned dependency. Done at the end of vllm-src so vllm-build and
 # vllm-dev, which both derive from it, inherit the unpinned tree.
 RUN if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        python3 /workspace/use_existing_torch.py --prefix; \
+        python3 /workspace/tools/use_existing_torch.py --prefix; \
     fi
 
 ######################### BUILD IMAGE #########################
@@ -308,51 +315,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
-######################### TRITON-CPU BUILD IMAGE #########################
-FROM base-arch AS vllm-triton-cpu-build
-
-# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
-# Re-declared here because this stage is `FROM base-arch` (not `vllm-build`),
-# so it does not inherit the ARG/ENV defined there. Without it, the guard
-# below would see an empty value and build triton-cpu on non-x86 targets
-# (e.g. arm64).
-ARG VLLM_CPU_X86=0
-
-ARG USE_SCCACHE
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_LOCAL_ONLY=0
-
-WORKDIR /vllm-workspace
-
-RUN mkdir dist
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
-    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
-    --mount=type=cache,target=/root/.triton \
-    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
-    set -ex; \
-    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
-        cd triton-cpu; \
-        git checkout "270e696d"; \
-        if [ "$USE_SCCACHE" = "1" ]; then \
-            if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
-                unset SCCACHE_BUCKET SCCACHE_REGION; \
-                export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
-            elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
-                export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
-            fi; \
-            export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
-            sccache --show-stats; \
-        fi; \
-        uv build --wheel --out-dir=../dist; \
-        if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi; \
-        cd ..; \
-        rm -rf triton-cpu; \
-    fi
-
 ######################### TEST DEPS #########################
 FROM base-arch AS vllm-test-deps
 
@@ -368,14 +330,20 @@ WORKDIR /vllm-workspace
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
-# packages unavailable on aarch64 (decord, terratorch) for arm builds.
+# packages unavailable on aarch64 (decord, terratorch) for arm builds. Also
+# drop the generic PyPI triton pulled in transitively (via xgrammar) on x86
+# builds, so it doesn't clobber the triton-cpu wheel from requirements/cpu.txt.
 RUN case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
+    x86_64) sed -i '/^triton==/d' requirements/test/cpu.txt ;; \
     esac
 
+# pytrec-eval-terrier bundles pre-C23 trec_eval sources. GCC 15 defaults to C23;
+# use C17 for test dependency builds without changing the vLLM compiler flags.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    export CFLAGS="${CFLAGS:+${CFLAGS} }-std=gnu17" && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        python3 /workspace/use_existing_torch.py --prefix \
+        python3 /workspace/tools/use_existing_torch.py --prefix \
         && uv pip install -r requirements/test/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
@@ -408,7 +376,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirements/test/cpu.txt
 
+# vllm-dev installs the same test dependencies in its own environment.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    export CFLAGS="${CFLAGS:+${CFLAGS} }-std=gnu17" && \
     uv pip install -r requirements/lint.txt && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         uv pip install -r requirements/test/cpu.txt \
@@ -417,14 +387,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
     fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
-
-# Installed after requirements/test/cpu.txt (which pins triton==3.6.0) so the
-# triton-cpu wheel isn't overwritten by that pin.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if ls dist/*.whl >/dev/null 2>&1; then \
-        uv pip install dist/*.whl; \
-    fi
 
 ENTRYPOINT ["bash"]
 
@@ -437,18 +399,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if ls dist/*.whl >/dev/null 2>&1; then \
-        uv pip install dist/*.whl; \
-    fi
-
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+# tools/ carries repo-tooling code that a few tests exercise directly
+# (e.g. tests/tools/test_check_test_tethering.py imports
+# tools.pre_commit.check_test_tethering).
+ADD ./tools/ ./tools/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -468,13 +428,7 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install "$(realpath dist/*.whl)[audio]"
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if ls dist/*.whl >/dev/null 2>&1; then \
-        uv pip install dist/*.whl; \
-    fi
+    uv pip install "$(realpath dist/*.whl)[audio,bench]"
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"

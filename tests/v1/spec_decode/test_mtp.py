@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -29,6 +30,31 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_glm_mtp_defers_lm_head(default_vllm_config):
+    from vllm.model_executor.models import deepseek_mtp
+    from vllm.models.glm5next.common import mtp
+
+    config = mock.MagicMock(
+        hidden_size=16,
+        rms_norm_eps=1e-5,
+        index_topk=8,
+        index_kpool=4,
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = config
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+
+    with (
+        mock.patch.object(mtp, "Glm5NextDecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(deepseek_mtp, "ParallelLMHead") as parallel_lm_head,
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.Glm5NextMultiTokenPredictorLayer(vllm_config, "model.layers.1")
+
+    parallel_lm_head.assert_not_called()
+    assert layer.shared_head.head is None
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -66,7 +92,6 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_group):
     """Test MTP-specific model loading with unified model approach."""
-
     # Setup mocks
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
@@ -117,8 +142,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
-    """Test that MTP's forward method returns hidden states directly"""
-
+    """Test that MTP's forward method returns hidden states directly."""
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
