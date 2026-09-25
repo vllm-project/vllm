@@ -1661,7 +1661,7 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
-    def trimtab_reinit(self, fields: dict) -> dict:  # noqa: D401
+    def trimtab_reinit(self, fields: dict) -> dict:
         """Trimtab warm reinit. Rebuild the KV cache, attention groups, CUDA
         graphs and the scheduler at a new size. Weights never leave the GPU.
 
@@ -1697,7 +1697,7 @@ class EngineCoreProc(EngineCore):
             "max_num_seqs": sc.max_num_seqs,
             "max_num_batched_tokens": sc.max_num_batched_tokens,
         }
-        released = self.collective_rpc("trimtab_release_kv")
+        released: list[Any] = self.collective_rpc("trimtab_release_kv")
         logger.info("trimtab release result %s", released)
         freed_at = _time.perf_counter()
 
@@ -1713,7 +1713,7 @@ class EngineCoreProc(EngineCore):
             block_size, hash_block_size = resolve_kv_cache_block_sizes(
                 kv_cache_config, self.vllm_config
             )
-            old = self.scheduler
+            old = cast(Any, self.scheduler)
             replacement = type(old)(
                 vllm_config=self.vllm_config,
                 kv_cache_config=kv_cache_config,
@@ -1746,7 +1746,7 @@ class EngineCoreProc(EngineCore):
             kv_cache_config = _rebuild(previous)
             fields = {"error": str(e), "restored": previous}
 
-        sched = self.scheduler
+        sched = cast(Any, self.scheduler)
         sched._trimtab_ceilings = {
             "max_num_seqs": sched.max_num_running_reqs,
             "max_num_batched_tokens": sched.max_num_scheduled_tokens,
@@ -1772,13 +1772,16 @@ class EngineCoreProc(EngineCore):
         Applies validated values to the live scheduler, which reads them on
         the next step. Ceilings are the values allocated at boot.
         """
-        sched = self.scheduler
+        # the concrete scheduler, not the interface: these are its own fields,
+        # as this file already does for kv_cache_manager
+        sched = cast(Any, self.scheduler)
         if not hasattr(sched, "_trimtab_ceilings"):
             sched._trimtab_ceilings = {
                 "max_num_seqs": sched.max_num_running_reqs,
                 "max_num_batched_tokens": sched.max_num_scheduled_tokens,
             }
-        applied, rejected = {}, {}
+        applied: dict[str, int | str] = {}
+        rejected: dict[str, str] = {}
         for key, value in knobs.items():
             if key == "long_prefill_token_threshold":
                 if not isinstance(value, (int, float)) or int(value) < 0:
@@ -1818,7 +1821,7 @@ class EngineCoreProc(EngineCore):
         return {"ok": not rejected, "applied": applied, "rejected": rejected}
 
     def trimtab_get_knobs(self) -> dict:
-        sched = self.scheduler
+        sched = cast(Any, self.scheduler)
         pending = getattr(sched, "_trimtab_pending_max_num_seqs", None)
         return {
             "max_num_seqs": pending

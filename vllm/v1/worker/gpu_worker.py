@@ -275,7 +275,7 @@ class Worker(WorkerBase):
 
         The KV cache is allocated inside CuMemAllocator.use_memory_pool(
         tag="kv_cache"). Dropping the tensor references marks the blocks free,
-        but torch.cuda.empty_cache() errors on a pluggable allocator
+        but emptying the cache errors on a pluggable allocator
         (pytorch/pytorch#145168), so the pages are not returned. vLLM's own
         use_memory_pool exit works around this by snapshotting the pool and
         releasing every allocated_size==0 block by hand. We run the same
@@ -289,8 +289,8 @@ class Worker(WorkerBase):
         from vllm.device_allocator.cumem import CuMemAllocator
 
         mr = self.model_runner
-        torch.cuda.synchronize()
-        free0 = torch.cuda.mem_get_info()[0]
+        torch.accelerator.synchronize()
+        free0 = torch.accelerator.get_memory_info()[0]
 
         try:
             from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
@@ -332,7 +332,7 @@ class Worker(WorkerBase):
         )
         released = 0
         if data is None:
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
         if data is not None:
             mem_pool, pool_alloc = data
             for allocation in mem_pool.snapshot():
@@ -343,12 +343,12 @@ class Worker(WorkerBase):
             gc.collect()
             del pool_alloc  # phase 2: drop the pluggable allocator
             gc.collect()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # vLLM caps the process at gpu_memory_utilization through
         # set_per_process_memory_fraction. Lift it, the profiler sizes the new
         # pool against device free memory, not this guard.
-        torch.cuda.set_per_process_memory_fraction(1.0)
+        torch.cuda.set_per_process_memory_fraction(1.0)  # no accelerator equivalent yet
 
         # init_snapshot stays as captured at boot (before weights loaded). The
         # profiler measures non_kv_cache_memory as consumption relative to it,
@@ -356,7 +356,9 @@ class Worker(WorkerBase):
         # the weights from that accounting and oversize the new pool.
         return {
             "released_gib": round(released / 2**30, 2),
-            "free_gib": round((torch.cuda.mem_get_info()[0] - free0) / 2**30, 2),
+            "free_gib": round(
+                (torch.accelerator.get_memory_info()[0] - free0) / 2**30, 2
+            ),
         }
 
     def sleep(self, level: int = 1) -> None:

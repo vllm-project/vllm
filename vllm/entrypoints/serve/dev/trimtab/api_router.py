@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # trimtab (github.com/numinous-technology/trimtab) dev router.
 
 from fastapi import APIRouter, FastAPI, Request
