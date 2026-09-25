@@ -35,6 +35,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
@@ -883,6 +884,40 @@ def test_fused_ngram_ids_correctness(
     offsets = params["ngram_heads_offsets"]
     sizes = params["ngram_heads_vocab_sizes"]
     assert torch.all((actual >= offsets) & (actual < offsets + sizes))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
+def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
+    """Eager breaks hand the side-stream lookup weak refs, so the ids must stay
+    valid after start_prefetch returns rather than be reused from the pool."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    input_ids = torch.arange(20, 25, dtype=torch.int32, device=device)
+    ngram_context = torch.tensor([[11, 12], [13, 14]], dtype=torch.int32, device=device)
+    params = _ngram_hash_params(device, ngram_context.shape[1])
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    for name in ("layer_multipliers", "ngram_heads_vocab_sizes", "ngram_heads_offsets"):
+        module.register_buffer(name, params[name])
+    module.eos_token_id = params["eos_token_id"]
+    module.heads_per_ngram = params["heads_per_ngram"]
+    num_heads = params["ngram_heads_vocab_sizes"].numel()
+    module._prefetch_ids = torch.empty(8, num_heads, dtype=torch.long, device=device)
+    prefetched: list[torch.Tensor] = []
+    module.ngram_embedding = SimpleNamespace(
+        supports_prefetch=True,
+        start_prefetch=lambda _, ids: prefetched.append(weak_ref_tensor(ids)),
+    )
+    expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+
+    # A fresh pool makes the next same-size allocation reuse any freed ids,
+    # like a later CUDA graph segment would.
+    pool = torch.cuda.MemPool()
+    with torch.cuda.use_mem_pool(pool):
+        module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
+        torch.full_like(expected, -1)
+
+    assert torch.equal(prefetched[0], expected)
 
 
 def _short_conv_dilated_decode_pytorch(

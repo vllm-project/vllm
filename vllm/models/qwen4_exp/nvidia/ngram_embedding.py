@@ -716,6 +716,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
         )
+        if self.ngram_embedding.supports_prefetch:
+            # The side-stream lookup outlives eager-break args, whose
+            # graph-pool storage later segments may reuse.
+            self._prefetch_ids = torch.empty(
+                max_total_tokens, self.ngram_heads, dtype=torch.long
+            )
         weight = self.ngram_embedding.weight
         logger.info(
             "Initialized PLE embedding %s: quantization_method=%s, "
@@ -864,6 +870,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             input_ids,
             query_start_loc,
             ngram_context,
+            output=self._prefetch_ids[: input_ids.numel()],
         )
         embedding.start_prefetch(hidden_states, ngram_ids)
 
