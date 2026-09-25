@@ -46,6 +46,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.transformers_utils.glm_tool_results import prepare_glm_tool_results
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
@@ -781,6 +782,7 @@ def safe_apply_chat_template(
     tokenize: bool = True,
     **kwargs,
 ) -> str | list[int]:
+    template_override = chat_template is not None
     chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -806,6 +808,15 @@ def safe_apply_chat_template(
         tokenizer=tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=kwargs,
+    )
+    conversation, chat_template = prepare_glm_tool_results(
+        conversation,
+        chat_template,
+        architectures=getattr(model_config.hf_config, "architectures", None),
+        template_override=template_override,
+        continue_final_message=bool(
+            resolved_kwargs.get("continue_final_message", False)
+        ),
     )
 
     # transformers v5 changed the default of `return_dict` to True, which
