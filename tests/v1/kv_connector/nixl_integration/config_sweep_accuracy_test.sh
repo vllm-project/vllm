@@ -22,15 +22,21 @@ dp_ep_configs=(
 "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # P-TP2, D-DPEP=2 (TP=1)
 )
 # We assume HMA enabled by default.
-hybrid_ssm_configs=(
+# Split per model family so CI can run each family as its own job:
+# HYBRID_SSM=granite|qwen3_5|jamba selects one family, any other value runs all.
+hybrid_ssm_granite_configs=(
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
-  # GDN (Qwen3.5)
+)
+# GDN (Qwen3.5)
+hybrid_ssm_qwen3_5_configs=(
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS ENFORCE_EAGER=0 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B VLLM_SERVE_EXTRA_ARGS=--spec-method,mtp,--spec-tokens,1"
-  # Mamba1 (Jamba)
+)
+# Mamba1 (Jamba)
+hybrid_ssm_jamba_configs=(
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ai21labs/AI21-Jamba2-3B VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
 sw_attn_configs=(
@@ -46,8 +52,13 @@ if [[ -n "${DP_EP:-}" ]]; then
   configs=("${dp_ep_configs[@]}")
   echo "DP_EP is set, using dp_ep_configs"
 elif [[ -n "${HYBRID_SSM:-}" ]]; then
-  configs=("${hybrid_ssm_configs[@]}")
-  echo "HYBRID_SSM is set, using hybrid_ssm_configs."
+  case "${HYBRID_SSM}" in
+    granite) configs=("${hybrid_ssm_granite_configs[@]}") ;;
+    qwen3_5) configs=("${hybrid_ssm_qwen3_5_configs[@]}") ;;
+    jamba) configs=("${hybrid_ssm_jamba_configs[@]}") ;;
+    *) configs=("${hybrid_ssm_granite_configs[@]}" "${hybrid_ssm_qwen3_5_configs[@]}" "${hybrid_ssm_jamba_configs[@]}") ;;
+  esac
+  echo "HYBRID_SSM=${HYBRID_SSM} is set, using hybrid_ssm configs."
 elif [[ -n "${SW_ATTN:-}" ]]; then
   configs=("${sw_attn_configs[@]}")
   echo "SW_ATTN is set, using sw_attn_configs."
