@@ -1,19 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
 
 class CacheHitSource(str, Enum):
-    """Bounded origins for cached prompt tokens."""
+    """Bounded origins for cached prompt tokens, declared fastest to slowest."""
 
     DEVICE = "device"
     HOST = "host"
-    DISK = "disk"
     P2P = "p2p"
-    # Fallback: uninstrumented connector, remote store, or a range mixing tiers.
+    DISK = "disk"
+    # Fallback: uninstrumented connector or remote store. Ranks slowest so a
+    # token partly served from an unknown tier is never labeled a known one.
     EXTERNAL_UNSPECIFIED = "external_unspecified"
+
+    @classmethod
+    def slowest(cls, sources: "Iterable[CacheHitSource]") -> "CacheHitSource":
+        """The slowest of ``sources``; a token needs KV from all of them."""
+        order = list(cls)
+        return max(sources, key=order.index)
 
 
 @dataclass
@@ -26,8 +34,8 @@ class CachedTokensBySource:
 
     device: int = 0
     host: int = 0
-    disk: int = 0
     p2p: int = 0
+    disk: int = 0
     external_unspecified: int = 0
 
     def add(self, source: CacheHitSource, num_tokens: int) -> None:

@@ -360,17 +360,6 @@ class RequestGroupState:
     num_hit_chunks: int = 0
 
 
-# Load cost order used when groups for the same tokens come from different
-# tiers. An unknown tier outranks every known one.
-_TIER_COST = {
-    CacheHitSource.DEVICE: 0,
-    CacheHitSource.HOST: 1,
-    CacheHitSource.P2P: 2,
-    CacheHitSource.DISK: 3,
-    CacheHitSource.EXTERNAL_UNSPECIFIED: 4,
-}
-
-
 @dataclass(slots=True)
 class RequestOffloadState:
     config: SchedulerOffloadConfig
@@ -1147,7 +1136,7 @@ class OffloadingConnectorScheduler:
         for lo, hi in zip(bounds, bounds[1:]):
             tiers = sparse_tiers + [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
             sources.add(
-                max(tiers, key=_TIER_COST.__getitem__)
+                CacheHitSource.slowest(tiers)
                 if tiers
                 else CacheHitSource.EXTERNAL_UNSPECIFIED,
                 hi - lo,

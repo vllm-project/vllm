@@ -62,7 +62,7 @@ def test_cached_tokens_by_source():
 
     assert by_source == CachedTokensBySource(host=5, disk=5, p2p=5)
     assert by_source.total == 15
-    assert by_source.items() == [("host", 5), ("disk", 5), ("p2p", 5)]
+    assert by_source.items() == [("host", 5), ("p2p", 5), ("disk", 5)]
     with pytest.raises(ValueError):
         by_source.add("gpu", 1)  # type: ignore[arg-type]
 
