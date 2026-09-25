@@ -308,3 +308,100 @@ def test_qwen3_xml_auto_still_extracts_tool_calls():
     assert calls[0].name == "get_weather"
     assert json.loads(calls[0].arguments) == {"city": "Tokyo"}
     assert not content or content.strip() == ""
+
+
+# qwen3_coder resolves to the same engine parser as qwen3_xml.
+NO_TOOLS_PARSERS = ("qwen3_xml", "qwen3_coder", "glm45")
+
+# Prefix text, a tool-call-shaped block, then trailing text.
+_QWEN3_SURROUNDED_PIECES = (
+    "Voici ma question.\n",
+    "<tool_call>",
+    "\n<function=kanban_block>\n",
+    "<parameter=reason>\n",
+    "blocked\n",
+    "</parameter>\n",
+    "</function>\n",
+    "</tool_call>",
+    "\nFin.",
+)
+
+_GLM45_SURROUNDED_PIECES = (
+    "Voici ma question.\n",
+    "<tool_call>",
+    "kanban_block\n",
+    "<arg_key>",
+    "reason",
+    "</arg_key>",
+    "\n",
+    "<arg_value>",
+    "blocked",
+    "</arg_value>",
+    "\n",
+    "</tool_call>",
+    "\nFin.",
+)
+
+
+def _surrounded_fixture(
+    parser_name: str,
+) -> tuple[dict[str, int], list[tuple[int, str]]]:
+    pieces: tuple[str, ...]
+    if parser_name == "glm45":
+        vocab = _GLM_VOCAB
+        pieces = _GLM45_SURROUNDED_PIECES
+    else:
+        vocab = _QWEN3_VOCAB
+        pieces = _QWEN3_SURROUNDED_PIECES
+    tokens: list[tuple[int, str]] = []
+    next_id = 1000
+    for piece in pieces:
+        if piece in vocab:
+            tokens.append((vocab[piece], piece))
+        else:
+            tokens.append((next_id, piece))
+            next_id += 1
+    return vocab, tokens
+
+
+@pytest.mark.parametrize("parser_name", NO_TOOLS_PARSERS)
+@pytest.mark.parametrize("request_factory", NO_TOOLS_REQUESTS)
+def test_parse_keeps_trailing_text_when_no_tools(parser_name, request_factory):
+    vocab, tokens = _surrounded_fixture(parser_name)
+    parser = _make_parser(parser_name, MockTokenizer(vocab=vocab, tokens=tokens))
+    request = request_factory()
+    text = "".join(token_text for _, token_text in tokens)
+
+    _, content, calls = parser.parse(text, request, enable_auto_tools=True)
+
+    assert not request.tools
+    assert calls == []
+    assert content == text
+    assert content.endswith("Fin.")
+
+
+@pytest.mark.parametrize("parser_name", NO_TOOLS_PARSERS)
+@pytest.mark.parametrize("request_factory", NO_TOOLS_REQUESTS)
+def test_streaming_keeps_trailing_text_and_emits_no_tool_calls_when_no_tools(
+    parser_name, request_factory
+):
+    vocab, tokens = _surrounded_fixture(parser_name)
+    parser = _make_parser(parser_name, MockTokenizer(vocab=vocab, tokens=tokens))
+    request = request_factory()
+    text = "".join(token_text for _, token_text in tokens)
+
+    deltas = []
+    last_index = len(tokens) - 1
+    for index, (token_id, delta_text) in enumerate(tokens):
+        delta = parser.parse_delta(
+            delta_text,
+            [token_id],
+            request,
+            prompt_token_ids=[] if index == 0 else None,
+            finished=index == last_index,
+        )
+        deltas.append(delta)
+
+    for delta in deltas:
+        assert delta is None or not delta.tool_calls
+    assert "".join(d.content or "" for d in deltas if d is not None) == text
