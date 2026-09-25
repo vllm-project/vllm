@@ -44,9 +44,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Eagle 1: DeepSeek + Qwen"
+      label: ":amd: (MI355 DPX) Spec Decode Eagle 1: DeepSeek + Qwen"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -71,9 +71,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+      label: ":amd: (MI355 DPX) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -157,9 +157,9 @@ steps:
     - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode N-Gram + Suffix"
+      label: ":amd: (MI355 DPX) Spec Decode N-Gram + Suffix"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
@@ -172,22 +172,24 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model"
+- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model Shard %N"
   key: spec-decode-draft-model
   timeout_in_minutes: 60
   device: h200_18gb
+  parallelism: 4
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/draft_model/
+    - pytest -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Draft Model"
+      label: ":amd: (MI355 DPX) Spec Decode Draft Model Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
+      parallelism: 2
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -288,7 +290,8 @@ steps:
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
+    # DFlash2 NVFP4 (27B) does not fit a 35GB MIG slice; runs on B200 below.
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
   mirror:
     amd:
       label: ":amd: (MI300) Spec Decode AL DFlash Nightly"
@@ -313,6 +316,21 @@ steps:
       - vllm/model_executor/models/laguna_dflash.py
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (B200) Spec Decode AL DFlash2 Nightly"
+  key: spec-decode-dflash2-nightly-b200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/model_executor/models/qwen3_5.py
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly"
   key: spec-decode-dspark-nightly
@@ -374,9 +392,9 @@ steps:
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   mirror:
     amd:
-      label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL MTP + Other Acceptance Nightly"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
