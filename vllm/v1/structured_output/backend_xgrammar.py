@@ -21,7 +21,6 @@ from vllm.v1.structured_output.backend_types import (
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
-    convert_lark_to_ebnf,
     grammar_is_likely_lark,
 )
 
@@ -91,7 +90,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
-            ctx = self.compiler.compile_grammar(grammar_spec)
+            if grammar_is_likely_lark(grammar_spec):
+                ctx = self.compiler.compile_lark(grammar_spec)
+            else:
+                ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
                 self.compiler.compile_regex,
@@ -404,19 +406,13 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.grammar:
-        if grammar_is_likely_lark(so_params.grammar):
-            # xgrammar supports EBNF grammars only
-            try:
-                so_params.grammar = convert_lark_to_ebnf(so_params.grammar)
-            except ValueError as e:
-                raise VLLMValidationError(
-                    "Failed to convert the grammar from Lark to EBNF. "
-                ) from e
-
-        # Test parsing EBNF grammar, possibly already converted from Lark
+        # Parse the grammar with the same syntax `compile_grammar` will use,
+        # but don't compile it. The grammar is passed on unchanged.
         try:
-            # parse the grammar, but we aren't compiling it.
-            xgr.Grammar.from_ebnf(so_params.grammar)
+            if grammar_is_likely_lark(so_params.grammar):
+                xgr.Grammar.from_lark(so_params.grammar)
+            else:
+                xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
             raise VLLMValidationError("Invalid grammar specification.") from e
         return

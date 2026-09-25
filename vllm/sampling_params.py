@@ -1178,6 +1178,7 @@ class SamplingParams(
             validate_structured_output_request_outlines,
         )
         from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+        from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -1210,6 +1211,22 @@ class SamplingParams(
                     "backends or tokenizer_mode='hf' instead."
                 )
             validate_structured_output_request_lm_format_enforcer(self)
+        elif (
+            backend == "auto"
+            and is_mistral_tokenizer(tokenizer)
+            and tokenizer.is_tekken
+            and self.structured_outputs.grammar
+            and grammar_is_likely_lark(self.structured_outputs.grammar)
+        ):
+            # Lark grammars for Tekken Mistral tokenizers, including the ones
+            # the Mistral tool parser generates, go to guidance. llguidance
+            # takes the tokenizer from mistral-common and never lets a regex
+            # match a special token. The xgrammar backend declares no special
+            # tokens for Mistral tokenizers, so a regex like `.` can match
+            # `[TOOL_CALLS]` or `[INST]` as plain text.
+            validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
+            self.structured_outputs._backend = "guidance"
+            self.structured_outputs._backend_was_auto = True
         else:
             # NOTE: backend must be "auto" here, because we have
             # checked supported_backends above.
