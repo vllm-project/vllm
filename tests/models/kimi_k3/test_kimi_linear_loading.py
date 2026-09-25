@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 from typing import Any
+
 import pytest
 import torch
 from torch import nn
@@ -27,17 +28,20 @@ class _MockExpertParam(nn.Parameter):
         self,
         param: nn.Parameter,
         loaded_weight: torch.Tensor,
-        name: str,
+        name: str = "",
         expert_id: int | None = None,
         shard_id: str | None = None,
+        **kwargs: Any,
     ):
-        self.loaded_calls.append({
-            "param": param,
-            "weight": loaded_weight,
-            "name": name,
-            "expert_id": expert_id,
-            "shard_id": shard_id,
-        })
+        self.loaded_calls.append(
+            {
+                "param": param,
+                "weight": loaded_weight,
+                "name": name,
+                "expert_id": expert_id,
+                "shard_id": shard_id,
+            }
+        )
 
 
 def _create_minimal_kimi_model(num_experts: int = 4) -> KimiLinearModel:
@@ -80,7 +84,8 @@ def _create_minimal_kimi_model(num_experts: int = 4) -> KimiLinearModel:
 
 
 def test_kimi_k3_load_weights_o1_expert_routing():
-    """Verify that KimiLinearModel.load_weights dispatches all expert projections via O(1) lookup."""
+    """Verify that KimiLinearModel.load_weights dispatches all expert
+    projections via O(1) lookup."""
     num_experts = 4
     model = _create_minimal_kimi_model(num_experts=num_experts)
 
@@ -101,7 +106,7 @@ def test_kimi_k3_load_weights_o1_expert_routing():
             (f"model.layers.0.mlp.experts.{exp_id}.w3.weight", w3_tensor)
         )
 
-    loaded_params = model.load_weights(weights_to_load)
+    model.load_weights(weights_to_load)
 
     w13_param = model.model.layers[0].mlp.experts.routed_experts.w13_weight
     w2_param = model.model.layers[0].mlp.experts.routed_experts.w2_weight
@@ -112,31 +117,37 @@ def test_kimi_k3_load_weights_o1_expert_routing():
     assert len(w2_param.loaded_calls) == num_experts
 
     # Verify per-expert dispatch correctness
+    exp_w13_name = "model.layers.0.mlp.experts.routed_experts.w13_weight"
+    exp_w2_name = "model.layers.0.mlp.experts.routed_experts.w2_weight"
     for exp_id in range(num_experts):
         w1_calls = [
-            c for c in w13_param.loaded_calls
+            c
+            for c in w13_param.loaded_calls
             if c["expert_id"] == exp_id and c["shard_id"] == "w1"
         ]
         assert len(w1_calls) == 1
-        assert w1_calls[0]["name"] == "model.layers.0.mlp.experts.routed_experts.w13_weight"
+        assert w1_calls[0]["name"] == exp_w13_name
 
         w3_calls = [
-            c for c in w13_param.loaded_calls
+            c
+            for c in w13_param.loaded_calls
             if c["expert_id"] == exp_id and c["shard_id"] == "w3"
         ]
         assert len(w3_calls) == 1
-        assert w3_calls[0]["name"] == "model.layers.0.mlp.experts.routed_experts.w13_weight"
+        assert w3_calls[0]["name"] == exp_w13_name
 
         w2_calls = [
-            c for c in w2_param.loaded_calls
+            c
+            for c in w2_param.loaded_calls
             if c["expert_id"] == exp_id and c["shard_id"] == "w2"
         ]
         assert len(w2_calls) == 1
-        assert w2_calls[0]["name"] == "model.layers.0.mlp.experts.routed_experts.w2_weight"
+        assert w2_calls[0]["name"] == exp_w2_name
 
 
 def test_kimi_k3_load_weights_unpacked_weight_packed_substitution():
-    """Verify that .weight_packed is substituted with .weight when experts are unpacked."""
+    """Verify that .weight_packed is substituted with .weight when experts
+    are unpacked."""
     model = _create_minimal_kimi_model(num_experts=2)
 
     weights_to_load = [
@@ -201,7 +212,8 @@ def test_kimi_k3_load_weights_scale_keys_not_corrupted():
 
 
 def test_kimi_k3_load_weights_large_expert_count_o1_scaling():
-    """Verify O(1) expert mapping handles large expert counts (e.g. 128 experts) correctly."""
+    """Verify O(1) expert mapping handles large expert counts
+    (e.g. 128 experts) correctly."""
     num_experts = 128
     model = _create_minimal_kimi_model(num_experts=num_experts)
 
@@ -229,3 +241,21 @@ def test_kimi_k3_load_weights_large_expert_count_o1_scaling():
 
     assert loaded_eids_w13 == set(target_experts)
     assert loaded_eids_w2 == set(target_experts)
+
+
+def test_kimi_k3_load_weights_non_expert_fallthrough():
+    """Verify that non-expert parameters fall through correctly to standard
+    weight loading."""
+    model = _create_minimal_kimi_model(num_experts=2)
+
+    norm_param = _MockExpertParam(torch.zeros(16))
+    model.model.layers[0].register_parameter("input_layernorm", norm_param)
+
+    weights_to_load = [
+        ("model.layers.0.input_layernorm", torch.randn(16)),
+    ]
+    model.load_weights(weights_to_load)
+
+    assert len(norm_param.loaded_calls) == 1
+    assert norm_param.loaded_calls[0]["expert_id"] is None
+    assert norm_param.loaded_calls[0]["shard_id"] is None

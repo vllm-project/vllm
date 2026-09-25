@@ -3,9 +3,9 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-import re
 from typing import Any
 
+import regex as re
 import torch
 from torch import nn
 
@@ -72,6 +72,8 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+_EXPERT_SUB_RE = re.compile(r"experts\.(\d+)\.([^.]+)\.")
 
 
 class KimiMLP(nn.Module):
@@ -907,8 +909,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         expert_2d_dict: dict[tuple[int, str], list[tuple[str, str, int, str]]] = (
             defaultdict(list)
         )
-        expert_fused_list: list[tuple[str, str, int, str]] = []
-        _EXPERT_SUB_RE = re.compile(r"experts\.(\d+)\.([^.]+)\.")
         for item in expert_params_mapping:
             param_name, weight_name, expert_id, shard_id = item
             m = _EXPERT_SUB_RE.search(weight_name)
@@ -916,12 +916,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 eid = int(m.group(1))
                 proj = m.group(2)
                 expert_2d_dict[(eid, proj)].append(item)
-            else:
-                expert_fused_list.append(item)
 
         for items in expert_2d_dict.values():
             items.sort(key=lambda x: len(x[1]), reverse=True)
-        expert_fused_list.sort(key=lambda x: len(x[1]), reverse=True)
 
         params_dict = dict(self.named_parameters())
         # Under the MXFP4 quant interface the routed experts register unpacked
@@ -975,16 +972,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 if "experts." in name:
                     m = _EXPERT_SUB_RE.search(name)
                     if m is not None:
-                        eid = int(m.group(1))
-                        proj = m.group(2)
-                        items = expert_2d_dict.get((eid, proj))
-                        if items is not None:
+                        candidates = expert_2d_dict.get((int(m.group(1)), m.group(2)))
+                        if candidates:
                             for (
                                 expert_param_name,
                                 expert_weight_name,
                                 expert_id,
                                 expert_shard_id,
-                            ) in items:
+                            ) in candidates:
                                 if expert_weight_name not in name:
                                     continue
                                 name_mapped = name.replace(
@@ -1004,30 +999,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                                 )
                                 matched_expert = True
                                 break
-                    if not matched_expert and expert_fused_list:
-                        for (
-                            expert_param_name,
-                            expert_weight_name,
-                            expert_id,
-                            expert_shard_id,
-                        ) in expert_fused_list:
-                            if expert_weight_name not in name:
-                                continue
-                            name_mapped = name.replace(expert_weight_name, expert_param_name)
-                            if is_pp_missing_parameter(name_mapped, self):
-                                continue
-                            name = name_mapped
-                            param = params_dict[name]
-                            weight_loader = param.weight_loader
-                            weight_loader(
-                                param,
-                                loaded_weight,
-                                name,
-                                expert_id=expert_id,
-                                shard_id=expert_shard_id,
-                            )
-                            matched_expert = True
-                            break
                 if not matched_expert:
                     # Skip loading extra bias for GPTQ models.
                     if (
