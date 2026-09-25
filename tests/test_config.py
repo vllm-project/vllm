@@ -45,6 +45,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
@@ -63,6 +64,17 @@ from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfi
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_nan_fault_tolerance_enables_detection_in_direct_config():
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            fault_tolerance_config=FaultToleranceConfig(enable_nan_fault_tolerance=True)
+        ),
+        observability_config=ObservabilityConfig(enable_detect_nans_in_logits=False),
+    )
+
+    assert config.observability_config.enable_detect_nans_in_logits
 
 
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
