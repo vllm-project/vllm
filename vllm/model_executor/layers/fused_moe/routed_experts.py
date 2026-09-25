@@ -36,6 +36,28 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _index_expert_mapping(
+    mapping: list[tuple[str, str, int, str]],
+) -> dict[str, list[tuple[str, str, int, str]]]:
+    """Index by logical checkpoint ID, preserving entry order and EPLB replicas.
+
+    An empty index keeps the full scan for unsupported mapping names.
+    """
+    mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
+    for entry in mapping:
+        prefix, _, suffix = entry[1].partition(".")
+        expert_key, sep, _ = suffix.partition(".")
+        if (
+            prefix != "experts"
+            or not expert_key
+            or (expert_key.isdecimal() and not sep)
+        ):
+            return {}
+        if expert_key.isdecimal():
+            mapping_by_expert.setdefault(expert_key, []).append(entry)
+    return mapping_by_expert
+
+
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
@@ -889,35 +911,22 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
-        # Group entries by the logical expert ID in the checkpoint name to avoid
-        # scanning all experts for each tensor. Preserve entry order and all
-        # physical destinations, including EPLB replicas. Fused tensors and
-        # names that cannot be indexed safely still use the full scan.
-        mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
-        for entry in expert_mapping:
-            prefix, _, suffix = entry[1].partition(".")
-            expert_key, sep, _ = suffix.partition(".")
-            if (
-                prefix != "experts"
-                or not expert_key
-                or (expert_key.isdecimal() and not sep)
-            ):
-                mapping_by_expert.clear()
-                break
-            if expert_key.isdecimal():
-                mapping_by_expert.setdefault(expert_key, []).append(entry)
+        mapping_by_expert = _index_expert_mapping(expert_mapping)
+
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
-            # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
-            mapping = expert_mapping
+            # Fused tensors and ambiguous names keep the full mapping.
+            candidates = expert_mapping
             if not is_fused and qual_name.count("experts.") == 1:
                 expert_key = qual_name.partition("experts.")[2].partition(".")[0]
-                mapping = mapping_by_expert.get(expert_key, expert_mapping)
+                candidates = mapping_by_expert.get(expert_key, expert_mapping)
+
             matched = False
-            for param_name, weight_name, expert_id, shard_id in mapping:
+            for param_name, weight_name, expert_id, shard_id in candidates:
                 if weight_name not in qual_name:
                     if matched and is_fused:
+                        # Fused tensors use the first contiguous run of matches.
                         break
                     continue
                 matched = True
