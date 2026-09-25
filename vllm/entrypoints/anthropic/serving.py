@@ -51,6 +51,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
-        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        self._merge_inline_system = self._should_merge_inline_system(online_renderer)
         # Resolved lazily from the renderer when "auto".
         self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
@@ -192,6 +193,28 @@ class AnthropicServingMessages(OpenAIServingChat):
         _, (engine_input,) = result
         components = self._extract_prompt_components(engine_input)
         return components.token_ids, components.text
+
+    @classmethod
+    def _should_merge_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
+        """Probe the chat templates the renderer applies, not the CLI override.
+
+        Both the tool and non-tool templates are checked since they may differ.
+        """
+        renderer = online_renderer.renderer
+        tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
+        if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
+            return cls._detect_merge_inline_system(online_renderer.chat_template)
+        return any(
+            cls._detect_merge_inline_system(
+                resolve_chat_template(
+                    renderer.tokenizer,
+                    online_renderer.chat_template,
+                    tools,
+                    model_config=online_renderer.model_config,
+                )
+            )
+            for tools in tool_variants
+        )
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
