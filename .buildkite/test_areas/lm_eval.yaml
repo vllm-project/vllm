@@ -307,6 +307,7 @@ steps:
       - csrc/
       - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-AITER-TP4.yaml
       - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-AITER-TEP4.yaml
+      - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-FP8-TP4-ROCm.yaml
       - tests/evals/gsm8k/configs/models-spec-decode-rocm.txt
       - tests/evals/gsm8k/test_gsm8k_correctness.py
       - tests/evals/gsm8k/gsm8k_eval.py
@@ -571,7 +572,7 @@ steps:
 - label: ":nvidia: (H100) LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-h100-act
   optional: true
-  timeout_in_minutes: 70
+  timeout_in_minutes: 90
   device: h100
   num_devices: 1
   source_file_dependencies:
@@ -582,7 +583,7 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
-  # - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
 - label: ":nvidia: (H100) LM Eval Humming DeepEP TEMPORARY"
   key: lm-eval-humming-h100-deepep
@@ -766,6 +767,34 @@ steps:
   - vllm/v1/attention/ops/triton_turboquant_store.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval TurboQuant t3nc"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 30
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/model_executor/layers/quantization/turboquant/
+      - vllm/v1/attention/backends/turboquant_attn.py
+      - vllm/v1/attention/backends/triton_attn.py
+      - vllm/v1/attention/ops/triton_unified_attention.py
+      - vllm/v1/attention/selector.py
+      - vllm/v1/attention/ops/triton_turboquant_decode.py
+      - vllm/v1/attention/ops/triton_turboquant_store.py
+      - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+      - vllm/v1/attention/ops/flydsl_kernels/
+      - vllm/v1/attention/ops/turboquant_soa/
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
 - label: ":nvidia: (H100) GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
