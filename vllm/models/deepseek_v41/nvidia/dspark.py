@@ -179,8 +179,8 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
-        from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        from the SAME projected target hidden ``main_x``, via its ``wkv`` shard of
+        ``context_wkv_proj`` + ``kv_norm`` + RoPE + quant, then writes it at the
         layer's context slots.
 
         ``context_slot_mappings`` is a per-layer list (each entry is the context
@@ -189,19 +189,15 @@ class DSparkDeepseekV4Model(nn.Module):
         runs the projection to reserve workspace but writes nothing (profiling).
         """
         all_kv = self.context_wkv_proj(main_x).view(
-            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
+            -1, self.num_dspark_layers, self.config.head_dim
         )
-        for i, (layer, kv) in enumerate(
-            zip(self.layers, all_kv.unbind(1), strict=True)
+        slot_mappings = context_slot_mappings or [None] * self.num_dspark_layers
+        for layer, kv, slot_mapping in zip(
+            self.layers, all_kv.unbind(1), slot_mappings
         ):
-            slot_mapping = (
-                None if context_slot_mappings is None else context_slot_mappings[i]
-            )
-            attn = layer.attn
-            kv = attn.kv_norm(kv)
-            if slot_mapping is None:
-                continue
-            _insert_context_kv(attn, kv, context_positions, slot_mapping)
+            kv = layer.attn.kv_norm(kv)
+            if slot_mapping is not None:
+                _insert_context_kv(layer.attn, kv, context_positions, slot_mapping)
 
     def forward(
         self,
@@ -409,6 +405,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             ("attn.fused_wqa_wkv", "attn.wq_a", 0),
             ("attn.fused_wqa_wkv", "attn.wkv", 1),
         ]
+        # Each draft layer's wkv is also a shard of the stacked context_wkv_proj.
+        context_wkv_shards = {
+            f"model.layers.{i}.attn.wkv": i for i in range(len(self.model.layers))
+        }
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -468,11 +468,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                         break
                 continue
 
-            match = re.fullmatch(r"model\.layers\.(\d+)\.attn\.wkv\.(.+)", name)
-            if match is not None:
-                context_name = f"model.context_wkv_proj.{match.group(2)}"
+            module, _, param_suffix = name.rpartition(".")
+            if (context_shard := context_wkv_shards.get(module)) is not None:
+                context_name = f"model.context_wkv_proj.{param_suffix}"
                 param = params_dict[context_name]
-                param.weight_loader(param, loaded_weight, int(match.group(1)))
+                param.weight_loader(param, loaded_weight, context_shard)
                 loaded_params.add(context_name)
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params
