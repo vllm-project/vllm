@@ -244,6 +244,13 @@ WeightTransferEngineFactory.register_engine(
 )
 
 
+WeightTransferEngineFactory.register_engine(
+    "modelexpress",
+    "vllm.distributed.weight_transfer.modelexpress_engine",
+    "ModelExpressWeightTransferEngine",
+)
+
+
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
     "nccl",
