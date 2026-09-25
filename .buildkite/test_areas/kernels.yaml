@@ -157,6 +157,20 @@ steps:
   - tests/kernels/
   commands:
     - pytest -v -s kernels/test_mhc_kernels.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) mHC Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/
+      - tests/kernels/
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) FLA Ops Kernels"
   key: kernels-fla-ops-test-b200
@@ -173,6 +187,20 @@ steps:
         kernels/test_fused_gdn_post_conv.py
         kernels/test_fused_recurrent_packed_decode.py
         kernels/test_fused_sigmoid_gating_delta_rule.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) FLA Ops Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/
+      - tests/kernels/
+      - vllm/platforms/rocm.py
 
 # Test files at the tests/kernels root that have no dedicated job, listed
 # explicitly. Files with dedicated jobs elsewhere are not listed; the test
@@ -218,6 +246,52 @@ steps:
         kernels/turboquant
     # BROKEN on main, pending kernel fixes (B200), so not listed above:
     #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
+  mirror:
+    amd:
+      label: ":amd: (MI355) Miscellaneous Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/
+      - tests/kernels/
+      - vllm/platforms/rocm.py
+      # Keep the ROCm exclusions from #50519: incompatible FlyDSL TurboQuant
+      # and a CUDA source check whose files are absent from the AMD test image.
+      commands:
+      - pytest -v -s
+          kernels/test_apply_repetition_penalties.py
+          kernels/test_awq_int4_to_int8.py
+          kernels/test_bf16_skinny_gemm.py
+          kernels/test_cache_kernels.py
+          kernels/test_compressor_kv_cache.py
+          kernels/test_cp_gather_fp8.py
+          kernels/test_deepseek_v4_cpu_kernels.py
+          kernels/test_dsv41_mega_attn_layouts.py
+          kernels/test_engram.py
+          kernels/test_flashinfer_bf16_gemm.py
+          kernels/test_flex_attention.py
+          kernels/test_fp32_router_gemm.py
+          kernels/test_fused_deepseek_v32_norm_rope.py
+          kernels/test_fused_indexer_q_rope_quant.py
+          kernels/test_fused_inv_rope_fp8_quant.py
+          kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+          kernels/test_fused_quant_activation.py
+          kernels/test_gate_linear_rocm_dispatch.py
+          kernels/test_gemm_rs_ar.py
+          kernels/test_kpool_decode_update_batched.py
+          kernels/test_mhc_jit_warmup.py
+          kernels/test_mhc_tilelang_jit.py
+          kernels/test_minimax_m3_amd_ops.py
+          kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+          kernels/test_onednn.py
+          kernels/test_relu2_fp8_quant.py
+          kernels/test_rocm_fp32_router_gemm.py
+          --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
