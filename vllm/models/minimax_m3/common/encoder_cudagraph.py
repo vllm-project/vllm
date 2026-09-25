@@ -4,11 +4,10 @@
 
 Mixin implementing the SupportsEncoderCudaGraph protocol for any host class
 that holds the vision tower as ``self.vision_tower`` (a
-``MiniMaxVLVisionModel``). Image-only (t == 1): video items fall back to
-eager via an output-token sentinel in ``get_encoder_cudagraph_item_specs``.
+``MiniMaxVLVisionModel``). The manager routes image items through this mixin;
+video items use the eager encoder path.
 """
 
-import math
 from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +17,7 @@ from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.multimodal import MultiModalConfig
     from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -31,6 +31,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     """SupportsEncoderCudaGraph for hosts with ``self.vision_tower``."""
 
     vision_tower: "MiniMaxVLVisionModel"
+    multimodal_config: "MultiModalConfig | None"
 
     @property
     def _encoder_cudagraph_pad_totals(self) -> dict[int, int]:
@@ -44,6 +45,15 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        if (
+            self.multimodal_config is not None
+            and self.multimodal_config.get_limit_per_prompt("image") == 0
+        ):
+            raise ValueError(
+                "cudagraph_mm_encoder requires the MiniMax M3 vision tower, "
+                "but the image limit is 0. Disable cudagraph_mm_encoder."
+            )
 
         # FlashInfer reads max_seqlen on the host and TORCH_SDPA calls
         # .tolist() on CUDA cu_seqlens; neither can be captured (same
@@ -66,9 +76,11 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             # with one trailing padding sequence; declaring fewer rows than the
             # buffer holds is undefined behaviour and returns NaN on FlashAttn.
             total = pad_totals.get(dst.data_ptr())
-            n = min(src.shape[0], dst.shape[0])
+            if total is None:
+                raise RuntimeError("cu_seqlens replay buffer was not registered")
+            n = src.shape[0]
             dst[:n].copy_(src[:n])
-            dst[n:] = total if total is not None else src[-1]
+            dst[n:] = total
 
         def pad_rope_planes(dst: torch.Tensor, src: torch.Tensor) -> None:
             # cos/sin planes are (3, N, half_rot_dim): the row axis is dim 1,
@@ -84,7 +96,6 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "rotary_sin",
                 "cu_seqlens",
                 "max_seqlen",
-                "sequence_lengths",
             ],
             out_hidden_size=self.vision_tower.out_hidden_size,
             padding_logics={
@@ -125,20 +136,13 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         merge = self.vision_tower.spatial_merge_size
-        specs = []
-        for t, h, w in self._get_grid_thw_list(mm_kwargs):
-            if t != 1:
-                # Video chunks are not captured; the sentinel output-token
-                # count exceeds every budget, forcing the eager fallback.
-                specs.append(EncoderItemSpec(input_size=t * h * w, output_tokens=2**30))
-            else:
-                specs.append(
-                    EncoderItemSpec(
-                        input_size=t * h * w,
-                        output_tokens=t * h * w // (merge * merge),
-                    )
-                )
-        return specs
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * h * w // (merge * merge),
+            )
+            for t, h, w in self._get_grid_thw_list(mm_kwargs)
+        ]
 
     def select_encoder_cudagraph_items(
         self, mm_kwargs: dict[str, Any], indices: list[int]
@@ -189,12 +193,9 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         merge = self.vision_tower.spatial_merge_size
         # Output tokens per item in the dummy grid (ceiling so total >= budget).
         per_item_out = (token_budget + max_batch_size - 1) // max_batch_size
-        # Positions are computed arithmetically by the rope setup kernel, so
-        # there is no precomputed-grid capacity limit; shape the dummy items
-        # near-square.
-        wo = math.isqrt(per_item_out - 1) + 1
-        ho = (per_item_out + wo - 1) // wo
-        grid_thw_list = [[1, ho * merge, wo * merge] for _ in range(max_batch_size)]
+        grid_thw_list = [
+            [1, merge, per_item_out * merge] for _ in range(max_batch_size)
+        ]
 
         embeddings = self.vision_tower.vision_model.embeddings
         patch_dim = (
@@ -212,15 +213,13 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             dtype=self.vision_tower.dtype,
         )
 
-        # max_seqlen must cover the worst case: one item consuming the full
-        # budget, i.e. token_budget * merge² patches. max_batch_size + 1 leaves
-        # a spare cu_seqlens slot so replay can append a padding sequence
-        # covering rows the real batch does not fill.
+        # The padding sequence can contain nearly all captured rows when a
+        # small image replays this graph. Leave one spare cu_seqlens slot.
         metadata = self.vision_tower.vision_model.prepare_encoder_metadata(
             grid_thw_list,
             device=device,
             max_batch_size=max_batch_size + 1,
-            max_seqlen_override=token_budget * merge * merge,
+            max_seqlen_override=total_patches,
         )
 
         values: dict[str, torch.Tensor] = {"pixel_values": dummy_pixel_values}
@@ -248,6 +247,9 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             self._get_grid_thw_list(mm_kwargs),
             device=pixel_values.device,
         )
+        # FlashAttention reads this CPU scalar during capture, so the captured
+        # launch must retain the bound for the padded buffer.
+        metadata.pop("max_seqlen")
 
         values: dict[str, torch.Tensor | None] = {"pixel_values": pixel_values}
         values.update(metadata)
@@ -259,8 +261,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         path: str = "default",
     ) -> torch.Tensor:
         pixel_values = inputs.pop("pixel_values")
-        # Remaining keys (rotary_cos, rotary_sin, cu_seqlens, max_seqlen,
-        # sequence_lengths) are consumed as encoder_metadata.
+        # Remaining keys are consumed as encoder_metadata.
         return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=inputs)
 
     def encoder_eager_forward(
