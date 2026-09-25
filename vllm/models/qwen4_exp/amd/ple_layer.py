@@ -8,6 +8,7 @@ from collections.abc import Iterable, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
@@ -19,9 +20,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
