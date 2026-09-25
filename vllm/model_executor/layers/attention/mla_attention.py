@@ -2004,6 +2004,23 @@ def align_mla_chunked_context_workspace_size(
     return round_up(max(workspace_size, alignment), alignment)
 
 
+def shift_block_table_to_starts(
+    block_table: torch.Tensor, starts: torch.Tensor, block_size: int
+) -> torch.Tensor:
+    """Advance each request's block-table row to its context start.
+
+    For gather kernels that have no ``seq_starts`` argument. Every start must be
+    a multiple of ``block_size``, which holds for chunked-context starts because
+    ``build_mla_chunked_context_metadata`` aligns chunks to blocks on CUDA.
+    """
+    num_cols = block_table.shape[1]
+    cols = torch.arange(num_cols, device=block_table.device, dtype=torch.int64)
+    first_block = (starts // block_size).to(torch.int64).unsqueeze(1)
+    # Columns past a row's last block only feed tokens the gather never reads.
+    idx = (cols.unsqueeze(0) + first_block).clamp_(max=num_cols - 1)
+    return torch.gather(block_table, 1, idx)
+
+
 def build_mla_chunked_context_metadata(
     *,
     context_lens_cpu: torch.Tensor,
@@ -2422,7 +2439,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
-        use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        # Packed DS-MLA caches are upconverted into a BF16 workspace.
+        use_packed_ds_mla_cache = vllm_config.cache_config.cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        )
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
@@ -2437,7 +2458,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
                 dtype=torch.bfloat16
-                if use_packed_fp8_cache
+                if use_packed_ds_mla_cache
                 else self.model_config.dtype,
                 device=device,
             )
@@ -2453,7 +2474,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size,
                     self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
-                dtype=torch.bfloat16 if use_packed_fp8_cache else self.q_data_type,
+                dtype=torch.bfloat16 if use_packed_ds_mla_cache else self.q_data_type,
                 device=device,
             )
 
@@ -2943,6 +2964,20 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
+            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+                # The NVFP4 gather always reads from a request's first token, so
+                # a continuation chunk advances its block-table row instead.
+                if chunk.is_continuation:
+                    chunk_block_table = shift_block_table_to_starts(
+                        chunk_block_table, chunk.starts, kv_c_and_k_pe_cache.shape[1]
+                    )
+                ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=chunk_block_table,
+                    workspace_starts=chunk.cu_seq_lens,
+                    batch_size=chunk.num_requests,
+                )
             elif current_platform.is_cpu():
                 assert not is_quantized_kv_cache(self.kv_cache_dtype), (
                     "CPU MLA context gather fallback only supports "
@@ -3031,6 +3066,11 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
+        if self.kv_cache_dtype == "nvfp4_ds_mla":
+            raise NotImplementedError(
+                "nvfp4_ds_mla prefill context is not supported with decode "
+                "context parallelism"
+            )
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
