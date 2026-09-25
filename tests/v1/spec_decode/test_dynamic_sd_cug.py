@@ -426,3 +426,50 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
             assert desc.num_active_loras == 0
+
+
+def test_dynamic_sd_draft_decode_query_len_skips_expansion(monkeypatch):
+    """Draft-decode (decode_query_len=1) must not expand dynamic-SD tiers.
+
+    SpeculatorCudaGraphManager builds the draft-decode manager with
+    decode_query_len=1. Expanding schedule tiers via
+    ``decode_query_len - num_speculative_tokens`` yields non-positive lengths
+    and ZeroDivisionError in round_up (see
+    https://github.com/vllm-project/vllm/issues/58692). Keep lens {1}.
+    Target-model capture (decode_query_len = k + 1) is covered by other tests.
+    """
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+
+    # Schedule from the issue repro: lower k tiers than max speculative tokens.
+    schedule = [(1, 4, 4), (5, 8, 3), (9, 12, 2), (13, 16, 1)]
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=16,
+        max_spec_tokens=4,
+        cudagraph_mode="FULL_DECODE_ONLY",
+        use_dynamic_sd=True,
+        num_spec_per_batch_size=schedule,
+    )
+
+    # Must not raise ZeroDivisionError during candidate init.
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        decode_query_len=1,
+    )
+
+    full_query_lens = {
+        desc.uniform_token_count
+        for desc in manager._capture_descs.get(CUDAGraphMode.FULL, [])
+        if desc.uniform_token_count is not None
+    }
+    assert full_query_lens == {1}
