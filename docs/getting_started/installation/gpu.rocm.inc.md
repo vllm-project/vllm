@@ -40,11 +40,16 @@ If you need a different ROCm version or want to use an existing PyTorch installa
     source .venv/bin/activate
     ```
 
-To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+To install the latest version of vLLM for Python 3.12, ROCm 10.0 and `glibc >= 2.35`, pick the extra for your GPU, e.g. `gfx942` for MI300 or `gfx950` for MI350:
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
+uv pip install "vllm[device-gfx942]" --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
 ```
+
+!!! tip
+    The ROCm 10.0 wheels install the ROCm SDK from pip ([TheRock](https://github.com/ROCm/TheRock)), and the `device-<gfx>` extra adds the GPU kernels for that architecture (`device-all` installs every supported one). To find your GPU's target, run `uvx --from rocm-bootstrap rocm-bootstrap-detect --unique`.
+
+    Wheels for the legacy ROCm 7.2 stack, which use a system ROCm installation, remain available at `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/rocm723`.
 
 !!! tip
     You can find out about which ROCm version the latest vLLM supports by checking the `vllm` package in index in extra-index-url <https://wheels.vllm.ai/rocm/> at [https://wheels.vllm.ai/rocm/vllm](https://wheels.vllm.ai/rocm/vllm) .
@@ -99,6 +104,7 @@ export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | \
 # inspect if the ROCm version is compatible with your environment
 echo $VLLM_ROCM_VARIANT
 
+# for the ROCm 10.0 variant (rocm100), add the extra for your GPU, e.g. "vllm[device-gfx942]"
 uv pip install --pre vllm \
     --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} \
     --index-strategy unsafe-best-match

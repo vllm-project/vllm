@@ -7,18 +7,29 @@
 # Required environment variables:
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or IAM role)
 #   S3_BUCKET (default: vllm-wheels)
+# Optional:
+#   ROCM_WHEEL_DIRS      - local wheel dirs to upload
+#                          (default: artifacts/rocm-base-wheels artifacts/rocm-vllm-wheel)
+#   ROCM_WHEEL_SUBDIR    - store wheels under rocm/{commit}/<subdir>/ instead of
+#                          rocm/{commit}/, so several ROCm stacks can share a commit
+#   ROCM_EXTERNAL_LINKS  - file of absolute URLs to list in the index without hosting
 #
 # S3 path structure:
-#   s3://vllm-wheels/rocm/{commit}/     - All wheels for this commit
-#   s3://vllm-wheels/rocm/nightly/      - Index pointing to latest nightly
-#   s3://vllm-wheels/rocm/{version}/    - Index for release versions
+#   s3://vllm-wheels/rocm/{commit}/[<subdir>/]  - All wheels for this commit
+#   s3://vllm-wheels/rocm/{commit}/<variant>/   - Index per ROCm variant (e.g. rocm100)
+#   s3://vllm-wheels/rocm/nightly/<variant>/    - Index pointing to latest nightly
+#   s3://vllm-wheels/rocm/{version}/<variant>/  - Index for release versions
+# The top-level index.html at each prefix lists every variant present, since
+# several ROCm stacks publish into the same prefixes.
 
 set -ex
 
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
-S3_COMMIT_PREFIX="s3://$BUCKET/$ROCM_SUBPATH/"
+WHEEL_DIRS="${ROCM_WHEEL_DIRS:-artifacts/rocm-base-wheels artifacts/rocm-vllm-wheel}"
+WHEEL_SUBPATH="$ROCM_SUBPATH${ROCM_WHEEL_SUBDIR:+/$ROCM_WHEEL_SUBDIR}"
+S3_WHEEL_PREFIX="s3://$BUCKET/$WHEEL_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
 
 echo "========================================"
@@ -49,9 +60,11 @@ source .buildkite/scripts/lib/manylinux.sh
 # ======== Part 1: Collect and prepare wheels ========
 
 # Collect all wheels
+rm -rf all-rocm-wheels "$INDICES_OUTPUT_DIR"
 mkdir -p all-rocm-wheels
-cp artifacts/rocm-base-wheels/*.whl all-rocm-wheels/ 2>/dev/null || true
-cp artifacts/rocm-vllm-wheel/*.whl all-rocm-wheels/ 2>/dev/null || true
+for dir in $WHEEL_DIRS; do
+    cp "$dir"/*.whl all-rocm-wheels/ 2>/dev/null || true
+done
 
 WHEEL_COUNT=$(find all-rocm-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
 echo "Total wheels to upload: $WHEEL_COUNT"
@@ -84,9 +97,9 @@ ls -lh all-rocm-wheels/
 # ======== Part 2: Upload wheels to S3 ========
 
 echo ""
-echo "Uploading wheels to $S3_COMMIT_PREFIX"
+echo "Uploading wheels to $S3_WHEEL_PREFIX"
 for wheel in all-rocm-wheels/*.whl; do
-    aws s3 cp "$wheel" "$S3_COMMIT_PREFIX"
+    aws s3 cp "$wheel" "$S3_WHEEL_PREFIX"
 done
 
 # ======== Part 3: Generate and upload indices ========
@@ -95,7 +108,7 @@ done
 echo ""
 echo "Generating indices..."
 obj_json="rocm-objects.json"
-aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$ROCM_SUBPATH/" --delimiter / --output json > "$obj_json"
+aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$WHEEL_SUBPATH/" --delimiter / --output json > "$obj_json"
 
 mkdir -p "$INDICES_OUTPUT_DIR"
 
@@ -103,20 +116,48 @@ mkdir -p "$INDICES_OUTPUT_DIR"
 # HACK: Replace regex module with stdlib re (same as CUDA script)
 sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
 
+INDEX_ARGS=(--version "$ROCM_SUBPATH" --wheel-dir "${WHEEL_SUBPATH#rocm/}")
+if [[ -n "${ROCM_EXTERNAL_LINKS:-}" ]]; then
+    INDEX_ARGS+=(--external-links "$ROCM_EXTERNAL_LINKS")
+fi
 $PYTHON .buildkite/scripts/generate-nightly-index.py \
-    --version "$ROCM_SUBPATH" \
+    "${INDEX_ARGS[@]}" \
     --current-objects "$obj_json" \
     --output-dir "$INDICES_OUTPUT_DIR" \
     --comment "ROCm commit $BUILDKITE_COMMIT"
 
-# Upload indices to commit directory
-echo "Uploading indices to $S3_COMMIT_PREFIX"
-aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
+# Upload this build's variant indices under an S3 prefix (e.g. rocm/nightly), then
+# rebuild that prefix's top-level project list from every variant now present.
+publish_indices() {
+    local prefix="$1"
+    local listing variants merged
+    echo "Uploading indices to s3://$BUCKET/$prefix/"
+    aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$prefix/" --exclude "index.html"
+    listing=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$prefix/" \
+        --delimiter / --query 'CommonPrefixes[].Prefix' --output text)
+    variants=$(tr '\t' '\n' <<< "$listing" | sed -n "s|^$prefix/\(rocm[0-9]*\)/$|\1|p" | sort -u)
+    merged=$(mktemp)
+    {
+        echo '<!DOCTYPE html>'
+        echo '<html>'
+        echo '  <meta name="pypi:repository-version" content="1.0">'
+        echo '  <body>'
+        for variant in $variants; do
+            echo "    <a href=\"$variant/\">$variant/</a><br/>"
+        done
+        echo '  </body>'
+        echo '</html>'
+    } > "$merged"
+    echo "Variants under $prefix/: $(echo "$variants" | tr '\n' ' ')"
+    aws s3 cp "$merged" "s3://$BUCKET/$prefix/index.html"
+    rm -f "$merged"
+}
+
+publish_indices "$ROCM_SUBPATH"
 
 # Only scheduled nightly builds should update the moving nightly index.
 if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    echo "Updating rocm/nightly/ index..."
-    aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/rocm/nightly/"
+    publish_indices "rocm/nightly"
 fi
 
 # Extract version from vLLM wheel and update version-specific index
@@ -129,8 +170,7 @@ if [ -n "$VLLM_WHEEL" ]; then
     echo "Pure version: $PURE_VERSION"
 
     if [[ "$VERSION" != *"dev"* ]]; then
-        echo "Updating rocm/$PURE_VERSION/ index..."
-        aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/rocm/$PURE_VERSION/"
+        publish_indices "rocm/$PURE_VERSION"
     fi
 fi
 
@@ -142,7 +182,7 @@ echo "ROCm Wheel Upload Complete!"
 echo "========================================"
 echo ""
 echo "Wheels available at:"
-echo "  s3://$BUCKET/$ROCM_SUBPATH/"
+echo "  s3://$BUCKET/$WHEEL_SUBPATH/"
 echo ""
 echo "Install command (by commit):"
 echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/$ROCM_SUBPATH/"
