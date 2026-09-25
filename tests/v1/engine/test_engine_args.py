@@ -132,6 +132,26 @@ def test_prefix_cache_retention_interval_hybrid_eagle_uses_block_size(monkeypatc
     )
 
 
+def test_prefix_cache_retention_interval_hybrid_eagle_skips_one_block(monkeypatch):
+    """k=1 is dense in reachable_block_mask; leave the unset interval as 0."""
+    import vllm.config.cache as cache_mod
+    from vllm.config.cache import (
+        CacheConfig,
+        maybe_apply_hybrid_eagle_retention_default,
+    )
+
+    monkeypatch.setattr(cache_mod, "HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS", 1)
+    cache_config = CacheConfig(block_size=16, prefix_cache_retention_interval=0)
+    cache_config._prefix_cache_retention_interval_unset = True
+    maybe_apply_hybrid_eagle_retention_default(
+        cache_config, is_hybrid=True, use_eagle=True
+    )
+    interval = cache_config.prefix_cache_retention_interval
+    assert interval == 0
+    assert not (interval is not None and 0 < interval <= cache_config.block_size)
+    assert cache_config._prefix_cache_retention_interval_unset
+
+
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
 def test_prefix_caching_xxhash_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
