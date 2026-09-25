@@ -148,11 +148,8 @@ class MiniMaxM3MTP(nn.Module):
         super().__init__()
 
         if vllm_config.use_v2_model_runner and get_pp_group().world_size > 1:
-            # Sharded loaders require a complete state, including embeddings.
-            self.has_own_embed_tokens = vllm_config.load_config.load_format in (
-                "sharded_state",
-                "runai_streamer_sharded",
-            )
+            # Preserve embeddings from loaders that bypass load_weights.
+            self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"
 
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -323,9 +320,10 @@ class MiniMaxM3MTP(nn.Module):
                     f"Failed to load MTP layer {layer_idx} weights from checkpoint."
                 )
 
-        if (
-            hasattr(self, "has_own_embed_tokens")
-            and "model.embed_tokens.weight" in loaded_params
-        ):
-            self.has_own_embed_tokens = True
+        if hasattr(self, "has_own_embed_tokens"):
+            if "model.embed_tokens.weight" in loaded_params:
+                self.has_own_embed_tokens = True
+            elif is_mtp_completeness_check_enabled():
+                # A complete checkpoint without embeddings borrows the target's.
+                self.has_own_embed_tokens = False
         return loaded_params
