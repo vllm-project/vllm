@@ -16,21 +16,26 @@ dirty flush-buffer lines. The same pattern extends to multi-GPU benchmarks
 Multi-GPU section of SKILL.md.
 """
 
+import statistics
+
 import pandas as pd
 import torch
 
 LLC_TARGET_BYTES = 400 * 1024**2  # above 256 MB MI355X LLC and B200 L2 (126 MB)
 INNER = 2  # repeat slots within one graph to amortize per-replay overhead
-REPLAYS = 10
+REPLAYS = 10  # replays per round: makes each measurement large vs overhead
+ROUNDS = 5  # median across rounds: replay time is not always stable
+WARMUP = 5  # warmup replays to reach steady clocks before timing
 MATMUL_CASES = [
     ("compute-bound", 4096, 4096, 4096),
     ("decode-GEMM", 16, 16384, 8192),
 ]
 
 
-def timeit_graph(calls, inner=INNER, replays=REPLAYS):
+def timeit_graph(calls, inner=INNER, replays=REPLAYS, rounds=ROUNDS):
     """Time a list of per-slot callables as one graph (zero launch overhead);
-    weights rotate across slots so they stay HBM-cold."""
+    weights rotate across slots so they stay HBM-cold. Returns the median over
+    rounds of per-round means, ms per call."""
     for c in calls:
         c()
     torch.accelerator.synchronize()
@@ -39,16 +44,19 @@ def timeit_graph(calls, inner=INNER, replays=REPLAYS):
         for i in range(len(calls) * inner):
             calls[i % len(calls)]()
     torch.accelerator.synchronize()
-    for _ in range(3):
+    events = [(torch.cuda.Event(True), torch.cuda.Event(True)) for _ in range(rounds)]
+    for _ in range(WARMUP):
         g.replay()
+    # No sync between warmup and the first round: queued replays keep the GPU
+    # busy, so each round's launch latency stays outside its event window.
+    for s, e in events:
+        s.record()
+        for _ in range(replays):
+            g.replay()
+        e.record()
     torch.accelerator.synchronize()
-    s, e = torch.cuda.Event(True), torch.cuda.Event(True)
-    s.record()
-    for _ in range(replays):
-        g.replay()
-    e.record()
-    torch.accelerator.synchronize()
-    return s.elapsed_time(e) / (replays * len(calls) * inner)  # ms per call
+    samples = [s.elapsed_time(e) / (replays * len(calls) * inner) for s, e in events]
+    return statistics.median(samples)  # ms per call
 
 
 def main() -> None:
