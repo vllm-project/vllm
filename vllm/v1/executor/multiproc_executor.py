@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import pickle
 import queue
+import socket
 import signal
 import threading
 import time
@@ -75,6 +76,133 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+class _PeerMonitor:
+    """Small executor-level liveness channel for multi-node MP executors."""
+
+    HEARTBEAT_INTERVAL = 1.0
+    HEARTBEAT_TIMEOUT = 3.0
+    CONNECT_RETRY_INTERVAL = 0.2
+
+    def __init__(self, executor: "MultiprocExecutor"):
+        self.executor_ref = weakref.ref(executor)
+        pc = executor.parallel_config
+        self.node_rank = pc.node_rank_within_dp
+        self.node_count = pc.nnodes_within_dp
+        self.host = pc.master_addr
+        self.port = pc.master_port + 1
+        self.stop_event = threading.Event()
+        self.thread: Thread | None = None
+        self.server: socket.socket | None = None
+        self.connections: list[socket.socket] = []
+        self.last_seen: dict[socket.socket, float] = {}
+
+    def start(self) -> None:
+        self.thread = Thread(target=self._run, daemon=True, name="MultiprocPeerMonitor")
+        self.thread.start()
+
+    def shutdown(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join(timeout=2)
+        for conn in [*self.connections, self.server]:
+            if conn is not None:
+                with suppress(OSError):
+                    conn.close()
+        self.connections.clear()
+
+    def _notify_failure(self, reason: str) -> None:
+        executor = self.executor_ref()
+        if executor is not None:
+            executor._handle_peer_failure(reason)
+
+    def _run(self) -> None:
+        try:
+            if self.node_rank == 0:
+                self._run_server()
+            else:
+                self._run_client()
+        except Exception:
+            logger.exception("Peer monitor stopped unexpectedly")
+            self._notify_failure("peer monitor failed")
+
+    def _run_server(self) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server = server
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("0.0.0.0", self.port))
+        server.listen(max(1, self.node_count - 1))
+        server.settimeout(0.2)
+        logger.info("Peer monitor listening on %s:%d", self.host, self.port)
+        connect_deadline = time.monotonic() + 15.0
+        while not self.stop_event.is_set():
+            try:
+                conn, _ = server.accept()
+                conn.settimeout(0.2)
+                self.connections.append(conn)
+                self.last_seen[conn] = time.monotonic()
+            except TimeoutError:
+                pass
+            if not self.connections and time.monotonic() >= connect_deadline:
+                self._notify_failure("peer monitor did not connect")
+                return
+            self._poll_connections()
+
+    def _run_client(self) -> None:
+        conn: socket.socket | None = None
+        connect_deadline = time.monotonic() + 15.0
+        while not self.stop_event.is_set() and conn is None:
+            try:
+                conn = socket.create_connection((self.host, self.port), timeout=0.5)
+                conn.settimeout(0.2)
+            except OSError:
+                if time.monotonic() >= connect_deadline:
+                    self._notify_failure("peer monitor connection failed")
+                    return
+                self.stop_event.wait(self.CONNECT_RETRY_INTERVAL)
+        if conn is None:
+            return
+        self.connections.append(conn)
+        self.last_seen[conn] = time.monotonic()
+        self._poll_connections()
+
+    def _poll_connections(self) -> None:
+        if not self.connections:
+            return
+        next_heartbeat = 0.0
+        executor = self.executor_ref()
+        sentinels = [] if executor is None else [h.proc.sentinel for h in executor.workers]
+        while not self.stop_event.is_set():
+            now = time.monotonic()
+            if sentinels and multiprocessing.connection.wait(sentinels, timeout=0):
+                self._notify_failure("local worker process died")
+                return
+            if now >= next_heartbeat:
+                for conn in list(self.connections):
+                    try:
+                        conn.sendall(b"H\n")
+                    except OSError:
+                        self.connections.remove(conn)
+                        self._notify_failure("peer monitor connection closed")
+                        continue
+                next_heartbeat = now + self.HEARTBEAT_INTERVAL
+            for conn in list(self.connections):
+                try:
+                    data = conn.recv(16)
+                    if not data:
+                        self.connections.remove(conn)
+                        self._notify_failure("peer monitor disconnected")
+                    else:
+                        self.last_seen[conn] = now
+                except socket.timeout:
+                    if now - self.last_seen.get(conn, now) > self.HEARTBEAT_TIMEOUT:
+                        self.connections.remove(conn)
+                        self._notify_failure("peer heartbeat timed out")
+                except OSError:
+                    self.connections.remove(conn)
+                    self._notify_failure("peer monitor read failed")
+            self.stop_event.wait(0.05)
+
+
 class FutureWrapper(Future):
     def __init__(
         self,
@@ -120,6 +248,10 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
+        self.workers_aborted = False
+        self.peer_failure_event = threading.Event()
+        self.peer_failure_info: str | None = None
+        self._peer_monitor: _PeerMonitor | None = None
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
@@ -248,6 +380,10 @@ class MultiprocExecutor(Executor):
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
 
+            if self.parallel_config.nnodes_within_dp > 1:
+                self._peer_monitor = _PeerMonitor(self)
+                self._peer_monitor.start()
+
             self.futures_queue = deque[FutureWrapper]()
 
             self._post_init_executor()
@@ -330,6 +466,19 @@ class MultiprocExecutor(Executor):
             return
 
         monitor_workers()
+
+    def _handle_peer_failure(self, reason: str) -> None:
+        if self.peer_failure_event.is_set() or getattr(self, "shutting_down", False):
+            return
+        self.peer_failure_info = reason
+        self.peer_failure_event.set()
+        self.is_failed = True
+        logger.error("Peer failure detected: %s", reason)
+        self._abort_workers_after_rpc_timeout()
+        callback = self.failure_callback
+        if callback is not None:
+            self.failure_callback = None
+            callback()
 
     def register_failure_callback(self, callback: FailureCallback):
         if self.is_failed:
@@ -426,13 +575,32 @@ class MultiprocExecutor(Executor):
         def get_response():
             responses = []
             for mq in response_mqs:
-                dequeue_timeout = (
-                    None if deadline is None else max(0.0, deadline - time.monotonic())
-                )
-                try:
-                    status, result = mq.dequeue(timeout=dequeue_timeout)
-                except TimeoutError as e:
-                    raise TimeoutError(f"RPC call to {method} timed out.") from e
+                while True:
+                    if self.peer_failure_event.is_set():
+                        self._abort_workers_after_rpc_timeout()
+                        raise RuntimeError(
+                            f"Peer failure interrupted RPC call to {method}: "
+                            f"{self.peer_failure_info}"
+                        )
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        # A timed-out collective can leave a worker blocked in a
+                        # device-side collective.  Abort the exact local worker
+                        # processes before the engine supervisor force-kills this
+                        # process, otherwise those workers can be reparented and
+                        # retain their CUDA contexts indefinitely.
+                        self._abort_workers_after_rpc_timeout()
+                        raise TimeoutError(f"RPC call to {method} timed out.")
+                    dequeue_timeout = (
+                        _PeerMonitor.HEARTBEAT_INTERVAL / 5
+                        if remaining is None
+                        else min(remaining, _PeerMonitor.HEARTBEAT_INTERVAL / 5)
+                    )
+                    try:
+                        status, result = mq.dequeue(timeout=dequeue_timeout)
+                        break
+                    except TimeoutError:
+                        continue
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
@@ -446,6 +614,26 @@ class MultiprocExecutor(Executor):
         )
 
         return future if non_block else future.result()
+
+    def _abort_workers_after_rpc_timeout(self) -> None:
+        if self.workers_aborted:
+            return
+        self.workers_aborted = True
+        workers = self.workers
+        logger.error(
+            "[shutdown] RPC timeout; terminating worker processes immediately "
+            "count=%d",
+            len(workers),
+        )
+        for worker in workers:
+            if worker.death_writer is not None:
+                with suppress(OSError):
+                    worker.death_writer.close()
+                worker.death_writer = None
+            proc = worker.proc
+            if proc.is_alive():
+                with suppress(OSError, ProcessLookupError):
+                    proc.kill()
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -508,6 +696,9 @@ class MultiprocExecutor(Executor):
                 worker_count,
             )
             self.shutting_down = True
+            if self._peer_monitor is not None:
+                self._peer_monitor.shutdown()
+                self._peer_monitor = None
 
             # Make sure all the worker processes are terminated first.
             if workers := getattr(self, "workers", None):
