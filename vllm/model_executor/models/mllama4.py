@@ -18,7 +18,6 @@
 # limitations under the License.
 import math
 from collections.abc import Hashable, Iterable, Mapping
-from itertools import tee
 from typing import Annotated, Any, Literal
 
 import torch
@@ -26,7 +25,7 @@ from torch import nn
 from transformers import BatchFeature, Llama4Config, Llama4VisionConfig
 from transformers.image_utils import SizeDict
 from transformers.models.llama4 import Llama4Processor
-from transformers.models.llama4.image_processing_llama4_fast import (
+from transformers.models.llama4.image_processing_llama4 import (
     find_supported_resolutions,
     get_best_fit,
 )
@@ -555,9 +554,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(Llama4Config)
 
     def get_hf_processor(self, **kwargs: object) -> Llama4Processor:
-        return self.ctx.get_hf_processor(
-            Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
-        )
+        return self.ctx.get_hf_processor(Llama4Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
@@ -1040,25 +1037,6 @@ class Llama4ForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def separate_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-        prefix: str,
-    ) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str, torch.Tensor]]]:
-        weights1, weights2 = tee(weights, 2)
-
-        def get_prefix_weights() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, data in weights1:
-                if name.startswith(prefix):
-                    yield (name, data)
-
-        def get_other_weights() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, data in weights2:
-                if not name.startswith(prefix):
-                    yield (name, data)
-
-        return get_prefix_weights(), get_other_weights()
 
     def _consolidate_qkv_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
