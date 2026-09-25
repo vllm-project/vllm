@@ -29,9 +29,8 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
   buffers whose total footprint exceeds the last-level cache (e.g. 256 MB on
   MI355X), so every call reads cold from HBM, timed with HIP events — see
   [benchmarks/graph_replay_benchmark.py](benchmarks/graph_replay_benchmark.py)
-  (platform-agnostic). `do_bench` inflates small/decode-size kernels with
-  per-rep launch/event overhead, and its default flush buffer is only as
-  large as the LLC, so eviction is marginal on a 256 MB LLC.
+  (platform-agnostic). Prefer this over `do_bench`, whose per-rep
+  launch/event overhead inflates small/decode-size kernels.
 - For compute-heavy kernels, report TFLOPS with the FLOP formula in the
   benchmark. For memory-heavy kernels, report estimated bytes moved and GB/s.
   For mixed kernels, report the most honest metric available and call out the
