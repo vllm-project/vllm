@@ -1524,7 +1524,14 @@ def _get_kv_cache_groups_uniform_page_size(
     for layer_spec, layer_names in same_type_layers.items():
         for names, specs in zip(layer_buckets, spec_buckets):
             candidate = {str(i): spec for i, spec in enumerate([*specs, layer_spec])}
-            if _get_shared_block_table_spec(candidate) is None:
+            if (
+                _get_shared_block_table_spec(
+                    candidate,
+                    # Page sizes depend on TP; KV transfer peers may differ.
+                    share_by_page_size=vllm_config.kv_transfer_config is None,
+                )
+                is None
+            ):
                 continue
             names.extend(layer_names)
             specs.append(layer_spec)
@@ -1603,6 +1610,7 @@ def _get_kv_cache_groups_uniform_page_size(
 
 def _get_shared_block_table_spec(
     specs: dict[str, KVCacheSpec],
+    share_by_page_size: bool = True,
 ) -> KVCacheSpec | None:
     """The spec of a KV cache group holding these layers, or None if they
     cannot share a block table.
@@ -1617,6 +1625,8 @@ def _get_shared_block_table_spec(
         return type(values[0]).merge(values)
     except (AssertionError, ValueError):
         pass
+    if not share_by_page_size:
+        return None
     if not all(isinstance(spec, AttentionSpec) for spec in values):
         return None
     if len({spec.page_size_bytes for spec in values}) > 1:
