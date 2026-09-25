@@ -1779,7 +1779,7 @@ else
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
-    --shm-size=32gb \
+    --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
     "${coredump_flags[@]}" \
