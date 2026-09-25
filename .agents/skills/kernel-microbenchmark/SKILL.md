@@ -27,9 +27,11 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
   `from flashinfer.testing import bench_gpu_time_with_cupti`.
 - ROCm: CUPTI and FlashInfer do not exist. Use HIP graph replay over rotating
   buffers whose total footprint exceeds the last-level cache (e.g. 256 MB on
-  MI355X), so every call reads cold from HBM, timed with HIP events. `do_bench`-style
-  timing (~7 µs launch + ~4 µs L2-flush overhead per call) measures a hot
-  cache and flatters small/decode-size kernels.
+  MI355X), so every call reads cold from HBM, timed with HIP events — see
+  [benchmarks/graph_replay_benchmark.py](benchmarks/graph_replay_benchmark.py)
+  (platform-agnostic). `do_bench` inflates small/decode-size kernels with
+  per-rep launch/event overhead, and its default flush buffer is only as
+  large as the LLC, so eviction is marginal on a 256 MB LLC.
 - For compute-heavy kernels, report TFLOPS with the FLOP formula in the
   benchmark. For memory-heavy kernels, report estimated bytes moved and GB/s.
   For mixed kernels, report the most honest metric available and call out the
@@ -119,6 +121,10 @@ throughput conventions.
 
 - Use [benchmarks/cupti_microbenchmark.py](benchmarks/cupti_microbenchmark.py)
   as a minimal single-GPU FlashInfer CUPTI timing pattern.
+- Use
+  [benchmarks/graph_replay_benchmark.py](benchmarks/graph_replay_benchmark.py)
+  as a graph-replay timing pattern over rotating buffers sized past the
+  last-level cache — the ROCm/HIP default, also usable on CUDA.
 - Use
   [benchmarks/multi_gpu_gemm_rs.py](benchmarks/multi_gpu_gemm_rs.py) as a
   minimal distributed CUDA-graph timing pattern.
