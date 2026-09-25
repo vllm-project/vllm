@@ -40,6 +40,7 @@ from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
+from .logging import LoggingConfig
 from .lora import LoRAConfig
 from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
@@ -402,6 +403,8 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
+    logging_config: LoggingConfig = Field(default_factory=LoggingConfig)
+    """Logging configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
@@ -722,11 +725,23 @@ class VllmConfig:
         if model_config is not None and current_platform.is_rocm():
             architectures = getattr(model_config, "architectures", ())
             if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
+                # This default is a speed preference, not a claim that V1 can
+                # serve the config, so it yields where V1 cannot. It yields by
+                # falling through to the checks below, not by selecting V2.
+                v1_unsupported = self._get_v1_model_runner_unsupported_features()
+                if not v1_unsupported:
+                    logger.warning_once(
+                        "Defaulting to V1 model runner on ROCm for model "
+                        "architectures: %s",
+                        ", ".join(architectures),
+                    )
+                    return False
                 logger.warning_once(
-                    "Defaulting to V1 model runner on ROCm for model architectures: %s",
+                    "Skipping the ROCm V1 model runner default for %s: V1 does "
+                    "not support %s.",
                     ", ".join(architectures),
+                    ", ".join(v1_unsupported),
                 )
-                return False
 
         if not HAS_TRITON:
             logger.warning_once(
