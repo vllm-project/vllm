@@ -583,10 +583,18 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     assert 42 in loaded
 
 
-@pytest.mark.parametrize("recurrent_source", ["host", "p2p", None])
-def test_external_cache_hit_sources_preserve_partial_tail_origin(recurrent_source):
-    """Full-attention keys decide attribution; the recurrent group's tier
-    is not double counted, and the partial-tail key keeps its own origin."""
+@pytest.mark.parametrize(
+    ("recurrent_source", "expected"),
+    [
+        ("host", CachedTokensBySource(p2p=16, host=12)),
+        ("p2p", CachedTokensBySource(p2p=28)),
+        (None, CachedTokensBySource(p2p=16, host=12)),
+    ],
+)
+def test_external_cache_hit_sources_preserve_partial_tail_origin(
+    recurrent_source, expected
+):
+    """Recurrent state covers the whole prefix; the slowest tier wins."""
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
@@ -620,17 +628,22 @@ def test_external_cache_hit_sources_preserve_partial_tail_origin(recurrent_sourc
         num_external_tokens=28,
     )
     assert req_status.partial_tail_boundary is None
-    assert scheduler.get_external_cache_hit_sources(
-        request, 28
-    ) == CachedTokensBySource(p2p=16, host=12)
+    assert scheduler.get_external_cache_hit_sources(request, 28) == expected
 
 
-@pytest.mark.parametrize("second_source", ["host", "p2p"])
-def test_external_cache_hit_sources_use_one_full_attention_group(
+@pytest.mark.parametrize(
+    ("second_source", "expected"),
+    [
+        ("host", CachedTokensBySource(host=4, disk=4)),
+        ("p2p", CachedTokensBySource(p2p=4, disk=4)),
+    ],
+)
+def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     request_runner,
     second_source,
+    expected,
 ):
-    """Full-attention groups cover the same tokens; attribute through one."""
+    """Groups with different chunk sizes overlap; the slowest tier wins."""
     block_size = 4
     groups = [
         KVCacheGroupSpec(
@@ -675,9 +688,7 @@ def test_external_cache_hit_sources_use_one_full_attention_group(
         2 * block_size,
     )
 
-    assert scheduler.get_external_cache_hit_sources(
-        request, 2 * block_size
-    ) == CachedTokensBySource(host=block_size, disk=block_size)
+    assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == expected
 
 
 @pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
@@ -725,8 +736,8 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     full_attention,
     sparse_source,
 ):
-    """Skipped keys do not participate. Full-attention keys decide when
-    present; otherwise the sparse keys attribute the whole prefix."""
+    """Skipped keys do not participate. Sparse state covers the whole prefix,
+    so each token range reports the slowest of its sources."""
     block_size = 4
     chunk_size = block_size * blocks_per_chunk
     spec_kwargs = dict(
@@ -792,15 +803,18 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     scheduler.update_state_after_alloc(
         request, KVCacheBlocks(tuple(block_groups)), count
     )
+    rank = ["host", "p2p", "disk", "external_unspecified"]
+    sparse_tiers = ["host", "disk"] if sparse_source == "mixed" else [sparse_source]
+
+    def slowest(*tiers):
+        return max(tiers, key=rank.index)
+
     expected = CachedTokensBySource()
     if full_attention:
-        expected.add("host", 2 * chunk_size - local_tokens)
-        expected.add("disk", 2 * chunk_size)
+        expected.add(slowest("host", *sparse_tiers), 2 * chunk_size - local_tokens)
+        expected.add(slowest("disk", *sparse_tiers), 2 * chunk_size)
     else:
-        expected.add(
-            "external_unspecified" if sparse_source == "mixed" else sparse_source,
-            count,
-        )
+        expected.add(slowest(*sparse_tiers), count)
     result = scheduler.get_external_cache_hit_sources(request, count)
     assert result == expected
     assert result.total == count
