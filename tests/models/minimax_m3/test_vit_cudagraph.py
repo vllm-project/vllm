@@ -85,6 +85,7 @@ class _ViTOnlyModel(nn.Module, MiniMaxM3EncoderCudaGraphMixin):
     def __init__(self, device, dtype):
         super().__init__()
         self.multimodal_config = None
+        self._encoder_cg_pad_totals = {}
         with set_default_torch_dtype(dtype), set_current_vllm_config(VllmConfig()):
             self.vision_tower = MiniMaxVLVisionModel(
                 PreTrainedConfig.from_dict(_vision_config_dict()),

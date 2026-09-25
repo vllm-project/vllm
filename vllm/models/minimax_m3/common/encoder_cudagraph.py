@@ -32,15 +32,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     vision_tower: "MiniMaxVLVisionModel"
     multimodal_config: "MultiModalConfig | None"
-
-    @property
-    def _encoder_cudagraph_pad_totals(self) -> dict[int, int]:
-        """Row count of each captured buffer set, keyed by cu_seqlens ptr."""
-        totals = self.__dict__.get("_encoder_cg_pad_totals")
-        if totals is None:
-            totals = {}
-            self.__dict__["_encoder_cg_pad_totals"] = totals
-        return totals
+    _encoder_cg_pad_totals: dict[int, int]
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -67,7 +59,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "cudagraph_mm_encoder."
             )
 
-        pad_totals = self._encoder_cudagraph_pad_totals
+        pad_totals = self._encoder_cg_pad_totals
 
         def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
             # Varlen attention requires cu_seqlens[-1] to equal the number of
@@ -224,9 +216,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
         values: dict[str, torch.Tensor] = {"pixel_values": dummy_pixel_values}
         values.update({k: v for k, v in metadata.items() if v is not None})
-        self._encoder_cudagraph_pad_totals[values["cu_seqlens"].data_ptr()] = (
-            total_patches
-        )
+        self._encoder_cg_pad_totals[values["cu_seqlens"].data_ptr()] = total_patches
         return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
