@@ -1553,7 +1553,7 @@ def _get_kv_cache_groups_uniform_page_size(
     ]
     group_size = min(
         range(
-            min(max(min(bucket_sizes), min_group_layers), max(bucket_sizes)),
+            min(min_group_layers, max(bucket_sizes)),
             max(bucket_sizes) + 1,
         ),
         key=lambda size: (
