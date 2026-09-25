@@ -15,7 +15,11 @@ import torch
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.routed_experts import (
+    RoutedExperts,
+    _index_expert_mapping,
+    _match_expert_mapping,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -542,6 +546,76 @@ class TestLoadWeightsExpertBias:
         weights = [(expert_name, torch.zeros(self.NUM_EXPERTS, 1))]
         with pytest.raises(AttributeError, match=param_name.replace(".", r"\.")):
             list(RoutedExperts.load_weights(experts, weights))
+
+
+class TestMatchExpertMapping:
+    """`_match_expert_mapping` must yield exactly the entries the previous
+    substring scan in `load_weights` visited, in the same order."""
+
+    PREFIX = "model.layers.0.mlp.experts"
+
+    @staticmethod
+    def _scan(
+        mapping: list[tuple[str, str, int, str]], qual_name: str, is_fused: bool
+    ) -> list[tuple[str, str, int, str]]:
+        out: list[tuple[str, str, int, str]] = []
+        for entry in mapping:
+            if entry[1] not in qual_name:
+                if out and is_fused:
+                    break
+                continue
+            out.append(entry)
+        return out
+
+    @pytest.mark.parametrize(
+        "projs,num_redundant,lora_prefix",
+        [
+            (("gate_proj", "down_proj", "up_proj"), 0, ""),
+            (("gate_proj", "down_proj", "up_proj"), 4, ""),
+            (("gate_proj", "down_proj", "up_proj"), 0, "base_layer."),
+            (("w1", "w2", "w3"), 0, ""),
+        ],
+    )
+    def test_matches_substring_scan(self, projs, num_redundant, lora_prefix):
+        gate, down, up = projs
+        num_experts = 16
+        mapping = RoutedExperts.build_expert_params_mapping(
+            gate,
+            down,
+            up,
+            num_experts=num_experts,
+            num_redundant_experts=num_redundant,
+            routed_experts_prefix="",
+            lora_base_layer_prefix=lora_prefix,
+            include_fused=True,
+        )
+        index = _index_expert_mapping(mapping)
+        assert index is not None
+        fused_names = ("gate_up_proj", "w13", down)
+        names = [
+            f"{e}.{p}.{lora_prefix}{suffix}"
+            for e in (0, 1, 10, num_experts - 1)
+            for p in projs
+            for suffix in ("weight", "weight_scale", "input_scale")
+        ]
+        names += [f"{p}{s}" for p in fused_names for s in ("", ".weight")]
+        names += [f"3.{p}.weight" for p in fused_names]
+        names += ["experts.1.gate_proj.weight", "gate.weight"]
+        for name in names:
+            qual_name = f"{self.PREFIX}.{name}"
+            for is_fused in (False, True):
+                assert _match_expert_mapping(
+                    mapping, index, qual_name, is_fused
+                ) == self._scan(mapping, qual_name, is_fused), (name, is_fused)
+
+    def test_unindexable_mapping_falls_back_to_scan(self):
+        mapping = [
+            ("experts.w13_", "experts.0.gate_proj.", 0, "w1"),
+            ("experts.w13_", "mlp.experts.1.up_proj.", 1, "w3"),
+        ]
+        assert _index_expert_mapping(mapping) is None
+        qual_name = "model.layers.0.mlp.experts.1.up_proj.weight"
+        assert _match_expert_mapping(mapping, None, qual_name, False) == [mapping[1]]
 
 
 class TestPerTensorScaleCoercion:
