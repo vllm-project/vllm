@@ -2,6 +2,27 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (H200) Initialized Snapshot E2E"
+  key: initialized-snapshot-e2e
+  device: h200
+  num_devices: 1
+  no_plugin: true
+  optional: true
+  timeout_in_minutes: 60
+  working_dir: "."
+  env:
+    SNAPSHOT_E2E_RUN_LIMIT_S: "1200"
+    NVIDIA_VISIBLE_DEVICES: "0"
+  source_file_dependencies:
+  - .buildkite/scripts/initialized-snapshot-e2e.sh
+  - .buildkite/test_areas/entrypoints.yaml
+  - docker/Dockerfile
+  - tools/install_snapshot_runtime.sh
+  - vllm/entrypoints/cli/
+  - vllm/snapshot/
+  commands:
+  - bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT"
+
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests
@@ -21,9 +42,11 @@ steps:
       label: ":amd: (MI355) Entrypoints Unit"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 35
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
@@ -44,7 +67,7 @@ steps:
       label: ":amd: (MI300) Entrypoints Integration (LLM)"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 55
+      timeout_in_minutes: 90
       depends_on:
       - image-build-amd
 
@@ -73,9 +96,9 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server OpenAI - Part 1)"
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API completion)"
   device: h200_35gb
-  key: entrypoints-integration-api-server-openai-part-1
+  key: entrypoints-integration-api-server-openai-completion
   timeout_in_minutes: 68
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -84,19 +107,20 @@ steps:
   - tests/entrypoints/openai
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 1)"
+      label: ":amd: (MI300) Entrypoints Integration (OpenAI API completion)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server OpenAI - Part 2)"
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
   device: h200_35gb
-  key: entrypoints-integration-api-server-openai-part-2
+  key: entrypoints-integration-api-server-openai-chat_completion
   timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -106,10 +130,9 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 2)"
+      label: ":amd: (MI300) Entrypoints Integration (OpenAI API chat_completion)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 70
@@ -176,6 +199,15 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Speech to Text)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
@@ -210,6 +242,15 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Pooling)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 65
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) OpenAI API Correctness"
   key: openai-api-correctness

@@ -147,8 +147,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
 
 
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
@@ -759,8 +758,9 @@ def test_worker_setup_tolerates_finer_scratch_group():
     worker.pp_size = 1
     worker.num_kv_head = 8
     assert worker.coord.enable_partial_hash_hits
-    # The scratch DB is keyed at its own block size and never probed.
-    assert worker.token_dbs[2].hash_block_size == 4
+    # Only the participating full-attention and Mamba groups are registered.
+    assert len(worker.token_dbs) == 2
+    assert all(db.hash_block_size == 8 for db in worker.token_dbs)
 
     for g_idx, db in enumerate(worker.token_dbs):
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -772,11 +772,11 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_size=worker.block_size,
         coord=worker.coord,
         tp_rank=0,
-        group_put_steps=[1, 1, 1],
+        group_put_steps=[1, 1],
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
-        group_participates=[True, True, False],
+        group_participates=[True, True],
     )
 
     # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
@@ -784,7 +784,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
     req = ReqMeta(
         req_id="r0",
         token_len_chunk=0,
-        block_ids=([1], [2], [3]),
+        block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
@@ -797,8 +797,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
     # A 13-token prompt sharing the prefix must hit the first hash unit.
     assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
     # The scratch group's namespace never enters the store.
-    scratch_prefix = worker.token_dbs[2].key_for(hs[0]).rsplit("@", 1)[0]
-    assert not any(key.startswith(scratch_prefix) for key in store._data)
+    assert not any("@group:2" in key for key in store._data)
 
 
 def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
@@ -838,7 +837,8 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
     worker.tp_size = 1
     worker.pp_size = 1
     worker.num_kv_head = 8
-    assert worker.token_dbs[1].hash_block_size == 8
+    assert len(worker.token_dbs) == 1
+    assert worker.token_dbs[0].hash_block_size == 16
 
     raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
     raw_ring = torch.zeros(4 * ring.page_size_bytes, dtype=torch.int8)
@@ -879,14 +879,14 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
         kv_role=worker.kv_role,
         ready_event=threading.Event(),
         enable_kv_event=False,
-        group_participates=[True, False],
+        group_participates=[True],
     )
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        # The ring group holds one block for the request's lifetime.
-        block_ids=([1, 2, 3, 4], [1]),
+        # Scheduler metadata is projected to the participating store groups.
+        block_ids=([1, 2, 3, 4],),
         block_hashes=hs,
         can_save=True,
         store_job_id=1,

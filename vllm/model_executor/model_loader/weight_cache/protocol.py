@@ -20,17 +20,25 @@ import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
+from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    format_socket_role_suffix,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+    filter_duplicate_safetensors_files,
+)
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_gpu{gpu_id}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
@@ -69,6 +77,7 @@ def check_ipc_platform_support() -> None:
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
             CUDA/ROCm.
+
     """
     if current_platform.is_cuda_alike():
         return
@@ -89,6 +98,7 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
     Raises:
         UnsupportedQuantForIPCError: If any quant method does not declare
             ``supports_pre_processed_weights``.
+
     """
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
@@ -102,20 +112,9 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
             )
 
 
-def get_physical_device_id(device_index: int) -> int | None:
-    """Map a local CUDA device index to the physical GPU id.
-
-    Returns None if CUDA_VISIBLE_DEVICES contains non-integer entries
-    (e.g. GPU UUIDs), in which case an explicit socket path is required.
-    """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if not visible:
-        return device_index
-    entries = visible.split(",")
-    try:
-        return int(entries[device_index])
-    except (IndexError, ValueError):
-        return None
+def get_current_device_uuid() -> str:
+    """UUID of the physical GPU backing the current accelerator device."""
+    return current_platform.get_device_uuid(torch.accelerator.current_device_index())
 
 
 def get_socket_dir(socket_dir: str | None = None) -> str:
@@ -132,9 +131,23 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_id: int, socket_dir: str | None = None) -> str:
-    directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_id=gpu_id))
+def get_socket_path(
+    gpu_uuid: str,
+    socket_dir: str | None = None,
+    *,
+    is_draft: bool = False,
+) -> str:
+    """Socket path of a daemon group; ``is_draft=False`` is the target.
+
+    The GPU uuid is hashed to keep the name well under the AF_UNIX path
+    limit (~108 bytes) even with the draft role suffix.
+    """
+    gpu_id = safe_hash(gpu_uuid.encode()).hexdigest()
+    name = SOCKET_NAME_TEMPLATE.format(
+        gpu_uuid=gpu_id,
+        role=format_socket_role_suffix(is_draft),
+    )
+    return os.path.join(get_socket_dir(socket_dir), name)
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -245,12 +258,6 @@ def hash_checkpoint(model: str) -> str | None:
     """
     if not os.path.isdir(model):
         return None
-    from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
-
-    from vllm.model_executor.model_loader.weight_utils import (
-        filter_duplicate_safetensors_files,
-    )
-
     files = glob.glob(os.path.join(model, "*.safetensors"))
     if os.path.isfile(os.path.join(model, SAFE_WEIGHTS_INDEX_NAME)):
         files = filter_duplicate_safetensors_files(
@@ -282,10 +289,21 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
+    is_draft: bool = False
+    """Daemon group the weights come from; False is the target model."""
+    dp_size: int = 1
+    dp_rank: int = 0
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        *,
+        is_draft: bool = False,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -312,6 +330,9 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
+            is_draft=is_draft,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -337,8 +358,6 @@ class TensorEntry:
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
-        from torch.multiprocessing.reductions import reduce_tensor
-
         tensor = tensor.detach()
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
@@ -349,14 +368,23 @@ class TensorEntry:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
-        from torch.multiprocessing.reductions import rebuild_cuda_tensor
-
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
         # have different CUDA_VISIBLE_DEVICES mappings.
         args[6] = device_index
         return rebuild_cuda_tensor(*args)
+
+
+class WeightCacheState(NamedTuple):
+    """Client-side decode of a daemon's get_state response payload."""
+
+    entries: dict[str, TensorEntry]
+    """Model tensors, exported as CUDA IPC handles or shipped by value."""
+    aliases: dict[str, str]
+    """Duplicate (tied) weight names aliased to their canonical entry."""
+    attrs: dict[str, bool]
+    """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:
