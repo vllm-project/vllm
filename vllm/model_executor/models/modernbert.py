@@ -19,7 +19,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
     SequencePooler,
@@ -367,8 +366,7 @@ class ModernBertPooler(SequencePooler):
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             head_dtype=head_dtype,
-            projector=lambda x: self.dense(x),
-            activation=LambdaPoolerActivation(lambda x: self.norm(self.act(x))),
+            projector=lambda x: self.norm(self.act(self.dense(x))),
         )
 
 
