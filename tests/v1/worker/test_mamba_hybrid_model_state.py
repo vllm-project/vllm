@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.v1.attention.test_gdn_metadata_builder import (
+from tests.v1.attention.ssm.test_gdn_metadata_builder import (
     BLOCK_SIZE,
     DEVICE,
     _create_gdn_builder,
