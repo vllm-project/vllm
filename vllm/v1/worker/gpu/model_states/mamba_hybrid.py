@@ -281,7 +281,14 @@ class MambaHybridModelState(DefaultModelState):
                 # Test request state, not num_scheduled_tokens == draft_count+1:
                 # adaptive rewrites num_scheduled_tokens to an even split, so that
                 # equality rarely holds and would demote every verify row to decode.
-                is_decode = (~input_batch.is_prefilling_np) & (
+                # A one-token prompt tail over prior state that the scheduler padded
+                # with placeholder drafts is also a spec-decode row: the prefill
+                # kernels can't roll the placeholders back.
+                num_computed = input_batch.num_computed_prefill_tokens_np
+                is_prompt_tail = (num_computed > 0) & (
+                    input_batch.prefill_len_np - num_computed == 1
+                )
+                is_decode = (~input_batch.is_prefilling_np | is_prompt_tail) & (
                     input_batch.num_scheduled_tokens > 0
                 )
                 spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
