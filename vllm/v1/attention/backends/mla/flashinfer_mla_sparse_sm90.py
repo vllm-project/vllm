@@ -63,6 +63,13 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
+# TODO: FlashInfer bakes per-row kv_len into the plan on the host, which
+# forces a D2H sync under async scheduling. The plan-info layout constants
+# below and the int-workspace clamp in _SM90State work around this by
+# planning from sync-free upper bounds; delete them once FlashInfer accepts
+# an upper-bound plan() that clamps kv_end internally, or exposes a
+# GPU-side plan API (upstream ask in flashinfer-ai/flashinfer, see
+# vllm-project/vllm#58684).
 # FlashInfer MLAPlanInfo layout (scheduler.cuh) field indices.
 _PLAN_INFO_LEN = 18
 _PI_NUM_BLKS_Y = 1
