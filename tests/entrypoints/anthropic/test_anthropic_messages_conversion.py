@@ -12,20 +12,27 @@ blocks echoed back by Anthropic clients, and streaming conversion in
 Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
+import asyncio
 import json
 from argparse import Namespace
 from http import HTTPStatus
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import regex as re
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
+from vllm.entrypoints.anthropic.inline_system import (
+    InlineSystemModeResolver,
+    _Prober,
+)
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
@@ -33,6 +40,7 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
 )
+from vllm.entrypoints.chat_utils import parse_chat_messages
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -50,6 +58,16 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.tokenizers import (
+    deepseek_v4_encoding,
+    deepseek_v32_encoding,
+    deepseek_v41_encoding,
+)
+from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
+from vllm.tokenizers.deepseek_v32 import get_deepseek_v32_tokenizer
+from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
+
+from ...utils import VLLM_PATH
 
 _convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -789,12 +807,10 @@ class TestBuildAnthropicUsage:
 
 
 class TestInlineSystemMessageInMessagesArray:
-    """Verify that ``role: system`` messages embedded inside the ``messages``
-    array are preserved in their original position.
-
-    Unlike the previous approach that merged all system messages into a single
-    leading system message (breaking prefix caching), this preserves the
-    conversation structure so KV-cache hits remain intact.
+    """Verify that, in ``preserve`` mode (the converter default), ``role:
+    system`` messages inside the ``messages`` array keep their position when
+    the request has a leading system prompt, so earlier turns render unchanged
+    and stay prefix-cacheable.
     """
 
     def test_inline_system_merged_with_top_level_system(self):
@@ -869,7 +885,7 @@ class TestInlineSystemMessageInMessagesArray:
         assert result.messages[2]["content"] == "....."
 
     def test_inline_system_string_only(self):
-        """Only an inline system string, no top-level system."""
+        """Without a leading system prompt, preserve falls back to folding."""
         request = _make_request(
             [
                 {"role": "user", "content": "Hello"},
@@ -878,11 +894,7 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        # Inline system stays in its original position.
-        assert result.messages[0]["role"] == "user"
-        assert result.messages[0]["content"] == "Hello"
-        assert result.messages[1]["role"] == "system"
-        assert result.messages[1]["content"] == "Be concise."
+        assert result.messages == [{"role": "user", "content": "Hello\n\nBe concise."}]
 
     def test_inline_system_list_content(self):
         """Inline system with list content blocks."""
@@ -896,16 +908,18 @@ class TestInlineSystemMessageInMessagesArray:
                         {"type": "text", "text": "Part two."},
                     ],
                 },
-            ]
+            ],
+            system="Top-level prompt.",
         )
         result = _convert(request)
 
         # Inline system stays in its original position;
         # text blocks are concatenated (same as top-level system).
-        assert result.messages[0]["role"] == "user"
-        assert result.messages[0]["content"] == "Hi"
-        assert result.messages[1]["role"] == "system"
-        assert result.messages[1]["content"] == "Part one. Part two."
+        assert result.messages[1] == {"role": "user", "content": "Hi"}
+        assert result.messages[2] == {
+            "role": "system",
+            "content": "Part one. Part two.",
+        }
 
     def test_multiple_inline_system_messages(self):
         """Multiple inline system messages each stay in their position."""
@@ -980,16 +994,16 @@ class TestInlineSystemMessageInMessagesArray:
                         {"type": "text", "text": "Real system content."},
                     ],
                 },
-            ]
+            ],
+            system="Top-level prompt.",
         )
         result = _convert(request)
 
         # Billing header stripped, real content preserved in position.
-        assert len(result.messages) == 2
-        assert result.messages[0]["role"] == "user"
-        assert result.messages[0]["content"] == "Hello"
-        assert result.messages[1]["role"] == "system"
-        assert result.messages[1]["content"] == "Real system content."
+        assert result.messages[1:] == [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Real system content."},
+        ]
 
 
 # ======================================================================
@@ -1369,50 +1383,519 @@ class TestStreamingCacheUsageSemantics:
 
 
 # ======================================================================
-# Auto-detection of system-first template requirement
+# Inline system message placement
 # ======================================================================
 
 
-Q35_TEMPLATE = (
-    "{%- for message in messages %}"
-    "{%- if message.role == 'system' %}"
-    "{%- if not loop.first %}"
-    "{{- raise_exception('System message must be at the beginning.') }}"
-    "{%- endif %}"
-    "{%- endif %}"
-    "{%- endfor %}"
-)
+def _tool_use(tool_id: str, command: str = "ls") -> dict:
+    return {
+        "type": "tool_use",
+        "id": tool_id,
+        "name": "Bash",
+        "input": {"command": command},
+    }
 
 
-class TestDetectMergeInlineSystem:
-    """Verify _detect_merge_inline_system auto-detection.
+def _tool_result(tool_id: str, content="out") -> dict:
+    return {"type": "tool_result", "tool_use_id": tool_id, "content": content}
 
-    Tests three scenarios:
-    1. Template with system-first guard (e.g. Qwen) → merge needed
-    2. Template without restrictions → no merge, cache-friendly
-    3. No template provided → safe default: merge
+
+def _roles(messages: list[dict]) -> list[str]:
+    return [m["role"] for m in messages]
+
+
+class TestNormalizeInlineSystem:
+    """Placement of inline system messages in ``preserve`` and ``fold``."""
+
+    @pytest.mark.parametrize("mode", ["preserve", "fold"])
+    def test_leading_inline_system_joins_system_prompt(self, mode):
+        request = _make_request(
+            [
+                {"role": "system", "content": "Lead."},
+                {"role": "user", "content": "Q"},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system=mode)
+
+        assert result.messages == [
+            {"role": "system", "content": "Top.\n\nLead."},
+            {"role": "user", "content": "Q"},
+        ]
+
+    @pytest.mark.parametrize(
+        ("mode", "expected_tail"),
+        [
+            (
+                "preserve",
+                [
+                    {"role": "tool", "tool_call_id": "t1", "content": "out"},
+                    {"role": "system", "content": "S"},
+                ],
+            ),
+            ("fold", [{"role": "tool", "tool_call_id": "t1", "content": "out\n\nS"}]),
+        ],
+    )
+    def test_system_between_tool_call_and_result_moves_after_results(
+        self, mode, expected_tail
+    ):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "assistant", "content": [_tool_use("t1")]},
+                {"role": "system", "content": "S"},
+                {"role": "user", "content": [_tool_result("t1")]},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system=mode)
+
+        assert _roles(result.messages[:3]) == ["system", "user", "assistant"]
+        assert result.messages[3:] == expected_tail
+
+    def test_fold_appends_to_last_string_tool_result(self):
+        """Images and tool_reference parts in the run are skipped over."""
+        image = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "x"},
+        }
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {
+                    "role": "assistant",
+                    "content": [_tool_use("t1"), _tool_use("t2")],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        _tool_result("t1", [{"type": "text", "text": "a"}, image]),
+                        _tool_result(
+                            "t2", [{"type": "tool_reference", "tool_name": "Read"}]
+                        ),
+                    ],
+                },
+                {"role": "system", "content": "S1"},
+                {"role": "system", "content": "S2"},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system="fold")
+
+        assert _roles(result.messages) == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+            "tool",
+            "tool",
+        ]
+        # The empty t2 result gains the text without a leading separator.
+        assert result.messages[5]["content"] == "S1\n\nS2"
+        assert result.messages[3]["content"] == "a"
+        assert result.messages[6]["content"] == [
+            {"type": "tool_reference", "name": "Read"}
+        ]
+
+    def test_fold_appends_to_user_text_after_tool_results(self):
+        """Claude Code's own user text after tool results is reused."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "assistant", "content": [_tool_use("t1")]},
+                {
+                    "role": "user",
+                    "content": [
+                        _tool_result("t1"),
+                        {
+                            "type": "text",
+                            "text": "<system-reminder>r</system-reminder>",
+                        },
+                    ],
+                },
+                {"role": "system", "content": "S"},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system="fold")
+
+        assert _roles(result.messages) == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        assert (
+            result.messages[4]["content"] == "<system-reminder>r</system-reminder>\n\nS"
+        )
+
+    def test_fold_extends_list_user_content(self):
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "A"},
+                        {"type": "text", "text": "B"},
+                    ],
+                },
+                {"role": "system", "content": "S"},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system="fold")
+
+        assert result.messages[1]["content"] == [
+            {"type": "text", "text": "A"},
+            {"type": "text", "text": "B\n\nS"},
+        ]
+
+    def test_fold_after_assistant_prepends_to_next_user(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "assistant", "content": "A"},
+                {"role": "system", "content": "S"},
+                {"role": "user", "content": "Q2"},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system="fold")
+
+        assert result.messages[1:] == [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "S\n\nQ2"},
+        ]
+
+    @pytest.mark.parametrize(
+        "after", [[], [{"role": "assistant", "content": "A2"}]], ids=["end", "asst"]
+    )
+    def test_fold_after_assistant_without_next_user(self, after):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "assistant", "content": "A"},
+                {"role": "system", "content": "S"},
+                *after,
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system="fold")
+
+        assert result.messages[3] == {"role": "user", "content": "S"}
+        assert len(result.messages) == 4 + len(after)
+
+    def test_fold_into_empty_user_content(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": []},
+                {"role": "system", "content": "S"},
+            ],
+            system="Top.",
+        )
+        result = _convert(request, inline_system="fold")
+
+        assert result.messages[1:] == [{"role": "user", "content": "S"}]
+
+    @pytest.mark.parametrize(
+        "system",
+        [
+            None,
+            [{"type": "text", "text": "x-anthropic-billing-header: cc_version=1;"}],
+        ],
+        ids=["none", "billing_header_only"],
+    )
+    def test_preserve_without_system_prompt_folds(self, system):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "system", "content": "S"},
+            ],
+            system=system,
+        )
+        result = _convert(request, inline_system="preserve")
+
+        assert result.messages == [{"role": "user", "content": "Q\n\nS"}]
+
+
+def _claude_code_session(num_turns: int) -> list[dict]:
+    """Messages of a Claude Code-shaped session after ``num_turns`` tool loops.
+
+    Each turn has thinking, parallel tool calls, an image tool result, user
+    reminder text on alternate turns, and an inline system message.
     """
-
-    def test_qwen_template_requires_merge(self):
-        """Template with loop.first guard rejects mid-conversation system."""
-        assert (
-            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
+    image = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "x"},
+    }
+    messages: list[dict] = [
+        {"role": "user", "content": "Fix the bug."},
+        {"role": "system", "content": "# Environment\n - Platform: linux"},
+    ]
+    for turn in range(num_turns):
+        ids = (f"t{turn}a", f"t{turn}b")
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": f"think {turn}", "signature": ""},
+                    *(_tool_use(i, f"cmd {i}") for i in ids),
+                ],
+            }
         )
-
-    def test_no_restriction_no_merge(self):
-        """Template without restriction accepts mid-conversation system."""
-        assert (
-            AnthropicServingMessages._detect_merge_inline_system(
-                "{%- for message in messages %}"
-                "{{- message.role }}: {{ message.content }}\n"
-                "{%- endfor %}"
-            )
-            is False
+        results = [
+            _tool_result(ids[0], f"out {turn}"),
+            _tool_result(ids[1], [{"type": "text", "text": "shot"}, image]),
+        ]
+        if turn % 2:
+            results.append({"type": "text", "text": f"reminder {turn}"})
+        messages.append({"role": "user", "content": results})
+        messages.append(
+            {"role": "system", "content": f"<total_tokens>{turn}</total_tokens>"}
         )
+    return messages
 
-    def test_no_template_defaults_merge(self):
-        """No chat_template → conservative default: merge."""
-        assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+class TestInlineSystemSessionInvariants:
+    """Invariants that keep Claude Code sessions cacheable and well-formed."""
+
+    @staticmethod
+    def _session(num_turns: int, mode: str, system: str | None) -> list[dict]:
+        request = _make_request(_claude_code_session(num_turns), system=system)
+        return _convert(request, inline_system=mode).messages
+
+    @pytest.mark.parametrize("mode", ["preserve", "fold"])
+    @pytest.mark.parametrize("system", ["Top.", None])
+    def test_each_turn_extends_the_previous(self, mode, system):
+        for turn in range(1, 5):
+            prev = self._session(turn, mode, system)
+            cur = self._session(turn + 1, mode, system)
+            assert cur[: len(prev)] == prev
+
+    @pytest.mark.parametrize("system", ["Top.", None])
+    def test_fold_adds_no_user_turns(self, system):
+        """Reasoning kept only after the last user turn stays in place."""
+        without_inline = _make_request(
+            [m for m in _claude_code_session(4) if m["role"] != "system"],
+            system=system,
+        )
+        folded = self._session(4, "fold", system)
+
+        assert _roles(folded) == _roles(_convert(without_inline).messages)
+
+    @pytest.mark.parametrize("mode", ["preserve", "fold"])
+    def test_tool_results_follow_their_tool_calls(self, mode):
+        """Only tool results (and their images) follow a tool call."""
+        messages = self._session(4, mode, "Top.")
+        for i, message in enumerate(messages):
+            if not message.get("tool_calls"):
+                continue
+            run = []
+            for follower in messages[i + 1 :]:
+                content = follower.get("content")
+                is_image = isinstance(content, list) and all(
+                    part["type"] == "image_url" for part in content
+                )
+                if follower["role"] != "tool" and not is_image:
+                    break
+                run.append(follower)
+            assert [m["tool_call_id"] for m in run if m["role"] == "tool"] == [
+                tc["id"] for tc in message["tool_calls"]
+            ]
+
+
+# ======================================================================
+# Renderer probe for inline system support
+# ======================================================================
+
+_SPECIAL_RE = re.compile(r"<\|[^|<>]*\|>|<｜[^｜]*｜>")
+_ROLE_MARKERS = "<|system|><|user|><|assistant|><|tool|>"
+_TEMPLATES = VLLM_PATH / "examples"
+_LLAMA_TEMPLATE = _TEMPLATES / "tool_chat_template_llama3.2_json.jinja"
+
+
+class _FakeTokenizer:
+    """Word-level tokenizer whose ``<|...|>``/``<｜...｜>`` markers are special."""
+
+    def __init__(self, special_source: str) -> None:
+        self.vocab: dict[str, int] = {}
+        self.all_special_ids = [
+            self._id(t) for t in dict.fromkeys(_SPECIAL_RE.findall(special_source))
+        ]
+
+    def _id(self, piece: str) -> int:
+        return self.vocab.setdefault(piece, len(self.vocab))
+
+    def encode(self, text: str) -> list[int]:
+        pieces: list[str] = []
+        pos = 0
+        for match in _SPECIAL_RE.finditer(text):
+            pieces += re.findall(r"\w+|\W", text[pos : match.start()])
+            pieces.append(match.group())
+            pos = match.end()
+        pieces += re.findall(r"\w+|\W", text[pos:])
+        return [self._id(p) for p in pieces]
+
+    def decode(self, token_ids: list[int]) -> str:
+        pieces = {i: p for p, i in self.vocab.items()}
+        return "".join(pieces[i] for i in token_ids)
+
+    def get_added_vocab(self) -> dict[str, int]:
+        return {}
+
+
+class _FakeOnlineRenderer:
+    """Renders like ``OnlineRenderer.render_chat`` with ``apply_chat_template``."""
+
+    model_config = SimpleNamespace(
+        is_encoder_decoder=False,
+        multimodal_config=None,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        enable_prompt_embeds=False,
+    )
+
+    def __init__(self, apply_chat_template, special_source: str) -> None:
+        self.apply_chat_template = apply_chat_template
+        tokenizer = _FakeTokenizer(special_source)
+        self.renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+
+    async def render_chat(self, request):
+        conversation, _, _ = parse_chat_messages(
+            request.messages, self.model_config, content_format="string"
+        )
+        params = request.build_chat_params(None, "auto")
+        text = self.apply_chat_template(
+            conversation,
+            tools=[t.model_dump() for t in request.tools],
+            tokenize=False,
+            **params.chat_template_kwargs,
+        )
+        tokenizer = self.renderer.get_tokenizer()
+        return conversation, [{"prompt_token_ids": tokenizer.encode(text)}]
+
+
+def _jinja_online_renderer(template: str) -> _FakeOnlineRenderer:
+    from transformers.utils.chat_template_utils import _compile_jinja_template
+
+    compiled = _compile_jinja_template(template)
+
+    def apply_chat_template(conversation, **kwargs):
+        return compiled.render(messages=conversation, bos_token="<|bos|>", **kwargs)
+
+    return _FakeOnlineRenderer(apply_chat_template, template + _ROLE_MARKERS)
+
+
+class _FakeHfTokenizer:
+    def get_added_vocab(self) -> dict[str, int]:
+        return {}
+
+
+def _probe(online_renderer) -> tuple[str, str]:
+    return asyncio.run(_Prober(online_renderer).probe())
+
+
+class TestProbeInlineSystem:
+    """``auto`` keeps inline system turns only where the renderer marks them."""
+
+    def test_role_marked_template_preserves(self):
+        mode, reason = _probe(_jinja_online_renderer(_LLAMA_TEMPLATE.read_text()))
+        assert mode == "preserve", reason
+
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            (
+                (VLLM_PATH / "rust/src/chat/tests/templates/qwen35.jinja").read_text(),
+                "renderer rejects it",
+            ),
+            (
+                "{% for m in messages %}{% if m.role != 'system' or loop.first %}"
+                "<|{{ m.role }}|>{{ m.content }}{% endif %}{% endfor %}"
+                "{% if add_generation_prompt %}<|assistant|>{% endif %}",
+                "drops it",
+            ),
+            (
+                # Glued text also merges tokens across the boundary.
+                "{% for m in messages %}"
+                "{% if m.role == 'system' %}{{ m.content }}"
+                "{% else %}<|{{ m.role }}|>{{ m.content }}{% endif %}{% endfor %}"
+                "{% if add_generation_prompt %}<|assistant|>{% endif %}",
+                "mid: rendering it changes other parts",
+            ),
+            (
+                "{% for m in messages %}"
+                "<|{{ 'user' if m.role == 'system' and not loop.first else m.role }}|>"
+                "{{ m.content }}{% endfor %}"
+                "{% if add_generation_prompt %}<|assistant|>{% endif %}",
+                "renders the same as a user message",
+            ),
+            (
+                "{% set ns = namespace(last=-1) %}{% for m in messages %}"
+                "{% if m.role in ('user', 'system') %}{% set ns.last = loop.index0 %}"
+                "{% endif %}{% endfor %}{% for m in messages %}<|{{ m.role }}|>"
+                "{% if m.reasoning_content and loop.index0 > ns.last %}"
+                "{{ m.reasoning_content }}{% endif %}{{ m.content or '' }}"
+                "{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}",
+                "after_tool: rendering it changes other parts",
+            ),
+        ],
+        ids=["rejects", "drops", "unmarked", "as_user", "reasoning"],
+    )
+    def test_unsafe_templates_fold(self, template, expected):
+        mode, reason = _probe(_jinja_online_renderer(template))
+        assert mode == "fold"
+        assert expected in reason
+
+    def test_renderer_rejecting_history_reasoning_is_still_probed(self):
+        template = (
+            "{% for m in messages %}{% if m.reasoning_content %}"
+            "{{ raise_exception('no think tokens') }}{% endif %}"
+            "<|{{ m.role }}|>{{ m.content or '' }}<|end|>{% endfor %}"
+            "{% if add_generation_prompt %}<|assistant|>{% endif %}"
+        )
+        mode, reason = _probe(_jinja_online_renderer(template))
+        assert mode == "preserve", reason
+
+    @pytest.mark.parametrize(
+        ("wrap", "encoding", "expected"),
+        [
+            (get_deepseek_v32_tokenizer, deepseek_v32_encoding, "fold"),
+            (get_deepseek_v4_tokenizer, deepseek_v4_encoding, "fold"),
+            (get_deepseek_v41_tokenizer, deepseek_v41_encoding, "preserve"),
+        ],
+        ids=["v32", "v4", "v41"],
+    )
+    def test_deepseek_encoders(self, wrap, encoding, expected):
+        online_renderer = _FakeOnlineRenderer(
+            wrap(_FakeHfTokenizer()).apply_chat_template,
+            Path(encoding.__file__).read_text(),
+        )
+        mode, reason = _probe(online_renderer)
+        assert mode == expected, reason
+
+    def test_unrenderable_probe_folds(self):
+        online_renderer = _jinja_online_renderer("")
+        failing = AsyncMock(side_effect=ValueError("boom"))
+        with patch.object(online_renderer, "render_chat", failing):
+            assert _probe(online_renderer)[0] == "fold"
+
+    def test_resolver_probes_once(self):
+        online_renderer = _jinja_online_renderer(_LLAMA_TEMPLATE.read_text())
+        render_chat = AsyncMock(wraps=online_renderer.render_chat)
+        resolver = InlineSystemModeResolver(online_renderer, "auto")
+
+        async def resolve_many():
+            return await asyncio.gather(*(resolver.resolve() for _ in range(4)))
+
+        with patch.object(online_renderer, "render_chat", render_chat):
+            assert asyncio.run(resolve_many()) == ["preserve"] * 4
+        calls = render_chat.await_count
+        assert asyncio.run(InlineSystemModeResolver(None, "fold").resolve()) == "fold"
+        assert render_chat.await_count == calls
 
 
 # ======================================================================

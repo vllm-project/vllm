@@ -16,6 +16,7 @@ from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
+    AnthropicInlineSystemOption,
 )
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -189,6 +190,14 @@ class BaseFrontendArgs:
     (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
     ``low`` when the renderer rejects ``none`` or renders it the same as a
     thinking effort, and ``none`` otherwise."""
+    anthropic_inline_system: AnthropicInlineSystemOption = "auto"
+    """Anthropic ``/v1/messages`` only. Where ``role: "system"`` messages
+    inside ``messages`` go. ``preserve`` keeps them in place as system turns
+    (folding when the request has no system prompt). ``fold`` appends their
+    text to the preceding user message or tool result, without adding turns.
+    ``auto`` (default) probes the renderer once and uses ``preserve`` only if
+    it renders them as distinct system turns without changing the rest of the
+    prompt; otherwise ``fold``."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False

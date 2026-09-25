@@ -115,6 +115,8 @@ AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
 # reasoning_effort sent to the chat template for thinking.type=disabled.
 AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
 AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
+AnthropicInlineSystemMode = Literal["preserve", "fold"]
+AnthropicInlineSystemOption = Literal["auto", AnthropicInlineSystemMode]
 AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
 
 

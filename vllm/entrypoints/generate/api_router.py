@@ -186,6 +186,7 @@ async def init_generate_state(
             enable_force_include_usage=args.enable_force_include_usage,
             default_chat_template_kwargs=default_chat_template_kwargs,
             disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+            inline_system=args.anthropic_inline_system,
         )
         if "generate" in supported_tasks
         else None

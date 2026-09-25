@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.anthropic.inline_system import InlineSystemModeResolver
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicInlineSystemOption,
+    AnthropicMessagesRequest,
+)
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -46,6 +50,7 @@ class ServingRender(BaseServing):
         *,
         request_logger: RequestLogger | None = None,
         tool_server: "ToolServer | None" = None,
+        inline_system: AnthropicInlineSystemOption = "auto",
     ) -> None:
         super().__init__(
             models=models,
@@ -56,11 +61,7 @@ class ServingRender(BaseServing):
         self.online_renderer = online_renderer
         self.tool_server = tool_server
 
-        self._merge_inline_system = (
-            AnthropicServingMessages._detect_merge_inline_system(
-                online_renderer.chat_template
-            )
-        )
+        self._inline_system = InlineSystemModeResolver(online_renderer, inline_system)
 
         self._placeholder_metadata_parser: MultiModalDataParser | None = None
         self._placeholder_metadata_parser_failed = False
@@ -152,7 +153,7 @@ class ServingRender(BaseServing):
         render_chat_request so the rendered tokens match the server exactly.
         """
         chat_req = AnthropicServingMessages.to_chat_completion_request(
-            request, merge_inline_system=self._merge_inline_system
+            request, inline_system=await self._inline_system.resolve()
         )
         return await self.render_chat_request(chat_req)
 
