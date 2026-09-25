@@ -28,6 +28,11 @@ ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
 ARG TRITON_INSTALL_FROM_SOURCE_REPO=
 ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
+ARG EFA_INSTALLER_VERSION=1.50.0
+ARG EFA_INSTALLER_SHA256=fa6dff8593d866866c13cb4640d9059835cd4efa427971f100ab40c97bef2841
+# Mooncake version the vllm-openai-efa target pins its EFA wheel to. Keep in
+# sync with requirements/kv_connectors*.txt, which install the non-EFA build.
+ARG MOONCAKE_VERSION=0.3.13.post1
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -1404,3 +1409,124 @@ USER vllm
 WORKDIR /home/vllm
 ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
+
+#################### OPENAI API SERVER (AWS EFA, OPT-IN) ####################
+# Extends `vllm-openai` with the pieces needed to drive AWS EFA from inside the
+# container, so no host-side EFA installation is required:
+#
+#   1. The AWS EFA userspace stack (libfabric plus its EFA provider), which
+#      NIXL's bundled LIBFABRIC plugin dlopens.
+#   2. The EFA build of the Mooncake transfer engine wheel.
+#
+# Requires the KV connectors, since NIXL and Mooncake come from there:
+#   docker build --target vllm-openai-efa -t vllm:openai-efa \
+#       --build-arg INSTALL_KV_CONNECTORS=true -f docker/Dockerfile .
+#
+# NOTE: this stage is last, so it is what a bare `docker build` with no
+# --target produces. Always pass --target explicitly.
+#
+# Kernel modules and host limits remain the responsibility of the container
+# host.
+FROM vllm-openai AS vllm-openai-efa
+
+ARG TARGETARCH
+ARG CUDA_VERSION
+ARG EFA_INSTALLER_VERSION
+ARG EFA_INSTALLER_SHA256
+ARG MOONCAKE_VERSION
+
+# Fail early and clearly if the KV connectors were not installed: without them
+# there is no NIXL plugin to load libfabric and no Mooncake wheel to swap, so
+# the resulting image would be tagged EFA while being unable to use it.
+RUN set -eu; \
+    if ! python3 -c "import importlib.metadata as m; m.version('nixl')" \
+            2>/dev/null; then \
+        echo "vllm-openai-efa requires the KV connectors; rebuild with \
+--build-arg INSTALL_KV_CONNECTORS=true" >&2; \
+        exit 1; \
+    fi
+
+# Install the AWS EFA userspace stack.
+#
+# `set -eux` is required: the body is a `;`-separated sequence run by /bin/sh,
+# so without it only the last command decides the RUN exit status and a failed
+# install would silently produce an empty layer.
+RUN set -eux; \
+    EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+    curl -fsSL --retry 3 --retry-all-errors \
+        "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+        -o "${EFA_INSTALLER_ARCHIVE}"; \
+    echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+    tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+    # efa_installer.sh apt-installs pciutils/environment-modules/tcl, and
+    # earlier layers purge /var/lib/apt/lists, so refresh the lists first.
+    apt-get update -y; \
+    # --minimal is not usable here: it installs rdma-core but skips libfabric,
+    # which is the only piece the LIBFABRIC plugin needs.
+    (cd /tmp/aws-efa-installer && \
+        ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify); \
+    test -x /opt/amazon/efa/bin/fi_info; \
+    /opt/amazon/efa/bin/fi_info --version; \
+    # Assert the EFA provider is compiled into this libfabric. `-l` lists
+    # providers without needing EFA hardware, so it works during a build.
+    /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+    # Verify NIXL's plugin resolves libfabric at load time. Checking only that
+    # the file exists is useless: the NIXL wheel always ships the plugin, so
+    # that passes even when no libfabric is installed at all.
+    EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
+        -print -quit); \
+    test -n "${EFA_NIXL_PLUGIN}"; \
+    ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /'; \
+    rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
+        /var/lib/apt/lists/*
+
+# Swap the Mooncake wheel for its EFA build, mirroring the CUDA-major split in
+# `vllm-openai-base`: mooncake-transfer-engine -> mooncake-transfer-engine-efa
+# on CUDA 12, and the -cuda13 pair on CUDA 13. Both wheels ship the `mooncake`
+# package, so the current one must be uninstalled rather than installed over.
+# --no-deps keeps the torch stack vLLM was compiled against untouched.
+#
+# The EFA wheels are published for x86_64 only, so on other architectures this
+# step is skipped and the standard wheel is kept. The EFA userspace installed
+# above still works there, so NIXL's LIBFABRIC backend remains usable; only
+# Mooncake's EFA protocol is unavailable.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    set -eu; \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "${CUDA_MAJOR}" = "13" ]; then \
+        MOONCAKE_PKG=mooncake-transfer-engine-cuda13; \
+        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa-cuda13; \
+    else \
+        MOONCAKE_PKG=mooncake-transfer-engine; \
+        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa; \
+    fi; \
+    if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "TARGETARCH=${TARGETARCH}: ${MOONCAKE_EFA_PKG} is x86_64-only, \
+keeping ${MOONCAKE_PKG} (Mooncake EFA protocol unavailable)"; \
+    else \
+        uv pip uninstall --system "${MOONCAKE_PKG}" 2>/dev/null || true; \
+        uv pip install --system --no-deps \
+            "${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
+        # Verify by distribution metadata rather than importing the module: the
+        # extension links libcuda.so.1, absent from a GPU-less builder.
+        python3 -c "import importlib.metadata as m; \
+m.version('${MOONCAKE_EFA_PKG}')"; \
+        ! python3 -c "import importlib.metadata as m; \
+m.version('${MOONCAKE_PKG}')" 2>/dev/null; \
+    fi
+
+# Mooncake protocol, derived from the architecture. amd64 carries the EFA wheel
+# so it can use the `efa` protocol; other architectures kept the standard wheel,
+# which speaks `rdma`.
+#
+# ENV cannot be made conditional and cannot read anything a RUN produced, so the
+# value is derived with ARG substitution. `#amd64` strips that exact prefix, so
+# ARCH_IF_NOT_AMD64 is empty on amd64 and holds the architecture name everywhere
+# else; `:+` maps that to rdma, and `:-` supplies efa for the empty case. The
+# ENV line reads as: rdma if not amd64, otherwise efa.
+ARG ARCH_IF_NOT_AMD64=${TARGETARCH#amd64}
+ARG PROTOCOL_IF_NOT_AMD64=${ARCH_IF_NOT_AMD64:+rdma}
+ENV MOONCAKE_PROTOCOL=${PROTOCOL_IF_NOT_AMD64:-efa}
+
+ENTRYPOINT ["vllm", "serve"]
+#################### OPENAI API SERVER (AWS EFA, OPT-IN) ####################
