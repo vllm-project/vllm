@@ -67,10 +67,8 @@ def _run_ar(
     device, group = _get_device_and_group(parallel_config)
     # Populate this rank's contribution on CPU to reduce GPU syncs.
     pin_memory = PIN_MEMORY and torch.device(device).type == "cuda"
-    num_fields = 5 if profiler_ready is not None else 4
-    tensor_cpu = torch.zeros(
-        num_fields, dp_size, dtype=torch.int32, pin_memory=pin_memory
-    )
+    # Keep the collective shape independent of local profiler configuration.
+    tensor_cpu = torch.zeros(5, dp_size, dtype=torch.int32, pin_memory=pin_memory)
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
@@ -148,7 +146,7 @@ def _synchronize_dp_ranks(
         tokens per-microbatch for each DP rank including any DP padding.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
         synced_profiler_ready: Whether all DP ranks have armed synchronized
-            profiler stepping, or None when readiness was not included.
+            profiler stepping, or None when not requested.
     ]
 
     """

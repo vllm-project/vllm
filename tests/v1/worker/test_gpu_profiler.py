@@ -632,6 +632,34 @@ class TestDPSynchronizedProfiler:
         assert worker._dp_profiler_requested is True
         worker.profiler.start.assert_not_called()
 
+    @pytest.mark.parametrize("synchronize_iterations", [False, True])
+    def test_single_rank_keeps_rank_local_profiling(self, synchronize_iterations):
+        worker = MagicMock()
+        worker.rank = 0
+        worker.profiler_config = ProfilerConfig(
+            profiler="cuda",
+            synchronize_iterations_across_dp=synchronize_iterations,
+        )
+        worker.parallel_config.data_parallel_size = 1
+        worker._dp_profiler_requested = False
+        _bind_profiler_mode_helper(worker)
+
+        with (
+            patch(
+                "vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"
+            ),
+            patch("vllm.v1.worker.gpu_worker.logger") as logger,
+        ):
+            Worker.profile(worker)
+
+        worker.profiler.start.assert_called_once_with()
+        assert worker._dp_profiler_requested is False
+        if synchronize_iterations:
+            logger.info_once.assert_called_once()
+            assert "data_parallel_size=1" in logger.info_once.call_args.args[0]
+        else:
+            logger.info_once.assert_not_called()
+
     def test_delayed_start_counts_shared_boundaries(self, default_profiler_config):
         default_profiler_config.delay_iterations = 2
         profiler = ConcreteWorkerProfiler(default_profiler_config)
@@ -703,7 +731,7 @@ def _v1_boundary_result(profiler_ready=True):
     )
 
 
-@pytest.mark.parametrize("profiler_ready", [True, None])
+@pytest.mark.parametrize("profiler_ready", [True, False, None])
 def test_v1_execute_model_advances_profiler_only_after_dp_agreement(profiler_ready):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.execute_model_state = None
@@ -740,10 +768,10 @@ def test_v1_execute_model_advances_profiler_only_after_dp_agreement(profiler_rea
     if profiler_ready is None:
         runner.dp_profiler_advance.assert_not_called()
     else:
-        runner.dp_profiler_advance.assert_called_once_with(True)
+        runner.dp_profiler_advance.assert_called_once_with(profiler_ready)
 
 
-@pytest.mark.parametrize("profiler_ready", [True, None])
+@pytest.mark.parametrize("profiler_ready", [True, False, None])
 def test_v1_dummy_run_advances_profiler_only_after_dp_agreement(profiler_ready):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = SimpleNamespace(
@@ -764,7 +792,7 @@ def test_v1_dummy_run_advances_profiler_only_after_dp_agreement(profiler_ready):
     if profiler_ready is None:
         runner.dp_profiler_advance.assert_not_called()
     else:
-        runner.dp_profiler_advance.assert_called_once_with(True)
+        runner.dp_profiler_advance.assert_called_once_with(profiler_ready)
 
 
 @pytest.mark.parametrize("dummy_run", [False, True])
@@ -834,10 +862,15 @@ def test_skipped_dp_coordination_does_not_claim_profiler_readiness(runner_versio
 
 
 @pytest.mark.parametrize(
-    ("readiness", "expected"),
-    [([1, 0], False), ([1, 1], True)],
+    ("local_ready", "readiness", "expected"),
+    [
+        (None, [0, 0], None),
+        (False, [0, 1], False),
+        (True, [1, 0], False),
+        (True, [1, 1], True),
+    ],
 )
-def test_legacy_dp_sync_carries_profiler_readiness(readiness, expected):
+def test_legacy_dp_sync_carries_profiler_readiness(local_ready, readiness, expected):
     from vllm.v1.worker import dp_utils
 
     reduced = torch.tensor(
@@ -853,18 +886,30 @@ def test_legacy_dp_sync_carries_profiler_readiness(readiness, expected):
     parallel_config = SimpleNamespace(
         disable_nccl_for_dp_synchronization=True,
         num_ubatches=1,
+        data_parallel_size=2,
+        data_parallel_rank=0,
     )
 
-    with patch.object(dp_utils, "_run_ar", return_value=reduced):
+    def reduce(tensor, group):
+        # Disabled, unarmed and armed profiling must use the same wire shape.
+        assert tensor.shape == reduced.shape
+        assert tensor[4, 0].item() == int(bool(local_ready))
+        tensor.copy_(reduced)
+
+    with (
+        patch.object(dp_utils, "_get_device_and_group", return_value=("cpu", None)),
+        patch.object(torch.distributed, "all_reduce", side_effect=reduce) as all_reduce,
+    ):
         *_, profiler_ready = dp_utils._synchronize_dp_ranks(
             num_tokens_unpadded=64,
             num_tokens_padded=64,
             should_attempt_ubatching=False,
             cudagraph_mode=0,
             parallel_config=parallel_config,
-            profiler_ready=True,
+            profiler_ready=local_ready,
         )
 
+    all_reduce.assert_called_once()
     assert profiler_ready is expected
 
 

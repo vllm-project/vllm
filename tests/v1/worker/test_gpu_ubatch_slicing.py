@@ -295,8 +295,7 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    num_fields = 7 if profiler_ready_per_rank is not None else 6
-    reduced = torch.zeros(num_fields, dp_size, dtype=torch.int32)
+    reduced = torch.zeros(7, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
@@ -371,12 +370,19 @@ def test_microbatching_pads_all_ranks_to_the_largest():
     assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
 
 
-def test_profiler_readiness_uses_existing_dp_agreement():
-    _, waiting = _sync_dp([64, 64], profiler_ready_per_rank=[True, False])
-    _, ready = _sync_dp([64, 64], profiler_ready_per_rank=[True, True])
+@pytest.mark.parametrize(
+    ("readiness", "expected"),
+    [
+        (None, None),
+        ([False, True], False),
+        ([True, False], False),
+        ([True, True], True),
+    ],
+)
+def test_profiler_readiness_uses_existing_dp_agreement(readiness, expected):
+    _, dp_sync = _sync_dp([64, 64], profiler_ready_per_rank=readiness)
 
-    assert waiting is not None and waiting.profiler_ready is False
-    assert ready is not None and ready.profiler_ready is True
+    assert dp_sync is not None and dp_sync.profiler_ready is expected
 
 
 def test_profiler_readiness_includes_locally_idle_rank():

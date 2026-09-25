@@ -1436,6 +1436,11 @@ class Worker(WorkerBase):
                     "next execution boundary agreed by all DP ranks."
                 )
             else:
+                if self.profiler_config.synchronize_iterations_across_dp:
+                    logger.info_once(
+                        "synchronize_iterations_across_dp has no effect with "
+                        "data_parallel_size=1; using rank-local profiler iterations."
+                    )
                 self.profiler.start()
         else:
             if self.profiler is None:
