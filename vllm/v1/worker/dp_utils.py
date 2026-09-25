@@ -274,23 +274,11 @@ def coordinate_batch_across_dp(
         )
         return should_ubatch, num_tokens_after_padding, cudagraph_mode, None
 
-    (
-        should_ubatch,
-        num_tokens_after_padding,
-        synced_cudagraph_mode,
-        synced_profiler_ready,
-    ) = _synchronize_dp_ranks(
+    return _synchronize_dp_ranks(
         num_tokens_unpadded,
         num_tokens_padded,
         should_attempt_ubatching,
         cudagraph_mode,
         parallel_config,
         profiler_ready,
-    )
-
-    return (
-        should_ubatch,
-        num_tokens_after_padding,
-        synced_cudagraph_mode,
-        synced_profiler_ready,
     )

@@ -225,7 +225,6 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
         self._dp_profiler_requested = False
-        self._dp_profiler_session_started = False
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -1089,21 +1088,17 @@ class Worker(WorkerBase):
         """Advance once when all DP ranks have armed the same profile session."""
         profiler = self.profiler
         if not all_ranks_ready:
-            if self._dp_profiler_session_started:
-                assert profiler is not None
+            if profiler is not None and profiler.is_armed:
                 profiler.stop()
-                self._dp_profiler_session_started = False
                 self._dp_profiler_requested = False
             return
 
         assert profiler is not None
-        if not self._dp_profiler_session_started:
+        if not profiler.is_armed:
             profiler.start()
-            self._dp_profiler_session_started = True
 
         profiler.step()
         if not profiler.is_armed:
-            self._dp_profiler_session_started = False
             self._dp_profiler_requested = False
 
     def annotate_profile(self, scheduler_output):
@@ -1381,7 +1376,6 @@ class Worker(WorkerBase):
             # Keep the explicit stop synchronous. Other DP ranks observe the
             # de-armed state at their next existing execution agreement.
             self._dp_profiler_requested = False
-            self._dp_profiler_session_started = False
             try:
                 self.profiler.stop()
             finally:
