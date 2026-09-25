@@ -431,7 +431,7 @@ def build_attn_metadata(
     token_to_req_indices: torch.Tensor | None = None
     # Mamba groups with the same spec and builder differ only in their state
     # indices, so later groups re-gather those from the first group's metadata.
-    # This includes capture, so their FULL graphs read the first group's buffers.
+    # Also at capture, so FULL graphs share the batch-level buffers.
     mamba_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):

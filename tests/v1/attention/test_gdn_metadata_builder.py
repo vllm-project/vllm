@@ -76,6 +76,17 @@ GDN_BUILD_TEST_CASES = {
         expected_num_prefill_tokens=0,
         expected_num_spec_decodes=0,
     ),
+    # No speculative config, decode alongside prefill
+    "regular_decode_with_prefill": GDNBuildTestCase(
+        seq_lens=[40, 100],
+        query_lens=[1, 50],
+        num_decode_draft_tokens=None,
+        num_speculative_tokens=0,
+        expected_num_decodes=1,
+        expected_num_prefills=1,
+        expected_num_prefill_tokens=50,
+        expected_num_spec_decodes=0,
+    ),
     # Multi-token prefill alongside spec decode — no decode to reclassify
     "spec_decode_with_real_prefill": GDNBuildTestCase(
         seq_lens=[100, 20],
@@ -196,8 +207,7 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
 def test_update_block_table_matches_build(
     test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
 ):
-    """Another group's metadata updated with this group's block table gives
-    the state indices this group's own build() would."""
+    """update_block_table() on another group's metadata matches build()."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
     src, dst, ref = (
         _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
@@ -228,22 +238,13 @@ def test_update_block_table_matches_build(
     )
 
     for field, source_index in zip(fields, source_indices):
-        actual, want = getattr(meta, field), getattr(expected, field)
-        assert (actual is None) == (want is None), field
-        if want is not None:
-            torch.testing.assert_close(actual, want)
+        actual = getattr(meta, field)
+        torch.testing.assert_close(actual, getattr(expected, field))
         # The source group's indices are untouched.
-        if source_index is not None:
-            torch.testing.assert_close(getattr(source, field), source_index)
-    # FULL graph state indices land in this group's own buffers.
-    if meta.spec_state_indices_tensor is not None and meta.num_prefills == 0:
-        staged = full_cuda_graph and dst.spec_state_indices_tensor.data_ptr()
-        assert (meta.spec_state_indices_tensor.data_ptr() == staged) == full_cuda_graph
-    if meta.non_spec_state_indices_tensor is not None and meta.num_prefills == 0:
-        staged = full_cuda_graph and dst.non_spec_state_indices_tensor.data_ptr()
-        assert (
-            meta.non_spec_state_indices_tensor.data_ptr() == staged
-        ) == full_cuda_graph
+        torch.testing.assert_close(getattr(source, field), source_index)
+        # FULL graph state indices land in this group's own buffers.
+        if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
+            assert actual.data_ptr() == getattr(dst, field).data_ptr()
 
 
 def test_has_initial_state_after_reclassification():
