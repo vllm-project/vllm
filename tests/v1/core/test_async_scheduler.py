@@ -464,9 +464,6 @@ class PipelinedEngine:
         self.queue.appendleft(_QueuedStep(scheduler_output, new_reqs, sampled_tokens))
         return scheduler_output
 
-    def schedule(self, sampled_tokens: list[int]) -> SchedulerOutput:
-        return self._schedule(sampled_tokens)
-
     def _process_oldest_step(self) -> None:
         step = self.queue.pop()
         scheduler_output = step.scheduler_output
@@ -524,9 +521,6 @@ class PipelinedEngine:
             pooler_output=[],
         )
         self.scheduler.update_from_output(scheduler_output, model_runner_output)
-
-    def retire_oldest(self) -> None:
-        self._process_oldest_step()
 
     def run(
         self,
@@ -627,14 +621,14 @@ def test_resumable_scheduler_race(
     safe_frontier = len(old_prompt)
     scheduler.add_request(request)
 
-    s0 = engine.schedule(sampled_tokens=[EOS_TOKEN_ID])
+    s0 = engine._schedule(sampled_tokens=[EOS_TOKEN_ID])
     assert s0.num_scheduled_tokens == {request_id: old_prompt_len}
 
     for i, old_late_token in enumerate(old_late_tokens, 1):
-        old_step = engine.schedule(sampled_tokens=[old_late_token])
+        old_step = engine._schedule(sampled_tokens=[old_late_token])
         assert old_step.num_scheduled_tokens[request_id] > 0
 
-    engine.retire_oldest()
+    engine._process_oldest_step()
     assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
     assert request.num_in_flight_tokens > 0
     assert request.num_output_placeholders == 0
@@ -645,14 +639,14 @@ def test_resumable_scheduler_race(
     if retire_old_result_before_resume:
         all_token_ids_before_stale = list(request.all_token_ids)
         for _ in old_late_tokens:
-            engine.retire_oldest()
+            engine._process_oldest_step()
             assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
             assert sum(req is request for req in scheduler.skipped_waiting) == 1
         assert request.num_stale_output_tokens == 0
         assert list(request.all_token_ids) == all_token_ids_before_stale
 
     scheduler.add_request(continuation)
-    new_step = engine.schedule(sampled_tokens=[new_turn_token])
+    new_step = engine._schedule(sampled_tokens=[new_turn_token])
     assert new_step.num_scheduled_tokens == {request_id: continuation_len}
     assert scheduler.requests[request_id] is request
     assert list(request.prompt_token_ids) == expected_prompt
@@ -663,14 +657,14 @@ def test_resumable_scheduler_race(
     if not retire_old_result_before_resume:
         all_token_ids_before_stale = list(request.all_token_ids)
         for _ in old_late_tokens:
-            engine.retire_oldest()
+            engine._process_oldest_step()
         assert list(request.output_token_ids) == []
         assert list(request.all_token_ids) == all_token_ids_before_stale
         assert request.status == RequestStatus.RUNNING
         assert request.num_output_placeholders == 1
         assert request.num_in_flight_tokens == continuation_len
 
-    engine.retire_oldest()
+    engine._process_oldest_step()
     assert list(request.output_token_ids) == [new_turn_token]
     assert list(request.all_token_ids) == expected_prompt + [new_turn_token]
     assert request.status == RequestStatus.RUNNING
