@@ -996,14 +996,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
-# https://docs.flashinfer.ai/installation.html
-# From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.7.0
-RUN --mount=type=cache,target=/opt/uv/cache \
+# Install FlashInfer's precompiled kernels for all GPU architectures (the default).
+RUN --mount=type=cache,target=/opt/pip/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-            --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels; \
     fi
 
 # ============================================================
