@@ -567,24 +567,30 @@ steps:
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
   mirror:
     amd:
-      label: ":amd: (MI250) Pipeline Parallelism DP V2"
+      label: ":amd: (MI355) Pipeline Parallelism DP V2"
       dind: false
-      device: mi250_4
-      timeout_in_minutes: 20
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - csrc/
+      - vllm/config/
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
+      - vllm/envs.py
       - vllm/executor/
-      - vllm/model_executor/models/
-      - vllm/model_executor/layers/
-      - vllm/v1/attention/backends/
-      - vllm/v1/attention/selector.py
+      - vllm/ir/
+      - vllm/kernels/aiter_ops.py
+      - vllm/model_executor/
+      - vllm/v1/
       - tests/v1/distributed/test_pp_dp_v2.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      commands:
+      - VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus

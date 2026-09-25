@@ -308,12 +308,10 @@ steps:
   - tests/distributed/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
-  - tests/v1/distributed/test_pp_dp_v2.py
   optional: true
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/pipeline_parallel/
-  - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 #----------------------------------------------------------  mi250 · kernels  ----------------------------------------------------------#
 
@@ -2951,6 +2949,31 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
+
+- label: ":amd: (MI355) Pipeline Parallelism DP V2"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/envs.py
+  - vllm/executor/
+  - vllm/ir/
+  - vllm/kernels/aiter_ops.py
+  - vllm/model_executor/
+  - vllm/v1/
+  - tests/v1/distributed/test_pp_dp_v2.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 - label: ":amd: (MI355 DPX) Sharded RDT Weight Transfer"
   timeout_in_minutes: 45
