@@ -274,6 +274,8 @@ def rocm_aiter_fused_experts(
         activation_interleave = False
     elif activation == MoEActivation.SITU:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
+    elif activation == MoEActivation.RELU2_NO_MUL:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("relu2")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
     if activation_method is None:
@@ -369,7 +371,7 @@ def rocm_aiter_fused_experts(
         # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
         # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
         # SITU's A16W4 FlyDSL kernel pads per gate/up half; pass through unrounded.
-        if activation != MoEActivation.SITU:
+        if activation not in (MoEActivation.SITU, MoEActivation.RELU2_NO_MUL):
             hidden_pad = hidden_pad // 128 * 128
             intermediate_pad = (
                 intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
@@ -388,6 +390,10 @@ def rocm_aiter_fused_experts(
             # SiTUv2 flydsl (VLLM_ROCM_USE_AITER_MOE_SITUV2=1) uses a4w4
             # fp4 activations with separated gate/up weights (AITER #4463);
             # default a16w4 SiTU also stays separated.
+            gate_mode = GateMode.SEPARATED.value
+        elif activation == MoEActivation.RELU2_NO_MUL:
+            # aiter's Tier 2 Relu2 CK-Tile kernel only supports non-gated
+            # (use_g1u1=False) dispatch with separated gate/up weights.
             gate_mode = GateMode.SEPARATED.value
         elif quant_config.use_mxfp4_w4a16:
             gate_mode = GateMode.INTERLEAVE.value
@@ -472,7 +478,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -505,6 +511,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
