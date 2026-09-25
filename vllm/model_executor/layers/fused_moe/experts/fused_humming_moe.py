@@ -4,7 +4,6 @@
 
 import json
 import math
-import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -155,11 +154,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
 
     def init_humming_moe(self):
-        from vllm.utils.humming import MmaType, dtypes, get_heuristics_config
+        from vllm.utils.humming import GemmType, MmaType, dtypes, get_heuristics_config
 
-        self.use_m_major_w4a8 = (
-            os.getenv("HUMMING_EXPERIMENTAL_RS_W4A8") == "1"
-            and self.humming_gemm_type().value == "grouped_contiguous"
+        self.use_m_major_input_scale = (
+            self.humming_gemm_type() == GemmType.GROUPED_CONTIGUOUS
             and all(
                 config.sm_version == 90
                 and config.mma_type == MmaType.WGMMA
@@ -178,21 +176,21 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
             "gemm_type": self.humming_gemm_type().value,
-            "use_m_major_input_scale": self.use_m_major_w4a8,
+            "use_m_major_input_scale": self.use_m_major_input_scale,
         }
         self.w13_tuning_config = get_heuristics_config(
             layer_config=self.humming_configs["w13"],
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type(),
-            use_m_major_input_scale=self.use_m_major_w4a8,
+            use_m_major_input_scale=self.use_m_major_input_scale,
         )
         self.w2_tuning_config = get_heuristics_config(
             layer_config=self.humming_configs["w2"],
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type(),
-            use_m_major_input_scale=self.use_m_major_w4a8,
+            use_m_major_input_scale=self.use_m_major_input_scale,
         )
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
@@ -220,27 +218,43 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert scatter_idx is None
             if activation is not None:
                 raise ValueError("Cannot apply activation to prequantized input")
-            if self.use_m_major_w4a8:
-                # DeepEP sends row-major FP32 block scales. The optimized
-                # Humming kernel consumes the same values K-group major.
+            if self.use_m_major_input_scale:
+                # Pre-dispatch FP8 quantization provides [M, K/128] scales;
+                # Humming's optimized grouped kernel reads K-group-major scales.
                 rows = input_scale.size(0)
-                if rows % 4 == 0 and os.getenv(
-                    "HUMMING_EXPERIMENTAL_DEEPGEMM_SCALE_TRANSPOSE", "0"
-                ) == "1":
-                    from deep_gemm.utils.layout import (
-                        get_mn_major_tma_aligned_tensor,
+                padded_rows = (rows + 3) // 4 * 4
+                # For large unaligned scales, padding rows first and then
+                # transposing with DeepGEMM beats padding the transposed view.
+                use_deepgemm_transpose = input_scale.is_cuda and (
+                    rows == padded_rows
+                    or (
+                        padded_rows >= 8192
+                        and input_scale.size(1) >= 32
+                        and padded_rows * input_scale.size(1) >= 512 * 1024
+                    )
+                )
+                m_major_scale = None
+                if use_deepgemm_transpose:
+                    from vllm.utils.deep_gemm import (
+                        get_col_major_tma_aligned_tensor,
+                        is_deep_gemm_supported,
                     )
 
-                    # DeepGEMM produces (M, groups) with strides (1, M).
-                    # Viewing it as (groups, M) meets Humming's contiguous
-                    # scale-layout contract without another GPU copy.
-                    input_scale = get_mn_major_tma_aligned_tensor(input_scale).T
-                else:
-                    input_scale = input_scale.T.contiguous()
-                    if rows % 4:
-                        input_scale = torch.nn.functional.pad(
-                            input_scale, (0, 4 - rows % 4)
+                    if is_deep_gemm_supported():
+                        scales = input_scale
+                        if rows != padded_rows:
+                            scales = torch.nn.functional.pad(
+                                scales, (0, 0, 0, padded_rows - rows)
+                            )
+                        m_major_scale = get_col_major_tma_aligned_tensor(scales).T
+                if m_major_scale is None:
+                    if rows != padded_rows:
+                        m_major_scale = torch.nn.functional.pad(
+                            input_scale.T, (0, padded_rows - rows)
                         )
+                    else:
+                        m_major_scale = input_scale.T.contiguous()
+                input_scale = m_major_scale
             return inputs, input_scale, None
 
         activation_kwargs = {}
@@ -266,7 +280,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             expert_tokens=expert_tokens if layout == "grouped_mask" else None,
             scatter_idx=scatter_idx,
             num_valid_tokens=num_valid_tokens,
-            m_major_scale=self.use_m_major_w4a8,
+            m_major_scale=self.use_m_major_input_scale,
             **activation_kwargs,
         )
         input_scale = group_scales if mode.has_group_scale else token_scales
@@ -419,8 +433,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         and Humming then consumes the pre-quantized FP8 + scale directly (see
         the apply() methods, which forward the dispatch scale into
         HummingExpertsBase.process_input). vLLM dispatches row-major
-        [M, K // 128] float32 scales; the opt-in RS W4A8 path transposes
-        them to M-major layout before the grouped GEMM.
+        [M, K // 128] float32 scales; the optimized grouped W4A8 path
+        transposes them to M-major layout before the grouped GEMM.
         """
         quant_config = self.quant_config
         return (
@@ -950,7 +964,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         # Expanded prefill has exact local rows. A present metadata object in
         # CUDA-graph decode has no counts and still describes a padded buffer.
         if (
-            self.use_m_major_w4a8
+            self.use_m_major_input_scale
             and expert_tokens_meta is not None
             and expert_tokens_meta.expert_num_tokens is not None
         ):

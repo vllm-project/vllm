@@ -61,7 +61,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
         if quant_config._is_mxfp4(weight_quant):
             if layer.moe_config.moe_backend == "humming":
-                if format != "mxfp4-pack-quantized" or input_quant is None:
+                if (
+                    format != CompressionFormat.mxfp4_pack_quantized.value
+                    or input_quant is None
+                ):
                     raise ValueError(
                         "Humming MXFP4 MoE requires packed MXFP4 weights "
                         "and quantized activations"
