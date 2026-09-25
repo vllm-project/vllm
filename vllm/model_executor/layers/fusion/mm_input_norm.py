@@ -28,7 +28,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.transformers_utils.processor import cached_get_processor, get_processor_config
 from vllm.triton_utils import tl, triton
 
-InputLayout = Literal["patches_chw", "chw"]
+InputLayout = Literal["lcp", "chw"]
 
 
 @triton.jit
@@ -294,7 +294,7 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
-        input_layout: InputLayout = "patches_chw",
+        input_layout: InputLayout = "lcp",
     ):
         super().__init__()
 
@@ -407,13 +407,13 @@ class FusedMMInputNorm(CustomOp):
 
 def build_mm_input_norm(
     model_config: ModelConfig,
-    input_layout: InputLayout = "patches_chw",
+    input_layout: InputLayout = "lcp",
 ) -> nn.Module:
     """Build the input normalization module for a model.
 
     Args:
         model_config: Model whose processor supplies normalization parameters.
-        input_layout: ``patches_chw`` for patch rows or ``chw`` for images.
+        input_layout: ``lcp`` for flattened patch rows or ``chw`` for images.
 
     Returns:
         An identity module when normalization is disabled or unnecessary;
