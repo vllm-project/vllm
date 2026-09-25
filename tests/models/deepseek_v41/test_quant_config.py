@@ -85,3 +85,35 @@ def test_quant_method_fallback_for_128x128_block_size(vllm_config_context):
     # When block size is not [32, 32], standard Fp8LinearMethod is used for both
     assert isinstance(method_attn, Fp8LinearMethod)
     assert isinstance(method_shared, Fp8LinearMethod)
+
+
+def test_deepseek_v4_quark_block_size_discovery():
+    """Verify deepseek_v4 dynamic block size extraction from Quark configs."""
+    from vllm.models.deepseek_v4.quant_config import (
+        DeepseekV4FP8Config as DeepseekV4CoreFP8Config,
+    )
+
+    # 1. Top-level weight_block_size
+    cfg1 = DeepseekV4CoreFP8Config.from_config({
+        "quant_method": "quark",
+        "weight_block_size": [32, 32],
+    })
+    assert cfg1.weight_block_size == [32, 32]
+
+    # 2. Nested in layer_quant_config
+    cfg2 = DeepseekV4CoreFP8Config.from_config({
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "model.layers.0.self_attn.q_proj": {
+                "weight": {"block_size": [32, 32]}
+            }
+        },
+    })
+    assert cfg2.weight_block_size == [32, 32]
+
+    # 3. Default fallback to [128, 128]
+    cfg3 = DeepseekV4CoreFP8Config.from_config({
+        "quant_method": "quark",
+    })
+    assert cfg3.weight_block_size == [128, 128]
+
