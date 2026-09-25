@@ -601,13 +601,15 @@ steps:
   commands:
     - pip install helion==1.4.0
     - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 5
   mirror:
     amd:
       label: ":amd: (MI250) Helion Kernels Shard %N"
       dind: false
       device: mi250_1
       timeout_in_minutes: 45
+      # Explicit so the base step's count does not multiply the mirror's replicas.
+      parallelism: 2
       depends_on:
       - image-build-amd
       source_file_dependencies:
