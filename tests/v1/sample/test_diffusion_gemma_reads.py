@@ -12,7 +12,9 @@ from vllm.model_executor.models.diffusion_gemma import (
     DiffusionGemmaRequestStates,
     _compiled_sample_step,
     _concat_logprob_stashes,
+    _denoise_temperature,
     _mask_rows_to_allowed,
+    sample_row_stats_reference,
 )
 from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
@@ -132,8 +134,18 @@ def _denoise_once(
     decode_idx = torch.arange(n, dtype=torch.int64, device=device)
     sampled = torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width]
     num_sampled = torch.zeros(n, dtype=torch.int32, device=device)
-    _compiled_sample_step(
+    temp = _denoise_temperature(states.step, decode_slots, float(MAX_STEPS), 0.5, 1.0)
+    argmax, sample, entropy, probs = sample_row_stats_reference(
         torch.zeros(n * width, VOCAB, device=device),
+        temp,
+        width,
+        embed_dtype if compute_sc else None,
+    )
+    _compiled_sample_step(
+        sample.view(n, width),
+        argmax.view(n, width),
+        entropy.view(n, width),
+        probs.view(n, width, -1) if probs is not None else None,
         decode_slots,
         decode_idx,
         decode_slots,
@@ -159,9 +171,6 @@ def _denoise_once(
         sampled,
         num_sampled,
         torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
-        max_denoising_steps=float(MAX_STEPS),
-        t_min=0.5,
-        t_max=1.0,
         confidence_threshold=0.1,
         vocab_size=VOCAB,
         CL=width,
