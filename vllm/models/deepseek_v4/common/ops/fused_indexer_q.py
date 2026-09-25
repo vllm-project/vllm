@@ -55,25 +55,15 @@ def _fp32x2_to_fp4x2(x_lo, x_hi):
 
 
 @triton.jit
-def _quantize_mxfp4_pair(x_lo, x_hi):
-    """Quantize a block of MXFP4_BLOCK_SIZE fp32 values given as two
-    interleaved halves (x_lo = values at even positions in the block,
-    x_hi = values at odd positions). Returns:
-        - packed : uint8[BLOCK/2]  (low nibble = quant(x_lo), high = quant(x_hi))
-        - ue8m0  : scalar uint8    (block scale = 2^(ue8m0 - 127))
-    """
-    amax = tl.maximum(tl.max(tl.abs(x_lo)), tl.max(tl.abs(x_hi)))
-    # 6 * 2^-126 is from https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/kernel.py#L163
-    amax = tl.maximum(amax, 6.0 * (2**-126))
-    # ue8m0 block scale: 2^ceil(log2(amax/6.0)).
-    log2_ratio = tl.math.ceil(tl.math.log2(amax * (1.0 / 6.0)))
-    log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
-    scale = tl.math.exp2(log2_ratio)
-    ue8m0 = (log2_ratio + 127.0).to(tl.uint8)
-
-    inv_scale = 1.0 / scale
-    packed = _fp32x2_to_fp4x2(x_lo * inv_scale, x_hi * inv_scale)
-    return packed, ue8m0
+def _fp32x2_to_fp4x2_rocm(x_lo, x_hi):
+    return tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_fp4_f32 $0, $1, $2, $3",
+        constraints="=v,v,v,v",
+        args=[x_lo, x_hi, 1.0],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    ).to(tl.uint8)
 
 
 class FusedIndexerQRopeQuantTritonKernel(
@@ -310,10 +300,11 @@ class FusedIndexerQRopeQuantTritonKernel(
 
 
 def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
-    """Weights dtypes the model's indexer layers ask for: fp32 for the dense
-    scoring kernels, plus bf16 when the DeepSeek V4.1 sparse-logits indexer
-    (`SparseMQAIndexer`) is enabled."""
-    if vllm_config.attention_config.indexer_sparse_logits:
+    """Weights dtypes requested by sparse indexer implementations."""
+    uses_rocm_mxfp4 = current_platform.is_rocm() and (
+        vllm_config.attention_config.resolve_indexer_kv_dtype("fp8") == "mxfp4"
+    )
+    if uses_rocm_mxfp4 or vllm_config.attention_config.indexer_sparse_logits:
         return (torch.float32, torch.bfloat16)
     return (torch.float32,)
 
@@ -329,6 +320,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
         index_q_half_rot_dim: int
         index_q_head_dim: int
         mxfp4_block: int
+        use_explicit_fma: bool
 
     @staticmethod
     @triton.jit
@@ -358,11 +350,11 @@ class FusedIndexerQRopeMxFp4TritonKernel(
         index_weights_head_scale,
         index_weights_out_ptr,
         index_weights_out_stride,
+        PRESHUFFLE_FP4: tl.constexpr,
+        USE_EXPLICIT_FMA: tl.constexpr,
     ):
         INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
         INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
-        NUM_NOPE_BLOCKS: tl.constexpr = INDEX_Q_NOPE_DIM // MXFP4_BLOCK
-        NUM_ROPE_BLOCKS: tl.constexpr = INDEX_Q_ROT_DIM // MXFP4_BLOCK
         HALF_BLOCK: tl.constexpr = MXFP4_BLOCK // 2
         tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
         tl.static_assert(INDEX_Q_NOPE_DIM % MXFP4_BLOCK == 0)
@@ -380,48 +372,72 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             + tok_idx * index_q_mxfp4_stride0
             + head_idx * index_q_mxfp4_stride1
         )
-        scale_base = (
-            index_q_scale_ptr
-            + tok_idx * index_q_scale_stride0
-            + head_idx * index_q_scale_stride1
+        NUM_PAIRS: tl.constexpr = INDEX_Q_HEAD_DIM // 2
+        NUM_BLOCKS: tl.constexpr = INDEX_Q_HEAD_DIM // MXFP4_BLOCK
+        NOPE_PAIRS: tl.constexpr = INDEX_Q_NOPE_DIM // 2
+        pair_idx = tl.arange(0, NUM_PAIRS)
+        rope_pair = pair_idx - NOPE_PAIRS
+        is_rope = rope_pair >= 0
+        cos_sin_idx = tl.maximum(rope_pair, 0)
+
+        cos = tl.load(
+            index_q_cos_sin_ptr + pos * index_q_cos_sin_stride + cos_sin_idx,
+            mask=is_rope,
+            other=1.0,
+        ).to(tl.float32)
+        sin = tl.load(
+            index_q_cos_sin_ptr
+            + pos * index_q_cos_sin_stride
+            + cos_sin_idx
+            + INDEX_Q_HALF_ROT_DIM,
+            mask=is_rope,
+            other=0.0,
+        ).to(tl.float32)
+        x_even = tl.load(q_base + pair_idx * 2).to(tl.float32)
+        x_odd = tl.load(q_base + pair_idx * 2 + 1).to(tl.float32)
+        if USE_EXPLICIT_FMA:
+            q_even = tl.fma(x_even, cos, -(x_odd * sin))
+            q_odd = tl.fma(x_odd, cos, x_even * sin)
+        else:
+            q_even = x_even * cos - x_odd * sin
+            q_odd = x_odd * cos + x_even * sin
+        q_even = q_even.to(tl.bfloat16).to(tl.float32)
+        q_odd = q_odd.to(tl.bfloat16).to(tl.float32)
+
+        even_2d = tl.reshape(q_even, (NUM_BLOCKS, HALF_BLOCK))
+        odd_2d = tl.reshape(q_odd, (NUM_BLOCKS, HALF_BLOCK))
+        amax = tl.maximum(
+            tl.max(tl.abs(even_2d), axis=1),
+            tl.max(tl.abs(odd_2d), axis=1),
         )
+        amax = tl.maximum(amax, 6.0 * (2**-126))
+        log2_ratio = tl.math.ceil(tl.math.log2(amax * (1.0 / 6.0)))
+        log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
+        inv_scale = tl.math.exp2(-log2_ratio)
+        inv_scale_2d = tl.reshape(inv_scale, (NUM_BLOCKS, 1))
+        if PRESHUFFLE_FP4:
+            packed = _fp32x2_to_fp4x2_rocm(
+                even_2d * inv_scale_2d, odd_2d * inv_scale_2d
+            )
+        else:
+            packed = _fp32x2_to_fp4x2(even_2d * inv_scale_2d, odd_2d * inv_scale_2d)
+        tl.store(out_base + pair_idx, tl.reshape(packed, (NUM_PAIRS,)))
 
-        half_off = tl.arange(0, HALF_BLOCK)
-
-        # ---- NoPE blocks: direct load, pair as (even-index, odd-index) values ----
-        for b in tl.static_range(NUM_NOPE_BLOCKS):
-            base = b * MXFP4_BLOCK
-            x_lo = tl.load(q_base + base + half_off * 2).to(tl.float32)
-            x_hi = tl.load(q_base + base + half_off * 2 + 1).to(tl.float32)
-            packed, ue8m0 = _quantize_mxfp4_pair(x_lo, x_hi)
-            tl.store(out_base + base // 2 + half_off, packed)
-            tl.store(scale_base + b, ue8m0)
-
-        # ---- RoPE blocks: apply GPT-J interleaved RoPE to the block's 16 pairs,
-        # then quantize. Each block covers HALF_BLOCK (=16) cos/sin pairs. ----
-        rot_q_base = q_base + INDEX_Q_NOPE_DIM
-        for b in tl.static_range(NUM_ROPE_BLOCKS):
-            pair_off = b * HALF_BLOCK + half_off  # indices in [0, HALF_ROT_DIM)
-            cos_b = tl.load(
-                index_q_cos_sin_ptr + pos * index_q_cos_sin_stride + pair_off
-            ).to(tl.float32)
-            sin_b = tl.load(
-                index_q_cos_sin_ptr
-                + pos * index_q_cos_sin_stride
-                + pair_off
-                + INDEX_Q_HALF_ROT_DIM
-            ).to(tl.float32)
-            x_even = tl.load(rot_q_base + pair_off * 2).to(tl.float32)
-            x_odd = tl.load(rot_q_base + pair_off * 2 + 1).to(tl.float32)
-            r_even = x_even * cos_b - x_odd * sin_b
-            r_odd = x_odd * cos_b + x_even * sin_b
-            # bf16 roundtrip for parity with the FP8 kernel / reference numerics.
-            r_even = r_even.to(tl.bfloat16).to(tl.float32)
-            r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
-            packed, ue8m0 = _quantize_mxfp4_pair(r_even, r_odd)
-            rope_byte_off = (INDEX_Q_NOPE_DIM + b * MXFP4_BLOCK) // 2
-            tl.store(out_base + rope_byte_off + half_off, packed)
-            tl.store(scale_base + NUM_NOPE_BLOCKS + b, ue8m0)
+        block_idx = tl.arange(0, NUM_BLOCKS)
+        if PRESHUFFLE_FP4:
+            scale_offset = (
+                tok_idx * index_q_scale_stride0
+                + (head_idx % 16) * 4
+                + head_idx // 16
+                + block_idx * 64
+            )
+        else:
+            scale_offset = (
+                tok_idx * index_q_scale_stride0
+                + head_idx * index_q_scale_stride1
+                + block_idx
+            )
+        tl.store(index_q_scale_ptr + scale_offset, (log2_ratio + 127.0).to(tl.uint8))
 
         # MXFP4 weight-fold contract:
         #   index_weights_out = index_weights * softmax_scale * head_scale
@@ -456,6 +472,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             index_q_half_rot_dim=rope_dim // 2,
             index_q_head_dim=head_dim,
             mxfp4_block=MXFP4_BLOCK_SIZE,
+            use_explicit_fma=current_platform.is_rocm(),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -501,7 +518,9 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             ),
             index_q_scale=TritonWarmupTensor(
                 torch.uint8,
-                shape=(1, compile_key.num_heads, scale_head_dim),
+                shape=(1, 1, 4, 16, 4)
+                if current_platform.is_rocm()
+                else (1, compile_key.num_heads, scale_head_dim),
             ),
             index_weights_out=TritonWarmupTensor(
                 compile_key.weights_out_dtype,
@@ -540,6 +559,8 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             MXFP4_BLOCK=MXFP4_BLOCK_SIZE,
             index_weights_stride=index_weights.stride(0),
             index_weights_out_stride=index_weights_out.stride(0),
+            PRESHUFFLE_FP4=current_platform.is_rocm(),
+            USE_EXPLICIT_FMA=current_platform.is_rocm(),
             num_warps=1,
         )
 
@@ -578,6 +599,8 @@ def fused_indexer_q_rope_quant(
     MXFP4 path (use_fp4=True):
         q_packed   : (T, H, HEAD_DIM // 2) uint8 (2 E2M1 nibbles per byte)
         q_scale    : (T, H, HEAD_DIM // MXFP4_BLOCK_SIZE) uint8 ue8m0 bytes
+                     ROCm returns AITER's (T, 1, 4, 16, 4) swizzle; CUDA
+                     returns the logical scales packed into (T, H) int32.
         weights_out = weights * softmax_scale * head_scale
         Rationale: MXFP4 has PER-BLOCK (32-element) scales that live with
         the Q values — they cannot be folded into a per-token weight
@@ -603,17 +626,25 @@ def fused_indexer_q_rope_quant(
             f"size {MXFP4_BLOCK_SIZE}"
         )
         num_scale_blocks = index_q_head_dim // MXFP4_BLOCK_SIZE
+        rocm_fp4 = current_platform.is_rocm()
+        if rocm_fp4:
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950() or (num_index_q_heads, index_q_head_dim) != (64, 128):
+                raise ValueError("ROCm MXFP4 indexer Q requires gfx950, H=64, D=128")
         index_q_packed = torch.empty(
             (num_tokens, num_index_q_heads, index_q_head_dim // 2),
             dtype=torch.uint8,
             device=index_q.device,
         )
         index_q_scale = torch.empty(
-            (num_tokens, num_index_q_heads, num_scale_blocks),
+            (num_tokens, 1, 4, 16, 4)
+            if rocm_fp4
+            else (num_tokens, num_index_q_heads, num_scale_blocks),
             dtype=torch.uint8,
             device=index_q.device,
         )
-        if has_cutedsl():
+        if not rocm_fp4 and has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
                 _INDEXER_Q_MXFP4_KERNEL,
@@ -655,6 +686,9 @@ def fused_indexer_q_rope_quant(
                 index_q_scale,
                 index_weights_out,
             )
+
+        if rocm_fp4:
+            return (index_q_packed, index_q_scale), index_weights_out
 
         # Values stay uint8 (2 E2M1 nibbles per byte). Scales are 4 ue8m0
         # bytes per (token, head) reinterpreted as one int32, then squeezed

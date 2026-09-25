@@ -229,6 +229,54 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
     )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm MXFP4 only")
+@torch.inference_mode()
+def test_rocm_mxfp4_fused_indexer_q_emits_bf16_weights():
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("ROCm MXFP4 indexer Q requires gfx950")
+
+    num_tokens = 17
+    n_head = 64
+    device = "cuda"
+    torch.manual_seed(0)
+    q = torch.randn(num_tokens, n_head, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.randint(
+        0, MAX_POS, (num_tokens,), dtype=torch.int64, device=device
+    )
+    cos_sin_cache = torch.randn(MAX_POS, ROPE_DIM, dtype=torch.float32, device=device)
+    weights = torch.randn(num_tokens, n_head, dtype=torch.bfloat16, device=device)
+    softmax_scale = HEAD_DIM**-0.5
+    head_scale = 0.125
+
+    _, weights_ref = _reference(
+        positions,
+        q,
+        cos_sin_cache,
+        weights,
+        softmax_scale,
+        head_scale,
+        n_head,
+        use_fp4=True,
+    )
+    _, weights_actual = fused_indexer_q_rope_quant(
+        positions,
+        q,
+        cos_sin_cache,
+        weights,
+        softmax_scale,
+        head_scale,
+        use_fp4=True,
+        weights_out_dtype=torch.bfloat16,
+    )
+
+    assert weights_actual.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        weights_actual, weights_ref.to(torch.bfloat16), rtol=0, atol=0
+    )
+
+
 @pytest.mark.skipif(not has_cutedsl(), reason="cutedsl (cutlass) not installed")
 @pytest.mark.parametrize(
     "use_fp4",

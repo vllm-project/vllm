@@ -1115,6 +1115,11 @@ class DeepseekV4Indexer(nn.Module):
                 self.softmax_scale,
                 self.n_head**-0.5,
                 use_fp4=self.use_fp4_kv,
+                weights_out_dtype=(
+                    torch.bfloat16
+                    if self.use_fp4_kv and current_platform.is_rocm()
+                    else torch.float32
+                ),
             )
 
         if not skip_compressor:

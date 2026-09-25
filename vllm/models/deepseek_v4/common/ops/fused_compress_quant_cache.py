@@ -40,7 +40,7 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
-from .fused_indexer_q import _fp32x2_to_fp4x2
+from .fused_indexer_q import _fp32x2_to_fp4x2, _fp32x2_to_fp4x2_rocm
 
 
 def compress_norm_rope_store_triton(
@@ -927,6 +927,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     TOKEN_STRIDE: tl.constexpr,  # HEAD_SIZE // 2 = 64 packed bytes/token
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
+    PRESHUFFLE: tl.constexpr = False,
 ):
     """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
 
@@ -1011,12 +1012,6 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
 
     cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
-    val_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
-    scale_ptr = (
-        cache_block_ptr
-        + kv_cache_block_size * TOKEN_STRIDE
-        + kv_pos_in_block * SCALE_DIM
-    )
 
     NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
     HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
@@ -1073,13 +1068,34 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
 
     inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
-    packed = _fp32x2_to_fp4x2(
-        even_2d * inv_scale_col, odd_2d * inv_scale_col
-    )  # (N_BLOCKS, HALF_BLOCK) uint8
+    if PRESHUFFLE:
+        packed = _fp32x2_to_fp4x2_rocm(even_2d * inv_scale_col, odd_2d * inv_scale_col)
+    else:
+        packed = _fp32x2_to_fp4x2(even_2d * inv_scale_col, odd_2d * inv_scale_col)
     packed_flat = tl.reshape(packed, (TOKEN_STRIDE,))
 
-    tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
-    tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)
+    packed_idx = tl.arange(0, TOKEN_STRIDE)
+    scale_idx = tl.arange(0, SCALE_DIM)
+    if PRESHUFFLE:
+        tl.static_assert(HEAD_SIZE == 128 and QUANT_BLOCK == 32)
+        value_offset = (
+            (packed_idx // HALF_BLOCK) * kv_cache_block_size * HALF_BLOCK
+            + kv_pos_in_block * HALF_BLOCK
+            + packed_idx % HALF_BLOCK
+        )
+        scale_offset = (
+            kv_cache_block_size * TOKEN_STRIDE
+            + scale_idx * kv_cache_block_size
+            + (kv_pos_in_block % 16) * 4
+            + kv_pos_in_block // 16
+        )
+    else:
+        value_offset = kv_pos_in_block * TOKEN_STRIDE + packed_idx
+        scale_offset = (
+            kv_cache_block_size * TOKEN_STRIDE + kv_pos_in_block * SCALE_DIM + scale_idx
+        )
+    tl.store(cache_block_ptr + value_offset, packed_flat)
+    tl.store(cache_block_ptr + scale_offset, ue8m0)
 
 
 class FusedKVCompressNormRopeInsertIndexerTritonKernel(
@@ -1277,6 +1293,12 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         token_stride: int,
         scale_dim: int,
     ) -> LaunchSpec:
+        if (
+            use_fp4_cache
+            and current_platform.is_rocm()
+            and (not _ON_GFX950 or head_dim != 128 or kv_cache.shape[1] != 64)
+        ):
+            raise ValueError("ROCm MXFP4 indexer K requires gfx950, D=128, page=64")
         return (num_actual,), dict(
             kernel=(
                 _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
@@ -1301,6 +1323,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             TOKEN_STRIDE=token_stride,
             SCALE_DIM=scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
+            **({"PRESHUFFLE": current_platform.is_rocm()} if use_fp4_cache else {}),
             num_warps=1,
             **pdl_kwargs,
         )
