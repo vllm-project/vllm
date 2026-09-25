@@ -29,7 +29,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
-from vllm.utils.multi_stream_utils import execute_in_parallel_default_first
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -727,14 +727,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             weights, _ = indexer.weights_proj(hidden_states)
             return weights
 
-        (q, qr, qr_scale, kv), (latent, indexer_weights) = (
-            execute_in_parallel_default_first(
-                default_chain,
-                [compressor_chain, indexer_weights_chain],
-                self.ln_events[0],
-                self.ln_events[1:3],
-                aux_streams[:2],
-            )
+        (q, qr, qr_scale, kv), (latent, indexer_weights) = execute_in_parallel(
+            default_chain,
+            [compressor_chain, indexer_weights_chain],
+            self.ln_events[0],
+            self.ln_events[1:3],
+            aux_streams[:2],
+            enable=True,
+            default_first=True,
         )
 
         indexer._produce_k(latent, positions, self.indexer_rotary_emb)
@@ -779,12 +779,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         aux_streams = self.aux_stream_list
         assert aux_streams is not None
-        q, aux_results = execute_in_parallel_default_first(
+        q, aux_results = execute_in_parallel(
             swa_q_chain,
             [indexer_q_chain],
             self.ln_events[0],
             self.ln_events[1:2],
             aux_streams[:1],
+            enable=True,
+            default_first=True,
         )
         index_q, index_q_scale, index_weights_out = aux_results[0]
         return q, kv, index_q, index_q_scale, index_weights_out

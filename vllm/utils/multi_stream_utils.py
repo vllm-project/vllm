@@ -70,6 +70,7 @@ def execute_in_parallel(
     done_events: list[torch.cuda.Event],
     aux_streams: list[torch.cuda.Stream] | None = None,
     enable: bool = False,
+    default_first: bool = False,
 ) -> tuple[Any, list[Any]]:
     """Run default_fn on the current stream and aux_fns concurrently on
     aux_streams.
@@ -97,6 +98,10 @@ def execute_in_parallel(
             so callers that pass aux_streams must also pass enable=True
             (typically gated by an env var) to actually overlap. When False,
             execution falls back to sequential on the current stream.
+        default_first: When True, enqueue the default chain before the aux
+            chains. The default chain is typically the longest, so it starts
+            first; the aux streams still only wait on start_event, so they
+            overlap the default chain. Defaults to False.
 
     Returns:
         Tuple of (default_result, aux_results) where aux_results[i] is the
@@ -117,6 +122,8 @@ def execute_in_parallel(
     pending: list[torch.cuda.Event] = []
 
     start_event.record()
+    if default_first:
+        default_result = default_fn()
     for i, fn in enumerate(aux_fns):
         if fn is None:
             continue
@@ -125,38 +132,10 @@ def execute_in_parallel(
             aux_results[i] = fn()
             done_events[i].record()
         pending.append(done_events[i])
-
-    default_result = default_fn()
+    if not default_first:
+        default_result = default_fn()
 
     for ev in pending:
         ev.wait()
 
-    return default_result, aux_results
-
-
-def execute_in_parallel_default_first(
-    default_fn: Callable[[], Any],
-    aux_fns: list[Callable[[], Any]],
-    start_event: torch.cuda.Event,
-    done_events: list[torch.cuda.Event],
-    aux_streams: list[torch.cuda.Stream],
-) -> tuple[Any, list[Any]]:
-    """``execute_in_parallel`` with the default chain enqueued first.
-
-    The default chain is the longest, so launching it first lets it start
-    before the aux chains; the aux streams only wait on the pre-fork default
-    stream work (``start_event``), so they still overlap the default chain.
-    """
-    start_event.record()
-    default_result = default_fn()
-    aux_results: list[Any] = [None] * len(aux_fns)
-    pending: list[torch.cuda.Event] = []
-    for i, fn in enumerate(aux_fns):
-        with torch.cuda.stream(aux_streams[i]):
-            start_event.wait()
-            aux_results[i] = fn()
-            done_events[i].record()
-        pending.append(done_events[i])
-    for ev in pending:
-        ev.wait()
     return default_result, aux_results
