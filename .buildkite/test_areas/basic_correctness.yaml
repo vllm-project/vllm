@@ -19,9 +19,9 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness"
+      label: ":amd: (MI355 DPX) Basic Correctness"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
