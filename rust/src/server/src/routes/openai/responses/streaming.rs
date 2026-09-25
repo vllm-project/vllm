@@ -82,9 +82,7 @@ pub(crate) struct OutputItemStreamer {
     output_index: u32,
     /// The currently open output item, if any.
     current: Option<OpenItem>,
-    /// Whether reasoning items appear in the final output. Reasoning deltas
-    /// still stream regardless (Python parity), they are only excluded from
-    /// the terminal payload.
+    /// Whether reasoning items appear in the stream and final output.
     include_reasoning: bool,
     /// IDs of streamed items in emission order, together with their block
     /// kind. Used to keep final-response item IDs consistent with the stream.
@@ -133,6 +131,9 @@ impl OutputItemStreamer {
                 }
                 match kind {
                     AssistantBlockKind::Reasoning => {
+                        if !self.include_reasoning {
+                            return vec![];
+                        }
                         let mut events = self.open_reasoning_if_needed();
                         events.push(self.reasoning_delta(delta.clone()));
                         events
@@ -147,6 +148,7 @@ impl OutputItemStreamer {
                 }
             }
             ChatEvent::BlockEnd { block, .. } => match block.kind() {
+                AssistantBlockKind::Reasoning if !self.include_reasoning => vec![],
                 AssistantBlockKind::Reasoning => self.close_reasoning(block_text(block)),
                 AssistantBlockKind::Text => self.close_message(block_text(block)),
                 // Tool-call blocks flow through the dedicated events.
@@ -415,7 +417,7 @@ impl OutputItemStreamer {
                 call_id,
                 name,
                 arguments,
-                saw_delta,
+                saw_delta: _,
             } => {
                 let (call_id, name, arguments) = match final_call {
                     Some(call) => (
@@ -429,18 +431,15 @@ impl OutputItemStreamer {
                     ),
                     None => (call_id, name, arguments),
                 };
-                let mut events = Vec::new();
-                if saw_delta {
-                    events.push(part_event(
-                        "response.function_call_arguments.done",
-                        output_index,
-                        &item_id,
-                        [
-                            ("arguments", Value::String(arguments.clone())),
-                            ("name", Value::String(name.clone())),
-                        ],
-                    ));
-                }
+                let mut events = vec![part_event(
+                    "response.function_call_arguments.done",
+                    output_index,
+                    &item_id,
+                    [
+                        ("arguments", Value::String(arguments.clone())),
+                        ("name", Value::String(name.clone())),
+                    ],
+                )];
                 events.push(output_item_event(
                     "response.output_item.done",
                     output_index,
@@ -552,5 +551,39 @@ fn part_event<const N: usize>(
     ResponseStreamEvent {
         event_type,
         payload: fields,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    #[test]
+    fn empty_function_call_emits_arguments_done() {
+        let mut streamer = OutputItemStreamer::new(true);
+        streamer.on_event(&ChatEvent::ToolCallStart {
+            index: 0,
+            id: "call_1".to_string(),
+            name: "empty".to_string(),
+        });
+
+        let events = streamer.on_event(&ChatEvent::ToolCallEnd {
+            index: 0,
+            call: AssistantToolCall {
+                id: "call_1".to_string(),
+                name: "empty".to_string(),
+                arguments: String::new(),
+            },
+        });
+        let payloads: Vec<Value> = events
+            .iter()
+            .map(|event| serde_json::from_str(&event.to_json(0)).unwrap())
+            .collect();
+
+        assert_eq!(payloads[0]["type"], "response.function_call_arguments.done");
+        assert_eq!(payloads[0]["arguments"], "");
+        assert_eq!(payloads[1]["type"], "response.output_item.done");
     }
 }
