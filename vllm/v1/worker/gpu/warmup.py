@@ -30,6 +30,7 @@ from vllm.v1.worker.extensible_kv_cache import (
     ensure_kv_cache_blocks,
     num_committable_kv_blocks,
 )
+from vllm.v1.worker.gpu.input_batch import post_update
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -101,6 +102,54 @@ def _warmup_block_counter(
         )
 
     return block_count
+
+
+def warmup_pp_decode_update(model_runner: GPUModelRunner) -> None:
+    """JIT-compile the kernel behind ``update_pp_decode_requests``.
+
+    That path only runs on real steps, so the warmup steps never reach it
+    on non-last PP ranks. Its first triton compile must not happen
+    mid-serving: the in-flight sampled-token broadcast keeps a NCCL kernel
+    spinning on this device, which blocks the CUDA module load and
+    deadlocks the pipeline. An all -1 idx_mapping makes this a no-op.
+    The freshly allocated int32 tensors are 16-byte aligned, matching the
+    padded views `PPHandler` produces at serving time (triton specializes
+    on pointer alignment).
+
+    Serving reaches one variant per (sampled-token width, drafts received)
+    pair: the width is `PPHandler._sample_len` (1 when the batch carries no
+    drafts; a stride of 1 is its own specialization), and drafts arrive only
+    in steps that proposed some. Compile every pair.
+    """
+    pp_handler = model_runner.pp_handler
+    assert pp_handler is not None
+    req_states = model_runner.req_states
+    device = model_runner.device
+    num_spec = pp_handler.max_sample_len - 1
+    sample_lens = sorted({1, pp_handler.max_sample_len})
+    received_drafts: list[torch.Tensor | None] = [None]
+    if num_spec > 0:
+        received_drafts.append(
+            torch.zeros((1, num_spec), dtype=torch.int64, device=device)
+        )
+    for sample_len in sample_lens:
+        for draft_tokens in received_drafts:
+            post_update(
+                # Serving builds idx_mapping as int64; the triton signature
+                # must match or the first real step recompiles mid-serving.
+                torch.full((1,), -1, dtype=torch.int64, device=device),
+                req_states.num_computed_tokens.gpu,
+                req_states.last_sampled_tokens,
+                None,
+                torch.zeros((1, sample_len), dtype=torch.int64, device=device),
+                torch.zeros(1, dtype=torch.int32, device=device),
+                torch.zeros(1, dtype=torch.int32, device=device),
+                None,
+                req_states.all_token_ids.gpu,
+                req_states.total_len.gpu,
+                draft_tokens,
+                req_states.draft_tokens,
+            )
 
 
 def run_mixed_prefill_decode_warmup(
@@ -621,7 +670,7 @@ def _warmup_kernels(
     # The deferred PP post-update path only runs on real steps, so the steps
     # above never JIT-compile its kernel on non-last ranks.
     if not model_runner.is_last_pp_rank and model_runner.pp_handler is not None:
-        model_runner.warmup_pp_decode_update()
+        warmup_pp_decode_update(model_runner)
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
