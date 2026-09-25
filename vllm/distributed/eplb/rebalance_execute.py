@@ -648,7 +648,6 @@ def rearrange_expert_weights_inplace(
     communicator: EplbCommunicator,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
-    enable_migration_batching: bool = False,
 ) -> None:
     """Rearranges the expert weights in place according to the new expert indices.
 
@@ -670,8 +669,6 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
-        enable_migration_batching: Schedule remote transfers in batches where
-            each rank communicates with at most one peer.
 
     """
     if rank_mapping is not None:
@@ -741,7 +738,6 @@ def rearrange_expert_weights_inplace(
             ep_rank=ep_rank,
             communicator=communicator,
             layer_idx=layer_idx,
-            enable_migration_batching=enable_migration_batching,
         )
 
         move_from_buffer(
