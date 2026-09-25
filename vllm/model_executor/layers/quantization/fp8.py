@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
@@ -93,7 +94,7 @@ class Fp8Config(QuantizationConfig):
 
     def __init__(
         self,
-        is_checkpoint_fp8_serialized: bool = False,
+        is_checkpoint_fp8_serialized: bool = True,
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
@@ -102,6 +103,13 @@ class Fp8Config(QuantizationConfig):
         super().__init__()
 
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        if not is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "The `fp8` quantization method no longer supports online "
+                "quantization. Please use `--quantization fp8_per_tensor` "
+                "instead. See "
+                "https://docs.vllm.ai/en/stable/features/quantization/online/"
+            )
 
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
@@ -112,11 +120,6 @@ class Fp8Config(QuantizationConfig):
         )
         self.store_dtype = store_dtype
         if weight_block_size is not None:
-            if not is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "The block-wise quantization only supports fp8-serialized "
-                    "checkpoint for now."
-                )
             if len(weight_block_size) != 2:
                 raise ValueError(
                     "The quantization block size of weight must have 2 "
@@ -182,18 +185,9 @@ class Fp8Config(QuantizationConfig):
                 match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
-            if not self.is_checkpoint_fp8_serialized:
-                from vllm.model_executor.layers.quantization.online.fp8 import (
-                    Fp8PerTensorOnlineLinearMethod,
-                )
-
-                online_method = Fp8PerTensorOnlineLinearMethod()
-                online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-                return online_method
-            else:
-                offline_method = Fp8LinearMethod(self)
-                offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-                return offline_method
+            offline_method = Fp8LinearMethod(self)
+            offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return offline_method
         elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
@@ -208,14 +202,7 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
-            if self.is_checkpoint_fp8_serialized:
-                return Fp8MoEMethod(self, layer)
-            else:
-                from vllm.model_executor.layers.quantization.online.fp8 import (
-                    Fp8PerTensorOnlineMoEMethod,
-                )
-
-                return Fp8PerTensorOnlineMoEMethod(moe=layer.moe_config)
+            return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -548,7 +535,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        assert self.quant_config.is_checkpoint_fp8_serialized
         params_dtype = torch.float8_e4m3fn
 
         if self.block_quant:
@@ -842,7 +828,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
