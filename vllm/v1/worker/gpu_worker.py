@@ -587,7 +587,7 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            self._profile_run()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -614,7 +614,7 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            self._profile_run()
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -1351,6 +1351,14 @@ class Worker(WorkerBase):
                     # Proton output names are fixed when the wrapper is constructed.
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
+
+    def _profile_run(self) -> None:
+        if self.use_v2_model_runner:
+            self.model_runner.profile_run(  # type: ignore[call-arg]
+                randomize_inputs=self.randomize_dummy_inputs
+            )
+        else:
+            self.model_runner.profile_run()
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
