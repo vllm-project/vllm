@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -208,6 +209,7 @@ class Worker(WorkerBase):
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
@@ -243,6 +245,30 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
+    def _save_sleep_parameters(self, model: nn.Module) -> None:
+        patterns = self.model_config.sleep_preserve_parameter_names
+        if not patterns:
+            self._sleep_saved_parameters = {}
+            return
+        parameters = dict(model.named_parameters())
+        names: set[str] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(parameters, pattern)
+            if not matches:
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            names.update(matches)
+        self._sleep_saved_parameters = {
+            name: param.detach().to("cpu")
+            for name, param in parameters.items()
+            if name in names and not param.is_cpu
+        }
+
+    @torch.no_grad()
+    def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        for name, value in self._sleep_saved_parameters.items():
+            model.get_parameter(name).copy_(value)
+        self._sleep_saved_parameters.clear()
+
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
@@ -250,6 +276,7 @@ class Worker(WorkerBase):
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
+            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
@@ -287,6 +314,8 @@ class Worker(WorkerBase):
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
+        if wake_weights and self._sleep_saved_parameters:
+            self._restore_sleep_parameters(self.model_runner.model)
         if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
@@ -377,13 +406,14 @@ class Worker(WorkerBase):
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_index
 
-                tp_pp_world_size = (
+                tp_pcp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.prefill_context_parallel_size
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
+                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -521,6 +551,11 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+        # Preserve parallel weight loading, then use serving's thread count
+        # for profiling and compilation so Dynamo's global-state guards remain
+        # valid when requests arrive.
+        set_torch_threads_for_runtime()
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
@@ -581,12 +616,10 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
-        # XPU stays excluded (see #39977).
         cudagraph_memory_estimate = 0
         if (
-            current_platform.is_cuda_alike()
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -761,9 +794,6 @@ class Worker(WorkerBase):
             ),
         )
 
-        if self.model_config.enable_return_routed_experts:
-            self.model_runner.init_routed_experts_capturer()
-
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -812,9 +842,12 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.use_v2_model_runner:  # noqa: SIM102
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                # A workspace resize after capture frees what the graphs point at.
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -933,12 +966,7 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.utils.jit_monitor import activate as activate_jit_monitor
-
-        activate_jit_monitor(
-            mode=self.observability_config.jit_monitor_mode,
-            verbose=self.observability_config.jit_monitor_verbose,
-        )
+        self._maybe_activate_jit_monitor()
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
@@ -949,13 +977,23 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
-        # Startup is done; steady-state serving gets no benefit from torch
-        # intra-op parallelism.
-        set_torch_threads_for_runtime()
-
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
+        )
+
+    def _maybe_activate_jit_monitor(self) -> None:
+        # When JIT warmup is disabled (e.g. enforce_eager), runtime JIT
+        # compilation is expected, so monitoring would only produce noise
+        # (or spurious errors in "error" mode).
+        if not self.vllm_config.kernel_config.enable_jit_warmup:
+            return
+
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
+
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
         )
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:

@@ -406,14 +406,9 @@ def draft_watermarking_mask(
 
     if contexts.stride(-1) != 1:
         contexts = contexts.contiguous()
-    # The kernel indexes these by row without a stride. `steps` is left alone:
-    # the kernel takes its stride, so a broadcast row needs no copy.
+    # Only `steps` passes its row stride to the kernel.
     req_indices = req_indices.contiguous()
     enabled = enabled.contiguous()
-    # `prompt_lens`, `total_lens` and the last dimension of `all_token_ids` and
-    # of `prior_contexts` are read flat and contiguous by contract:
-    # `prior_contexts` is allocated by the draft watermarker and the other
-    # three come from the runner's request state, which owns them outright.
     active = torch.empty(len(contexts), dtype=torch.bool, device=contexts.device)
     _repeated_context_mask_kernel[(len(contexts),)](
         active,

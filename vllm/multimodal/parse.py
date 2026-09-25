@@ -664,15 +664,57 @@ class MultiModalDataParser:
 
         assert_never(video)
 
+    def _parse_audio_embedding_data(
+        self, data: dict[str, torch.Tensor]
+    ) -> DictEmbeddingItems:
+        counts = data.get("audio_num_tokens")
+        if (
+            not isinstance(counts, torch.Tensor)
+            or counts.dtype not in (torch.int32, torch.int64)
+            or counts.ndim not in (1, 2)
+            or (counts.ndim == 2 and counts.shape[1] != 1)
+            or not torch.all(counts > 0)
+        ):
+            raise ValueError(
+                "audio_num_tokens must contain one positive integer per audio"
+            )
+
+        counts = counts.flatten()
+        if "audio_embeds" in data:
+            embeds = data["audio_embeds"]
+            if len(embeds) != len(counts) or any(
+                len(embedding) != count for embedding, count in zip(embeds, counts)
+            ):
+                raise ValueError("audio_num_tokens does not match audio_embeds")
+
+        required, optional = self.embedding_field_sets("audio")
+        return DictEmbeddingItems(
+            {**data, "audio_num_tokens": counts},
+            modality="audio",
+            required_fields=required,
+            optional_fields=optional,
+            fields_factory=lambda _: {
+                "audio_embeds": MultiModalFieldConfig.batched("audio"),
+                "audio_num_tokens": MultiModalFieldConfig.batched(
+                    "audio", keep_on_cpu=True
+                ),
+            },
+        )
+
     def _parse_audio_data(
         self,
-        data: ModalityData[AudioItem],
+        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if data is None:
             return None
 
         if self.is_embeddings(data):
             return AudioEmbeddingItems(data, self.expected_hidden_size)
+
+        if isinstance(data, dict) and "audio_num_tokens" in self.embedding_fields.get(
+            "audio", {}
+        ):
+            return self._parse_audio_embedding_data(data)
 
         data_items: list[AudioItem | None]
         if (
