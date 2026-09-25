@@ -362,6 +362,25 @@ def test_config_rejects_architectures_without_mapped_storage(arch, monkeypatch):
         EngramConfig(checkpoint_mapped=True).verify_model_config(model_config)
 
 
+@pytest.mark.parametrize("is_cuda", [True, False])
+def test_config_rejects_mapping_off_cuda(is_cuda, monkeypatch):
+    import vllm.platforms
+
+    platform = vllm.platforms.current_platform
+    monkeypatch.setattr(platform, "is_cuda_alike", lambda: True, raising=False)
+    monkeypatch.setattr(platform, "is_cuda", lambda: is_cuda, raising=False)
+    model_config = SimpleNamespace(
+        architecture="Qwen4ExpForCausalLM",
+        hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+    )
+    EngramConfig(checkpoint_mapped=False).verify_model_config(model_config)
+    if is_cuda:
+        EngramConfig(checkpoint_mapped=True).verify_model_config(model_config)
+    else:
+        with pytest.raises(ValueError, match="implemented for CUDA only"):
+            EngramConfig(checkpoint_mapped=True).verify_model_config(model_config)
+
+
 def test_config_rejects_shared_memory_with_mapping():
     with pytest.raises(ValueError, match="checkpoint_mapped"):
         EngramConfig(checkpoint_mapped=True, dp_shared_memory=True)

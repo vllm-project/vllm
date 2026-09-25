@@ -183,6 +183,6 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
-- `checkpoint_mapped` is Qwen4Exp-only, requires a GPU that reads pageable
-  host memory through the host page tables, and has been validated only on
-  DGX Spark.
+- `checkpoint_mapped` is Qwen4Exp-only and CUDA-only, requires a GPU that
+  reads pageable host memory through the host page tables, and has been
+  validated only on DGX Spark.
