@@ -26,7 +26,6 @@ from cutlass.cute.runtime import make_fake_tensor
 from cutlass.cutlass_dsl import dsl_user_op
 
 from vllm.cute_utils import _tcgen05, mbarrier, recast_val, simple_tma_copy
-from vllm.cute_utils.cvt import bf16x2_to_fp32x2, fp32x4_to_fp8x4
 from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
@@ -78,6 +77,8 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         tile_m = max(8, acc_cols)
         tile_n = 128
         tile_k = 128
+        # tcgen05 MXFP8 MMA consumes K = 32, one MX block, per instruction.
+        mma_k = 32
         # Each group's heads split K across one cluster, one head per CTA.
         heads_per_group = compile_key.heads_per_group
         tiles_per_group = compile_key.o_lora_rank // tile_n
@@ -98,7 +99,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             positions: cute.Tensor,
             rope: cute.Tensor,
             w: cpasync.TmaInfo,
-            ws: cute.Tensor,
+            ws: cpasync.TmaInfo,
             q: cute.Tensor,
             qs: cute.Tensor,
         ):
@@ -122,12 +123,28 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                     (tile_m, tile_k, num_stages), stride=(tile_k, 1, tile_m * tile_k)
                 ),
                 byte_alignment=1024,
+                swizzle=cute.make_swizzle(3, 4, 3),
             )
+            # tcgen05.cp 32x128b.warpx4 order: row r at byte (r % 32) * 16 +
+            # (r // 32) * 4, one 4-byte cell of MX-block scales per row.
             sW_SF = smem.allocate_tensor(
+                Int32,
+                cute.make_layout(((32, 4), num_stages), stride=((4, 1), tile_n)),
+                128,
+            )
+            sW_SF_raw = smem.allocate_tensor(
                 Int32, cute.make_layout((tile_n, num_stages)), 128
             )
             sX_SF = smem.allocate_tensor(
-                Int32, cute.make_layout((tile_n, num_stages)), 128
+                Uint8,
+                cute.make_layout(
+                    ((32, 4), tile_k // mma_k, num_stages),
+                    stride=((16, 4), 1, tile_n * 4),
+                ),
+                128,
+            )
+            copy_fp8x4 = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(), Float8E4M3FN, num_bits_per_copy=32
             )
             partial = smem.allocate_tensor(
                 Float32,
@@ -145,18 +162,27 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                 for stage in cutlass.range_constexpr(num_stages):
                     # Wait for weight TMA and this stage's quantization threads.
                     cute.arch.mbarrier_init(mbar_loaded + stage, 1 + threads // 4)
-                cute.arch.mbarrier_init(mbar_ws_loaded, tile_n)
+                cute.arch.mbarrier_init(mbar_ws_loaded, 1)
                 cute.arch.mbarrier_init(mbar_done, 1)
                 cute.arch.mbarrier_init(mbar_reduced, 1)
                 cute.arch.mbarrier_init_fence()
             # Local users of the barriers (warp 0's TMA below) need the init too.
             cute.arch.sync_threads()
-            # Paired with cluster_wait() before the DSMEM exchange, so peers see
-            # mbar_reduced initialized before their st.async. The init fence
-            # above orders the init before this relaxed arrive, and splitting
-            # arrive / wait hides the cluster barrier behind the prologue.
+            # Paired with cluster_wait() below: peers must see mbar_reduced
+            # initialized before their st.async; the split hides the barrier.
             cute.arch.cluster_arrive_relaxed()
             if warp == 0:
+                # Raw DeepGEMM MN-major scales; the MMA warp transposes them to
+                # the UTCCP order, which TMA cannot scatter at 4-byte granularity.
+                ws_tiles = cute.zipped_divide(ws.tma_tensor, (tile_n, num_stages))
+                with cute.arch.elect_one():
+                    mbarrier.arrive_expect_tx(mbar_ws_loaded, tile_n * num_stages * 4)
+                simple_tma_copy(
+                    ws.atom,
+                    ws_tiles[None, (tile % tiles_per_group, split, group)],
+                    sW_SF_raw,
+                    mbar_ws_loaded,
+                )
                 tiles = cute.zipped_divide(w.tma_tensor, (tile_n, tile_k))
                 for stage in cutlass.range_constexpr(num_stages):
                     with cute.arch.elect_one():
@@ -167,89 +193,83 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                         sW[None, None, stage],
                         mbar_loaded + stage,
                     )
-            if tid < tile_n:
-                for stage in cutlass.range_constexpr(num_stages):
-                    # TMA cannot scatter 4-byte scales into tcgen05.cp
-                    # 32x128b.warpx4 order; a 4-byte cp.async can, without
-                    # stalling the thread on the load.
-                    cute.arch.cp_async_shared_global(
-                        cute.domain_offset(
-                            ((tid % 32) * 4 + tid // 32, stage), sW_SF
-                        ).iterator,
-                        cute.domain_offset(
-                            (
-                                group,
-                                (tile % tiles_per_group) * tile_n + tid,
-                                split * num_stages + stage,
-                            ),
-                            ws,
-                        ).iterator,
-                        4,
-                        "ca",
-                    )
-                    sX_SF[tid, stage] = Int32(0)
-                    sX32 = cute.recast_tensor(sX, Int32)
-                    for row in cutlass.range_constexpr(tile_m // 4):
-                        sX32[tid // 32 + row * 4, tid % 32, stage] = Int32(0)
-                cute.arch.cp_async_mbarrier_arrive_noinc(mbar_ws_loaded)
-            # Order the zeroing before other threads' quantized stores.
-            cute.arch.sync_threads()
             # x and positions come from the PDL predecessor; everything above
-            # only touches weights.
+            # only touches weights. Padded sX rows only feed unread MMA columns.
             cute.arch.griddepcontrol_wait()
             # TMEM is allocated at runtime, and a PDL predecessor on this SM may
             # hold it until it exits; allocating earlier can deadlock.
             if warp == 0:
                 cute.arch.alloc_tmem(tmem_cols, taddr)
                 cute.arch.relinquish_tmem_alloc_permit()
-            x64 = cute.recast_tensor(x, Uint64)
-            sX32 = cute.recast_tensor(sX, Uint32)
-            sX_SF_bytes = cute.recast_tensor(sX_SF, Uint8)
-            for iteration in cutlass.range_constexpr(
-                cute.ceil_div(tokens, tokens_per_iter)
-            ):
+            copy_x = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=64
+            )
+            n_iters = cute.ceil_div(tokens, tokens_per_iter)
+            qid = (tid + 32) % threads_per_token
+            k = qid * 4
+            # Issue every token's x load before any math so their latencies overlap.
+            x_bf16 = cute.make_rmem_tensor((4, n_iters), BFloat16)
+            for iteration in cutlass.range_constexpr(n_iters):
                 token = iteration * tokens_per_iter + tid // threads_per_token
-                qid = (tid + 32) % threads_per_token
-                k = qid * 4
                 if cutlass.const_expr(tokens % tokens_per_iter == 0) or token < tokens:
-                    packed = x64[token, group * heads_per_group + split, qid]
-                    v0, v1 = bf16x2_to_fp32x2(Uint32(packed))
-                    v2, v3 = bf16x2_to_fp32x2(Uint32(packed >> 32))
+                    x_src = cute.local_tile(
+                        x[token, group * heads_per_group + split, None], (4,), (qid,)
+                    )
+                    cute.copy(copy_x, x_src, x_bf16[None, iteration])
+            for iteration in cutlass.range_constexpr(n_iters):
+                token = iteration * tokens_per_iter + tid // threads_per_token
+                if cutlass.const_expr(tokens % tokens_per_iter == 0) or token < tokens:
+                    x_f32 = cute.make_rmem_tensor((4,), Float32)
+                    x_f32.store(x_bf16[None, iteration].load().to(Float32))
                     if k >= nope_dim:
                         # Inverse RoPE on the interleaved pairs (k, k+1) and
                         # (k+2, k+3); each rope row is cos || sin.
                         pos = positions[token]
-                        c = Float32(rope[pos, (k - nope_dim) // 2])
-                        s = Float32(rope[pos, (k - nope_dim) // 2 + _ROPE_DIM // 2])
-                        v0, v1 = v0 * c + v1 * s, v1 * c - v0 * s
-                        c = Float32(rope[pos, (k - nope_dim) // 2 + 1])
-                        s = Float32(rope[pos, (k - nope_dim) // 2 + _ROPE_DIM // 2 + 1])
-                        v2, v3 = v2 * c + v3 * s, v3 * c - v2 * s
+                        for pair in cutlass.range_constexpr(2):
+                            freq = (k - nope_dim) // 2 + pair
+                            cos = Float32(rope[pos, freq])
+                            sin = Float32(rope[pos, freq + _ROPE_DIM // 2])
+                            even, odd = x_f32[2 * pair], x_f32[2 * pair + 1]
+                            x_f32[2 * pair] = even * cos + odd * sin
+                            x_f32[2 * pair + 1] = odd * cos - even * sin
                     amax = cute.arch.fmax(
-                        cute.arch.fmax(cute.abs(v0), cute.abs(v1)),
-                        cute.arch.fmax(cute.abs(v2), cute.abs(v3)),
+                        cute.arch.fmax(cute.abs(x_f32[0]), cute.abs(x_f32[1])),
+                        cute.arch.fmax(cute.abs(x_f32[2]), cute.abs(x_f32[3])),
                     )
                     amax = cute.arch.warp_reduction_max(amax, threads_in_group=8)
                     exponent, inv = _scale(cute.arch.fmax(amax, Float32(1e-10)))
-                    # Recasting drops the pointer swizzle; address it explicitly.
-                    sX32[token, (qid % 32) ^ ((token % 8) * 4), qid // 32] = (
-                        fp32x4_to_fp8x4(v0 * inv, v1 * inv, v2 * inv, v3 * inv)
+                    x_fp8 = cute.make_rmem_tensor((4,), Float8E4M3FN)
+                    x_fp8.store((x_f32.load() * inv).to(Float8E4M3FN))
+                    cute.copy(
+                        copy_fp8x4,
+                        x_fp8,
+                        cute.local_tile(
+                            sX[token, None, k // tile_k], (4,), (qid % 32,)
+                        ),
                     )
                     if lane % 8 == 0:
-                        sX_SF_bytes[
-                            token * 16 + k % tile_k // 32 + k // tile_k * 512
-                        ] = Uint8(exponent)
+                        sX_SF[token, k % tile_k // mma_k, k // tile_k] = Uint8(exponent)
             cute.arch.fence_proxy("async.shared", space="cta")
             mbarrier.arrive(mbar_loaded + qid // 32, order="release")
             if warp == 0:
                 base = cute.make_tensor(taddr, cute.make_layout(1))[0]
-                sdesc = _tcgen05.make_sdesc_128B_swizzle(0)
-                sfdesc = Uint64((8 << 32) | (1 << 46))
+                # sW / sX are 128B-swizzled K-major; one stage's K fills the
+                # swizzle atom, so the leading byte offset is unused.
+                sdesc = _tcgen05.make_sdesc_128B_swizzle(LBO=0)
+                # Unswizzled 32 x 16 B scale tiles: SBO = one 8-row core matrix
+                # (16 B units at bit 32); bit 46 is the SM100 descriptor version.
+                sf_sbo = 8 * 16
+                sfdesc = Uint64((sf_sbo >> 4 << 32) | (1 << 46))
+                # M = tile_n weight rows (A), N = tile_m token rows (B).
                 idesc = _tcgen05.make_mxfp8_idesc(tile_n, tile_m)
-                # cp.async writes through the generic proxy; tcgen05.cp reads
-                # through the async proxy.
+                # sW_SF's layout is the UTCCP order, so a plain copy transposes;
+                # fence the generic-proxy writes before tcgen05.cp reads them.
                 cute.arch.mbarrier_wait(mbar_ws_loaded, 0)
+                for stage in cutlass.range_constexpr(num_stages):
+                    for i in cutlass.range_constexpr(4):
+                        sW_SF[i * 32 + lane, stage] = sW_SF_raw[i * 32 + lane, stage]
                 cute.arch.fence_proxy("async.shared", space="cta")
+                cute.arch.sync_warp()
                 for stage in cutlass.range_constexpr(num_stages):
                     cute.arch.mbarrier_wait(mbar_loaded + stage, 0)
                     _tcgen05.fence_after_thread_sync()
@@ -266,15 +286,17 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                     )
                     _tcgen05.cp(
                         base + sf_col + 4,
-                        sfdesc | (sX_SF[None, stage].iterator.toint() >> 4),
+                        sfdesc | (sX_SF[None, None, stage].iterator.toint() >> 4),
                         "32x128b",
                         "warpx4",
                     )
-                    for kk in cutlass.range_constexpr(4):
+                    # Advance mma_k FP8 bytes (16 B units) and pick MX block kk of
+                    # each 4-byte scale (B sf_id at bit 4, A sf_id at bit 29).
+                    for kk in cutlass.range_constexpr(tile_k // mma_k):
                         _tcgen05.mma_mxfp8(
                             base,
-                            adesc + kk * 2,
-                            bdesc + kk * 2,
+                            adesc + kk * mma_k // 16,
+                            bdesc + kk * mma_k // 16,
                             idesc + ((kk << 4) | (kk << 29)),
                             base + sf_col,
                             base + sf_col + 4,
@@ -296,9 +318,8 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             # Pairs with cluster_arrive_relaxed() above: every peer's
             # mbar_reduced is initialized before the st.async below.
             cute.arch.cluster_wait()
-            # quack's mixed const_expr-if rewrite (installed process-wide once
-            # quack is imported) can leave these unbound after the dynamic path
-            # above; bind them so the regions below join on one type.
+            # quack's process-wide const_expr-if rewrite can leave these unbound
+            # after the dynamic path above; bind them so the regions join.
             amax, exponent, inv = Float32(0), Uint32(0), Float32(0)
             if tid < tile_n:
                 acc = cute.make_rmem_tensor(acc_cols, Float32)
@@ -381,7 +402,13 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                 layout,
                 (tile_n, tile_k),
             )
-            device_kernel(x, positions, rope, tma, ws, q, qs).launch(
+            ws_tma = cpasync.make_tiled_tma_atom(
+                cpasync.CopyBulkTensorTileG2SOp(cta_group=tcgen05.CtaGroup.ONE),
+                cute.make_tensor(ws.iterator, cute.select(ws.layout, mode=[1, 2, 0])),
+                cute.make_layout((tile_n, num_stages)),
+                (tile_n, num_stages),
+            )
+            device_kernel(x, positions, rope, tma, ws_tma, q, qs).launch(
                 grid=(n_tiles * heads_per_group, 1, 1),
                 block=(threads, 1, 1),
                 cluster=(heads_per_group, 1, 1),
@@ -429,7 +456,10 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             make_fake_tensor(Float32, (cute.sym_int(), _ROPE_DIM), (_ROPE_DIM, 1)),
             make_fake_tensor(Float8E4M3FN, (n, k), (k, 1), assumed_align=16),
             make_fake_tensor(
-                Int32, (groups, rank, k // 128), (rank * k // 128, 1, rank)
+                Int32,
+                (groups, rank, k // 128),
+                (rank * k // 128, 1, rank),
+                assumed_align=16,
             ),
             make_fake_tensor(Float8E4M3FN, (tokens, n), (n, 1)),
             make_fake_tensor(Uint8, (128 * n // 32,), (1,)),
