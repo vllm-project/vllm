@@ -406,6 +406,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
     ),
+    "LummaForCausalLM": _HfExamplesInfo(
+        "FrontiersMind/Lumma-0.6B-Base", trust_remote_code=True
+    ),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",

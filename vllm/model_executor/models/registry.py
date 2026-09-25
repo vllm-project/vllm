@@ -158,6 +158,7 @@ _TEXT_GENERATION_MODELS = {
         "longcat_flash_ngram",
         "LongcatFlashNgramForCausalLM",
     ),
+    "LummaForCausalLM": ("lumma", "LummaForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
