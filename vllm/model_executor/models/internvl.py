@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -629,7 +629,7 @@ class InternVLChatModel(
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -643,7 +643,7 @@ class InternVLChatModel(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -663,7 +663,7 @@ class InternVLChatModel(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
 
