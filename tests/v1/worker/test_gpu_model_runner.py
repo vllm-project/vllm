@@ -177,14 +177,22 @@ def test_freeze_gc_disables_and_restores_automatic_gc(
 
 
 @pytest.mark.parametrize("capture_encoder", [False, True])
+@pytest.mark.parametrize("builder_workspace", [0, GiB_bytes])
 def test_graph_profile_excludes_retained_workspace_and_minimal_kv(
-    monkeypatch, capture_encoder
+    monkeypatch, capture_encoder, builder_workspace
 ):
-    """Budget released graph pools plus unsampled graphs, without workspace overlap."""
+    """Budget graphs and builder workspace, excluding retained workspace and KV."""
     module = gpu_model_runner_module
     mib = 1 << 20
     memory = dict(free=20 * GiB_bytes, graphs=0)
     descs = [SimpleNamespace(num_tokens=n) for n in (16, 8, 4)]
+
+    class Builder:
+        def __init__(self):
+            memory["free"] -= builder_workspace
+
+        def __del__(self):
+            memory["free"] += builder_workspace
 
     def allocate_graph(size):
         memory["free"] -= size
@@ -194,6 +202,8 @@ def test_graph_profile_excludes_retained_workspace_and_minimal_kv(
         memory["free"] -= 5 * GiB_bytes  # 2 GiB KV and 3 GiB workspace.
 
     def capture(desc, **kwargs):
+        if not runner.attn_groups:
+            runner.attn_groups.append(Builder())
         if desc.num_tokens == 16:
             memory["free"] -= GiB_bytes  # Retained during each mode's warmup.
             if memory["graphs"] == 0:
@@ -206,6 +216,7 @@ def test_graph_profile_excludes_retained_workspace_and_minimal_kv(
         memory["graphs"] = 0
 
     def cleanup_cache():
+        runner.attn_groups.clear()
         # Graph measurement must precede releasing this temporary KV cache.
         assert memory["free"] == 13 * GiB_bytes
         memory["free"] += 2 * GiB_bytes
@@ -222,6 +233,7 @@ def test_graph_profile_excludes_retained_workspace_and_minimal_kv(
         max_model_len=128,
         max_num_tokens=128,
         lora_config=None,
+        attn_groups=[],
         _init_minimal_kv_cache_for_profiling=init_cache,
         _cleanup_profiling_kv_cache=cleanup_cache,
         _create_encoder_cudagraph_manager=lambda: encoder if capture_encoder else None,
@@ -252,7 +264,9 @@ def test_graph_profile_excludes_retained_workspace_and_minimal_kv(
 
     estimate = GPUModelRunner.profile_cudagraph_memory(runner)
 
-    assert estimate == (4 + capture_encoder) * GiB_bytes + 128 * mib
+    assert estimate == (
+        (4 + capture_encoder) * GiB_bytes + 128 * mib + builder_workspace
+    )
 
 
 def test_prepare_padding_mask_marks_sequence_parallel_padding():

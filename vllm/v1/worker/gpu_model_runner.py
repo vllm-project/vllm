@@ -6735,10 +6735,12 @@ class GPUModelRunner(
             self.cudagraph_dispatcher.keys_initialized = False
             if free_before_graph_cleanup is not None:
                 torch.accelerator.synchronize()
+                # Include builder-owned workspace, keeping the dummy KV alive.
+                if hasattr(self, "attn_groups"):
+                    self.attn_groups.clear()
                 gc.collect()
                 torch.accelerator.empty_cache()
-                # Keep the minimal KV cache alive while measuring graph release.
-                # Persistent workspaces are charged separately by the worker.
+                # Retained workspaces are charged separately by the worker.
                 sampled_graph_memory = max(
                     torch.accelerator.get_memory_info()[0] - free_before_graph_cleanup,
                     0,

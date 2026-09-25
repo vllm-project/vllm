@@ -64,6 +64,7 @@ def _make_profiling_runner(
     )
     runner.vllm_config = SimpleNamespace()
     runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.attn_groups = []
 
     events: list[str] = []
     runner.events = events
@@ -184,10 +185,11 @@ def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
 
 @pytest.mark.parametrize("bootstrap_bytes", [0, 2 << 30])
 @pytest.mark.parametrize("capture_retained_bytes", [0, 2 << 30])
+@pytest.mark.parametrize("workspace_owner", [None, "attention", "mamba"])
 def test_profile_excludes_persistent_workspaces_from_graph_estimate(
-    monkeypatch, bootstrap_bytes, capture_retained_bytes
+    monkeypatch, bootstrap_bytes, capture_retained_bytes, workspace_owner
 ):
-    """Retained workspace belongs in the worker budget, regardless of its phase."""
+    """Budget destroyed builder workspaces here and retained workspaces later."""
     graph_bytes = 1 << 30
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(
@@ -196,6 +198,10 @@ def test_profile_excludes_persistent_workspaces_from_graph_estimate(
         captured_bytes=graph_bytes + capture_retained_bytes,
     )
     runner.kv_caches = [object()]
+    builder_bytes = 3 << 30 if workspace_owner is not None else 0
+    runner.attn_groups = [object()] if builder_bytes else []
+    if workspace_owner == "mamba":
+        runner.model_state._mamba_ctx = runner.attn_groups[0]
     free_after_capture = (16 << 30) - bootstrap_bytes - capture_retained_bytes
     readings = iter((free_after_capture - graph_bytes, free_after_capture))
 
@@ -203,11 +209,15 @@ def test_profile_excludes_persistent_workspaces_from_graph_estimate(
         # Releasing dummy KV before the second sample would overcount graphs.
         assert runner.kv_caches
         assert "teardown" not in runner.events
-        return next(readings), 16 << 30
+        has_builder_memory = runner.attn_groups or getattr(
+            runner.model_state, "_mamba_ctx", None
+        )
+        builder_memory = builder_bytes if has_builder_memory else 0
+        return next(readings) - builder_memory, 16 << 30
 
     monkeypatch.setattr(cgu.torch.accelerator, "get_memory_info", memory_info)
 
-    assert cgu.profile_cudagraph_memory(runner) == graph_bytes
+    assert cgu.profile_cudagraph_memory(runner) == graph_bytes + builder_bytes
 
 
 def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
@@ -377,12 +387,22 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
 @pytest.mark.skipif(
     not cgu.current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
 )
-@pytest.mark.parametrize("workspace_phase", [None, "bootstrap", "capture"])
+@pytest.mark.parametrize(
+    "workspace_phase",
+    [
+        None,
+        "bootstrap",
+        "capture",
+        "builder_bootstrap",
+        "builder_capture",
+        "mamba_capture",
+    ],
+)
 @pytest.mark.parametrize("use_fast_prefill", [False, True])
 def test_profile_cudagraph_memory_frees_throwaway_pool(
     monkeypatch, workspace_phase, use_fast_prefill
 ):
-    """Release graph pools and dummy KV, retaining only persistent workspaces."""
+    """Budget released builder memory, excluding dummy KV and retained workspaces."""
     from vllm.v1.worker.gpu.attn_utils import FastPrefillHelper
 
     @contextlib.contextmanager
@@ -408,6 +428,7 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(
 
     def _init(r):
         r.events.append("init")
+        r.attn_groups = [SimpleNamespace()]
         if use_fast_prefill:
             r.cudagraph_manager.device = torch.device("cuda")
             # Keep the helper buffer distinguishable from allocator granularity.
@@ -422,16 +443,22 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(
         manager = cgu.CudaGraphManager.__new__(cgu.CudaGraphManager)
         manager.pool = cgu.current_platform.get_global_graph_pool()
         r.speculator = SimpleNamespace(cudagraph_manager=manager)
-        if workspace_phase == "bootstrap":
-            r.workspace = torch.empty(
+        if workspace_phase in ("bootstrap", "builder_bootstrap"):
+            owner = r if workspace_phase == "bootstrap" else r.attn_groups[0]
+            owner.workspace = torch.empty(
                 allocation_bytes, dtype=torch.uint8, device="cuda"
             )
 
     def _capture_model(*, profile_only: bool = False) -> int:
-        if workspace_phase == "capture":
-            runner.workspace = torch.empty(
+        if workspace_phase in ("capture", "builder_capture", "mamba_capture"):
+            owner = runner if workspace_phase == "capture" else runner.attn_groups[0]
+            owner.workspace = torch.empty(
                 allocation_bytes, dtype=torch.uint8, device="cuda"
             )
+            if workspace_phase == "mamba_capture":
+                runner.model_state._mamba_ctx = SimpleNamespace(
+                    aligned_state_indices=owner.workspace
+                )
         for owner in (
             runner.cudagraph_manager,
             runner.speculator.cudagraph_manager,
@@ -452,12 +479,19 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(
     graph_estimate = cgu.profile_cudagraph_memory(runner)
     memory["after"] = torch.accelerator.memory_reserved()
 
-    graph_bytes = (2 + use_fast_prefill) * allocation_bytes
+    builder_workspace = workspace_phase in (
+        "builder_bootstrap",
+        "builder_capture",
+        "mamba_capture",
+    )
+    graph_bytes = (2 + use_fast_prefill + builder_workspace) * allocation_bytes
     assert memory["captured"] - memory["before"] >= graph_bytes + allocation_bytes
     assert graph_bytes <= graph_estimate < graph_bytes + allocation_bytes, (
         f"{graph_estimate=}, {graph_bytes=}"
     )
-    retained_bytes = allocation_bytes if workspace_phase is not None else 0
+    retained_bytes = (
+        allocation_bytes if workspace_phase in ("bootstrap", "capture") else 0
+    )
     assert memory["after"] - memory["before"] == retained_bytes
 
 

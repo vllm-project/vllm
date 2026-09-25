@@ -957,10 +957,13 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             if runner.model_state.supports_mm_inputs:
                 runner.model_state.encoder_runner.clear()
             if free_with_graphs is not None:
-                # Measure released graph pools before freeing the dummy KV
-                # cache. Persistent workspaces survive and are charged by the
-                # worker's post-profiling memory snapshot instead.
+                # Include builder/context workspace, keeping the dummy KV alive.
+                # Retained workspaces are charged separately by the worker.
                 torch.accelerator.synchronize()
+                if hasattr(runner, "attn_groups"):
+                    runner.attn_groups.clear()
+                if hasattr(runner.model_state, "_mamba_ctx"):
+                    runner.model_state._mamba_ctx = None
                 gc.collect()
                 torch.accelerator.empty_cache()
                 graph_memory = max(
