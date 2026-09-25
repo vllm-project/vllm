@@ -69,6 +69,19 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
     assert args.port == 9000
 
 
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [([], "auto"), (["--http", "h11"], "h11"), (["--http", "httptools"], "httptools")],
+)
+def test_http_implementation_arg(serve_parser, cli_args, expected):
+    assert serve_parser.parse_args(cli_args).http == expected
+
+
+def test_http_implementation_rejects_unknown_value(serve_parser):
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(["--http", "unknown"])
+
+
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path
