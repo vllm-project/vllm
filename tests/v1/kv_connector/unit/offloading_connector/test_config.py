@@ -327,7 +327,24 @@ def _replicated_layout(
     kv_cache_config.all_groups_are_tp_replicated = _all_kv_groups_tp_replicated(
         kv_cache_config.kv_cache_groups, config
     )
-    return build_offloading_config(config, kv_cache_config).replicated_layout
+
+    # Scheduler and Worker offload config
+    worker_offload_config = build_offloading_config(config, kv_cache_config)
+    scheduler_offload_config = build_offloading_config(
+        config, generate_scheduler_kv_cache_config([kv_cache_config])
+    )
+    # Verify that the Worker and Scheduler agree on replication.
+    # and worker-bytes-per-block
+    assert (
+        worker_offload_config.replicated_layout
+        == scheduler_offload_config.replicated_layout
+    )
+    assert (
+        worker_offload_config.worker_kv_bytes_per_block
+        == scheduler_offload_config.worker_kv_bytes_per_block
+    )
+
+    return worker_offload_config.replicated_layout
 
 
 _SWA_MLA_PAGE = SlidingWindowMLASpec(
