@@ -3865,6 +3865,42 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
         assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific priority")
+@pytest.mark.parametrize(
+    ("architecture", "is_kv_consumer", "expected_fused"),
+    [
+        ("GlmMoeDsaForCausalLM", True, ["native"]),
+        ("DeepseekV32ForCausalLM", True, ["native"]),
+        ("GlmMoeDsaForCausalLM", False, ["aiter", "native"]),
+        ("LlamaForCausalLM", True, ["aiter", "native"]),
+    ],
+)
+def test_rocm_remote_dsa_decode_uses_native_fused_add_rms_norm(
+    monkeypatch, architecture, is_kv_consumer, expected_fused
+):
+    """Remote DSA decode keeps graphs but avoids capture-unsafe fused AITER RMSNorm."""
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_USE_AITER", True)
+    monkeypatch.setattr(envs, "VLLM_ROCM_USE_AITER_RMSNORM", True)
+    monkeypatch.setattr(rocm_platform, "on_rdna4", lambda: False)
+
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            backend="inductor",
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=is_kv_consumer),
+        model_config=SimpleNamespace(architectures=[architecture]),
+    )
+
+    priority = current_platform.get_default_ir_op_priority(config)
+    assert priority.rms_norm == ["aiter", "native"]
+    assert priority.fused_add_rms_norm == expected_fused
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
 def test_ir_op_priority_str():
     """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig

@@ -69,6 +69,12 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 # Models partially supported by ROCm.
 # Architecture -> Reason.
 _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
+_ROCM_DSA_MODELS = frozenset(
+    {
+        "DeepseekV32ForCausalLM",
+        "GlmMoeDsaForCausalLM",
+    }
+)
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
@@ -1220,6 +1226,23 @@ class RocmPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
+        # AITER fused add RMSNorm corrupts CUDA-graph replay for remotely-prefilled
+        # DeepSeek-V3.2/GLM DSA decode (https://github.com/vllm-project/vllm/issues/57064).
+        # Keep CUDA graphs and the other AITER kernels enabled, but use the native
+        # fused implementation for the KV consumer.
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        model_config = getattr(vllm_config, "model_config", None)
+        is_remote_dsa_decode = (
+            kv_transfer_config is not None
+            and model_config is not None
+            and kv_transfer_config.is_kv_consumer
+            and bool(
+                _ROCM_DSA_MODELS.intersection(
+                    getattr(model_config, "architectures", None) or []
+                )
+            )
+        )
+
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         # TODO(luka/TJ) remove env vars completely
         if (
@@ -1232,10 +1255,12 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
+        fused_add_rms_norm = default if is_remote_dsa_decode else rms_norm
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
-            fused_add_rms_norm=rms_norm,
+            fused_add_rms_norm=fused_add_rms_norm,
             gelu_and_mul_sparse=["native"],
         )
 
