@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.sample.watermark import (
 )
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class StubWatermarker(Watermarker):
@@ -61,13 +62,17 @@ def make_gpu_watermark_sampler(monkeypatch):
     monkeypatch.setattr(buffer_utils, "UvaBuffer", CPUUvaBuffer)
 
     def make(watermarker, *, max_num_reqs=2, vocab_size=8, **kwargs):
-        req_states = SimpleNamespace(
+        req_states = RequestState(
             max_num_reqs=max_num_reqs,
+            max_model_len=64,
+            max_num_batched_tokens=64,
+            num_speculative_steps=1,
             vocab_size=vocab_size,
             device=torch.device("cpu"),
         )
         return GPUWatermarkSampler(
             watermarker,
+            vllm_config=SimpleNamespace(reasoning_config=None),
             max_num_reqs=max_num_reqs,
             vocab_size=vocab_size,
             device=torch.device("cpu"),
@@ -310,11 +315,11 @@ def test_gpu_sampler_warns_about_unexpected_greedy_watermarking(
         lambda message, *_args, **_kwargs: messages.append(message),
     )
 
-    sampler.add_request(0, 1, SamplingParams(temperature=0, watermarking=True))
+    sampler.add_request(0, SamplingParams(temperature=0, watermarking=True))
     assert sampler.watermarking.np[0]
-    sampler.add_request(0, 1, SamplingParams(temperature=0, watermarking=True))
+    sampler.add_request(0, SamplingParams(temperature=0, watermarking=True))
     assert sampler.watermarking.np[0]
-    sampler.add_request(0, 1, SamplingParams(temperature=0, watermarking=False))
+    sampler.add_request(0, SamplingParams(temperature=0, watermarking=False))
     assert not sampler.watermarking.np[0]
     assert messages == [
         (
@@ -330,8 +335,8 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
     monkeypatch, make_gpu_watermark_sampler
 ):
     sampler = make_gpu_watermark_sampler(StubWatermarker(), deduplicate_contexts="none")
-    sampler.add_request(0, 1, SamplingParams(watermarking=True))
-    sampler.add_request(1, 1, SamplingParams(watermarking=False))
+    sampler.add_request(0, SamplingParams(watermarking=True))
+    sampler.add_request(1, SamplingParams(watermarking=False))
     sampler.apply_staged_writes()
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
         2, 1, dtype=torch.int64
@@ -382,7 +387,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
     sampler = make_gpu_watermark_sampler(
         watermarker, max_num_reqs=1, vocab_size=4, deduplicate_contexts="none"
     )
-    sampler.add_request(0, 1, SamplingParams(top_k=2, top_p=0.8, watermarking=True))
+    sampler.add_request(0, SamplingParams(top_k=2, top_p=0.8, watermarking=True))
     sampler.apply_staged_writes()
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
         1, 1, dtype=torch.int64

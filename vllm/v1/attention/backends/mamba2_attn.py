@@ -156,7 +156,10 @@ class Mamba2AttentionMetadataBuilder(
                 # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
                 # for prefill rows, which is all this slice covers.
                 num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
-                    common, common_attn_metadata
+                    common_attn_metadata,
+                    common.num_reqs,
+                    common.num_prefills,
+                    common.num_decode_tokens,
                 )
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
