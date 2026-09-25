@@ -10,7 +10,7 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
@@ -125,7 +125,7 @@ def _assert_model_config_methods(
 
 def test_head_size_falls_back_when_head_dim_is_zero():
     """Regression test for configs that materialize missing head_dim as 0."""
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         model_type="deepseek_vl_v2",
         hidden_size=1280,
         num_attention_heads=10,
@@ -140,7 +140,7 @@ def test_head_size_falls_back_when_head_dim_is_zero():
 
 
 def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         model_type="deepseek_v2",
         qk_rope_head_dim=128,
         qk_nope_head_dim=128,
@@ -176,7 +176,7 @@ def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.Monke
     ],
 )
 def test_num_experts_per_tok_aliases(attribute: str):
-    hf_config = PretrainedConfig(**{attribute: 4})
+    hf_config = PreTrainedConfig(**{attribute: 4})
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
     model_config = cast(
         ModelConfig,
@@ -191,7 +191,7 @@ def test_num_experts_per_tok_aliases(attribute: str):
 
 
 def test_num_experts_per_tok_none_is_normalized():
-    hf_config = PretrainedConfig(top_k_experts=None)
+    hf_config = PreTrainedConfig(top_k_experts=None)
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_num_experts_per_token() == 0
@@ -207,7 +207,7 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
             "modelopt_quant_config": {"quant_cfg": {}},
         }
     }
-    hf_config = PretrainedConfig(quantization_config=quantization_config)
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
 
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
@@ -370,7 +370,7 @@ def test_gemma4_uniform_head_dims_are_homogeneous():
     assert arch[3] is arch
 
 
-class _HeterogeneousConfig(PretrainedConfig):
+class _HeterogeneousConfig(PreTrainedConfig):
     """A heterogeneous config with no convertor of its own.
 
     Mirrors the parts vLLM uses: per-layer configs are shallow copies with the
@@ -384,7 +384,7 @@ class _HeterogeneousConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
     @property
-    def per_layer_config(self) -> list[PretrainedConfig]:
+    def per_layer_config(self) -> list[PreTrainedConfig]:
         layers = []
         for i in range(self.num_hidden_layers):
             layer = copy(self)
