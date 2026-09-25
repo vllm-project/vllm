@@ -2533,6 +2533,14 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
+    def make_timeout_diagnostic_state(self) -> dict[str, int | float]:
+        return {
+            "kv_cache_usage": self.get_kv_cache_usage(),
+            "num_running_reqs": len(self.running),
+            "num_skipped_waiting_reqs": len(self.skipped_waiting),
+            "num_waiting_reqs": len(self.waiting),
+        }
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:

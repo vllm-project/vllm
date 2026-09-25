@@ -29,7 +29,14 @@ from vllm.distributed import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.logging_utils.dump_input import dump_engine_exception
+from vllm.logging_utils.dump_input import (
+    EngineExecutionTimeoutSnapshot,
+    EngineExecutionTimeoutWatchdog,
+    dump_engine_exception,
+    get_engine_timeout_request_sample_indices,
+    make_engine_execution_timeout_snapshot,
+    make_sampling_params_summary,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import (
     MultiModalCacheMissError,
@@ -106,6 +113,20 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+EXECUTE_MODEL_WAIT_STAGE = "execute_model_wait"
+SAMPLE_TOKENS_STAGE = "sample_tokens"
+SAMPLE_TOKENS_WAIT_STAGE = "sample_tokens_wait"
+_EMPTY_ENGINE_EXECUTION_TIMEOUT_SNAPSHOT = EngineExecutionTimeoutSnapshot({}, {})
+
+
+BatchQueueEntry = tuple[
+    Future[ModelRunnerOutput],
+    SchedulerOutput,
+    Future[Any],
+    str,
+    EngineExecutionTimeoutSnapshot,
+]
 
 
 class EngineCore:
@@ -212,9 +233,7 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = vllm_config.max_concurrent_batches
-        self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
-        ) = None
+        self.batch_queue: deque[BatchQueueEntry] | None = None
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
@@ -253,6 +272,13 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+        self.execution_timeout_watchdog = EngineExecutionTimeoutWatchdog(
+            config=self.vllm_config,
+            timeout_s=envs.VLLM_ENGINE_SLOW_STAGE_DUMP_S,
+        )
+        self._timeout_sampling_params_by_request: dict[str, dict[str, Any] | None] = {}
+        self.execution_timeout_watchdog.start()
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -556,6 +582,88 @@ class EngineCore:
             raise err
 
     @contextmanager
+    def dump_on_slow_execution(
+        self,
+        stage: str,
+        snapshot: EngineExecutionTimeoutSnapshot,
+    ) -> Generator[None, None, None]:
+        watchdog = self.execution_timeout_watchdog
+        if not watchdog.enabled:
+            yield
+            return
+        generation = watchdog.arm(snapshot, stage)
+        try:
+            yield
+        finally:
+            watchdog.disarm(generation)
+
+    def _prepare_timeout_diagnostic_state(
+        self, scheduler_output: SchedulerOutput
+    ) -> EngineExecutionTimeoutSnapshot:
+        if not self.execution_timeout_watchdog.enabled:
+            return _EMPTY_ENGINE_EXECUTION_TIMEOUT_SNAPSHOT
+        scheduler_state = self._make_scheduler_timeout_state(scheduler_output)
+        try:
+            return make_engine_execution_timeout_snapshot(
+                scheduler_output, scheduler_state
+            )
+        except Exception:
+            logger.warning_once(
+                "Failed to snapshot scheduler output for timeout diagnostics; "
+                "continuing with a minimal diagnostic"
+            )
+            return EngineExecutionTimeoutSnapshot(
+                scheduler_output_summary={"scheduler_output_summary_unavailable": True},
+                scheduler_queue_summary={},
+            )
+
+    def _make_scheduler_timeout_state(
+        self, scheduler_output: SchedulerOutput
+    ) -> dict[str, Any]:
+        cached_request_sampling_params: dict[str, dict[str, Any] | None] = {}
+        try:
+            sampling_params_cache = getattr(
+                self, "_timeout_sampling_params_by_request", None
+            )
+            if sampling_params_cache is None:
+                sampling_params_cache = self._timeout_sampling_params_by_request = {}
+            for request_id in scheduler_output.finished_req_ids:
+                sampling_params_cache.pop(request_id, None)
+            for request in scheduler_output.scheduled_new_reqs:
+                sampling_params_cache[request.req_id] = make_sampling_params_summary(
+                    request.sampling_params
+                )
+            _, cached_request_indices = get_engine_timeout_request_sample_indices(
+                len(scheduler_output.scheduled_new_reqs),
+                scheduler_output.scheduled_cached_reqs.num_reqs,
+            )
+            cached_request_ids = (
+                scheduler_output.scheduled_cached_reqs.req_ids[index]
+                for index in cached_request_indices
+            )
+            cached_request_sampling_params = {
+                request_id: sampling_params_cache[request_id]
+                for request_id in cached_request_ids
+                if request_id in sampling_params_cache
+            }
+        except Exception:
+            logger.warning_once(
+                "Failed to maintain sampling parameters for timeout diagnostics; "
+                "continuing without the optional sampling snapshot"
+            )
+
+        try:
+            state: dict[str, Any] = dict(self.scheduler.make_timeout_diagnostic_state())
+        except Exception:
+            logger.warning_once(
+                "Failed to capture scheduler timeout diagnostics; continuing "
+                "without the optional scheduler snapshot"
+            )
+            state = {}
+        state["cached_request_sampling_params"] = cached_request_sampling_params
+        return state
+
+    @contextmanager
     def capture_iteration_details(
         self, scheduler_output: SchedulerOutput | None
     ) -> Generator[SchedulerIterationDetails | None, None, None]:
@@ -641,15 +749,18 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        timeout_state = self._prepare_timeout_diagnostic_state(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            with self.dump_on_slow_execution(EXECUTE_MODEL_WAIT_STAGE, timeout_state):
+                model_output = future.result()
             if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+                with self.dump_on_slow_execution(SAMPLE_TOKENS_STAGE, timeout_state):
+                    model_output = self.model_executor.sample_tokens(grammar_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -696,8 +807,12 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
+        deferred_timeout_state = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            scheduled_timeout_state = self._prepare_timeout_diagnostic_state(
+                scheduler_output
+            )
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -708,6 +823,7 @@ class EngineCore:
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
+                future_stage = EXECUTE_MODEL_WAIT_STAGE
             else:
                 if not scheduler_output.pending_structured_output_tokens:
                     # We aren't waiting for any tokens, get any grammar output
@@ -715,17 +831,31 @@ class EngineCore:
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
+                    with self.dump_on_slow_execution(
+                        SAMPLE_TOKENS_STAGE,
+                        scheduled_timeout_state,
+                    ):
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
+                    future_stage = SAMPLE_TOKENS_WAIT_STAGE
                 else:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
                     deferred_scheduler_output = scheduler_output
+                    deferred_timeout_state = scheduled_timeout_state
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
+                batch_queue.appendleft(
+                    (
+                        future,
+                        scheduler_output,
+                        exec_future,
+                        future_stage,
+                        scheduled_timeout_state,
+                    )
+                )
                 if len(batch_queue) < self.batch_queue_size and (
                     model_executed or self.scheduler.has_requests()
                 ):
@@ -740,10 +870,17 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        (
+            future,
+            scheduler_output,
+            exec_model_fut,
+            future_stage,
+            timeout_state,
+        ) = batch_queue.pop()
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
+            self.dump_on_slow_execution(future_stage, timeout_state),
         ):
             model_output = future.result()
             if model_output is None:
@@ -764,6 +901,7 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
+            assert deferred_timeout_state is not None
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
             if self.check_for_draft_tokens:
@@ -780,8 +918,22 @@ class EngineCore:
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
-            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
-            batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+            with self.dump_on_slow_execution(
+                SAMPLE_TOKENS_STAGE,
+                deferred_timeout_state,
+            ):
+                future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True
+                )
+            batch_queue.appendleft(
+                (
+                    future,
+                    deferred_scheduler_output,
+                    exec_future,
+                    SAMPLE_TOKENS_WAIT_STAGE,
+                    deferred_timeout_state,
+                )
+            )
 
         return engine_core_outputs, model_executed
 
@@ -797,6 +949,9 @@ class EngineCore:
 
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
+        watchdog = getattr(self, "execution_timeout_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()

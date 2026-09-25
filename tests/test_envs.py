@@ -48,6 +48,17 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
+def test_engine_slow_stage_dump_environment_variable(monkeypatch: pytest.MonkeyPatch):
+    slow_stage_dump = environment_variables["VLLM_ENGINE_SLOW_STAGE_DUMP_S"]
+    monkeypatch.delenv("VLLM_ENGINE_SLOW_STAGE_DUMP_S", raising=False)
+
+    assert slow_stage_dump() == 0
+
+    monkeypatch.setenv("VLLM_ENGINE_SLOW_STAGE_DUMP_S", "30")
+
+    assert slow_stage_dump() == 30
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
