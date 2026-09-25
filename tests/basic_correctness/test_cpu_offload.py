@@ -2,20 +2,83 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from operator import attrgetter
+from unittest.mock import Mock
 
 import pytest
+import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.utils import maybe_offload_embeddings
 from vllm.model_executor.offloader import (
     PrefetchOffloader,
     UVAOffloader,
     get_offloader,
     set_offloader,
 )
+from vllm.utils.platform_utils import is_uva_available
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from ..utils import compare_two_settings
+
+
+def _model_with_direct_embedding() -> tuple[nn.Module, VocabParallelEmbedding]:
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    embedding = VocabParallelEmbedding(16, 8, disable_tp=True)
+    model.language_model.model.embed_tokens = embedding
+    return model, embedding
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not is_uva_available(),
+    reason="UVA is not available.",
+)
+def test_direct_embedding_offload_preserves_prefix(monkeypatch, default_vllm_config):
+    model, embedding = _model_with_direct_embedding()
+    model.cuda()
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.should_pin_memory", lambda: False
+    )
+    offloader = UVAOffloader(
+        cpu_offload_max_bytes=embedding.weight.nbytes,
+        cpu_offload_params={"outer.language_model.model.embed_tokens"},
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.get_offloader", lambda: offloader
+    )
+
+    maybe_offload_embeddings(model, prefix="outer")
+
+    assert offloader.cpu_offload_bytes == embedding.weight.nbytes
+    assert getattr(embedding.weight, "_vllm_is_uva_offloaded", False)
+    assert embedding.weight.device.type == "cuda"
+
+
+def test_direct_embedding_offload_skips_unsupported_offloader(
+    monkeypatch, default_vllm_config
+):
+    model, _ = _model_with_direct_embedding()
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available", lambda: False
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.should_pin_memory", lambda: False
+    )
+    offloader = UVAOffloader(cpu_offload_max_bytes=1024)
+    wrap_modules = Mock()
+    monkeypatch.setattr(offloader, "wrap_modules", wrap_modules)
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.get_offloader", lambda: offloader
+    )
+
+    maybe_offload_embeddings(model)
+
+    wrap_modules.assert_not_called()
 
 
 @pytest.mark.parametrize("disable_pin_memory", [False, True])
