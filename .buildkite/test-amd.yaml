@@ -547,15 +547,14 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/basic_correctness/test_basic_correctness
-  - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_mem.py
+  - tests/basic_correctness/
   optional: true
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/test_mem.py
-  - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py
-  - pytest -v -s basic_correctness/test_cpu_offload.py
+  - pytest -v -s basic_correctness/memory
+  - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/models
+  - pytest -v -s basic_correctness/cpu_offload
+  - pytest -v -s basic_correctness/prefetch_offload
 
 - label: ":amd: (MI300) Distributed Models Shard %N"
   timeout_in_minutes: 80
@@ -1081,14 +1080,14 @@ steps:
   - tests/distributed/test_ray_v2_executor.py
   - tests/distributed/test_ray_v2_executor_e2e.py
   - tests/distributed/test_pipeline_parallel.py
-  - tests/basic_correctness/test_basic_correctness.py
+  - tests/basic_correctness/models/test_basic_correctness.py
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
-  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
+  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
 
 - label: ":amd: (MI300) Distributed DP + EP" # TBD
   timeout_in_minutes: 50
