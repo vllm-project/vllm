@@ -19,6 +19,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
+    AllBlocksCleared,
     BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -182,6 +183,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._validate_kv_cache_config(vllm_config, kv_cache_config)
         self._kv_cache_config = kv_cache_config
         self._kv_cache_events: MooncakeStoreKVEvents | None = None
+        self._pending_reset_events: list[KVCacheEvent] = []
+        kv_events_config = vllm_config.kv_events_config
+        self._enable_kv_events = bool(
+            kv_events_config and kv_events_config.enable_kv_cache_events
+        )
 
         self.connector_scheduler: MooncakeStoreScheduler | None = None
         self.connector_worker: MooncakeStoreWorker | None = None
@@ -286,14 +292,28 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         Mooncake master. Caller must first pause generation (e.g.
         ``pause_generation``) so no new puts are enqueued during drain.
 
-        Returns True on ack, False on failure, None for the worker role.
+        Returns True on ack, False on failure or pending writes, and None for
+        the worker role.
         """
         if self.role == KVConnectorRole.SCHEDULER:
             assert self.connector_scheduler is not None
-            # Clear local references to keys we're about to wipe.
+            if self.connector_scheduler.has_pending_push_work():
+                logger.warning(
+                    "Mooncake store reset deferred: saves are still pending."
+                )
+                return False
             self.connector_scheduler.load_specs.clear()
+            if not self.connector_scheduler.reset_store():
+                return False
+
+            if self._kv_cache_events is not None:
+                self._pending_reset_events.extend(
+                    self._kv_cache_events.pop_common_events()
+                )
             self._kv_cache_events = None
-            return self.connector_scheduler.reset_store()
+            if self._enable_kv_events:
+                self._pending_reset_events.append(AllBlocksCleared())
+            return True
         return None
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -312,6 +332,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._kv_cache_events.add_events(kv_cache_events.get_all_events())
 
     def take_events(self) -> Iterable[KVCacheEvent]:
+        pending_reset_events = self._pending_reset_events
+        self._pending_reset_events = []
+        yield from pending_reset_events
         if self._kv_cache_events is not None:
             events = self._kv_cache_events.pop_common_events()
             if not self._kv_cache_events.has_events():
