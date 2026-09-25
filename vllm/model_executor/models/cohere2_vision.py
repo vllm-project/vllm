@@ -8,10 +8,10 @@ from typing import Annotated, Literal
 
 import torch
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.models.cohere2_vision import Cohere2VisionConfig
-from transformers.models.cohere2_vision.image_processing_cohere2_vision_fast import (  # noqa: E501
-    Cohere2VisionImageProcessorFast,
+from transformers.models.cohere2_vision.image_processing_cohere2_vision import (  # noqa: E501
+    Cohere2VisionImageProcessor,
 )
 from transformers.models.cohere2_vision.processing_cohere2_vision import (
     Cohere2VisionProcessor,
@@ -178,7 +178,7 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         """Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
-        image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
+        image_processor: Cohere2VisionImageProcessor = processor.image_processor
 
         return image_processor.get_number_of_image_patches(
             image_height,
@@ -415,7 +415,7 @@ class Cohere2VisionForConditionalGeneration(
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
