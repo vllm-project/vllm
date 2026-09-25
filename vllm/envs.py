@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
+    VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
@@ -925,6 +926,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
+    ),
+    # Using a flag to control microbatch on XPU device, users on XPU device can
+    # decide to disable it when they needed.
+    "VLLM_XPU_PP_MICROBATCH": lambda: bool(
+        int(os.getenv("VLLM_XPU_PP_MICROBATCH", "1"))
     ),
     # When True and distributed_executor_backend="ray", use RayExecutorV2
     # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
