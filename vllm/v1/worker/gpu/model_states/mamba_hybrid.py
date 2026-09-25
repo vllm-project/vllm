@@ -43,16 +43,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         return {"is_prefilling": self.is_prefilling[:num_reqs]}
 
     def get_extra_attn_kwargs(
-        self,
-        attn_metadata_builder: Any,
-        num_reqs: int,
+        self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
@@ -82,6 +78,8 @@ def compute_num_decode_draft_tokens(
 ) -> np.ndarray:
     """Preserve the speculative state layout for decode rows without drafts."""
     num_reqs = num_scheduled_tokens.shape[0]
+    # GDN uses >= 0 to select spec-decode rows, so non-decode rows
+    # need the -1 sentinel rather than a raw zero draft count.
     num_decode_draft_tokens = np.full(num_padded_reqs, -1, dtype=np.int32)
     if num_draft_tokens_per_req is None:
         num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
@@ -295,12 +293,28 @@ class MambaHybridModelState(DefaultModelState):
                 input_batch.idx_mapping
             ]
 
+            is_prefilling_for_state = input_batch.is_prefilling_np
+            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            if num_draft_tokens_per_req is not None:
+                # Test request state, not num_scheduled_tokens == draft_count+1:
+                # adaptive rewrites num_scheduled_tokens to an even split, so that
+                # equality rarely holds and would demote every verify row to decode.
+                # A one-token prompt tail over prior state that the scheduler padded
+                # with placeholder drafts is also a spec-decode row: the prefill
+                # kernels can't roll the placeholders back.
+                num_computed = input_batch.num_computed_prefill_tokens_np
+                is_prompt_tail = (num_computed > 0) & (
+                    input_batch.prefill_len_np - num_computed == 1
+                )
+                is_prefilling_for_state = input_batch.is_prefilling_np & ~(
+                    is_prompt_tail & (num_draft_tokens_per_req > 0)
+                )
             num_decode_draft_tokens_cpu = torch.from_numpy(
                 compute_num_decode_draft_tokens(
                     num_reqs,
                     input_batch.num_scheduled_tokens,
-                    input_batch.num_draft_tokens_per_req,
-                    input_batch.is_prefilling_np,
+                    num_draft_tokens_per_req,
+                    is_prefilling_for_state,
                 )
             )
 
@@ -348,9 +362,7 @@ class MambaHybridModelState(DefaultModelState):
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
-                attn_metadata,
-                attn_groups,
-                for_capture=for_capture,
+                attn_metadata, attn_groups, for_capture=for_capture
             )
         return attn_metadata
 

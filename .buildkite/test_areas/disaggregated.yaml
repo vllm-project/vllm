@@ -42,6 +42,29 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+        - tests/utils.py
+        - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+        - vllm/platforms/rocm.py
+        - requirements/common.txt
+        - requirements/kv_connectors_rocm.txt
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        # Preserve all six model/TP pairs with native AITER attention.
+        - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_rocm.py
 
 - label: ":nvidia: (L4) Push NixlConnector PP prefill PD accuracy"
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
@@ -314,6 +337,44 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP"
+      dind: false
+      device: mi355_8
+      timeout_in_minutes: 85
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - requirements/kv_connectors_rocm.txt
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - vllm/model_executor/layers/fused_moe/
+        - vllm/model_executor/layers/quantization/
+        - vllm/models/deepseek_v4/
+        - vllm/v1/attention/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/_aiter_ops.py
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        # A mirror does not inherit the parent env, so it is repeated here in
+        # the parent's order. The layouts must stay empty: unset, the script
+        # defaults to HND, which the V4 indexer rejects.
+        - >-
+          VLLM_ROCM_USE_AITER=1
+          ENABLE_HMA_FLAG=1
+          DP_EP=1
+          GPU_MEMORY_UTILIZATION=0.85
+          PREFILLER_TP_SIZE=4
+          DECODER_TP_SIZE=4
+          PREFILL_BLOCK_SIZE=256
+          DECODE_BLOCK_SIZE=256
+          MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
+          VLLM_ENGINE_READY_TIMEOUT_S=1800
+          VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+          PREFILLER_KV_LAYOUT=
+          DECODER_KV_LAYOUT=
+          bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
 
 - label: ":nvidia: (H200) Kimi-Linear-48B-A3B Disaggregated DP EP"
   key: kimi-linear-disaggregated

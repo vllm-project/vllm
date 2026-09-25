@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import sys
+import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -50,6 +51,7 @@ from vllm.config import (
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
+    LoggingConfig,
     LoRAConfig,
     MambaConfig,
     ModelConfig,
@@ -84,6 +86,7 @@ from vllm.config.kernel import (
     SparseIndexerTopkBackend,
 )
 from vllm.config.load import SafetensorsLoadStrategy
+from vllm.config.logging import LogLevel
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
@@ -113,7 +116,7 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
-from vllm.logger import init_logger, suppress_logging
+from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -443,6 +446,20 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
+    "--log-config-file is deprecated and will be removed in v0.33.0. "
+    "Use --logging-config.pylogging_config_file instead."
+)
+
+
+class DeprecatedLogConfigFileAction(argparse.Action):
+    """Warn when the legacy ``--log-config-file`` option is used."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
+        setattr(namespace, self.dest, values)
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -573,6 +590,9 @@ class EngineArgs:
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
+    long_prefill_token_threshold_adaptive: bool = (
+        SchedulerConfig.long_prefill_token_threshold_adaptive
+    )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
@@ -729,6 +749,10 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+
+    logging_config: LoggingConfig | None = None
+    log_level: LogLevel | None = None
+    log_config_file: str | None = None
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -1548,6 +1572,34 @@ class EngineArgs:
             **lora_kwargs["enable_moe_shared_loras"],
         )
 
+        # Logging arguments
+        logging_group = parser.add_argument_group(
+            title="LoggingConfig",
+            description=LoggingConfig.__doc__,
+        )
+        logging_config_kwargs = get_kwargs(VllmConfig)["logging_config"]
+        logging_config_kwargs["default"] = argparse.SUPPRESS
+        logging_group.add_argument("--logging-config", **logging_config_kwargs)
+        logging_group.add_argument(
+            "--log-level",
+            choices=get_args(LogLevel),
+            default=argparse.SUPPRESS,
+            help=(
+                "Shortcut for --logging-config.log_level. "
+                "Overrides that field if both are specified."
+            ),
+        )
+        logging_group.add_argument(
+            "--log-config-file",
+            dest="log_config_file",
+            default=argparse.SUPPRESS,
+            metavar="PYLOGGING_CONFIG_FILE",
+            action=DeprecatedLogConfigFileAction,
+            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
+        )
+        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
+        # compatibility mapping in create_logging_config() in v0.33.0.
+
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
@@ -1642,6 +1694,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
+        )
+        scheduler_group.add_argument(
+            "--long-prefill-token-threshold-adaptive",
+            **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
@@ -2074,6 +2130,16 @@ class EngineArgs:
             jit_monitor_verbose=self.jit_monitor_verbose,
         )
 
+    def create_logging_config(self) -> LoggingConfig:
+        config = self.logging_config or LoggingConfig()
+        if self.log_level is not None:
+            config = dataclasses.replace(config, log_level=self.log_level)
+        if self.log_config_file is not None:
+            config = dataclasses.replace(
+                config, pylogging_config_file=self.log_config_file
+            )
+        return config
+
     def create_engine_config(
         self,
         usage_context: UsageContext | None = None,
@@ -2083,6 +2149,9 @@ class EngineArgs:
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
+        logging_config = self.create_logging_config()
+        configure_logging_if_needed(logging_config)
+
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
@@ -2489,6 +2558,9 @@ class EngineArgs:
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            long_prefill_token_threshold_adaptive=(
+                self.long_prefill_token_threshold_adaptive
+            ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
@@ -2711,6 +2783,7 @@ class EngineArgs:
             diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
+            logging_config=logging_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
