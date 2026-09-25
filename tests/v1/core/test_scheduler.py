@@ -6976,6 +6976,36 @@ def test_encoder_instance_finishes_request_once_prompt_is_consumed():
     assert request.num_output_tokens == 0
 
 
+@pytest.mark.skip_global_cleanup
+def test_dsv41_cache_only_prefill_finishes_without_sampling():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+        kv_role="kv_producer",
+    )
+    scheduler.is_dsv41_encoder_only_prefill = True
+    scheduler.connector.request_finished = Mock(return_value=(True, None))
+    (request,) = create_requests(num_requests=1, num_tokens=32, max_tokens=8)
+    request.kv_transfer_params = {
+        "do_remote_decode": True,
+        "cache_only": True,
+        "transfer_id": "xfer-test",
+    }
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(output),
+    )[0].outputs
+
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.num_output_tokens == 0
+    assert outputs[0].kv_transfer_params is None
+    assert request.request_id in scheduler.requests
+    scheduler.connector.request_finished.assert_called_once()
+
+
 @pytest.mark.parametrize("ec_role", ["ec_producer", "ec_consumer"])
 def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str):
     """Neither role re-encodes what the connector already holds.

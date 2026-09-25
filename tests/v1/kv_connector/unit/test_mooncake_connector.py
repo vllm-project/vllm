@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
+    MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
     MooncakeXferResponse,
@@ -28,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _align_transfer_regions,
     _compute_sender_transfer_plan,
     _validate_asymmetric_region_lengths,
+    _validate_dsv41_cache_only_regions,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -736,6 +738,58 @@ def test_scheduler_request_finished():
     assert delay_free is False
     assert len(scheduler_connector._reqs_need_send) == 0
     assert "id-1" in scheduler_connector._reqs_not_processed
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_encoder_only_cache_ready_triggers_mooncake_transfer():
+    """A completed cache-only P request is sendable without a sampled token."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.dsv41_encoder_only_prefill = True
+    connector = MooncakeConnectorScheduler(
+        vllm_config,
+        "test-engine",
+        _make_test_kv_cache_config(),
+    )
+    request = create_request(request_id=1, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params.update(transfer_id="xfer-1", cache_only=True)
+    request.num_computed_tokens = request.num_prompt_tokens
+    request.status = RequestStatus.FINISHED_STOPPED
+
+    delay_free, _ = connector.request_finished(request, ([10, 11],))
+
+    assert delay_free
+    assert connector._reqs_need_send[request.request_id][1] == [[10, 11]]
+
+    connector._reqs_need_send.clear()
+    request.num_computed_tokens -= 1
+    delay_free, _ = connector.request_finished(request, ([12],))
+    assert not delay_free
+    assert request.request_id not in connector._reqs_need_send
+
+    request.num_computed_tokens = request.num_prompt_tokens
+    request.status = RequestStatus.FINISHED_ABORTED
+    delay_free, _ = connector.request_finished(request, ([13],))
+    assert not delay_free
+    assert request.request_id not in connector._reqs_need_send
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_encoder_only_mooncake_rejects_extra_consumer_cache_regions():
+    main = TransferRegion("model.layers.20.attn", 20, 0, 512, 512)
+    indexer = TransferRegion("model.layers.20.attn.indexer.k_cache", 20, 0, 132, 132)
+    swa = TransferRegion("model.layers.20.attn.swa_cache", 20, 0, 512, 512)
+
+    assert _validate_dsv41_cache_only_regions([main, indexer], [main, indexer]) is None
+    assert (
+        _validate_dsv41_cache_only_regions([main, indexer], [main, indexer, swa])
+        is not None
+    )
 
 
 @contextlib.contextmanager
