@@ -13,6 +13,7 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
@@ -20,6 +21,9 @@ from vllm.model_executor.layers.quantization.torchao import torchao_version_at_l
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
+)
+from vllm.model_executor.model_loader.moe_fast_loader import (
+    fast_bypass_safetensors_iterator,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
@@ -95,6 +99,13 @@ class DefaultModelLoader(BaseModelLoader):
             "enable_multithread_load",
             "num_threads",
             "enable_weights_track",
+            "enable_fast_moe_bypass",
+            "fast_moe_mode",
+            "crossover_threshold_gb",
+            "direct_vram_threshold_gb",
+            "direct_vram_mode",
+            "direct_io_mode",
+            "fuse_shared_experts",
         }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
@@ -305,7 +316,79 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             else:
-                if extra_config.get("enable_multithread_load"):
+                enable_fast_moe = extra_config.get(
+                    "enable_fast_moe_bypass",
+                    getattr(envs, "VLLM_FAST_MOE_BYPASS", False)
+                    or os.environ.get("VLLM_FAST_MOE_BYPASS", "0").lower() in ("1", "true")
+                )
+                if enable_fast_moe:
+                    n_shared_experts = 1
+                    if getattr(self, "model_config", None):
+                        hf_cfg = getattr(self.model_config, "hf_config", None)
+                        if hf_cfg:
+                            n_shared_experts = (
+                                getattr(hf_cfg, "n_shared_experts", None)
+                                or getattr(hf_cfg, "num_shared_experts", None)
+                                or 1
+                            )
+                    fse_enabled = extra_config.get("fuse_shared_experts")
+                    if fse_enabled is None:
+                        fse_enabled = os.environ.get(
+                            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0"
+                        ).lower() in ("1", "true")
+                    direct_io_mode = extra_config.get("direct_io_mode")
+                    if direct_io_mode is None:
+                        env_dio = os.environ.get("VLLM_MOE_DIRECT_IO")
+                        if env_dio is not None:
+                            direct_io_mode = env_dio.lower() in ("1", "true")
+
+                    fast_moe_mode = extra_config.get("fast_moe_mode")
+                    if fast_moe_mode is None:
+                        fast_moe_mode = getattr(envs, "VLLM_FAST_MOE_MODE", None)
+                    if fast_moe_mode is None:
+                        fast_moe_mode = os.environ.get("VLLM_FAST_MOE_MODE")
+
+                    crossover_threshold_gb = extra_config.get("crossover_threshold_gb")
+                    if crossover_threshold_gb is None:
+                        crossover_threshold_gb = extra_config.get("direct_vram_threshold_gb")
+                    if crossover_threshold_gb is None:
+                        crossover_threshold_gb = getattr(envs, "VLLM_FAST_MOE_CROSSOVER_GB", None)
+                    if crossover_threshold_gb is None:
+                        env_crossover = os.environ.get("VLLM_FAST_MOE_CROSSOVER_GB")
+                        if env_crossover:
+                            try:
+                                crossover_threshold_gb = float(env_crossover)
+                            except ValueError:
+                                pass
+
+                    tp_size = 1
+                    tp_rank = 0
+                    try:
+                        from vllm.distributed import (
+                            get_tensor_model_parallel_rank,
+                            get_tensor_model_parallel_world_size,
+                        )
+                        tp_size = get_tensor_model_parallel_world_size()
+                        tp_rank = get_tensor_model_parallel_rank()
+                    except Exception:
+                        pass
+
+                    weights_iterator = fast_bypass_safetensors_iterator(
+                        hf_weights_files,
+                        local_expert_ids=self.local_expert_ids,
+                        max_workers=extra_config.get(
+                            "num_threads", self.DEFAULT_NUM_THREADS
+                        ),
+                        fse_enabled=fse_enabled,
+                        n_shared_experts=n_shared_experts,
+                        mode=fast_moe_mode,
+                        crossover_threshold_gb=crossover_threshold_gb,
+                        direct_vram_mode=extra_config.get("direct_vram_mode"),
+                        direct_io_mode=direct_io_mode,
+                        tp_rank=tp_rank,
+                        tp_size=tp_size,
+                    )
+                elif extra_config.get("enable_multithread_load"):
                     weights_iterator = multi_thread_safetensors_weights_iterator(
                         hf_weights_files,
                         self.load_config.use_tqdm_on_load,
