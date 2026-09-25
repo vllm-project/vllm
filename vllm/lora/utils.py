@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
@@ -109,7 +109,7 @@ def from_layer(
     max_loras: int,
     lora_config: LoRAConfig,
     packed_modules_list: list,
-    model_config: PretrainedConfig | None = None,
+    model_config: PreTrainedConfig | None = None,
 ) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -130,7 +130,7 @@ def from_layer_logits_processor(
     lm_head: "ParallelLMHead",
     max_loras: int,
     lora_config: LoRAConfig,
-    model_config: PretrainedConfig | None = None,
+    model_config: PreTrainedConfig | None = None,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(
         layer,
@@ -147,7 +147,7 @@ def from_layer_classification(
     layer: nn.Module,
     max_loras: int,
     lora_config: LoRAConfig,
-    model_config: PretrainedConfig | None = None,
+    model_config: PreTrainedConfig | None = None,
 ) -> ClassificationHeadWithLoRA:
     instance_layer = ClassificationHeadWithLoRA(layer)
     instance_layer.create_lora_weights(max_loras, lora_config, model_config)

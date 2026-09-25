@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -40,7 +40,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
     and projects each to a hidden-size embedding.
     """
 
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
         compression = config.img_token_compression_config
         temporal_patch_size = compression.get("temporal_patch_size", 2)
@@ -186,7 +186,7 @@ class MiniMaxVLEncoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -247,7 +247,7 @@ class MiniMaxVLEncoderLayer(nn.Module):
 class MiniMaxVLEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         num_hidden_layers_override: int | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -299,7 +299,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -550,7 +550,7 @@ class MiniMaxVLVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         text_hidden_size: int,
         projector_hidden_size: int | None = None,
         quant_config: QuantizationConfig | None = None,
