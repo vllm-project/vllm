@@ -797,13 +797,21 @@ RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
 COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
-RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+RUN timeout --kill-after=30s 5m apt-get update -q -y --error-on=any \
+    -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=30 \
+    -o Acquire::https::Timeout=30 \
+    && apt-get install -q -y --no-install-recommends \
+    -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=30 \
+    -o Acquire::https::Timeout=30 \
     librdmacm1 \
     libibverbs1 \
     ibverbs-providers \
     ibverbs-utils \
     util-linux \
     unzip \
+    libsodium23 \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
