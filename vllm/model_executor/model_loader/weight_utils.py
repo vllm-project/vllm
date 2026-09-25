@@ -24,7 +24,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open
+from safetensors.torch import load, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -1187,7 +1187,7 @@ def multi_thread_safetensors_weights_iterator(
     def _load_file(st_file: str):
         result = {}
         with safe_open(st_file, framework="pt", device="cpu") as f:
-            for k in f.keys():
+            for k in f.keys():  # noqa: SIM118 (safe_open is not iterable)
                 if should_skip_weight(k, local_expert_ids):
                     continue
                 result[k] = f.get_tensor(k)

@@ -953,7 +953,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if isinstance(param, BlockQuantScaleParameter) or (
                 getattr(self, "weight_block_size", None)
                 and (
-                    isinstance(param, (BlockQuantScaleParameter, GroupQuantScaleParameter))
+                    isinstance(
+                        param,
+                        (
+                            BlockQuantScaleParameter,
+                            GroupQuantScaleParameter,
+                        ),
+                    )
                     or param is getattr(self, "weight_scale", None)
                 )
             ):
@@ -978,7 +984,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if isinstance(param, BlockQuantScaleParameter) or (
             getattr(self, "weight_block_size", None)
             and (
-                isinstance(param, (BlockQuantScaleParameter, GroupQuantScaleParameter))
+                isinstance(
+                    param,
+                    (
+                        BlockQuantScaleParameter,
+                        GroupQuantScaleParameter,
+                    ),
+                )
                 or param is getattr(self, "weight_scale", None)
             )
         ):
@@ -994,10 +1006,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offset=shard_offset,
                 shard_size=shard_size,
             )
-        except Exception as e:
+        except Exception:
             logger.error(
-                "weight_loader_v2 FAILED on %s: param shape=%s, loaded_weight shape=%s, "
-                "loaded_shard_id=%s, shard_size=%s, shard_offset=%s, output_sizes=%s, tp_size=%s, tp_rank=%s, param.tp_rank=%s, param_class=%s",
+                "weight_loader_v2 FAILED on %s: param shape=%s, "
+                "loaded_weight shape=%s, loaded_shard_id=%s, shard_size=%s, "
+                "shard_offset=%s, output_sizes=%s, tp_size=%s, tp_rank=%s, "
+                "param.tp_rank=%s, param_class=%s",
                 getattr(self, "prefix", ""),
                 getattr(param, "shape", None),
                 getattr(loaded_weight, "shape", None),

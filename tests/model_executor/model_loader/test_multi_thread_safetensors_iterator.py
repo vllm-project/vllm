@@ -2,6 +2,7 @@
 """Unit tests for bounded multi-thread safetensors weight loader."""
 
 from unittest.mock import patch
+
 import pytest
 import safetensors.torch
 import torch
@@ -13,7 +14,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 
 @pytest.fixture
 def synthetic_safetensors_shards(tmp_path):
-    """Create 8 synthetic safetensors shard files with mixed dense and expert weights."""
+    """Create 8 synthetic safetensors shard files with mixed dense
+    and expert weights."""
     shard_paths = []
     for i in range(8):
         file_path = str(tmp_path / f"model-{i:05d}-of-00008.safetensors")
@@ -27,12 +29,15 @@ def synthetic_safetensors_shards(tmp_path):
     return shard_paths
 
 
-def test_multi_thread_safetensors_bounded_sliding_window(synthetic_safetensors_shards):
+def test_multi_thread_safetensors_bounded_sliding_window(
+    synthetic_safetensors_shards,
+):
     """Verify that in-flight submitted tasks never exceed max_workers + 1."""
     max_workers = 2
     expected_max_buffer = max_workers + 1
 
     import concurrent.futures
+
     original_submit = concurrent.futures.ThreadPoolExecutor.submit
     max_observed_pending = 0
     currently_pending = 0
@@ -61,12 +66,15 @@ def test_multi_thread_safetensors_bounded_sliding_window(synthetic_safetensors_s
 
     # 8 dense weights + 8 expert weights + 8 scale weights = 24 items
     assert len(loaded) == 24
-    # Bounded sliding window invariant: pending futures must never exceed max_workers + 1
+    # Bounded sliding window invariant: pending futures <= max_workers + 1
     assert max_observed_pending <= expected_max_buffer
 
 
-def test_multi_thread_safetensors_local_expert_ids_filtering(synthetic_safetensors_shards):
-    """Verify non-local expert weights are skipped while dense weights and scales are preserved."""
+def test_multi_thread_safetensors_local_expert_ids_filtering(
+    synthetic_safetensors_shards,
+):
+    """Verify non-local expert weights are skipped while dense weights and
+    scales are preserved."""
     # Only load expert 0
     iterator = multi_thread_safetensors_weights_iterator(
         synthetic_safetensors_shards,
