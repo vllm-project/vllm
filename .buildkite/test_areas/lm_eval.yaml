@@ -516,13 +516,50 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
-- label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY"
-  key: moe-refactor-integration-test-b200-dp-temporary
+- label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY Qwen3 NvFp4 CT"
+  key: moe-refactor-integration-test-b200-dp-temporary-nvfp4-ct
+  timeout_in_minutes: 60
   device: b200-k8s
   optional: true
   num_devices: 2
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-nvfp4-ct.txt
+
+- label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY Qwen3 NvFp4 ModelOpt"
+  key: moe-refactor-integration-test-b200-dp-temporary-nvfp4-modelopt
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-nvfp4-modelopt.txt
+
+- label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY Qwen3 Fp8 AutoFp8"
+  key: moe-refactor-integration-test-b200-dp-temporary-fp8-autofp8
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-fp8-autofp8.txt
+
+- label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY Qwen3 Fp8 CT Block"
+  key: moe-refactor-integration-test-b200-dp-temporary-fp8-ct-block
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-fp8-ct-block.txt
+
+- label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY Qwen3 BF16"
+  key: moe-refactor-integration-test-b200-dp-temporary-bf16
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-bf16.txt
 
 - label: ":nvidia: (L4) LM Eval Humming TEMPORARY"
   key: lm-eval-humming-l4
