@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutedsl
 
 _FUSED_WO_A_MAX_TOKENS = 32
 
@@ -23,32 +22,33 @@ _FUSED_WO_A_MAX_TOKENS = 32
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
     method = getattr(layer.wo_b, "scheme", getattr(layer.wo_b, "quant_method", None))
-    wo_b_kernel = getattr(method, "kernel", None)
     return (
         current_platform.is_device_capability_family(100)
-        and has_flashinfer_cutedsl()
-        and (layer.n_local_groups, layer.n_local_heads) == (2, 16)
-        and (layer.nope_head_dim, layer.rope_head_dim) == (448, 64)
-        and layer.o_lora_rank == 1024
+        # WO-A is FP8 with per-32 scales, and WO-B takes MXFP8 input directly.
         and layer._einsum_recipe == (1, 1, 32)
-        and layer._tma_aligned_scales
-        and layer.wo_a.weight.dtype == torch.float8_e4m3fn
-        and hasattr(layer.wo_a, "weight_scale")
         and get_input_quant_key(layer.wo_b) == kMxfp8Dynamic
-        and isinstance(wo_b_kernel, FlashInferCutedslMxfp8LinearKernel)
+        and isinstance(
+            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
+        )
+        # A group's heads form one portable (<= 8 CTA) cluster.
+        and layer.n_local_heads // layer.n_local_groups <= 8
+        and (layer.nope_head_dim, layer.rope_head_dim) == (448, 64)
+        and layer.o_lora_rank % 128 == 0
     )
 
 
 def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
     """Warm the fused WO-A token counts ``dsv41_o_proj`` can dispatch."""
     # Draft models load outside the warmup registry; their layers share the
-    # target's head padding, so the target's registration covers them too.
+    # target's attention shapes, so the target's registration covers them too.
     if _can_fuse_wo_a(layer):
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
         _FUSED_WO_A_KERNEL.register_warmup(
             max_tokens=_FUSED_WO_A_MAX_TOKENS,
-            x_stride=layer.padded_heads * layer.head_dim,
+            n_groups=layer.n_local_groups,
+            heads_per_group=layer.n_local_heads // layer.n_local_groups,
+            o_lora_rank=layer.o_lora_rank,
         )
 
 
