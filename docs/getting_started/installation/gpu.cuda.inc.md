@@ -48,10 +48,11 @@ uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_V
 
 #### Install FlashInfer precompiled kernels {#install-flashinfer-kernels}
 
-vLLM's CUDA installation includes `flashinfer-python`. The optional
-`flashinfer-cubin` and `flashinfer-jit-cache` packages provide precompiled CUDA
-kernels that reduce downloads and compilation at startup. Install them from
-FlashInfer's wheel indexes using `flashinfer download-kernels`.
+vLLM's CUDA installation includes `flashinfer-python`. We strongly recommend
+also installing `flashinfer-cubin` and `flashinfer-jit-cache`, particularly on
+Hopper and newer GPUs, **especially Blackwell**. These packages provide
+precompiled CUDA kernels that reduce downloads and compilation at startup.
+Install them from FlashInfer's wheel indexes using `flashinfer download-kernels`.
 
 After installing vLLM, run the following in the same Python environment:
 
@@ -129,7 +130,7 @@ This command will do the following:
 1. Download the pre-built wheel of the base commit.
 1. Use its compiled libraries and `vllm-rs` binary in the installation.
 
-To also install FlashInfer's optional precompiled kernels, follow
+We also recommend installing FlashInfer's precompiled kernels. Follow
 [Install FlashInfer precompiled kernels](#install-flashinfer-kernels) after the editable install.
 
 !!! note
