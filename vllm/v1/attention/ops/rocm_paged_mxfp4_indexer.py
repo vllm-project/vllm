@@ -12,6 +12,7 @@ the whole context: the pool is resolved once per step and shared by all four.
 import functools
 import importlib
 import inspect
+import types
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -49,8 +50,9 @@ MXFP4_BLOCK_SIZE = 32
 # to storage below that, and buffer loads and stores take 32-bit offsets.
 MAX_LOGITS_BYTES = 2**31 - 1
 _AITER_MODULE = "aiter.ops.triton.attention.pa_mqa_logits_mxfp4"
-# The key writer and the query quantizer, next to the kernel that reads them.
-_AITER_CACHE_MODULE = "aiter.ops.triton.attention.pa_mqa_logits_mxfp4_cache"
+# The key writer and the query quantizer.
+_AITER_K_CACHE_MODULE = "aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache"
+_AITER_Q_QUANT_MODULE = "aiter.ops.triton.rope.q_rope_mxfp4_quant"
 
 
 @functools.cache
@@ -60,7 +62,12 @@ def _aiter():
 
 @functools.cache
 def _aiter_cache():
-    return importlib.import_module(_AITER_CACHE_MODULE)
+    k_cache = importlib.import_module(_AITER_K_CACHE_MODULE)
+    q_quant = importlib.import_module(_AITER_Q_QUANT_MODULE)
+    return types.SimpleNamespace(
+        k_norm_rope_mxfp4_cache=getattr(k_cache, "k_norm_rope_mxfp4_cache", None),
+        q_rope_mxfp4_quant=getattr(q_quant, "q_rope_mxfp4_quant", None),
+    )
 
 
 @functools.cache
@@ -91,10 +98,11 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
         return f"aiter's paged MXFP4 cache-prep ops are unavailable ({e})"
     if not all(
         callable(getattr(cache_ops, name, None))
-        for name in ("indexer_k_norm_rope_mxfp4_cache", "indexer_q_rope_mxfp4_quant")
+        for name in ("k_norm_rope_mxfp4_cache", "q_rope_mxfp4_quant")
     ):
         return (
-            f"aiter's paged MXFP4 cache-prep ops are missing from {_AITER_CACHE_MODULE}"
+            "aiter's paged MXFP4 cache-prep ops are missing from "
+            f"{_AITER_K_CACHE_MODULE} / {_AITER_Q_QUANT_MODULE}"
         )
     return None
 
@@ -172,7 +180,7 @@ def rocm_mxfp4_indexer_k_store(
     query heads."""
     assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
     layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
-    _aiter_cache().indexer_k_norm_rope_mxfp4_cache(
+    _aiter_cache().k_norm_rope_mxfp4_cache(
         k_pre,
         positions,
         cos_sin_cache,
@@ -201,13 +209,12 @@ def rocm_mxfp4_indexer_q_quant(
     assert use_fp4 and weights_out_dtype == torch.float32, (
         "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
     )
-    q_packed, q_scale, weights_out = _aiter_cache().indexer_q_rope_mxfp4_quant(
-        positions,
+    q_packed, q_scale, weights_out = _aiter_cache().q_rope_mxfp4_quant(
         index_q,
+        positions,
         index_q_cos_sin_cache,
         index_weights,
-        index_weights_softmax_scale,
-        index_weights_head_scale,
+        index_weights_softmax_scale * index_weights_head_scale,
     )
     return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
 

@@ -139,7 +139,7 @@ class _Case:
                     True,
                     num_heads=HEADS,
                 )
-                ops._aiter_cache().indexer_k_norm_rope_mxfp4_cache(
+                ops._aiter_cache().k_norm_rope_mxfp4_cache(
                     k_pre, pos, cos_sin, norm, 1e-6, self.natural[ratio], nat, ratio
                 )
 
