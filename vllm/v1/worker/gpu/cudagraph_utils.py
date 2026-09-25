@@ -183,6 +183,17 @@ def has_compiled_submodule(model: nn.Module) -> bool:
     )
 
 
+def allow_rocm_deepseek_v4_piecewise_without_compile(
+    vllm_config: VllmConfig,
+) -> bool:
+    """ROCm: allow DeepSeek-V4 FULL_AND_PIECEWISE without breakable CG."""
+    if not current_platform.is_rocm():
+        return False
+    model_config = vllm_config.model_config
+    archs = set(model_config.architectures if model_config else [])
+    return bool(archs & {"DeepseekV4ForCausalLM", "DeepSeekV4MTPModel"})
+
+
 class CudaGraphManager:
     def __init__(
         self,
