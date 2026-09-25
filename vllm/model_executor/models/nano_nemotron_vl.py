@@ -1619,9 +1619,11 @@ class NemotronH_Nano_VL_V2(
             features = feature_field.data
             batch_size = math.prod(features.shape[:-2])
             padded_feature_length = features.shape[-2]
-            output_length: int = self.sound_encoder.encoder._get_subsampling_output_length(
-                torch.tensor([padded_feature_length])
-            ).item()
+            output_length: int = (
+                self.sound_encoder.encoder._get_subsampling_output_length(
+                    torch.tensor([padded_feature_length])
+                ).item()
+            )
             audio_tokens = batch_size * output_length
             return audio_tokens, audio_tokens
         if modality not in ("image", "video"):
