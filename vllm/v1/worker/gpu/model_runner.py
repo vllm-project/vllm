@@ -19,7 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -514,8 +514,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.expert_load_stats = ExpertLoadStats.create(
             self.vllm_config, self.model, self.device
         )
-        if self.expert_load_stats is not None:
-            self.execute_model = self.expert_load_stats.wrap_execute(self.execute_model)
 
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
@@ -1896,6 +1894,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Run model.
+        stats_context = (
+            self.expert_load_stats.record(0 if dummy_run else input_batch.num_tokens)
+            if self.expert_load_stats is not None
+            else nullcontext()
+        )
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
@@ -1904,7 +1907,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.pre_forward(
                 **connector_kwargs, attn_metadata=attn_metadata
             )
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            with stats_context:
+                model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1913,19 +1917,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_active_loras=batch_desc.num_active_loras,
             )
 
-            with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
-                num_tokens_across_dp=(
-                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            with (
+                stats_context,
+                set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch.num_tokens_after_padding,
+                    cudagraph_runtime_mode=batch_desc.cg_mode,
+                    num_tokens_across_dp=(
+                        dp_sync.num_tokens_across_dp if dp_sync is not None else None
+                    ),
+                    batch_descriptor=batch_descriptor,
+                    ubatch_slices=ubatch_slices,
+                    slot_mapping=slot_mappings_by_layer,
+                    skip_compiled=skip_compiled,
+                    is_padding=input_batch.is_padding,
                 ),
-                batch_descriptor=batch_descriptor,
-                ubatch_slices=ubatch_slices,
-                slot_mapping=slot_mappings_by_layer,
-                skip_compiled=skip_compiled,
-                is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
                 if ubatch_state is not None:
@@ -2231,7 +2238,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         memory is reclaimable when running in the same process."""
         if self.expert_load_stats is not None:
             self.expert_load_stats.close()
-            self.execute_model = type(self).execute_model.__get__(self)
             self.expert_load_stats = None
         torch.accelerator.synchronize()
         if self.aux_output_connector is not None:

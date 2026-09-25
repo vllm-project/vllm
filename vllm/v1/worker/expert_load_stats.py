@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -50,6 +50,7 @@ class ExpertLoadReporter:
         self.counts = np.zeros((len(layers), num_experts), dtype=np.int64)
         self.step_begin = 1
         self.dropped = 0
+        self.export_errors = 0
         self.path: Path | None = None
         if config.output_dir:
             rank_suffix = "-".join(f"{key}{value}" for key, value in ranks.items())
@@ -97,6 +98,7 @@ class ExpertLoadReporter:
                     "max_mean_ratio": float(counts.max() / mean) if total else 0.0,
                     "unused_experts": int(np.count_nonzero(counts == 0)),
                     "dropped_trace_iterations": self.dropped,
+                    "export_errors": self.export_errors,
                 }
                 if self.config.detail == "per_expert":
                     record["counts"] = counts.tolist()
@@ -108,14 +110,32 @@ class ExpertLoadReporter:
         return records
 
     def write(self, records: list[dict[str, Any]]) -> None:
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as output:
-                for record in records:
-                    output.write(json.dumps(record, separators=(",", ":")) + "\n")
-        for record in records:
-            if record["event"] == "vllm.expert_load":
-                logger.info("%s", json.dumps(record, separators=(",", ":")))
+        if self.path is not None and not self.export_errors:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8") as output:
+                    for record in records:
+                        output.write(json.dumps(record, separators=(",", ":")) + "\n")
+            except OSError:
+                self.export_errors += 1
+                logger.exception(
+                    "Expert-load JSONL export disabled after a write error; "
+                    "serving and summary logging will continue."
+                )
+        summaries = [r for r in records if r["event"] == "vllm.expert_load"]
+        if summaries:
+            logger.info(
+                "Expert-load steps %d-%d: %d layers, %d assignments, "
+                "max layer max/mean %.3f, %d dropped trace iterations, "
+                "%d export errors.",
+                summaries[0]["step_begin"],
+                summaries[0]["step_end"],
+                len(summaries),
+                sum(r["assignments"] for r in summaries),
+                max(r["max_mean_ratio"] for r in summaries),
+                summaries[0]["dropped_trace_iterations"],
+                self.export_errors,
+            )
 
 
 @dataclass
@@ -174,12 +194,34 @@ class ExpertLoadStats:
                 raise ValueError("Unsupported expert-load sequence-parallel topology")
             modules.append(module)
         layers = [module.layer_id for module in modules]
-        if not layers or len(layers) != len(set(layers)):
+        if len(layers) != len(set(layers)):
             raise ValueError("Expert-load stats require unique target MoE layer IDs")
-        if config.layers is not None and set(layers) != set(config.layers):
-            raise ValueError(
-                "Requested expert-load layers are not present on this worker"
+        if config.layers is not None:
+            model_config = vllm_config.model_config
+            if max(config.layers) >= model_config.get_total_num_hidden_layers():
+                raise ValueError("Requested expert-load layer is outside the model")
+            start, end = model_config.get_layers_start_end_indices(
+                vllm_config.parallel_config
             )
+            local_selection = {i for i in config.layers if start <= i < end}
+            if local_selection != set(layers):
+                raise ValueError(
+                    "Requested expert-load layers are not MoE layers on this stage"
+                )
+        if not modules:
+            return None
+        tp_rank = get_tp_group().rank_in_group
+        # Replicated routing belongs to TP rank zero. Avoid counters and empty
+        # exports on replicas; SP routing before dispatch owns a local shard.
+        modules = [
+            module
+            for module in modules
+            if tp_rank == 0
+            or (module.moe_config.sp_size > 1 and not module.do_naive_dispatch_combine)
+        ]
+        if not modules:
+            return None
+        layers = [module.layer_id for module in modules]
         expert_counts = {module.moe_config.num_logical_experts for module in modules}
         if len(expert_counts) != 1 or min(expert_counts) <= 0:
             raise ValueError(
@@ -187,7 +229,7 @@ class ExpertLoadStats:
             )
         ranks = {
             "dp_rank": vllm_config.parallel_config.data_parallel_rank,
-            "tp_rank": get_tp_group().rank_in_group,
+            "tp_rank": tp_rank,
             "pp_rank": get_pp_group().rank_in_group,
             "ep_rank": get_ep_group().rank_in_group,
         }
@@ -292,7 +334,7 @@ class ExpertLoadStats:
         for slot in self.slots:
             if slot.future is None or slot.future.done():
                 if slot.future is not None:
-                    slot.future.result()  # Surface writer failures.
+                    slot.future.result()  # I/O errors are handled by the reporter.
                     slot.future = None
                 slot.iterations = []
                 self.current = slot
@@ -304,6 +346,9 @@ class ExpertLoadStats:
 
     def warmup(self) -> None:
         """Compile export kernels before the serving-time JIT guard is enabled."""
+        self.num_valid_tokens.zero_()
+        self.counts.zero_()
+        self.summary.zero_()
         destinations = [None]
         if self.config.trace:
             destinations.append(self.slots[0].device[1])
@@ -386,26 +431,20 @@ class ExpertLoadStats:
         )
         self.reporter.write(records)
 
-    def wrap_execute(self, execute: Callable) -> Callable:
-        @wraps(execute)
-        @torch.inference_mode()
-        def wrapped(*args, **kwargs):
-            scheduler_output = args[0] if args else kwargs["scheduler_output"]
-            dummy = kwargs.get("dummy_run", args[2] if len(args) > 2 else False)
-            num_tokens = scheduler_output.total_num_scheduled_tokens
-            if not self.active or dummy or num_tokens == 0:
-                return execute(*args, **kwargs)
-            self.begin(num_tokens)
-            try:
-                result = execute(*args, **kwargs)
-            except BaseException:
-                self.num_valid_tokens.zero_()
-                self.counts.zero_()
-                raise
-            self.end()
-            return result
-
-        return wrapped
+    @contextmanager
+    def record(self, num_tokens: int) -> Iterator[None]:
+        """Bound collection to a real target forward, outside graph capture."""
+        if not self.active or num_tokens == 0:
+            yield
+            return
+        self.begin(num_tokens)
+        try:
+            yield
+        except BaseException:
+            self.num_valid_tokens.zero_()
+            self.counts.zero_()
+            raise
+        self.end()
 
     @torch.inference_mode()
     def close(self) -> None:

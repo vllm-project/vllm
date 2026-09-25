@@ -19,7 +19,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["STATS_START", "STATS_END", "STATS_TOKEN_OFFSET"])
     def _eplb_map_and_record_i32_kernel(
         topk_ids_ptr,
         logical_replica_count_ptr,

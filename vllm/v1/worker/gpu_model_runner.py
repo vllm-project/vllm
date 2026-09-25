@@ -4425,6 +4425,9 @@ class GPUModelRunner(
                 scheduler_output,
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
+            self.expert_load_stats.record(num_tokens_unpadded)
+            if self.expert_load_stats is not None
+            else nullcontext(),
         ):
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -5343,11 +5346,6 @@ class GPUModelRunner(
                 self.expert_load_stats = ExpertLoadStats.create(
                     self.vllm_config, self.model, self.device
                 )
-                if self.expert_load_stats is not None:
-                    self.execute_model = self.expert_load_stats.wrap_execute(
-                        self.execute_model
-                    )
-
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except torch.cuda.OutOfMemoryError as e:
@@ -6523,7 +6521,6 @@ class GPUModelRunner(
         memory is reclaimable when running in the same process."""
         if self.expert_load_stats is not None:
             self.expert_load_stats.close()
-            self.execute_model = type(self).execute_model.__get__(self)
             self.expert_load_stats = None
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager

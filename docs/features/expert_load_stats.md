@@ -5,10 +5,10 @@ Expert-load statistics observe **logical expert routing assignments** without en
 ## Enable interval summaries
 
 ```bash
-vllm serve MODEL --expert-load-stats-config '{"enabled":true,"log_interval":1000}'
+vllm serve MODEL --expert-load-stats-config '{"enabled":true,"log_interval":1000,"output_dir":"./expert-load"}'
 ```
 
-Each summary contains a per-layer expert count vector, assignment total, maximum, mean, maximum-to-mean ratio, unused-expert count, and worker rank labels. `detail="summary"` omits the count vector. Counts reset after each reported interval by default; `reset_after_log=false` reports cumulative counts since startup. `output_dir` optionally writes the same records to rank-qualified JSONL files in addition to the summary log.
+JSONL summaries contain a per-layer expert count vector, assignment total, maximum, mean, maximum-to-mean ratio, unused-expert count, and worker rank labels. `detail="summary"` omits the count vector. Counts reset after each reported interval by default; `reset_after_log=false` reports cumulative counts since startup. Console logging is one compact line per reporting worker and interval, without expert vectors. Set `output_dir` to retain per-layer statistics in rank-qualified JSONL files; without it, only the compact console overview is emitted.
 
 ## Use the same collection settings with or without EPLB
 
@@ -36,7 +36,7 @@ vllm serve MODEL --expert-load-stats-config '{"enabled":true,"log_interval":1000
 
 Trace records contain `iteration`, `forward_index`, `layer`, and `counts`, plus the same rank and model-role labels. Iterations are one-based **local target-model forward calls**, not global scheduler steps. Warmup, graph capture, empty calls, and DP dummy calls do not advance this counter. Different DP ranks can have different iteration numbers; do not align independent ranks solely by this field.
 
-`trace_interval` samples every Nth target iteration, starting at iteration one. `trace_max_iterations` limits the initial trace window; summaries continue afterward. `layers` optionally selects target layer IDs. Per-iteration records go only to JSONL, not to the console or Prometheus.
+`trace_interval` samples every Nth target iteration, starting at iteration one. `trace_max_iterations` limits the initial trace window; summaries continue afterward. `layers` optionally selects global target layer IDs. Each pipeline stage observes only its selected local MoE layers; stages with no selected layers allocate no tracker or export buffers. Out-of-range IDs and selected dense layers are rejected. Per-iteration records go only to JSONL, not to the console or Prometheus.
 
 Each top-k selection of a valid routed expert contributes one assignment. Padding, invalid expert IDs, and shared experts are excluded. With speculative decoding, **target verification tokens are included even if later rejected**. Draft-model forwards are not instrumented in this version; every record is explicitly labeled `model_role="target"` and `forward_index=0`.
 
@@ -45,7 +45,7 @@ Each top-k selection of a valid routed expert contributes one assignment. Paddin
 Only `scope="local"` is supported. Collection adds no all-reduce or all-gather.
 
 - A gathered routing batch is sliced to this DP rank's source tokens.
-- Routing replicated across TP ranks is counted on TP rank zero only; other replicas report zeros.
+- Routing replicated across TP ranks is counted on TP rank zero only; other replicas do not instrument those layers or emit all-zero files.
 - For sequence-parallel routing before dispatch, each TP rank records its own token shard. Add the shards to reconstruct that DP rank's histogram.
 - Counts describe the originating tokens' **logical selections**, not the physical EP rank that executes an expert. They are not expert kernel time, communication time, or a complete utilization metric.
 
@@ -59,13 +59,13 @@ Enabled monitoring uses persistent int64 counters. Without EPLB there is one his
 
 Two preallocated export slots bound GPU and pinned-CPU memory. For L selected layers, E experts and trace chunk capacity C, counter and export storage is approximately `8 * L * E * (2 + 2 * (C + 1))` GPU bytes and `8 * L * E * 2 * (C + 1)` pinned-CPU bytes, plus scalar/event overhead. Without tracing, C is zero. CPU serialization also needs bounded per-chunk workspace.
 
-The inference stream snapshots counters; a separate copy stream waits for that snapshot and transfers to pinned memory. Only the reporting thread waits for D2H completion and writes JSONL. A slot cannot be reused until its write finishes. If both slots remain busy, trace samples are dropped and counted in `dropped_trace_iterations`; summary counts continue accumulating and their interval may extend. Slow export never waits on the inference thread. Disk/write errors are surfaced rather than silently discarding output. Normal shutdown drains outstanding chunks and emits a partial summary; abrupt process termination can lose buffered records.
+The inference stream snapshots counters; a separate copy stream waits for that snapshot and transfers to pinned memory. Only the reporting thread waits for D2H completion and writes JSONL. A slot cannot be reused until its write finishes. If both slots remain busy, trace samples are dropped and counted in `dropped_trace_iterations`; summary counts continue accumulating and their interval may extend. Slow export never waits on the inference thread. A filesystem error logs an exception once, increments `export_errors`, and disables further JSONL writes until restart; serving and compact summary logging continue. A failed write can leave the last JSONL record incomplete. CUDA failures are not suppressed. Normal shutdown drains outstanding chunks and emits a partial summary; abrupt process termination can lose buffered records.
 
 ## Initial coverage and validation
 
 This version supports CUDA target models using non-monolithic `BaseRouter` MoE paths, including MiniMax-M3's standard `FusedMoEFactory` path. It coexists with returned routed-expert capture without replacing its callback. Eager, piecewise, and full CUDA-graph paths use the same persistent recording buffers.
 
-Monolithic fused router/expert kernels, custom routing implementations (including specialized MegaMoE paths), LoRA, ubatching/DBO, context parallelism, elastic EP, encoder disaggregation, KV-sharing fast prefill, and adaptive speculative verification are rejected. All selected layers must exist on the worker and have the same logical expert count. This is not a claim that every MoE backend or distributed combination has been end-to-end validated.
+Monolithic fused router/expert kernels, custom routing implementations (including specialized MegaMoE paths), LoRA, ubatching/DBO, context parallelism, elastic EP, encoder disaggregation, KV-sharing fast prefill, and adaptive speculative verification are rejected. Selected layers owned by a worker must be MoE layers and have the same logical expert count. This is not a claim that every MoE backend or distributed combination has been end-to-end validated.
 
 Correctness tests:
 

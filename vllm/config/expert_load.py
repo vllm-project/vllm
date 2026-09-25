@@ -25,7 +25,7 @@ class ExpertLoadStatsConfig:
     scope: Literal["local"] = "local"
     """Rank-local token ownership only; no additional collectives."""
     detail: Literal["summary", "per_expert"] = "per_expert"
-    """Include the count vector in interval summaries when per_expert."""
+    """Include the count vector in JSONL summaries when per_expert."""
     reset_after_log: bool = True
     """Report interval counts; false reports cumulative counts since startup."""
     output_dir: str | None = None
