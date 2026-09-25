@@ -48,6 +48,9 @@ class IrOpPriorityConfig:
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
         from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
 
         assert "_impls" not in factors
         factors["_impls"] = {
