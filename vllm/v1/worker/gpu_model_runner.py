@@ -5713,7 +5713,15 @@ class GPUModelRunner(
         inputs_embeds: torch.Tensor | None,
         randomize_inputs: bool = False,
     ):
-        """Randomize dummy inputs to help balance expert-selection."""
+        """Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
+        This is to help balance expert-selection
+         - during profile_run
+         - during DP rank dummy run
+        """
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        randomize_inputs = randomize_inputs or (
+            envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        )
         if not randomize_inputs:
             yield
         elif input_ids is not None:
