@@ -873,6 +873,67 @@ class TestProcessChunk:
         ]
 
 
+class TestCountReasoningTokens:
+    def test_matches_process_chunk(self, harmony_parser, gpt_oss_tokenizer):
+        """Chat usage must report the same count as the Responses API path."""
+        token_ids = get_model_output_tokens(
+            [
+                assistant("Let me check the weather.", "analysis"),
+                tool_call("functions.get_weather", '{"location": "SF"}'),
+            ]
+        )
+        count = harmony_parser.count_reasoning_tokens(token_ids)
+
+        fresh = HarmonyParser(gpt_oss_tokenizer)
+        assert count == fresh.process_chunk(token_ids).reasoning_token_count
+        assert count > 0
+
+    def test_excludes_harmony_control_tokens(self, harmony_parser):
+        text = "Let me think about this."
+        token_ids = get_model_output_tokens(
+            [assistant(text, "analysis"), assistant("Hi", "final")]
+        )
+        expected = len(get_encoding().encode(text))
+        assert harmony_parser.count_reasoning_tokens(token_ids) == expected
+
+    def test_final_only_has_no_reasoning(self, harmony_parser):
+        token_ids = get_model_output_tokens([assistant("Hello", "final")])
+        assert harmony_parser.count_reasoning_tokens(token_ids) == 0
+
+    def test_streaming_reuses_running_total(
+        self, harmony_parser, gpt_oss_tokenizer, chat_request, monkeypatch
+    ):
+        """Called per streamed chunk with all tokens so far; must not replay."""
+        token_ids = get_model_output_tokens(
+            [assistant("Think", "analysis"), assistant("Answer", "final")]
+        )
+        expected = HarmonyParser(gpt_oss_tokenizer).count_reasoning_tokens(token_ids)
+        harmony_parser.parse_delta("", token_ids[:3], chat_request, finished=False)
+
+        def fail():
+            raise AssertionError("count_reasoning_tokens replayed the output")
+
+        monkeypatch.setattr(
+            "vllm.parser.harmony.get_streamable_parser_for_assistant", fail
+        )
+        for end in range(3, len(token_ids)):
+            harmony_parser.process_chunk(token_ids[end : end + 1])
+            harmony_parser.count_reasoning_tokens(token_ids[: end + 1])
+        assert harmony_parser.count_reasoning_tokens(token_ids) == expected
+
+    def test_does_not_disturb_stream_state(self, harmony_parser, chat_request):
+        """Streaming counts after each chunk, so it must not consume parser state."""
+        token_ids = get_model_output_tokens(
+            [assistant("Think", "analysis"), assistant("Answer", "final")]
+        )
+        harmony_parser.count_reasoning_tokens(token_ids)
+
+        reasoning, content, _ = harmony_parser.parse(
+            "", chat_request, model_output_token_ids=token_ids
+        )
+        assert (reasoning, content) == ("Think", "Answer")
+
+
 class TestAdjustRequest:
     REQUEST_TEXT = "Hello"
     TOOL_TYPE = "function"
