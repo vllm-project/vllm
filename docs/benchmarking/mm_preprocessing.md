@@ -5,6 +5,32 @@ preprocessing process pool is only useful if its parallelism outweighs the cost
 of transferring inputs and processed tensors across another process boundary.
 Compare both approaches before recommending `--mm-processor-num-workers`.
 
+## Choosing an evaluation environment
+
+There is no required standard host for this comparison. Use a GPU inference
+setup representative of your production serving workload. Run the experiment
+on an isolated test deployment with the same relevant configuration, not by
+sending benchmark traffic to a live customer-facing endpoint.
+
+Record the GPU model and count, CPU allocation and topology, host memory,
+shared-memory limit, driver and runtime versions, vLLM commit, model and
+tokenizer revisions, and exact server and client commands. Use the same host
+and resource allocation for every configuration. If the client shares that host,
+record its CPU allocation and check that it is not the throughput bottleneck.
+
+The original [issue #58266](https://github.com/vllm-project/vllm/issues/58266)
+used vLLM v0.29.0, custom Qwen3.5-VL-class 4B weights, one B300, and eight vCPUs
+on Modal. Its images were inline 1275x1650 PNGs of about 218 KB, producing about
+2.1k prompt tokens per request. A B300 is not a prerequisite for evaluating the
+change on another deployment, but different hardware, weights, or inputs are
+not an exact reproduction of that report. The public model below is an example,
+not the reporter's custom checkpoint.
+
+CPU-only rendering results do not establish an inference benefit. Likewise,
+successful functional tests or access to a GPU do not establish a speedup:
+the process pool still needs a measured practical advantage over API-server
+scale-out on the tested workload.
+
 ## Comparison matrix
 
 Keep the model, image inputs, pixel limits, cache settings, offered load, engine
@@ -124,7 +150,7 @@ throughput or TTFT result.
 
 ## Required inference comparison
 
-On the target GPU host, use **one** `vllm serve` deployment at a time and vary
+On the chosen evaluation host, use **one** `vllm serve` deployment at a time and vary
 `--api-server-count`, `--mm-processor-num-workers`, and thread budget according
 to the matrix. Keep engine settings unchanged, for example:
 
@@ -167,17 +193,40 @@ vllm bench serve \
     --custom-ensure-client-side-data \
     --num-prompts 1200 --custom-output-len 16 \
     --request-rate 20 --burstiness inf \
-    --num-warmups 32 --ignore-eos --seed 0 \
+    --num-warmups 32 --ignore-eos --temperature 0 --seed 0 \
     --percentile-metrics ttft,e2el \
     --metric-percentiles 50,99 \
     --save-result --save-detailed \
     --result-filename "$label-steady.json"
 ```
 
+This schedules 1200 requests at 20 requests/s, approximately a 60-second offered
+load, then waits for completion. Record both the offered-load interval and the
+time to drain outstanding requests; do not treat the offered rate as completed
+throughput.
+
+Also compare capacity using `--request-rate inf --max-concurrency 16`, keeping
+the same inputs, request count, and 16-token outputs. Save this separately from
+the open-loop test: a fixed offered rate can hide differences between
+configurations that both keep up. Do not apply that concurrency limit to the
+open-loop or burst tests.
+
 Also test a burst of 300 simultaneous requests with
-`--request-rate inf --num-prompts 300 --custom-output-len 1024`. Do not add a
-client concurrency limit to that burst. Retain error details and successful
-request counts rather than comparing latency after silently dropping rejections.
+`--request-rate inf --num-prompts 300 --custom-output-len 1024` and
+`--extra-body '{"min_tokens":1024}'` to match the report's
+`max_tokens = min_tokens = 1024`. Do not add a client concurrency limit to that
+burst. Use a distinct result filename for each workload, configuration, and
+trial. Retain error details and successful request counts rather than comparing
+latency after silently dropping rejections.
+
+To investigate the reported pre-engine bottleneck, collect the `llm_request`
+trace spans with the same tracing settings across configurations. The report's
+pre-engine-wait estimate is the span's `gen_ai.latency.time_to_first_token`
+minus `gen_ai.latency.time_in_model_prefill` and `gen_ai.latency.time_in_queue`.
+Use attributes from the same request and check their timing semantics at the
+tested revision. Do not subtract aggregate percentiles or mix client-side TTFT
+with server-side durations. This remainder includes frontend work and handoff, not
+just the processor's execution time; report engine queue time separately.
 
 Record GPU utilization, CPU usage, resident memory, shared-memory usage, TTFT,
 end-to-end latency, and successful requests/second. Compare deterministic
