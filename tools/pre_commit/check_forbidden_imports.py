@@ -13,6 +13,16 @@ _HF_NAMES = (
     r"|list_repo_refs|repo_exists"
 )
 
+# Transformers v4 names kept as aliases in v5.
+_TRANSFORMERS_LEGACY_NAMES = (
+    r"PretrainedConfig|PreTrainedTokenizer|PreTrainedTokenizerFast"
+    r"|BaseImageProcessorFast|\w+ImageProcessorFast"
+)
+_TRANSFORMERS_LEGACY_MODULES = (
+    r"tokenization_utils|tokenization_utils_fast|image_processing_utils_fast"
+    r"|models\.\w+\.\w+_fast"
+)
+
 
 @dataclass
 class ForbiddenImport:
@@ -116,6 +126,26 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/transformers_utils/repo_utils.py"},
         allowed_dirs={"examples/"},
+    ),
+    "transformers legacy names": ForbiddenImport(
+        pattern=(
+            r"^\s*from\s+transformers(?:\.[\w.]+)?\s+import\s*\([^)]*\b(?:"
+            + _TRANSFORMERS_LEGACY_NAMES
+            + r")\b"
+            r"|"
+            r"^\s*from\s+transformers(?:\.[\w.]+)?\s+import\b[^\n]*\b(?:"
+            + _TRANSFORMERS_LEGACY_NAMES
+            + r")\b"
+            r"|"
+            r"^\s*(?:from|import)\s+transformers\.(?:"
+            + _TRANSFORMERS_LEGACY_MODULES
+            + r")\b"
+        ),
+        tip=(
+            "Use the Transformers v5 names, e.g. PreTrainedConfig, PythonBackend, "
+            "TokenizersBackend, TorchvisionBackend, tokenization_utils_tokenizers, "
+            "tokenization_utils_sentencepiece and image_processing_backends."
+        ),
     ),
 }
 
@@ -244,6 +274,46 @@ def test_regex():
         result = matches("huggingface_hub repo API", content)
         assert result == should_match, (
             f"huggingface_hub case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
+    transformers_cases = [
+        # Should match
+        ("from transformers import PretrainedConfig", True),
+        ("from transformers import AutoConfig, PretrainedConfig", True),
+        ("from transformers import PreTrainedTokenizer", True),
+        ("from transformers import PreTrainedTokenizerFast", True),
+        ("from transformers.models.siglip import SiglipImageProcessorFast", True),
+        ("from transformers import (\n    PreTrainedTokenizerFast,\n)", True),
+        ("from transformers.configuration_utils import PretrainedConfig", True),
+        ("    from transformers import PretrainedConfig", True),
+        ("from transformers.tokenization_utils import AddedToken", True),
+        ("from transformers.tokenization_utils_fast import X", True),
+        ("from transformers.image_processing_utils_fast import X", True),
+        (
+            "from transformers.models.qwen2_vl.image_processing_qwen2_vl_fast import X",
+            True,
+        ),
+        ("import transformers.tokenization_utils_fast", True),
+        # Should not match
+        ("from transformers import PreTrainedConfig", False),
+        ("from transformers import PreTrainedTokenizerBase", False),
+        ("from transformers import PythonBackend, TokenizersBackend", False),
+        ("from transformers.tokenization_utils_base import BatchEncoding", False),
+        ("from transformers.tokenization_utils_tokenizers import X", False),
+        (
+            "from transformers.image_processing_backends import TorchvisionBackend",
+            False,
+        ),
+        ("from transformers.models.qwen2_vl import Qwen2VLImageProcessor", False),
+        ("from vllm.foo import GLM4VImageProcessorFast", False),
+        ("from transformers import (\n    PreTrainedConfig,\n)", False),
+        ("# from transformers import PretrainedConfig", False),
+    ]
+    for i, (content, should_match) in enumerate(transformers_cases):
+        result = matches("transformers legacy names", content)
+        assert result == should_match, (
+            f"transformers case {i} failed: {content!r} "
             f"(expected {should_match}, got {result})"
         )
 
