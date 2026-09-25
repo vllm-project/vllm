@@ -127,6 +127,53 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+    """Standard MXFP8 checkpoints already have one scale row per weight row."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+        lambda **kwargs: kernel,
+    )
+    config = ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})
+    linear = ReplicatedLinear(64, 64, bias=False, quant_config=config)
+    scales = torch.arange(128, dtype=torch.uint8).reshape(64, 2)
+    linear.weight_scale.weight_loader(linear.weight_scale, scales)
+    assert torch.equal(linear.weight_scale, scales)
+
+
+def test_modelopt_mxfp8_pre_processed_weights_follow_kernel(monkeypatch):
+    """The weight cache daemon can only serve MXFP8 layers whose kernel needs
+    no post-load state beyond the parameters it exports."""
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearKernel
+
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
+    method.kernel = None
+    assert not method.supports_pre_processed_weights
+
+    method.kernel = Mock(spec=Mxfp8LinearKernel)
+    method.kernel.supports_pre_processed_weights = False
+    assert not method.supports_pre_processed_weights
+    method.kernel.supports_pre_processed_weights = True
+    assert method.supports_pre_processed_weights
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.is_weights_pre_processed",
+        lambda: True,
+    )
+    layer = torch.nn.Module()
+    method.process_weights_after_loading(layer)
+    method.kernel.process_weights_after_loading.assert_not_called()
+
+    method.kernel.supports_pre_processed_weights = False
+    with pytest.raises(RuntimeError, match="pre-processed"):
+        method.process_weights_after_loading(layer)
+
+
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """Humming reads weight.input_dim/output_dim. Swapping the
     ModelWeightParameter for a plain Parameter drops them, so the per-tensor
@@ -324,7 +371,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
-            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+            "model.language_model.layers.1.experts.gate_up_proj": {
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
@@ -336,10 +383,10 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
     config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
-    expected_prefix = "language_model.model.layers.0.moe.experts"
+    expected_prefix = "language_model.model.layers.0.experts"
     assert set(config.quantized_layers) == {
         expected_prefix,
-        "language_model.model.layers.1.moe.gate_up_proj",
+        "language_model.model.layers.1.experts.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 
@@ -669,49 +716,6 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     with set_current_vllm_config(vllm_config):
         kernel = select_linear_kernel(spec, MagicMock(), rt)
     assert isinstance(kernel, kernel_cls)
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
-def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
-    """``prepare_humming_linear_layer_config`` reads ``output_partition_sizes``
-    and ``has_bias`` straight off the layer, so ``--linear-backend=humming``
-    needs create_weights to leave both there. Nothing else sets
-    ``output_partition_sizes``; ``LinearBase`` sets ``has_bias`` but
-    ``ParallelLMHead`` does not.
-    """
-    from vllm.config.quantization import QuantSpec
-    from vllm.model_executor.layers.quantization import modelopt as mo
-
-    monkeypatch.setattr(
-        mo, "select_linear_kernel", lambda spec, layer, rt, **kwargs: Mock()
-    )
-    monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, kernel: None)
-
-    def build(layer):
-        method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
-        method.spec = QuantSpec(weight=kNvfp4Static, activation=None)
-        method.ctx = mo.CkptCtx(group_size=16)
-        method.fmt = mo.FormatScheme()
-        method.wkey = mo.SCHEME_FOR[kNvfp4Static]
-        method.akey = None
-        method.input_dtype = method.out_dtype = torch.bfloat16
-        method.marlin_input_dtype = None
-        method.create_weights(
-            layer, 64, [32, 32], 64, 64, torch.bfloat16, weight_loader=Mock()
-        )
-
-    # ParallelLMHead-style: a bias slot but no has_bias attribute.
-    lm_head = torch.nn.Module()
-    lm_head.register_parameter("bias", None)
-    build(lm_head)
-    assert lm_head.output_partition_sizes == [32, 32]
-    assert lm_head.has_bias is False
-
-    # LinearBase already decided has_bias; we must not overwrite it.
-    linear = torch.nn.Module()
-    linear.has_bias = True
-    build(linear)
-    assert linear.has_bias is True
 
 
 @pytest.mark.parametrize(

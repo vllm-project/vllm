@@ -7,7 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
 from unittest.mock import patch
 
 import torch
@@ -31,6 +31,9 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .monitor import monitor_profiling_run, monitor_torch_compile
+
+DynamicArgDims: TypeAlias = dict[str, int | list[int] | dict[int, str]]
+"""Argument name -> the dynamic dimension(s) of that argument."""
 
 # shape_id parameter was added to mark_unbacked in PyTorch 2.11.0
 _SUPPORTS_SHAPE_ID = is_torch_equal_or_newer("2.11.0")
@@ -56,8 +59,7 @@ def should_torch_compile_mm_encoder(vllm_config: VllmConfig) -> bool:
 
 
 def ignore_torch_compile(cls: type[_T]) -> type[_T]:
-    """
-    A decorator to ignore support_torch_compile decorator
+    """A decorator to ignore support_torch_compile decorator
     on the class. This is useful when a parent class has
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
@@ -76,9 +78,7 @@ def ignore_torch_compile(cls: type[_T]) -> type[_T]:
 
 
 def _should_ignore_torch_compile(cls: type[_T]) -> bool:
-    """
-    Check if the class should be ignored for torch.compile.
-    """
+    """Check if the class should be ignored for torch.compile."""
     return getattr(cls, IGNORE_COMPILE_KEY, False)
 
 
@@ -92,7 +92,7 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
+    dynamic_arg_dims: DynamicArgDims | None,
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
@@ -106,7 +106,7 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
+    dynamic_arg_dims: DynamicArgDims | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
@@ -120,13 +120,12 @@ def support_torch_compile(cls: type[_T]) -> type[_T]: ...
 def support_torch_compile(
     cls: type[_T] | None = None,
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
+    dynamic_arg_dims: DynamicArgDims | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
 ) -> Callable[[type[_T]], type[_T]] | type[_T]:
-    """
-    A decorator to add support for compiling the forward method of a class.
+    """A decorator to add support for compiling the forward method of a class.
 
     Usage 1: use directly as a decorator without arguments:
 
@@ -332,13 +331,12 @@ def _try_load_aot_compiled_fn(
 
 def _support_torch_compile(
     cls: type[_T],
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]],
+    dynamic_arg_dims: DynamicArgDims,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
 ) -> type[_T]:
     """Internal implementation of support_torch_compile decorator."""
-
     if TorchCompileWithNoGuardsWrapper in cls.__bases__:
         # support decorating multiple times
         return cls
@@ -736,8 +734,7 @@ def _support_torch_compile(
 def maybe_use_cudagraph_partition_wrapper(
     vllm_config: VllmConfig,
 ) -> Generator[None, None, None]:
-    """
-    Context manager to set/unset customized cudagraph partition wrappers.
+    """Context manager to set/unset customized cudagraph partition wrappers.
 
     If we're using Inductor-based graph partitioning, we currently have the
     whole `fx.Graph` before Inductor lowering and the piecewise

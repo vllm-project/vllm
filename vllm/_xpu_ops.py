@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.rotary import apply_rotary_emb
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
@@ -249,6 +250,24 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_apply_rotary_emb_impl(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return apply_rotary_emb(x, cos, sin, is_neox_style)
+
+
+def _xpu_apply_rotary_emb_fake(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
 def _xpu_fp8_bmm_impl(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -286,6 +305,7 @@ def _xpu_fp8_bmm_impl(
         This implementation centralizes access to
         ``torch.ops._xpu_C.fp8_bmm``. Both scales must be contiguous, while
         ``a`` and ``b`` may be non-contiguous views.
+
     """
     return torch.ops._xpu_C.fp8_bmm(a, b, out_dtype, a_scale, b_scale, bias)
 
@@ -430,6 +450,7 @@ def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
         index_weights_out: (T, H) float32 output, preallocated;
             = index_weights * q_scale * softmax_scale * head_scale (the
             per-(token, head) q_scale is folded in here). [written]
+
     """
     torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
         index_q,
@@ -473,6 +494,7 @@ def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
         index_weights_out: (T, H) float32 output, preallocated;
             = index_weights * softmax_scale * head_scale (no q_scale folded;
             per-block scales live in index_q_scale). [written]
+
     """
     torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
         index_q,
@@ -1252,6 +1274,12 @@ class xpu_ops:
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_apply_rotary_emb",
+                op_func=_xpu_apply_rotary_emb_impl,
+                fake_impl=_xpu_apply_rotary_emb_fake,
             )
 
             direct_register_custom_op(

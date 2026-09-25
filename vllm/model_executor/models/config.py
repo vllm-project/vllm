@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
@@ -215,12 +215,16 @@ class Gemma4Config(VerifyAndUpdateConfig):
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
-        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
-        mixed backend selection and numerical divergence.
+        layers. The default FA3 on Hopper cannot handle head_dim > 256.
 
-        When FA4 is available we force it for ALL layers, giving a uniform kernel path
-        and avoiding the mixed FA3+FA4 penalty. Otherwise, leave backend selection to
-        the standard attention selector unless fallback_to_triton is set.
+        On SM90 with FP8 KV cache, use FA3 for supported layers and let the generic
+        FlashAttention selector upgrade larger head dimensions to FA4.
+        The multimodal-prefix composite routes image masks to Triton and causal
+        requests to this per-layer FA3/FA4 selection. For other configurations,
+        force FA4 for all layers to avoid the mixed
+        FA3+FA4 penalty.
+        When FA4 is not available, leave backend selection to the standard
+        attention selector unless fallback_to_triton is set.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -233,30 +237,35 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         max_head_dim = max(head_dims.values())
 
-        fa4_supports_dims = is_fa_version_supported(4) and max_head_dim <= 512
-
-        if (
-            fa4_supports_dims
-            and vllm_config.attention_config.flash_attn_version is None
-            and vllm_config.attention_config.backend
-            in (None, AttentionBackendEnum.FLASH_ATTN)
-        ):
-            vllm_config.attention_config.flash_attn_version = 4
-            logger.info(
-                "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
-                "all layers to avoid mixed FA3/FA4 penalty.",
-                head_dims,
-            )
-        elif (
-            fallback_to_triton
-            and not fa4_supports_dims
-            and vllm_config.attention_config.backend is None
-        ):
+        if is_fa_version_supported(4) and max_head_dim <= 512:
+            if (
+                vllm_config.attention_config.flash_attn_version is None
+                and vllm_config.attention_config.backend
+                in (None, AttentionBackendEnum.FLASH_ATTN)
+            ):
+                use_per_layer_fa = current_platform.is_device_capability_family(
+                    90
+                ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
+                if use_per_layer_fa:
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using "
+                        "per-layer FA3/FA4 selection for FP8 KV cache on SM90.",
+                        head_dims,
+                    )
+                else:
+                    vllm_config.attention_config.flash_attn_version = 4
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using FA4 "
+                        "for all layers to avoid mixed FA3/FA4 penalty.",
+                        head_dims,
+                    )
+        elif fallback_to_triton and vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
@@ -289,11 +298,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "FLASH_ATTN or TRITON_ATTN instead."
             )
         if attention_config.backend is None and not attention_config.use_non_causal:
+            # Only the sm_100 default backend order reads this flag (it puts
+            # FlashInfer first for causal models). Elsewhere Gemma4Config above
+            # keeps FlashInfer out: FA4 on every layer, else TRITON_ATTN.
             attention_config.use_non_causal = True
             logger.info(
-                "DiffusionGemma uses mixed causal/bidirectional attention "
-                "within a batch; setting use_non_causal=True to exclude "
-                "FlashInfer from auto-selection."
+                "DiffusionGemma mixes causal and bidirectional attention in "
+                "one batch; setting use_non_causal=True so the default backend "
+                "order prefers FlashAttention over FlashInfer."
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
@@ -339,7 +351,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
         if quant_config is not None and quant_config.get("quant_method") == "fp8":
             model_type = getattr(model_config.hf_config, "model_type", None)
-            if model_type == "deepseek_v4":
+            if model_type in ("deepseek_v4", "deepseek_v41"):
                 model_config.hf_config.quantization_config["quant_method"] = (
                     "deepseek_v4_fp8"
                 )
@@ -352,7 +364,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
             and hf_text_quant_config.get("quant_method") == "fp8"
         ):
             model_type = getattr(model_config.hf_text_config, "model_type", None)
-            if model_type == "deepseek_v4":
+            if model_type in ("deepseek_v4", "deepseek_v41"):
                 model_config.hf_text_config.quantization_config["quant_method"] = (
                     "deepseek_v4_fp8"
                 )
@@ -454,8 +466,7 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Perform early validation and setup for hybrid attention/mamba models.
+        """Perform early validation and setup for hybrid attention/mamba models.
 
         Block size alignment with mamba page sizes is handled later by
         Platform.update_block_size_for_backend(), which runs after model
@@ -463,6 +474,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         Args:
             vllm_config: vLLM Config
+
         """
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
@@ -538,6 +550,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
         config.num_labels = 1
+        config.get_text_config().num_labels = 1
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
@@ -618,12 +631,12 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Enable FULL_AND_PIECEWISE cuda graph mode by default (required
+        """Enable FULL_AND_PIECEWISE cuda graph mode by default (required
         to get good performance for mamba layers in V1).
 
         Args:
             vllm_config: vLLM Config
+
         """
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -672,7 +685,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def update_mamba_ssm_cache_dtype(
-        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+        cls, *, cache_config: "CacheConfig", hf_config: "PreTrainedConfig"
     ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
@@ -1012,6 +1025,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
+    "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501

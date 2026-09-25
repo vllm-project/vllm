@@ -28,8 +28,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -41,9 +43,7 @@ _PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
 
 
 class TrtLlmNvFp4ExpertsBase:
-    """
-    NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
-    """
+    """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface."""
 
     def __init__(
         self,
@@ -125,6 +125,10 @@ class TrtLlmNvFp4ExpertsBase:
             self.gemm1_beta = _per_expert(situ_linear_beta)
             self.gemm1_clamp_limit = None
 
+        # Unfolded values: process_weights_after_loading reruns on weight reload.
+        self._gemm1_clamp_limit_unfolded = self.gemm1_clamp_limit
+        self._gemm1_beta_unfolded = self.gemm1_beta
+
         logger.debug_once(
             "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
             moe_config.activation,
@@ -149,8 +153,9 @@ class TrtLlmNvFp4ExpertsBase:
         return self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        if not is_weights_pre_processed():
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
@@ -163,15 +168,15 @@ class TrtLlmNvFp4ExpertsBase:
 
         # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
         # division so the TRTLLM kernel receives the raw-GEMM-space clamp
-        # directly. g1_alphas is set once here in process_weights_after_loading
-        # (via the in-place mul above) and never changes again, so this is a
-        # static, per-expert constant. Register on the layer so EPLB
-        # rearranges it alongside the other expert tensors.
+        # directly. Fold from the unfolded value, since g1_alphas changes when
+        # weights are reloaded. Register on the layer so EPLB rearranges it
+        # alongside the other expert tensors.
         # SITU alpha/beta act on the dequantized gate/up (tanh clamps), not the
         # raw GEMM1 accumulator, so they are registered as-is without the
         # g1_alphas fold used by the SwiGLU-OAI clamp/beta below.
-        if self.gemm1_clamp_limit is not None and not self.is_situ:
-            gemm1_clamp_limit = self.gemm1_clamp_limit / self.quant_config.g1_alphas
+        clamp_limit = self._gemm1_clamp_limit_unfolded
+        if clamp_limit is not None and not self.is_situ:
+            gemm1_clamp_limit = clamp_limit / self.quant_config.g1_alphas
             layer.register_parameter(
                 "gemm1_clamp_limit",
                 torch.nn.Parameter(gemm1_clamp_limit, requires_grad=False),
@@ -182,12 +187,9 @@ class TrtLlmNvFp4ExpertsBase:
         # clamp limit. alpha is applied to the dequantized gate, so it stays
         # raw. Register both on the layer so EPLB rearranges them with the
         # other per-expert tensors.
-        if self.gemm1_beta is not None:
-            gemm1_beta = (
-                self.gemm1_beta
-                if self.is_situ
-                else self.gemm1_beta / self.quant_config.g1_alphas
-            )
+        beta = self._gemm1_beta_unfolded
+        if beta is not None:
+            gemm1_beta = beta if self.is_situ else beta / self.quant_config.g1_alphas
             layer.register_parameter(
                 "gemm1_beta",
                 torch.nn.Parameter(gemm1_beta, requires_grad=False),
@@ -222,10 +224,10 @@ class TrtLlmNvFp4ExpertsBase:
         activation_key: QuantKey | None,
     ) -> bool:
         """Supports Nvfp4 quantization."""
-        SUPPORTED_W_A = [
-            (kNvfp4Static, kNvfp4Dynamic),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return weight_key == kNvfp4Static and activation_key in (
+            kNvfp4Dynamic,
+            kNvfp4DynamicToken,
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -298,9 +300,17 @@ class TrtLlmNvFp4ExpertsBase:
 
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    Modular version of the implementation (just the experts).
-    """
+    """Modular version of the implementation (just the experts)."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        per_token_activation: bool = False,
+    ):
+        super().__init__(moe_config, quant_config, per_token_activation)
+        # Each launch permutes into its own buffer, so a chunked call finalizes.
+        moe_config.limit_deferred_moe_finalize(self._get_chunk_size())
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -318,22 +328,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        if self.per_token_activation:
-            # Deferred input quant leaves K unpacked here, breaking the
-            # workspace assumptions below. Per-token NVFP4 is only supported on
-            # the monolithic (non-EP) path for now.
-            raise NotImplementedError(
-                "NVFP4 per-token activation is only supported on the monolithic "
-                "(non-EP) FlashInfer TRTLLM MoE path."
-            )
-
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
 
-        # Hidden states are Nvfp4, packed into int8 dtype, so we
-        # need to multiply K by 2 to get the output shape right.
-        assert self.hidden_dim == K * 2
+        # Per-token inputs are unpacked; otherwise each byte holds two FP4 values.
+        assert self.hidden_dim == (K if self.expects_unquantized_inputs else K * 2)
         output = (M, self.hidden_dim)
 
         return (workspace1, workspace2, output)
@@ -343,7 +343,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
     def _invoke_kernel(
         self,
-        output: torch.Tensor,
+        output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -351,8 +351,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
-        a1q_scale: torch.Tensor,
-    ):
+        a1q_scale: torch.Tensor | None,
+    ) -> UnfinalizedMoEOutput | None:
+        """Finalize into ``output``, or stop after GEMM2 when it is None."""
         import flashinfer
 
         assert self.quant_config.w1_scale is not None
@@ -369,7 +370,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
-        flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
@@ -397,7 +398,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
-            do_finalize=True,
+            do_finalize=output is not None,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
             output=output,
@@ -405,6 +406,16 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
             ),
         )
+        if output is not None:
+            return None
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=False,
+            num_tokens=hidden_states.shape[0],
+            top_k=self.topk,
+        )
+        assert isinstance(routed_output, UnfinalizedMoEOutput)
+        return routed_output
 
     def apply(
         self,
@@ -423,7 +434,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> UnfinalizedMoEOutput | None:
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
         assert a1q_scale is not None or self.per_token_activation
@@ -435,8 +446,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         chunk_size = self._get_chunk_size()
 
         if chunk_size >= M:
-            self._invoke_kernel(
-                output,
+            # Each launch permutes into its own buffer, so only a run that fits
+            # in one launch can leave the top-k reduction to a deferring
+            # consumer.
+            defer = self.moe_config.should_defer_moe_finalize(M)
+            return self._invoke_kernel(
+                None if defer else output,
                 hidden_states,
                 w1,
                 w2,
@@ -460,14 +475,13 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                     global_num_experts,
                     None if a1q_scale is None else a1q_scale[start:end],
                 )
+        return None
 
 
 class TrtLlmNvFp4ExpertsMonolithic(
     TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsMonolithic
 ):
-    """
-    Monolithic version of the kernel (router + experts).
-    """
+    """Monolithic version of the kernel (router + experts)."""
 
     def supports_routing_replay_capture(self) -> bool:
         return True

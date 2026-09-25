@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains the command line arguments for the vLLM's online server.
+"""This file contains the command line arguments for the vLLM's online server.
 It is kept in a separate file for documentation purposes.
 """
 
@@ -15,12 +14,16 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+)
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (
@@ -47,7 +50,7 @@ class LoRAParserAction(argparse.Action):
             if item in [None, ""]:  # Skip if item is None or empty string
                 continue
             if "=" in item and "," not in item:  # Old format: name=path
-                name, path = item.split("=")
+                name, path = item.split("=", 1)
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -117,6 +120,13 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    tool_strict_level: ToolStrictLevelName = "auto"
+    """Server-side floor for structural-tag based tool calling, applied on top
+    of the per-tool `strict` field. `auto` follows the request's tool choice
+    and per-tool strictness; `function` constrains the
+    tool-call envelope (markup and function name) for every request with
+    tools; `parameter` additionally pins argument schemas, as if every tool
+    were `strict: true`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
@@ -174,12 +184,26 @@ class BaseFrontendArgs:
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
     explicit request-level ``chat_template_kwargs.cohere_format`` takes
     priority."""
+    anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
+    """Anthropic ``/v1/messages`` only. The ``reasoning_effort`` used for
+    requests with ``thinking: {"type": "disabled"}``. ``none`` turns thinking
+    off for models that support it; ``low`` suits models that always think
+    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
+    ``low`` when the renderer rejects ``none`` or renders it the same as a
+    thinking effort, and ``none`` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
+    """
+    enable_scale_out: bool = False
+    """
+    If set to True, register the scale-out endpoints (`/render`, `/derender`,
+    and `/inference/v1/generate`) on `vllm serve`. Has no effect on
+    `vllm launch render` or `vllm serve --tokens-only`, which always register
+    their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.

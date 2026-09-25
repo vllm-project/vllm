@@ -23,11 +23,11 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
+_last_inductor_triton_cache_dir: str | None = None
+
 
 class CompilerInterface:
-    """
-    The interface for a compiler that can be used by vLLM.
-    """
+    """The interface for a compiler that can be used by vLLM."""
 
     # The name of the compiler, e.g. inductor.
     # This is a class-level attribute.
@@ -36,8 +36,7 @@ class CompilerInterface:
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
-        """
-        when the vLLM process uses `cache_dir` as the cache directory,
+        """When the vLLM process uses `cache_dir` as the cache directory,
         the compiler should initialize itself with the cache directory,
         e.g. by re-directing its own cache directory to a sub-directory.
 
@@ -52,8 +51,7 @@ class CompilerInterface:
         pass
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        """
-        Gather all the relevant information from the vLLM config,
+        """Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
         See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
@@ -71,8 +69,7 @@ class CompilerInterface:
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
-        """
-        Compile the graph with the given example inputs and compiler config,
+        """Compile the graph with the given example inputs and compiler config,
         with a range. The `compile_range` specifies the range of the inputs,
         it could be concrete size (if compile_sizes is provided), e.g. [4, 4]
         or a range [5, 8].
@@ -105,8 +102,7 @@ class CompilerInterface:
         graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
-        """
-        Load the compiled function from the handle.
+        """Load the compiled function from the handle.
         Raises an error if the handle is invalid.
 
         The handle is the second return value of the `compile` function.
@@ -115,8 +111,7 @@ class CompilerInterface:
 
 
 class AlwaysHitShapeEnv:
-    """
-    Why do we need this class:
+    """Why do we need this class:
 
     For normal `torch.compile` usage, every compilation will have
     one Dynamo bytecode compilation and one Inductor compilation.
@@ -249,8 +244,7 @@ def _patch_standalone_compile_atomic_save() -> None:
 
 
 class InductorStandaloneAdaptor(CompilerInterface):
-    """
-    The adaptor for the Inductor compiler.
+    """The adaptor for the Inductor compiler.
     Requires PyTorch 2.8+.
     This is not on by default yet, but we plan to turn it on by default for
     PyTorch 2.8.
@@ -447,9 +441,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
 
 class InductorAdaptor(CompilerInterface):
-    """
-    The adaptor for the Inductor compiler, version 2.5, 2.6, 2.7.
-    """
+    """The adaptor for the Inductor compiler, version 2.5, 2.6, 2.7."""
 
     name = "inductor"
 
@@ -463,19 +455,22 @@ class InductorAdaptor(CompilerInterface):
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
+        global _last_inductor_triton_cache_dir
         self.cache_dir = cache_dir
         self.prefix = prefix
         self.base_cache_dir = cache_dir[: -len(prefix)] if prefix else cache_dir
         if disable_cache:
             return
-        # redirect the cache directory to a subdirectory
-        # set flags so that Inductor and Triton store their cache
-        # in the cache_dir, then users only need to copy the cache_dir
-        # to another machine to reuse the cache.
+        # Keep artifacts together unless the caller supplies a Triton cache.
         inductor_cache = os.path.join(self.base_cache_dir, "inductor_cache")
         os.makedirs(inductor_cache, exist_ok=True)
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
-        triton_cache = os.path.join(self.base_cache_dir, "triton_cache")
+        triton_cache = os.environ.get("TRITON_CACHE_DIR")
+        # A directory assigned by an earlier adaptor is still a model-local
+        # default, rather than a caller override for subsequent models.
+        if triton_cache is None or triton_cache == _last_inductor_triton_cache_dir:
+            triton_cache = os.path.join(self.base_cache_dir, "triton_cache")
+            _last_inductor_triton_cache_dir = triton_cache
         os.makedirs(triton_cache, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = triton_cache
 
@@ -727,8 +722,7 @@ class InductorAdaptor(CompilerInterface):
         return compiled_graph
 
     def metrics_context(self) -> contextlib.AbstractContextManager[Any]:
-        """
-        This method returns the Dynamo metrics context (if it exists,
+        """This method returns the Dynamo metrics context (if it exists,
         otherwise a null context). It is used by various compile components.
         Present in torch>=2.6, it's used inside FxGraphCache in
         torch==2.6 (but not after). It might also be used in various other

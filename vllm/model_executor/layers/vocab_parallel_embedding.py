@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import (
+    GroupCoordinator,
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -240,6 +241,8 @@ class VocabParallelEmbedding(PluggableLayer):
         prefix: full name of the layer in the state dict
         disable_tp: If true, tensor parallelism will be disabled for this layer.
         quant_method: Preselected quantization method for model-specific layers.
+        parallel_group: Process group used to shard and reduce the embedding.
+
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -256,13 +259,18 @@ class VocabParallelEmbedding(PluggableLayer):
         *,
         disable_tp: bool = False,
         quant_method: QuantizeMethodBase | None = None,
+        parallel_group: GroupCoordinator | None = None,
     ):
         super().__init__()
 
         # Keep the input dimensions.
         self.disable_tp = disable_tp
+        self.parallel_group = parallel_group
         if disable_tp:
             tp_rank, self.tp_size = 0, 1
+        elif parallel_group is not None:
+            tp_rank = parallel_group.rank_in_group
+            self.tp_size = parallel_group.world_size
         else:
             tp_rank = get_tensor_model_parallel_rank()
             self.tp_size = get_tensor_model_parallel_world_size()
@@ -270,12 +278,12 @@ class VocabParallelEmbedding(PluggableLayer):
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
-        num_added_embeddings = num_embeddings - self.org_vocab_size
+        self.num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(
             self.org_vocab_size, self.padding_size
         )
         self.num_embeddings_padded = pad_vocab_size(
-            self.org_vocab_size_padded + num_added_embeddings, self.padding_size
+            self.org_vocab_size_padded + self.num_added_embeddings, self.padding_size
         )
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
 
@@ -288,6 +296,18 @@ class VocabParallelEmbedding(PluggableLayer):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
+        # Divide the weight matrix along the vocabulary dimension.
+        self.num_embeddings_per_partition = divide(
+            self.num_embeddings_padded, self.tp_size
+        )
+
+        # Quantization methods share the same weight factory as linear layers,
+        # so setup standard linear metadata.
+        self.input_size = self.input_size_per_partition = embedding_dim
+        self.output_size = self.num_embeddings_padded
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.output_partition_sizes = [self.output_size_per_partition]
+        self.prefix = prefix
 
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
@@ -314,11 +334,6 @@ class VocabParallelEmbedding(PluggableLayer):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        # Divide the weight matrix along the vocabulary dimension.
-        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
-        self.num_embeddings_per_partition = divide(
-            self.num_embeddings_padded, self.tp_size
-        )
         assert (
             self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
         )
@@ -341,10 +356,10 @@ class VocabParallelEmbedding(PluggableLayer):
 
         self.quant_method.create_weights(
             self,
-            self.embedding_dim,
-            [self.num_embeddings_per_partition],
-            self.embedding_dim,
-            self.num_embeddings_padded,
+            self.input_size_per_partition,
+            self.output_partition_sizes,
+            self.input_size,
+            self.output_size,
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
@@ -535,10 +550,16 @@ class VocabParallelEmbedding(PluggableLayer):
                 # Each vocab token has one owner, so FP8 bytes can use int8 SUM.
                 comm_output = output_parallel.view(torch.int8)
                 comm_output.masked_fill_(input_mask.unsqueeze(-1), 0)
-                output = tensor_model_parallel_all_reduce(comm_output)
+                output = (
+                    self.parallel_group.all_reduce(comm_output)
+                    if self.parallel_group is not None
+                    else tensor_model_parallel_all_reduce(comm_output)
+                )
                 return output.view(output_parallel.dtype)
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
+        if self.parallel_group is not None:
+            return self.parallel_group.all_reduce(output_parallel)
         return tensor_model_parallel_all_reduce(output_parallel)
 
     def extra_repr(self) -> str:
@@ -568,6 +589,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
         disable_tp: If true, tensor parallelism will be disabled for this layer.
+
     """
 
     # --8<-- [end:parallel_lm_head]
@@ -585,6 +607,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         *,
         disable_tp: bool = False,
     ):
+        self.has_bias = bias
         super().__init__(
             num_embeddings,
             embedding_dim,

@@ -15,8 +15,9 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 import json
 from argparse import Namespace
 from http import HTTPStatus
+from types import SimpleNamespace
 from typing import Annotated
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -480,7 +481,7 @@ class TestThinkingBlockConversion:
     """
 
     def test_thinking_plus_text_in_assistant_message(self):
-        """thinking + text → reasoning field + plain-string content."""
+        """Thinking + text → reasoning field + plain-string content."""
         request = _make_request(
             [
                 {"role": "user", "content": "Write me some code."},
@@ -542,7 +543,7 @@ class TestThinkingBlockConversion:
         assert asst.get("content") is None
 
     def test_thinking_plus_tool_use_in_assistant_message(self):
-        """thinking + tool_use: reasoning field set, tool_calls populated."""
+        """Thinking + tool_use: reasoning field set, tool_calls populated."""
         request = _make_request(
             [
                 {"role": "user", "content": "What is 2+2?"},
@@ -1610,6 +1611,32 @@ class TestStopSequenceReason:
         assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
         assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
 
+    @pytest.mark.asyncio
+    async def test_streaming_no_stop_string_emits_explicit_null_stop_sequence(self):
+        """exclude_unset=True drops stop_sequence unless it is set explicitly."""
+
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert len(msg_deltas) == 1
+        assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        assert "stop_sequence" in msg_deltas[0]["delta"]
+        assert msg_deltas[0]["delta"]["stop_sequence"] is None
+
 
 # ======================================================================
 # Client-caused errors are 4xx, not 500 (Issue #52088)
@@ -1701,3 +1728,175 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "BadRequestError"
+
+
+# ======================================================================
+# thinking configuration pass-through
+# ======================================================================
+
+
+class TestThinkingConfig:
+    def test_absent_thinking_leaves_reasoning_untouched(self):
+        """Requests without `thinking` must convert exactly as before."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+
+        result = _convert(request)
+        assert result.reasoning_effort is None
+        assert result.thinking_token_budget is None
+        assert result.include_reasoning is True
+
+    def test_disabled_clears_reasoning_effort(self):
+        """`disabled` maps to reasoning_effort="none", which is what clears
+        enable_thinking for templates that honor it."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "none"
+
+    def test_disabled_overrides_output_config_effort(self):
+        """`thinking` is applied after output_config so an explicit opt-out wins
+        over an inherited effort ceiling."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "high"},
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "none"
+
+    def test_enabled_sets_thinking_token_budget(self):
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking={"type": "enabled", "budget_tokens": 2048},
+        )
+
+        result = _convert(request)
+        assert result.thinking_token_budget == 2048
+        assert result.reasoning_effort is None
+
+    @pytest.mark.parametrize(
+        "thinking",
+        [
+            pytest.param({"budget_tokens": 2048}, id="missing-type"),
+            pytest.param({"type": "enabled"}, id="enabled-missing-budget"),
+            pytest.param(
+                {"type": "enabled", "budget_tokens": 1023}, id="budget-below-1024"
+            ),
+            pytest.param(
+                {"type": "enabled", "budget_tokens": 4096}, id="budget-not-below-max"
+            ),
+            pytest.param({"type": "adaptive", "display": "full"}, id="bad-display"),
+        ],
+    )
+    def test_rejects_invalid_thinking(self, thinking):
+        """Mirror the Anthropic API's BetaThinkingConfigParam constraints."""
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+            )
+
+    def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):
+        """`adaptive` lets the model choose depth, so only the ceiling from
+        output_config.effort should survive."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "low"},
+            thinking={"type": "adaptive"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "low"
+        assert result.thinking_token_budget is None
+
+    def test_disabled_uses_configured_effort(self):
+        """Models that always think (GLM-5.3) or reject "none" (Harmony) are
+        served with a low effort instead."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request, disabled_thinking_effort="low")
+        assert result.reasoning_effort == "low"
+
+    @pytest.mark.parametrize("display", ["omitted", "summarized", "updates"])
+    def test_display_keeps_reasoning_included(self, display):
+        """Suppressing reasoning would mark it ended for structured outputs and
+        drop it from multi-turn history, so `display` is ignored."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "adaptive", "display": display},
+        )
+
+        result = _convert(request)
+        assert result.include_reasoning is True
+
+    def test_claude_code_payload(self):
+        """The combination Claude Code sends on every request: an effort ceiling
+        plus adaptive thinking with reasoning display omitted."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "high"},
+            thinking={"type": "adaptive", "display": "omitted"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "high"
+        assert result.include_reasoning is True
+        assert result.thinking_token_budget is None
+
+
+class TestProbeDisabledThinkingEffort:
+    """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
+
+    @staticmethod
+    async def _probe(render):
+        obj = MagicMock(spec=AnthropicServingMessages)
+        obj.online_renderer = MagicMock()
+        obj.online_renderer.render_chat = AsyncMock(
+            side_effect=lambda req: ([], [render(req.reasoning_effort)])
+        )
+        obj._extract_prompt_components = lambda engine_input: SimpleNamespace(
+            token_ids=engine_input, text=None
+        )
+        obj._render_probe_prompt = (
+            AnthropicServingMessages._render_probe_prompt.__get__(obj)
+        )
+        return await AnthropicServingMessages._probe_disabled_thinking_effort(obj)
+
+    @staticmethod
+    def _reject_none(effort):
+        """Harmony (gpt-oss) raises on ``none``."""
+        if effort == "none":
+            raise ValueError(f"unsupported {effort=}")
+        return [1]
+
+    @staticmethod
+    def _none_as_max(effort):
+        """GLM-5.3 treats efforts other than low/high as max."""
+        return [1, {"low": 0, "high": 1}.get(effort, 2)]
+
+    @pytest.mark.asyncio
+    async def test_template_honors_none(self):
+        assert await self._probe(lambda effort: [1, int(effort == "none")]) == "none"
+
+    @pytest.mark.asyncio
+    async def test_template_ignores_effort(self):
+        assert await self._probe(lambda effort: [1]) == "low"
+
+    @pytest.mark.asyncio
+    async def test_template_renders_none_as_thinking_effort(self):
+        assert await self._probe(self._none_as_max) == "low"
+
+    @pytest.mark.asyncio
+    async def test_renderer_rejects_none(self):
+        assert await self._probe(self._reject_none) == "low"
