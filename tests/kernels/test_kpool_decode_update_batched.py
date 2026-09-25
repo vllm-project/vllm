@@ -33,12 +33,14 @@ from vllm.platforms import current_platform
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.kpool_compress import (
         kpool_compress_and_write_cache,
+        kpool_compress_tokens_and_write_cache,
         kpool_decode_update_and_maybe_write_cache_batched,
         kpool_seed_tail_cache,
     )
 else:
     from vllm.models.glm5next.nvidia.ops.kpool_compress import (
         kpool_compress_and_write_cache,
+        kpool_compress_tokens_and_write_cache,
         kpool_decode_update_and_maybe_write_cache_batched,
         kpool_seed_tail_cache,
     )
@@ -554,3 +556,70 @@ def test_batched_matches_reference_fuzz(seed):
     r_ref = _torch_reference(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     r_kern = _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     _assert_eq(r_ref, r_kern)
+
+
+def _flat_batch(pool_size, req_lens, seed=0):
+    """Flat multi-request batch; request ``r`` starts at pos 0 and its ``j``-th
+    token completes pool ``j // pool_size`` (slot ``r * PAGE_SIZE + pool``) iff
+    ``j % pool_size == pool_size - 1``."""
+    torch.manual_seed(seed)
+    n = sum(req_lens)
+    k = torch.randn(n, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    score = torch.randn(n, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    ape = torch.randn(pool_size, HEAD_DIM, dtype=torch.float32, device="cuda")
+    slot_map = torch.full((n,), -1, dtype=torch.int32, device="cuda")
+    start = 0
+    for r, length in enumerate(req_lens):
+        j = torch.arange(length, device="cuda")
+        done = j[j % pool_size == pool_size - 1]
+        slot_map[start + done] = (r * PAGE_SIZE + done // pool_size).to(torch.int32)
+        start += length
+    return k, score, ape, slot_map
+
+
+def _gathered_pools_reference(kv, k, score, ape, slot_map, pool_size):
+    """Pooled writer on explicitly gathered ``[n_pools, pool_size, D]`` rows."""
+    pos = torch.arange(slot_map.shape[0], device="cuda")
+    rows = pos[(slot_map >= 0) & (pos >= pool_size - 1)]
+    offs = torch.arange(pool_size, device="cuda")
+    idx = (rows - (pool_size - 1))[:, None] + offs[None, :]
+    kpool_compress_and_write_cache(
+        kv,
+        k[idx],
+        score[idx],
+        ape,
+        slot_map[rows].to(torch.int64),
+        pool_size=pool_size,
+        head_dim=HEAD_DIM,
+        round_scale=ROUND_SCALE,
+    )
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+def test_compress_tokens_matches_gathered_pools(pool_size):
+    """The flat-token writer equals the pooled writer on gathered rows, with a
+    request boundary that is not pool-aligned within the batch, and skips a
+    slot on a row too early to own a full pool."""
+    k, score, ape, slot_map = _flat_batch(pool_size, [23, 41])
+    slot_map[pool_size - 2] = 3 * PAGE_SIZE
+    kv_ref = torch.zeros(4, PAGE_SIZE, HEAD_DIM + 4, dtype=torch.uint8, device="cuda")
+    kv_new = torch.zeros_like(kv_ref)
+    _gathered_pools_reference(kv_ref, k, score, ape, slot_map, pool_size)
+    kpool_compress_tokens_and_write_cache(
+        kv_new, k, score, ape, slot_map, pool_size, HEAD_DIM, round_scale=ROUND_SCALE
+    )
+    assert kv_ref.any()
+    assert torch.equal(kv_new, kv_ref)
+    assert not kv_new[3].any()
+
+
+def test_compress_tokens_short_batch_writes_nothing():
+    """A batch shorter than one pool cannot complete a pool."""
+    pool_size = 4
+    k, score, ape, slot_map = _flat_batch(pool_size, [pool_size - 1])
+    slot_map[-1] = 0
+    kv = torch.zeros(1, PAGE_SIZE, HEAD_DIM + 4, dtype=torch.uint8, device="cuda")
+    kpool_compress_tokens_and_write_cache(
+        kv, k, score, ape, slot_map, pool_size, HEAD_DIM, round_scale=ROUND_SCALE
+    )
+    assert not kv.any()

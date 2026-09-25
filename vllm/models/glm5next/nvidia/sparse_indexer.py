@@ -2,12 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import contextlib
+
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config_or_none
-from vllm.forward_context import get_forward_context
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+    is_in_breakable_cuda_graph,
+)
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
@@ -27,6 +35,8 @@ from vllm.utils.deep_gemm import has_deep_gemm
 from vllm.utils.torch_utils import (
     LayerNameType,
     _resolve_layer_name,
+    aux_stream,
+    current_stream,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -40,53 +50,10 @@ if current_platform.is_cuda_alike():
 logger = init_logger(__name__)
 
 
-# kpool write helper: form pools from the current token batch and compress them
-# into the index K cache via the fused Triton kernel.
-
-
-def _kpool_compress_insert(
-    k: torch.Tensor,
-    gate_score: torch.Tensor,
-    ape: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kpool: int,
-    head_dim: int,
-    round_scale: bool,
-) -> None:
-    """Pool ``kpool`` consecutive tokens into one fp8 K and write at pool slots.
-
-    ``slot_mapping`` is pool-granular (compress_ratio == kpool on the spec):
-    only the *last* token of each complete pool carries a valid (>=0) slot;
-    intra-pool tokens are -1. Every position is treated as a pool-completion
-    candidate and non-completions are masked off inside the kernel. Compacting
-    the valid rows first costs two device syncs on the eager prefill path and
-    buys nothing numerically. Assumes pool-aligned chunk starts.
-    """
-    n = slot_mapping.shape[0]
-    # No pool can complete in a batch smaller than one pool; also keeps the
-    # clamped gather indices below in bounds.
-    if n < kpool:
-        return
-    pos = torch.arange(n, device=k.device)
-    valid = slot_mapping >= 0
-    # Drop pools whose start falls before the batch (leading padding); their
-    # gate/k data is undefined anyway.
-    write_mask = valid & (pos >= kpool - 1)
-    offs = torch.arange(kpool, device=k.device)
-    idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + offs[None, :]
-    kpool_ops.kpool_compress_and_write_cache(
-        kv_cache,
-        k[idx],  # [n, kpool, head_dim]
-        gate_score[idx],
-        ape,
-        slot_mapping.to(torch.int64),
-        pool_size=kpool,
-        head_dim=head_dim,
-        write_mask=write_mask,
-        round_scale=round_scale,
-        write_cache=True,
-        return_compressed=False,
+def _capturing_cudagraph() -> bool:
+    return (
+        is_forward_context_available()
+        and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
     )
 
 
@@ -185,6 +152,7 @@ def sparse_attn_indexer_kpool(
     if k is not None:
         k = k[:num_tokens]
 
+    aux_compress = None
     if not skip_k_cache_insert:
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
         if index_kpool > 1 and gate_score is not None and compress_ape is not None:
@@ -193,38 +161,63 @@ def sparse_attn_indexer_kpool(
             # Decode tokens (the first num_decode_tokens in the batch) cannot be
             # pooled here — their pool's earlier tokens are not in this batch —
             # so they are deferred to the tail-buffer kernel in has_decode.
-            # compress_ratio == index_kpool makes slot_mapping pool-granular.
+            # compress_ratio == index_kpool makes slot_mapping
+            # pool-granular: only each complete pool's last token carries
+            # a valid slot.
             n_prefill = num_tokens - num_decode_tokens
             if n_prefill > 0:
                 # decode tokens are batched first; prefill tokens follow.
                 prefill_slice = slice(num_decode_tokens, num_tokens)
-                _kpool_compress_insert(
-                    k[prefill_slice],
-                    gate_score[prefill_slice],
-                    compress_ape,
-                    kv_cache,
-                    slot_mapping[prefill_slice],
-                    index_kpool,
-                    head_dim,
-                    round_scale=(scale_fmt is not None),
-                )
-                # Persist each request's incomplete prefill pool so decode can
-                # finish it, including after PD transfer. Tail slots use
-                # ``pos % kpool`` within the request's tail block. Processing
-                # only the batch's trailing tokens would miss all but the last
-                # request in a multi-request prefill.
-                if tail_kv_cache is not None and tail_prefix is not None:
-                    tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
-                    if tail_meta is not None:
-                        assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
-                        kpool_ops.kpool_seed_tail_cache(
-                            tail_kv_cache,
-                            k[prefill_slice],
-                            gate_score[prefill_slice],
-                            tail_meta.slot_mapping[prefill_slice],
-                            index_kpool,
-                            head_dim,
-                        )
+                # Eager pure-prefill batches run the compress + tail-seed
+                # writes on the aux stream, overlapping the current stream's
+                # topk-buffer fill and gather/logits preparation (SGLang's
+                # _can_overlap_prefill). Runs under CUDA graph capture or
+                # breakable graphs stay single-streamed. is_cuda() keeps the
+                # dispatcher's non-ROCm fallbacks (XPU, where aux_stream() is
+                # None) sequential; the AMD copy has no overlap at all.
+                if (
+                    not has_decode
+                    and current_platform.is_cuda()
+                    and not _capturing_cudagraph()
+                    and not is_in_breakable_cuda_graph()
+                ):
+                    aux_compress = aux_stream()
+                    assert aux_compress is not None
+                    aux_compress.wait_stream(current_stream())
+                    write_stream: contextlib.AbstractContextManager = torch.cuda.stream(
+                        aux_compress
+                    )
+                else:
+                    aux_compress = None
+                    write_stream = contextlib.nullcontext()
+                with write_stream:
+                    kpool_ops.kpool_compress_tokens_and_write_cache(
+                        kv_cache,
+                        k[prefill_slice],
+                        gate_score[prefill_slice],
+                        compress_ape,
+                        slot_mapping[prefill_slice],
+                        index_kpool,
+                        head_dim,
+                        round_scale=(scale_fmt is not None),
+                    )
+                    # Persist each request's incomplete prefill pool so decode
+                    # can finish it, including after PD transfer. Tail slots
+                    # use ``pos % kpool`` within the request's tail block.
+                    # Processing only the batch's trailing tokens would miss
+                    # all but the last request in a multi-request prefill.
+                    if tail_kv_cache is not None and tail_prefix is not None:
+                        tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
+                        if tail_meta is not None:
+                            assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
+                            kpool_ops.kpool_seed_tail_cache(
+                                tail_kv_cache,
+                                k[prefill_slice],
+                                gate_score[prefill_slice],
+                                tail_meta.slot_mapping[prefill_slice],
+                                index_kpool,
+                                head_dim,
+                            )
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
@@ -283,6 +276,9 @@ def sparse_attn_indexer_kpool(
             values_spec,
             scales_spec,
         )
+        if aux_compress is not None:
+            # The gather below reads the pools the compress path just wrote.
+            current_stream().wait_stream(aux_compress)
         for chunk in prefill_metadata.chunks if not short_prefill else ():
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]

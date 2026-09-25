@@ -37,55 +37,6 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
-# kpool write helper: form pools from the current token batch and compress them
-# into the index K cache via the fused Triton kernel.
-
-
-def _kpool_compress_insert(
-    k: torch.Tensor,
-    gate_score: torch.Tensor,
-    ape: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kpool: int,
-    head_dim: int,
-    round_scale: bool,
-) -> None:
-    """Pool ``kpool`` consecutive tokens into one fp8 K and write at pool slots.
-
-    ``slot_mapping`` is pool-granular (compress_ratio == kpool on the spec):
-    only the *last* token of each complete pool carries a valid (>=0) slot;
-    intra-pool tokens are -1. Every position is treated as a pool-completion
-    candidate and non-completions are masked off inside the kernel. Compacting
-    the valid rows first costs two device syncs on the eager prefill path and
-    buys nothing numerically. Assumes pool-aligned chunk starts.
-    """
-    n = slot_mapping.shape[0]
-    # No pool can complete in a batch smaller than one pool; also keeps the
-    # clamped gather indices below in bounds.
-    if n < kpool:
-        return
-    pos = torch.arange(n, device=k.device)
-    valid = slot_mapping >= 0
-    # Drop pools whose start falls before the batch (leading padding); their
-    # gate/k data is undefined anyway.
-    write_mask = valid & (pos >= kpool - 1)
-    offs = torch.arange(kpool, device=k.device)
-    idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + offs[None, :]
-    kpool_ops.kpool_compress_and_write_cache(
-        kv_cache,
-        k[idx],  # [n, kpool, head_dim]
-        gate_score[idx],
-        ape,
-        slot_mapping.to(torch.int64),
-        pool_size=kpool,
-        head_dim=head_dim,
-        write_mask=write_mask,
-        round_scale=round_scale,
-        write_cache=True,
-        return_compressed=False,
-    )
-
 
 @eager_break_during_capture
 def sparse_attn_indexer_kpool(
@@ -189,16 +140,18 @@ def sparse_attn_indexer_kpool(
             # Decode tokens (the first num_decode_tokens in the batch) cannot be
             # pooled here — their pool's earlier tokens are not in this batch —
             # so they are deferred to the tail-buffer kernel in has_decode.
-            # compress_ratio == index_kpool makes slot_mapping pool-granular.
+            # compress_ratio == index_kpool makes slot_mapping
+            # pool-granular: only each complete pool's last token carries
+            # a valid slot.
             n_prefill = num_tokens - num_decode_tokens
             if n_prefill > 0:
                 # decode tokens are batched first; prefill tokens follow.
                 prefill_slice = slice(num_decode_tokens, num_tokens)
-                _kpool_compress_insert(
+                kpool_ops.kpool_compress_tokens_and_write_cache(
+                    kv_cache,
                     k[prefill_slice],
                     gate_score[prefill_slice],
                     compress_ape,
-                    kv_cache,
                     slot_mapping[prefill_slice],
                     index_kpool,
                     head_dim,

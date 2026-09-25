@@ -69,21 +69,37 @@ def _hadamard128(x):
 
 
 @triton.jit
+def _hadamard_quantize_fp8(
+    acc, denom, FP8_MAX: tl.constexpr, ROUND_SCALE: tl.constexpr
+):
+    # bf16 round-trips match the unfused pooled-K path's precision.
+    x = (acc / denom).to(tl.bfloat16).to(tl.float32)
+    x = _hadamard128(x).to(tl.bfloat16).to(tl.float32)
+    absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
+    if ROUND_SCALE:
+        scale = tl.exp2(tl.ceil(tl.log2(absmax * (1.0 / FP8_MAX))))
+    else:
+        scale = absmax * (1.0 / FP8_MAX)
+    quantized = tl.minimum(tl.maximum(x / scale, -FP8_MAX), FP8_MAX)
+    return quantized, scale
+
+
+@triton.jit
 def _kpool_softmax_rotate_write_cache_kernel(
     buf_fp8_ptr,
     buf_fp32_ptr,
-    slot_k_ptr,
-    slot_score_ptr,
+    k_ptr,
+    score_ptr,
     ape_ptr,
     loc_ptr,
-    write_mask_ptr,
     compressed_k_ptr,
     compressed_scale_ptr,
-    slot_k_stride_0,
-    slot_k_stride_1,
-    slot_score_stride_0,
-    slot_score_stride_1,
+    k_stride_row,
+    k_stride_slot,
+    score_stride_row,
+    score_stride_slot,
     ape_stride_0,
+    row_offset,
     PAGE_SIZE: tl.constexpr,
     BUF_NUMEL_PER_PAGE: tl.constexpr,
     POOL_SIZE: tl.constexpr,
@@ -92,80 +108,53 @@ def _kpool_softmax_rotate_write_cache_kernel(
     FP8_MAX: tl.constexpr,
     PRESHUFFLE: tl.constexpr,
     ROUND_SCALE: tl.constexpr,
-    HAS_WRITE_MASK: tl.constexpr,
     RETURN_COMPRESSED: tl.constexpr,
     WRITE_CACHE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """One program per pool. softmax(slot_score+ape)-weighted sum of slot_k ->
-    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at ``loc``."""
+    """One program per pool row: online softmax(score+ape)-weighted sum of K
+    -> Hadamard-128 -> per-vector fp8 absmax quant -> write at ``loc``.
+
+    Slot ``s`` of row ``r`` is read at ``(r - row_offset) * stride_row +
+    s * stride_slot``: the ``[n_pools, POOL_SIZE, D]`` layout uses
+    ``row_offset = 0``, the flat token layout ``row_offset = POOL_SIZE - 1`` so
+    row ``r`` pools tokens ``r - POOL_SIZE + 1 .. r``. Rows with ``loc < 0`` or
+    ``r < row_offset`` are skipped.
+    """
     row = tl.program_id(0)
-    do_write = True
-    if HAS_WRITE_MASK:
-        do_write = tl.load(write_mask_ptr + row)
+    loc = tl.load(loc_ptr + row).to(tl.int64)
+    if (row < row_offset) | (loc < 0):
+        return
 
     offs = tl.arange(0, BLOCK_D)
-    mask = (offs < HEAD_DIM) & do_write
+    mask = offs < HEAD_DIM
+    base = (row - row_offset).to(tl.int64)
+    k_base = k_ptr + base * k_stride_row
+    score_base = score_ptr + base * score_stride_row
 
-    # --- Pass 1: per-dim max over the pool (softmax numerical stability) ---
-    max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
+    m = tl.full((BLOCK_D,), -float("inf"), tl.float32)
+    acc = tl.zeros((BLOCK_D,), tl.float32)
+    denom = tl.zeros((BLOCK_D,), tl.float32)
     for slot in tl.static_range(0, POOL_SIZE):
         score = tl.load(
-            slot_score_ptr
-            + row * slot_score_stride_0
-            + slot * slot_score_stride_1
-            + offs,
-            mask=mask,
-            other=0.0,
+            score_base + slot * score_stride_slot + offs, mask=mask, other=0.0
         ).to(tl.float32)
         score += tl.load(ape_ptr + slot * ape_stride_0 + offs, mask=mask, other=0.0).to(
             tl.float32
         )
-        max_score = tl.maximum(max_score, score)
-
-    # --- Pass 2: softmax-weighted sum of K ---
-    acc = tl.full((BLOCK_D,), 0.0, tl.float32)
-    denom = tl.full((BLOCK_D,), 0.0, tl.float32)
-    for slot in tl.static_range(0, POOL_SIZE):
-        score = tl.load(
-            slot_score_ptr
-            + row * slot_score_stride_0
-            + slot * slot_score_stride_1
-            + offs,
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        score += tl.load(ape_ptr + slot * ape_stride_0 + offs, mask=mask, other=0.0).to(
+        k = tl.load(k_base + slot * k_stride_slot + offs, mask=mask, other=0.0).to(
             tl.float32
         )
-        prob = tl.exp(score - max_score)
-        denom += prob
-        k = tl.load(
-            slot_k_ptr + row * slot_k_stride_0 + slot * slot_k_stride_1 + offs,
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        acc += k * prob
+        new_m = tl.maximum(m, score)
+        rescale = tl.exp(m - new_m)
+        prob = tl.exp(score - new_m)
+        denom = denom * rescale + prob
+        acc = acc * rescale + k * prob
+        m = new_m
 
-    x = acc / denom
-    x = tl.where(do_write, x, 0.0).to(tl.bfloat16).to(tl.float32)
-
-    # Match the unfused pooled-K path's bf16 precision before quantization.
-    x = _hadamard128(x).to(tl.bfloat16).to(tl.float32)
-
-    # --- per-vector absmax fp8 quant ---
-    fp8_max_inv = 1.0 / FP8_MAX
-    absmax = tl.max(tl.abs(x), axis=0)
-    absmax = tl.maximum(absmax, 1e-4)
-    if ROUND_SCALE:
-        scale = tl.exp2(tl.ceil(tl.log2(absmax * fp8_max_inv)))
-    else:
-        scale = absmax * fp8_max_inv
-    quantized = x / scale
-    quantized = tl.minimum(tl.maximum(quantized, -FP8_MAX), FP8_MAX)
+    quantized, scale = _hadamard_quantize_fp8(acc, denom, FP8_MAX, ROUND_SCALE)
 
     if WRITE_CACHE:
-        loc = tl.load(loc_ptr + row, mask=do_write, other=0)
         loc_page_index = loc // PAGE_SIZE
         loc_token_offset_in_page = loc % PAGE_SIZE
         out_k_offsets = loc_page_index * BUF_NUMEL_PER_PAGE + _cache_k_offset(
@@ -180,15 +169,80 @@ def _kpool_softmax_rotate_write_cache_kernel(
             + loc_token_offset_in_page
         )
         tl.store(buf_fp8_ptr + out_k_offsets, quantized, mask=mask)
-        tl.store(buf_fp32_ptr + out_s_offset, scale, mask=do_write)
+        tl.store(buf_fp32_ptr + out_s_offset, scale)
 
     if RETURN_COMPRESSED:
-        tl.store(
-            compressed_k_ptr + row * HEAD_DIM + offs,
-            quantized,
-            mask=offs < HEAD_DIM,
-        )
+        tl.store(compressed_k_ptr + row * HEAD_DIM + offs, quantized, mask=mask)
         tl.store(compressed_scale_ptr + row, scale)
+
+
+def _compress_and_write(
+    kv_cache: torch.Tensor,
+    k: torch.Tensor,
+    score: torch.Tensor,
+    ape: torch.Tensor,
+    loc: torch.Tensor,
+    *,
+    n_rows: int,
+    row_offset: int,
+    k_strides: tuple[int, int],
+    score_strides: tuple[int, int],
+    pool_size: int,
+    head_dim: int,
+    round_scale: bool,
+    return_compressed: bool,
+    write_cache: bool,
+):
+    assert ape.shape == (pool_size, head_dim)
+    assert k.dtype == torch.bfloat16
+    assert ape.dtype == torch.float32
+    assert kv_cache.dtype == torch.uint8
+    assert loc.shape == (n_rows,)
+    assert write_cache or return_compressed
+
+    page_size = kv_cache.shape[1]
+    if page_size > 1:
+        assert page_size % 16 == 0, "ROCm preshuffle requires 16-token tiles"
+    buf_fp8 = kv_cache.view(FP8_DTYPE)
+    buf_fp32 = kv_cache.view(torch.float32)
+    ape = ape.contiguous()
+    loc = loc.contiguous()
+    if return_compressed:
+        compressed_k = torch.empty((n_rows, head_dim), dtype=FP8_DTYPE, device=k.device)
+        compressed_scale = torch.empty((n_rows,), dtype=torch.float32, device=k.device)
+    else:
+        compressed_k, compressed_scale = buf_fp8, buf_fp32
+
+    if n_rows > 0:
+        _kpool_softmax_rotate_write_cache_kernel[(n_rows,)](
+            buf_fp8,
+            buf_fp32,
+            k,
+            score,
+            ape,
+            loc,
+            compressed_k,
+            compressed_scale,
+            *k_strides,
+            *score_strides,
+            ape.stride(0),
+            row_offset,
+            PAGE_SIZE=page_size,
+            BUF_NUMEL_PER_PAGE=kv_cache.stride(0),
+            POOL_SIZE=pool_size,
+            HEAD_DIM=head_dim,
+            S_OFFSET_NBYTES_IN_PAGE=page_size * head_dim,
+            FP8_MAX=FP8_MAX,
+            PRESHUFFLE=page_size > 1,
+            ROUND_SCALE=round_scale,
+            RETURN_COMPRESSED=return_compressed,
+            WRITE_CACHE=write_cache,
+            BLOCK_D=triton.next_power_of_2(head_dim),
+        )
+
+    if return_compressed:
+        return compressed_k, compressed_scale
+    return None
 
 
 def kpool_compress_and_write_cache(
@@ -199,7 +253,6 @@ def kpool_compress_and_write_cache(
     loc: torch.Tensor,
     pool_size: int,
     head_dim: int = INDEX_HEAD_DIM,
-    write_mask: torch.Tensor | None = None,
     round_scale: bool = True,
     return_compressed: bool = False,
     write_cache: bool = True,
@@ -214,103 +267,67 @@ def kpool_compress_and_write_cache(
         loc: ``[n_pools]`` int64 — flat physical slot per pool.
         pool_size: Number of tokens compressed into one cache entry.
         head_dim: Indexer head dimension.
-        write_mask: ``[n_pools]`` bool — pools to write, or None for all.
         round_scale: Round each fp8 scale down to a power of two.
         return_compressed: Also return the compressed K and scales.
         write_cache: Write the compressed result into ``kv_cache``.
 
     """
-    assert slot_k.ndim == 3
+    assert slot_k.ndim == 3 and slot_k.shape[1:] == (pool_size, head_dim)
     assert slot_score.shape == slot_k.shape
-    assert ape.shape == slot_k.shape[1:]
-    assert slot_k.shape[2] == head_dim
-    assert slot_k.dtype == torch.bfloat16
-    assert ape.dtype == torch.float32
-    assert kv_cache.dtype == torch.uint8
-    assert loc.dtype == torch.int64
-    assert write_cache or return_compressed
-
-    page_size = kv_cache.shape[1]
-    buf = kv_cache
-    slot_k = slot_k.contiguous()
-    slot_score = slot_score.contiguous()
-    ape = ape.contiguous()
-    loc = loc.contiguous()
-    if write_mask is None:
-        write_mask = torch.empty((1,), dtype=torch.bool, device=slot_k.device)
-        has_write_mask = False
-    else:
-        assert write_mask.shape == (slot_k.shape[0],)
-        write_mask = write_mask.contiguous()
-        has_write_mask = True
-        assert not return_compressed
-
-    if slot_k.shape[0] == 0:
-        if return_compressed:
-            return (
-                torch.empty(
-                    (0, head_dim),
-                    dtype=FP8_DTYPE,
-                    device=slot_k.device,
-                ),
-                torch.empty((0,), dtype=torch.float32, device=slot_k.device),
-            )
-        return None
-
-    buf_fp8 = buf.view(FP8_DTYPE)
-    buf_fp32 = buf.view(torch.float32)
-    # bytes per page (last dim of kv_cache) viewed as uint8
-    buf_numel_per_page = buf.stride(0)
-    s_offset_nbytes_in_page = page_size * head_dim
-
-    if return_compressed:
-        compressed_k = torch.empty(
-            (slot_k.shape[0], head_dim),
-            dtype=FP8_DTYPE,
-            device=slot_k.device,
-        )
-        compressed_scale = torch.empty(
-            (slot_k.shape[0],), dtype=torch.float32, device=slot_k.device
-        )
-    else:
-        compressed_k = buf_fp8
-        compressed_scale = buf_fp32
-
-    if page_size > 1:
-        assert page_size % 16 == 0, "ROCm preshuffle requires 16-token tiles"
-
-    _kpool_softmax_rotate_write_cache_kernel[(slot_k.shape[0],)](
-        buf_fp8,
-        buf_fp32,
+    assert slot_k.stride(2) == 1 and slot_score.stride(2) == 1
+    return _compress_and_write(
+        kv_cache,
         slot_k,
         slot_score,
         ape,
         loc,
-        write_mask,
-        compressed_k,
-        compressed_scale,
-        slot_k.stride(0),
-        slot_k.stride(1),
-        slot_score.stride(0),
-        slot_score.stride(1),
-        ape.stride(0),
-        PAGE_SIZE=page_size,
-        BUF_NUMEL_PER_PAGE=buf_numel_per_page,
-        POOL_SIZE=slot_k.shape[1],
-        HEAD_DIM=head_dim,
-        S_OFFSET_NBYTES_IN_PAGE=s_offset_nbytes_in_page,
-        FP8_MAX=FP8_MAX,
-        PRESHUFFLE=page_size > 1,
-        ROUND_SCALE=round_scale,
-        HAS_WRITE_MASK=has_write_mask,
-        RETURN_COMPRESSED=return_compressed,
-        WRITE_CACHE=write_cache,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        n_rows=slot_k.shape[0],
+        row_offset=0,
+        k_strides=(slot_k.stride(0), slot_k.stride(1)),
+        score_strides=(slot_score.stride(0), slot_score.stride(1)),
+        pool_size=pool_size,
+        head_dim=head_dim,
+        round_scale=round_scale,
+        return_compressed=return_compressed,
+        write_cache=write_cache,
     )
 
-    if return_compressed:
-        return compressed_k, compressed_scale
-    return None
+
+def kpool_compress_tokens_and_write_cache(
+    kv_cache: torch.Tensor,
+    k: torch.Tensor,
+    gate_score: torch.Tensor,
+    ape: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    pool_size: int,
+    head_dim: int = INDEX_HEAD_DIM,
+    round_scale: bool = True,
+) -> None:
+    """Compress the completed pools of a flat ``[n, head_dim]`` token batch.
+
+    ``slot_mapping`` is pool-granular: token ``i`` completes the pool
+    ``k[i - pool_size + 1 : i + 1]`` iff ``slot_mapping[i] >= 0``. Pools whose
+    start precedes the batch are dropped (chunk starts are pool-aligned).
+    """
+    assert k.ndim == 2 and k.shape[1] == head_dim
+    assert gate_score.shape == k.shape
+    assert k.stride(1) == 1 and gate_score.stride(1) == 1
+    _compress_and_write(
+        kv_cache,
+        k,
+        gate_score,
+        ape,
+        slot_mapping,
+        n_rows=k.shape[0],
+        row_offset=pool_size - 1,
+        k_strides=(k.stride(0), k.stride(0)),
+        score_strides=(gate_score.stride(0), gate_score.stride(0)),
+        pool_size=pool_size,
+        head_dim=head_dim,
+        round_scale=round_scale,
+        return_compressed=False,
+        write_cache=True,
+    )
 
 
 # Seed each request's incomplete pool into its paged tail during prefill.
@@ -478,7 +495,9 @@ def _kpool_decode_update_batched_kernel(
         if pos_valid & (slot == POOL_SIZE - 1):
             pool_logical_start = safe_pos - slot
 
-            max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
+            m = tl.full((BLOCK_D,), -float("inf"), tl.float32)
+            acc = tl.zeros((BLOCK_D,), tl.float32)
+            denom = tl.zeros((BLOCK_D,), tl.float32)
             for pool_slot in tl.static_range(0, POOL_SIZE):
                 is_current = pool_slot == slot
                 phys = (pool_logical_start + pool_slot) % POOL_SIZE
@@ -493,44 +512,20 @@ def _kpool_decode_update_batched_kernel(
                     mask=dim_mask,
                     other=0.0,
                 ).to(tl.float32)
-                max_score = tl.maximum(max_score, score)
-
-            acc = tl.full((BLOCK_D,), 0.0, tl.float32)
-            denom = tl.full((BLOCK_D,), 0.0, tl.float32)
-            for pool_slot in tl.static_range(0, POOL_SIZE):
-                is_current = pool_slot == slot
-                phys = (pool_logical_start + pool_slot) % POOL_SIZE
-                score_buf = tl.load(
-                    tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
-                    mask=dim_mask,
-                    other=0.0,
-                ).to(tl.float32)
-                score = tl.where(is_current, score_current, score_buf)
-                score += tl.load(
-                    ape_ptr + pool_slot * ape_stride_0 + offs,
-                    mask=dim_mask,
-                    other=0.0,
-                ).to(tl.float32)
-                prob = tl.exp(score - max_score)
-                denom += prob
                 k_buf = tl.load(
                     tail_kv_ptr + block_base + phys * HEAD_DIM + offs,
                     mask=dim_mask,
                     other=0.0,
                 ).to(tl.float32)
                 k = tl.where(is_current, key, k_buf)
-                acc += k * prob
+                new_m = tl.maximum(m, score)
+                rescale = tl.exp(m - new_m)
+                prob = tl.exp(score - new_m)
+                denom = denom * rescale + prob
+                acc = acc * rescale + k * prob
+                m = new_m
 
-            x = (acc / denom).to(tl.bfloat16).to(tl.float32)
-            x = _hadamard128(x).to(tl.bfloat16).to(tl.float32)
-
-            fp8_max_inv = 1.0 / FP8_MAX
-            absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
-            if ROUND_SCALE:
-                scale = tl.exp2(tl.ceil(tl.log2(absmax * fp8_max_inv)))
-            else:
-                scale = absmax * fp8_max_inv
-            quantized = tl.minimum(tl.maximum(x / scale, -FP8_MAX), FP8_MAX)
+            quantized, scale = _hadamard_quantize_fp8(acc, denom, FP8_MAX, ROUND_SCALE)
 
             loc = cache_loc.to(tl.int64)
             loc_page_index = loc // PAGE_SIZE
