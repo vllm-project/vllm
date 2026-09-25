@@ -190,6 +190,11 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
+        indexer_slot = (
+            slot_mapping.get(self.indexer.k_cache.prefix)
+            if self.indexer is not None
+            else None
+        )
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
@@ -220,6 +225,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
+            indexer_slot = None
         else:
             # HiSparse routes the KV write through update_kv_cache so the
             # host mirror sees it; the fused kernel only returns the rows.
@@ -250,6 +256,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
+            indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
             indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
@@ -272,6 +279,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            hisparse_cache.finish_kv_update()
 
         ql_nope, q_pe = self._compute_ql_nope(q_c)
 
