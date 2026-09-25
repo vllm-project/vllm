@@ -3,7 +3,6 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -82,9 +81,6 @@ def _run_prepare(
     next_prefill_tokens = torch.zeros_like(last_sampled)
     block_table = torch.tensor([block_table_values], dtype=torch.int32, device=device)
 
-    class InputsPrepared(Exception):
-        pass
-
     draft = SimpleNamespace(
         input_buffers=input_buffers,
         context_positions=context_positions,
@@ -100,6 +96,7 @@ def _run_prepare(
         dp_size=1,
         dp_rank=0,
         pcp_manager=None,
+        speculative_config=SimpleNamespace(is_dspark_prefill_only=lambda: False),
         draft_kv_cache_group_id=0,
         draft_kv_cache_group_ids=[0],
         _layer_group_idx=None,
@@ -120,27 +117,18 @@ def _run_prepare(
         max_model_len=128,
         sample_from_anchor=True,
     )
-    with (
-        patch(
-            "vllm.v1.worker.gpu.spec_decode.dflash.speculator.dispatch_cg_and_sync_dp",
-            side_effect=InputsPrepared,
-        ),
-        pytest.raises(InputsPrepared),
-    ):
-        DFlashSpeculator.propose(
-            draft,
-            input_batch,
-            {},
-            {},
-            draft.hidden_states,
-            None,
-            torch.tensor([1], dtype=torch.int32, device=device),
-            torch.tensor([2], dtype=torch.int32, device=device),
-            last_sampled,
-            next_prefill_tokens,
-            input_temperature,
-            input_seeds,
-        )
+    DFlashSpeculator._prepare_draft_inputs(
+        draft,
+        input_batch,
+        draft.hidden_states,
+        None,
+        torch.tensor([1], dtype=torch.int32, device=device),
+        torch.tensor([2], dtype=torch.int32, device=device),
+        last_sampled,
+        next_prefill_tokens,
+        input_temperature,
+        input_seeds,
+    )
     torch.accelerator.synchronize()
     return SimpleNamespace(
         input_buffers=input_buffers,
