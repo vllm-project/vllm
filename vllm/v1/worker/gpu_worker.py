@@ -13,7 +13,6 @@ from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
-import regex as re
 import torch
 import torch.nn as nn
 
@@ -367,27 +366,32 @@ class Worker(WorkerBase):
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
-        """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
-        cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit."""
-        if not current_platform.is_cuda():
+        """Limit CUDA/ROCm allocator splitting, restoring settings on exit."""
+        if (
+            not current_platform.is_cuda_alike()
+            or torch.cuda.memory.get_allocator_backend() != "native"
+        ):
             yield
             return
 
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        match = re.search(r"max_split_size_mb:(\d+)", conf)
-        original_value = match.group(1) if match else None
+        get_settings = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+        if get_settings is not None:
+            original_settings = get_settings()
+        else:
+            original_settings = torch.cuda.memory._snapshot()["allocator_settings"][
+                "PYTORCH_CUDA_ALLOC_CONF"
+            ]
 
-        torch._C._accelerator_setAllocatorSettings(
-            f"max_split_size_mb:{max_split_size_mb}"
-        )
+        # The setter resets other allocator options unless they are included.
+        prefix = original_settings.strip().rstrip(",")
+        settings = f"max_split_size_mb:{max_split_size_mb}"
+        if prefix:
+            settings = f"{prefix},{settings}"
         try:
+            torch._C._accelerator_setAllocatorSettings(settings)
             yield
         finally:
-            # PyTorch defaults to SIZE_MAX (no limit).
-            _SIZE_MAX_MB = (2**64 - 1) // (1024 * 1024)
-            restore = original_value if original_value else str(_SIZE_MAX_MB)
-            torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
+            torch._C._accelerator_setAllocatorSettings(original_settings)
 
     @instrument(span_name="Init device")
     def init_device(self):
@@ -605,10 +609,20 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            # Workspaces (e.g. the MoE workspace) grow in steps during this pass,
+            # freeing each smaller buffer. Without a split limit, a later small
+            # allocation can be carved out of a freed multi-GiB block and pin the
+            # whole segment past the empty_cache() in memory_profiling, so it is
+            # counted as consumed and taken from the KV cache. Blocks above the
+            # limit are never split, so they stay releasable. Exits before
+            # memory_profiling measures, restoring the original limit.
+            self._scoped_allocator_max_split(max_split_size_mb=20),
+        ):
             self.model_runner.profile_run()
 
         # Profile CUDA graph memory if graphs will be captured.
