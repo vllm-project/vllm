@@ -66,7 +66,7 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     torch.manual_seed(num_tokens)
     device = "cuda"
     layer = _make_layer(n, k, device)
-    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(bmm_batch_size=None))
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
 
     x = torch.randn(num_tokens, k, device=device, dtype=torch.bfloat16) * 0.5
@@ -103,7 +103,7 @@ def test_rocm_mxfp8_linear_handles_extreme_magnitudes():
     device = "cuda"
     n, k = 5120, 2048  # wo_b at TP=4
     layer = _make_layer(n, k, device)
-    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(bmm_batch_size=None))
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
 
     x = torch.randn(8, k, device=device, dtype=torch.bfloat16)
