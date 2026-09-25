@@ -3776,12 +3776,41 @@ def _decode_gfx950_num_splits(
     return num_splits
 
 
+_SPARSE_DECODE_BF16_MIN_SPLIT_LEN = 512
+
+
 def _sparse_decode_bf16_num_splits(
-    num_queries: int, heads_blocks: int, num_indices: int, block_k: int
+    num_queries: int, heads_blocks: int, sparse_len: int, block_k: int
 ) -> int:
-    avg_len = num_indices / max(1, num_queries)
+    """Pick a split count for bf16 sparse decode, or 1 to skip splitting.
+
+    Splitting costs a second launch plus the reduce, measured at ~12us on
+    gfx950. Below ``_SPARSE_DECODE_BF16_MIN_SPLIT_LEN`` selected slots per query
+    the single-pass kernel finishes inside that overhead, so splitting is a
+    regression however the splits are chosen. Above it, the split count is
+    capped at the number of ``block_k`` tiles available, since splits past that
+    walk no tokens and only add partials for the reduce to scan.
+
+    This picks between two different kernels, so under a full cudagraph the
+    choice is recorded at capture and replayed unchanged. ``sparse_len`` must
+    therefore come from a quantity the capture inflates to its runtime maximum,
+    not from per-step lengths, which are 1 for a captured decode batch.
+
+    Args:
+        num_queries: Decode rows in the batch.
+        heads_blocks: Head blocks per row, the second grid axis.
+        sparse_len: Longest selected KV run any decode row can walk.
+        block_k: KV tile width of the partial kernel.
+
+    Returns:
+        The split count, or 1 to fall through to the single-pass kernel.
+
+    """
+    if sparse_len < _SPARSE_DECODE_BF16_MIN_SPLIT_LEN:
+        return 1
     select = _decode_gfx950_num_splits if _ON_GFX950 else _decode_num_splits
-    return select(num_queries, heads_blocks, avg_len, 0.0, block_k)
+    num_splits = select(num_queries, heads_blocks, sparse_len, 0.0, block_k)
+    return max(1, min(num_splits, math.ceil(sparse_len / block_k)))
 
 
 def _rocm_sparse_attn_decode_ragged_bf16_triton(
@@ -4417,6 +4446,7 @@ def rocm_sparse_attn_decode_bf16(
     output: torch.Tensor,
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
+    sparse_len: int,
 ) -> None:
     """Run decode rows through the split-K path over an unquantized KV cache.
 
@@ -4434,6 +4464,9 @@ def rocm_sparse_attn_decode_bf16(
         output: Destination, written in place.
         ragged_indices: Flattened per-query KV slots.
         ragged_indptr: Segment offsets into ``ragged_indices``, ``[sq + 1]``.
+        sparse_len: Longest selected KV run any decode row can walk, used to
+            pick the split count. ``ragged_indices`` is a preallocated
+            worst-case buffer, so its size is not a usable stand-in.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
@@ -4449,7 +4482,7 @@ def rocm_sparse_attn_decode_bf16(
     num_splits = _sparse_decode_bf16_num_splits(
         num_queries,
         triton.cdiv(num_heads, 16),
-        ragged_indices.numel(),
+        sparse_len,
         32,
     )
     if num_splits == 1:

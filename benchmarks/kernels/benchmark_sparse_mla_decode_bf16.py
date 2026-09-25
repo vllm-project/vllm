@@ -53,7 +53,7 @@ def resolve_splits(spec: str, rows: int, live: int, args) -> int:
     if spec != "auto":
         return int(spec)
     return _sparse_decode_bf16_num_splits(
-        rows, triton.cdiv(args.heads, BLOCK_H), rows * live, BLOCK_K
+        rows, triton.cdiv(args.heads, BLOCK_H), live, BLOCK_K
     )
 
 

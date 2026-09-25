@@ -840,6 +840,9 @@ class ROCMAiterMLASparseImpl(
                     ragged_indptr=attn_metadata.paged_kv_indptr[
                         : num_decode_tokens + 1
                     ],
+                    sparse_len=min(
+                        attn_metadata.max_seq_len, attn_metadata.topk_tokens
+                    ),
                 )
             if num_decode_tokens < num_tokens:
                 rocm_sparse_attn_prefill(
