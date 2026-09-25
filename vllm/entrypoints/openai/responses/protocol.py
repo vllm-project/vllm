@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -49,6 +49,7 @@ from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
+    BeforeValidator,
     Field,
     ValidationError,
     field_serializer,
@@ -135,6 +136,31 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
+def _default_input_image_details(value: Any) -> Any:
+    """Set the API default for input images before SDK type validation."""
+    if not isinstance(value, dict):
+        return value
+
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
+
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
+
+    return {**value, "content": new_content} if changed else value
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -152,7 +178,15 @@ class ResponsesRequest(OpenAIBaseModel):
         ]
         | None
     ) = None
-    input: str | list[ResponseInputOutputItem]
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem,
+                BeforeValidator(_default_input_image_details),
+            ]
+        ]
+    )
     instructions: str | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None
