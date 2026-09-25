@@ -1790,6 +1790,24 @@ def disable_deepgemm_ue8m0(monkeypatch):
         is_deep_gemm_e8m0_used.cache_clear()
 
 
+@pytest.fixture
+def gpu_memory_cleared():
+    """Wait for prior tests to release GPU memory on gfx950."""
+    if not current_platform.is_rocm():
+        return
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_ratio=0.08,
+            timeout_s=30,
+            stable_duration_s=1,
+        )
+
+
 def _should_clean_gpu_memory_between_tests() -> bool:
     # This must stay opt-in: a function-scoped fixture cannot distinguish
     # stale VRAM from allocations owned by longer-lived module/session fixtures.

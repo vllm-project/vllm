@@ -2014,7 +2014,6 @@ steps:
   - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
   - tests/model_executor/test_jit_warmup_triton_launcher.py
   commands:
-  - apt-get update && apt-get install -y curl libsodium23
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTHONFAULTHANDLER=1
   - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
