@@ -9,7 +9,7 @@ reloading from disk.
 
 Launch one daemon per TP rank with a single command:
 
-    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+    vllm preload \\
         --model /path/to/model --tensor-parallel-size 4
 
 Engines then load from the daemons with:
@@ -27,12 +27,12 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
 ``--weight-cache-master-port`` distinct from the engine's ``--master-port``:
 
     # node 0 (8 local GPUs)
-    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+    vllm preload \\
         --model /path/to/model --tensor-parallel-size 16 \\
         --nnodes 2 --node-rank 0 --master-addr 10.0.0.1 \\
         --weight-cache-master-port 29600
     # node 1 (8 local GPUs)
-    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+    vllm preload \\
         --model /path/to/model --tensor-parallel-size 16 \\
         --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \\
         --weight-cache-master-port 29600
@@ -50,7 +50,7 @@ node with the engine's DP placement flags. Local GPU ``i`` serves DP rank
 shards are laid out exactly as in the engine:
 
     # node r (4 local GPUs)
-    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+    vllm preload \\
         --model /path/to/model --tensor-parallel-size 1 --enable-expert-parallel \\
         --data-parallel-size 16 --data-parallel-size-local 4 \\
         --data-parallel-start-rank 4r --data-parallel-address 10.0.0.1 \\
@@ -62,7 +62,7 @@ a reachable ``--data-parallel-address``). Each node then serves a contiguous
 block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
     # node r (4 local GPUs)
-    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+    vllm preload \\
         --model /path/to/model --tensor-parallel-size 8 --enable-expert-parallel \\
         --nnodes 4 --node-rank r --master-addr 10.0.0.1 \\
         --data-parallel-size 2 --data-parallel-address 10.0.0.1 \\
@@ -80,12 +80,8 @@ import contextlib
 import fcntl
 import multiprocessing
 import os
-import queue
-import signal
 import socket
-import sys
 from collections.abc import Callable
-from itertools import product
 
 import torch
 
@@ -99,7 +95,6 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
-from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -107,7 +102,6 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
-    check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_current_device_uuid,
@@ -122,8 +116,6 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.platforms import current_platform
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -504,178 +496,3 @@ def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
             "--data-parallel-start-rank + --data-parallel-size-local "
             f"({end_rank}) exceeds --data-parallel-size ({dp_size})"
         )
-
-
-def main() -> None:
-    parser = FlexibleArgumentParser(
-        description="Launch weight cache daemons (one per TP rank)."
-    )
-    EngineArgs.add_cli_args(parser)
-    parser.add_argument(
-        "--weight-cache-socket-dir",
-        type=str,
-        default=None,
-        help="Directory for the daemon Unix sockets (default: tempdir).",
-    )
-    parser.add_argument(
-        "--weight-cache-master-port",
-        type=int,
-        default=None,
-        help="Rendezvous port for the daemon's own TP group. Must differ from "
-        "the engine's --master-port (the daemon holds its group open while "
-        "serving) and match across nodes. Required when --nnodes > 1; defaults "
-        "to a free port for single-node.",
-    )
-    parser.add_argument(
-        "--weight-cache-draft-master-port",
-        type=int,
-        default=None,
-        help="Rendezvous port for the MTP draft daemon group. Defaults to "
-        "--weight-cache-master-port + 1 for multi-node, or a free port for "
-        "single-node.",
-    )
-    args = parser.parse_args()
-    engine_args = EngineArgs.from_cli_args(args)
-    vllm_config = engine_args.create_engine_config()
-    if vllm_config.load_config.load_format == "ipc_cache":
-        raise ValueError(
-            "The weight cache daemon itself must load from disk; use the "
-            "default --load-format"
-        )
-    # Config-only so it can fail before any model loading; the quant method
-    # check needs the created model and runs in get_daemon_model.
-    check_ipc_platform_support()
-    parallel_config = vllm_config.parallel_config
-    _reject_unsupported_parallelism(parallel_config)
-    tp_size = parallel_config.tensor_parallel_size
-    dp_size = parallel_config.data_parallel_size
-
-    placements = plan_local_ranks(parallel_config)
-    local_world_size = len(placements)
-    if dp_size == 1:
-        nnodes = parallel_config.nnodes
-        node_rank = parallel_config.node_rank
-        master_addr = parallel_config.master_addr
-    else:
-        master_addr = parallel_config.data_parallel_master_ip
-        if parallel_config.nnodes > 1:
-            nnodes = parallel_config.nnodes
-            node_rank = parallel_config.node_rank
-        else:
-            nnodes = dp_size // parallel_config.data_parallel_size_local
-            node_rank = parallel_config.data_parallel_rank // (
-                parallel_config.data_parallel_size_local
-            )
-        if nnodes > 1 and master_addr in ("127.0.0.1", "localhost"):
-            raise ValueError(
-                "Data parallelism across nodes requires a reachable "
-                "--data-parallel-address for the daemon rendezvous"
-            )
-
-    # The daemon forms its own world group and holds it open while serving, so
-    # it needs a rendezvous port distinct from the engine's. All nodes must
-    # agree on it; single-node can auto-pick a free port. The master address is
-    # the engine's --master-addr (TP across nodes) or --data-parallel-address.
-    if nnodes > 1 and args.weight_cache_master_port is None:
-        raise ValueError(
-            "--weight-cache-master-port is required when the daemons span nodes"
-        )
-    master_port = args.weight_cache_master_port or get_open_port()
-    distributed_init_method = get_distributed_init_method(master_addr, master_port)
-
-    # (is_draft, vllm_config, rendezvous) per daemon group.
-    groups: list[tuple[bool, VllmConfig, str]] = [
-        (False, vllm_config, distributed_init_method)
-    ]
-    draft_vllm_config = get_draft_daemon_config(vllm_config)
-    if draft_vllm_config is not None:
-        draft_master_port = args.weight_cache_draft_master_port or (
-            master_port + 1 if nnodes > 1 else get_open_port()
-        )
-        if draft_master_port == master_port:
-            raise ValueError(
-                "--weight-cache-draft-master-port must differ from "
-                "--weight-cache-master-port"
-            )
-        groups.append(
-            (
-                True,
-                draft_vllm_config,
-                get_distributed_init_method(master_addr, draft_master_port),
-            )
-        )
-
-    ctx = multiprocessing.get_context("spawn")
-    ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
-    # Local index == device index; global rank enumerates DP then TP.
-    expected_ready = {
-        (format_daemon_role(is_draft), dp_rank * tp_size + tp_rank)
-        for (is_draft, _, _), (_, dp_rank, tp_rank) in product(groups, placements)
-    }
-    procs = [
-        ctx.Process(
-            target=_run_daemon,
-            args=(
-                tp_rank,
-                local_rank,
-                config,
-                init_method,
-                args.weight_cache_socket_dir,
-                ready_queue,
-                is_draft,
-                dp_rank,
-            ),
-            name=f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-            f"{dp_rank * tp_size + tp_rank}",
-        )
-        for (is_draft, config, init_method), (
-            local_rank,
-            dp_rank,
-            tp_rank,
-        ) in product(groups, placements)
-    ]
-    for proc in procs:
-        proc.start()
-
-    def _shutdown(signum, frame):
-        for proc in procs:
-            proc.terminate()
-
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
-    ready: set[tuple[str, int]] = set()
-    while len(ready) < len(expected_ready):
-        try:
-            ready.add(ready_queue.get(timeout=1.0))
-        except queue.Empty:
-            dead = [p for p in procs if p.exitcode is not None]
-            if dead:
-                logger.error(
-                    "Weight cache daemon rank(s) exited during startup "
-                    "(exitcodes=%s); shutting down.",
-                    [p.exitcode for p in dead],
-                )
-                for proc in procs:
-                    proc.terminate()
-                for proc in procs:
-                    proc.join()
-                sys.exit(max((p.exitcode or 0) for p in procs))
-    socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
-    logger.info_once(
-        "===== Weight cache daemon READY: node %d/%d serving %d local rank(s) "
-        "x %d role(s) in %s =====",
-        node_rank,
-        nnodes,
-        local_world_size,
-        len(groups),
-        socket_dir_msg,
-    )
-
-    for proc in procs:
-        proc.join()
-    sys.exit(max(proc.exitcode or 0 for proc in procs))
-
-
-if __name__ == "__main__":
-    main()
