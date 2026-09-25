@@ -1462,8 +1462,7 @@ class FusedMoEConfig:
           the matching path. A deferred call runs the runner's ``_forward_impl``
           directly, since the MoE custom op returns tensors only, and the
           consumer then owns the top-k reduction, the shared-expert add and the
-          all-reduce. ``finalize_moe_output`` runs the reduction on its own for
-          deferred outputs the consumer's fused kernel can't take.
+          all-reduce.
 
         Args:
             max_num_tokens: Most tokens per call the consumer can take in

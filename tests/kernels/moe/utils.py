@@ -29,10 +29,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-from vllm.model_executor.layers.fused_moe.moe_output import (
-    UnfinalizedMoEOutput,
-    finalize_moe_output,
-)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import moe_unpermute
 from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
     BatchedPrepareAndFinalize,
 )
@@ -722,10 +720,10 @@ def check_deferred_moe_finalize(
 
     ``run`` calls the kernel on fixed inputs, first as built and then with
     ``moe_config`` asking to defer, which ``should_defer_moe_finalize`` must
-    report truthfully. A deferred output reduced by ``finalize_moe_output`` must
-    give the kernel's own finalized output bit for bit, and modular experts hand
-    the router's weights back as-is. A call the experts split across kernel
-    launches finalizes instead.
+    report truthfully. A deferred output reduced by ``moe_unpermute``, the
+    TRT-LLM finalize kernel, must give the kernel's own finalized output bit for
+    bit, and modular experts hand the router's weights back as-is. A call the
+    experts split across kernel launches finalizes instead.
     """
     # The deferred output views the router's buffer, so compare with a copy.
     expected_weights = None if router_weights is None else router_weights.clone()
@@ -743,7 +741,18 @@ def check_deferred_moe_finalize(
         torch.testing.assert_close(
             output.expert_weights, expected_weights, atol=0, rtol=0
         )
-    torch.testing.assert_close(finalize_moe_output(output), finalized, atol=0, rtol=0)
+    reference = torch.empty_like(finalized)
+    moe_unpermute(
+        reference,
+        output.gemm2_permuted,
+        output.expert_weights.float(),
+        output.expanded_idx_to_permuted_idx,
+        # The kernel reads its valid-row count through this pointer either way.
+        expert_first_token_offset=output.gemm2_permuted.new_full(
+            (1,), output.gemm2_permuted.shape[0], dtype=torch.int64
+        ),
+    )
+    torch.testing.assert_close(reference, finalized, atol=0, rtol=0)
 
 
 def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):
