@@ -176,7 +176,7 @@ steps:
       case "$$BUILDKITE_PARALLEL_JOB" in
         0)
           # transformers_audio, granite_speech, audioflamingo3, whisper, moss_audio
-          pytest -v -s models/multimodal/generation/audio -m 'not core_model'
+          pytest -v -s models/multimodal/generation/audio
           ;;
         1)
           # moondream3_moe is a cpu_test that initializes a gloo process group
@@ -189,7 +189,7 @@ steps:
           # spawn (from the repo root, as the whisper step does) avoids that,
           # matching the mode main's flat job is already in by the time these
           # files run.
-          cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/vision -m 'not core_model'
+          cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/vision
           ;;
         2)
           # ultravox, voxtral, voxtral_realtime, plus the mapping unit tests
