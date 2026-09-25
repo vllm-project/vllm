@@ -709,11 +709,28 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and not self.use_sequence_parallel
         )
 
+        fuse_by_layer = {
+            extract_layer_index(mod_name): getattr(
+                mod, "is_fused_shared_expert_enabled", False
+            )
+            for mod_name, mod in self.named_modules()
+            if isinstance(mod, DeepseekV4MoEBase)
+        }
+        n_routed = self.config.n_routed_experts
+
         for name, loaded_weight in weights:
             if name.startswith(("vision.", "aligner.", "image_")):
                 # Vision weights are loaded by the outer multimodal wrapper.
                 logger.warning_once("Skipping non-text weight: %s", name)
                 continue
+            if (
+                (".ffn.shared_experts." in name or ".shared_experts." in name)
+                and fuse_by_layer.get(extract_layer_index(name), False)
+            ):
+                name = name.replace(".shared_experts.down_proj", f".experts.{n_routed}.w2")
+                name = name.replace(".shared_experts.gate_proj", f".experts.{n_routed}.w1")
+                name = name.replace(".shared_experts.up_proj", f".experts.{n_routed}.w3")
+                name = name.replace(".shared_experts.w", f".experts.{n_routed}.w")
             if pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = self._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
@@ -825,7 +842,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         step = (
             1 if name.endswith(("weight_scale_inv", "weight_scale")) else block_size[0]
         )
-        dim = 1 if ".down_proj." in name else 0
+        dim = 1 if (".down_proj." in name or ".w2." in name) else 0
         mult = get_tensor_model_parallel_world_size() * step
         pad = cdiv(loaded_weight.shape[dim], mult) * mult - loaded_weight.shape[dim]
         if pad == 0:
@@ -837,12 +854,21 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        n_shared = getattr(self.config, "n_shared_experts", 0) or 0
+        is_fse = any(
+            getattr(mod, "is_fused_shared_expert_enabled", False)
+            for mod in self.modules()
+            if isinstance(mod, DeepseekV4MoEBase)
+        )
+        num_experts = self.config.n_routed_experts + (
+            n_shared if is_fse else 0
+        )
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
+            num_experts=num_experts,
         )
 
     def finalize_mega_moe_weights(self) -> None:
@@ -894,7 +920,9 @@ def _make_deepseek_v4_weights_mapper(
             # The ``embed.weight`` -> ``embed_tokens.weight`` suffix rule
             # renames the engram fp8 table but not its scale; route the
             # scale explicitly to the same module.
-            re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            re.compile(
+                r"(engram\.embed)\.(?:weight_)?scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     else:
@@ -907,7 +935,9 @@ def _make_deepseek_v4_weights_mapper(
                 r"(\.experts\.\d+\.w[123]\.base_layer)\.scale$"
             ): r"\1.weight_scale_inv",
             # Same engram reroute as the fp4 branch above.
-            re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            re.compile(
+                r"(engram\.embed)\.(?:weight_)?scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     return WeightsMapper(

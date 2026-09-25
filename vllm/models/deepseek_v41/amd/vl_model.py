@@ -312,14 +312,23 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
+        # Stream language_model weights as a contiguous block without sorting/materializing
+        # the entire 48-shard generator into a Python list. Materializing all 48 shards
+        # invalidates circular shared-memory buffers (Mode 3 Direct-I/O) and exhausts host
+        # memory. Non-language_model tensors (vision tower, aligner, image tokens, ~266 tensors /
+        # ~400 MB total in Shards 1-2) are buffered in host memory and yielded after language_model.
+        def _stream_reordered():
+            non_lm_weights: list[tuple[str, torch.Tensor]] = []
+            for name, tensor in self.hf_to_vllm_mapper.apply(weights):
+                if name.startswith("language_model."):
+                    yield name, tensor
+                else:
+                    non_lm_weights.append((name, tensor.clone()))
+
+            yield from non_lm_weights
+
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
+        loaded_params = loader.load_weights(_stream_reordered())
         # The child's load_weights already ran its post-load finalization.
         self._weights_finalized = True
         return loaded_params

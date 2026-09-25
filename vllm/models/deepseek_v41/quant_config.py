@@ -171,12 +171,22 @@ class DeepseekV4FP8Config(Fp8Config):
         # so translate the schema into format Fp8Config.from_config expects.
         if config.get("quant_method") == "quark":
             quark_exclude = config.get("exclude") or []
+            weight_block_size = config.get("weight_block_size")
+            if weight_block_size is None:
+                lqc = config.get("layer_quant_config") or {}
+                for v in lqc.values():
+                    bs = (v.get("weight") or {}).get("block_size")
+                    if bs:
+                        weight_block_size = list(bs)
+                        break
+            if weight_block_size is None:
+                weight_block_size = [128, 128]
             config = {
                 "quant_method": "fp8",
                 "activation_scheme": "dynamic",
                 "fmt": "e4m3",
                 "scale_fmt": "ue8m0",
-                "weight_block_size": [128, 128],
+                "weight_block_size": weight_block_size,
                 "ignored_layers": [
                     name for name in quark_exclude if isinstance(name, str)
                 ],
@@ -186,6 +196,7 @@ class DeepseekV4FP8Config(Fp8Config):
     def get_quant_method(self, layer, prefix):
         if (
             isinstance(layer, LinearBase)
+            and "shared_experts" not in prefix
             and self.weight_block_size == [32, 32]
             and self.is_scale_e8m0
         ):
