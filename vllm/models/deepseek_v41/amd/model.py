@@ -22,7 +22,11 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mhc import MHCPostOp, MHCPreDelayedOp
+from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
+    MHCPostOp,
+    MHCPreDelayedOp,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -251,6 +255,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
+        # Where aiter's fused seam kernel runs (gfx950), it folds the following
+        # attn_norm / ffn_norm into its collapse, so the separate norms are
+        # skipped for the seams it takes.
+        self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -269,6 +277,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Layer 0's attention seam projects the 2-D embedding with the folded
+        # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
+        # The fused kernel only takes the latter, so that seam keeps the
+        # separate attn_norm.
+        fuse_attn_norm = self.fuse_seam_norm and not (
+            residual is None and x.dim() == 2
+        )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -303,6 +318,8 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
                     pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
         else:
             pre_args = (
@@ -328,7 +345,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_mask,
                 )
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
-                    residual, *pre_args, pre_mix=pre_mix
+                    residual,
+                    *pre_args,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
             else:
                 (
@@ -344,8 +365,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     sublayer_out=x,
                     post_layer_mix=post_mix,
                     comb_res_mix=res_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
-        x = self.attn_norm(x)
+        if not fuse_attn_norm:
+            x = self.attn_norm(x)
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -368,8 +392,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             sublayer_out=x,
             post_layer_mix=post_mix,
             comb_res_mix=res_mix,
+            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
-        x = self.ffn_norm(x)
+        if not self.fuse_seam_norm:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre
 
