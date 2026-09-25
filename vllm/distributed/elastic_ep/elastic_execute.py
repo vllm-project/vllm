@@ -55,6 +55,7 @@ from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+from vllm.v1.worker.gpu.eplb_utils import preserve_serving_state
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
@@ -711,14 +712,19 @@ class ElasticEPScalingExecutor:
         runner = self.worker.model_runner
         all2all_manager = get_ep_all2all_manager()
         reuse_kernel = self._can_reuse_fused_moe_kernel()
+        serving_state = (
+            preserve_serving_state(runner)
+            if self.worker.use_v2_model_runner
+            else runner.preserve_serving_state()
+        )
         with (
             skip_dp_coordination() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
             self._suppress_eplb(),
-            runner.preserve_serving_state(),
+            serving_state,
         ):
-            runner.warm_up_workspace()
+            runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
             self.worker.compile_or_warm_up_model()
 
         lock_workspace()

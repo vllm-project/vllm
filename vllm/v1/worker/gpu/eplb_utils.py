@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
 from typing import Any
 
@@ -35,6 +36,27 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
         return wrapper
 
     return decorator
+
+
+@contextmanager
+def preserve_serving_state(model_runner: Any) -> Iterator[None]:
+    """Keep the elastic EP warmup out of the request pool and the KV cache."""
+    # After the drain only parked streaming sessions still hold a slot, and
+    # those are re-added from NewRequestData on their next chunk.
+    _remove_all_requests(model_runner)
+    model_runner.block_tables.redirect_writes_to_null_block = True
+    try:
+        yield
+    finally:
+        _remove_all_requests(model_runner)
+        model_runner.block_tables.redirect_writes_to_null_block = False
+        if model_runner.kv_block_zeroer is not None:
+            model_runner.kv_block_zeroer.zero_block_ids([0])
+
+
+def _remove_all_requests(model_runner: Any) -> None:
+    for req_id in list(model_runner.req_states.req_id_to_index):
+        model_runner._remove_request(req_id)
 
 
 class EPLBController:

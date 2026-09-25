@@ -4850,9 +4850,6 @@ class GPUModelRunner(
                 bt.block_table.gpu.copy_(saved_gpu)
                 bt.block_table.cpu.copy_(saved_cpu)
 
-    def warm_up_workspace(self) -> None:
-        self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)
-
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
