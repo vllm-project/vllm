@@ -564,7 +564,7 @@ steps:
   - tests/kernels/attention/test_cache.py
   - tests/kernels/quantization/nvfp4_utils.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
-  - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+  - tests/kernels/mamba/gdn/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
@@ -611,7 +611,7 @@ steps:
           pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
           pytest -v -s tests/kernels/moe/test_flashinfer.py
           pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
-          pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+          pytest -v -s tests/kernels/mamba/gdn/test_gdn_prefill_cutedsl.py
           pytest -v -s tests/kernels/attention/test_minimax_m3.py
           ;;
         *)
