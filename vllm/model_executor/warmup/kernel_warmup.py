@@ -311,6 +311,26 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
 
 
+def _flashinfer_deferred_moe_token_counts(
+    runner: "GPUModelRunner",
+) -> tuple[int, ...]:
+    """Return bounded token counts that exercise deferred MoE finalization."""
+    from vllm.model_executor.layers.fused_moe import MoERunner
+
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    token_counts: list[int] = []
+    for module in runner.get_model().modules():
+        if not isinstance(module, MoERunner):
+            continue
+
+        moe_config = module.moe_config
+        max_deferred_tokens = moe_config.defer_moe_finalize_max_num_tokens
+        if moe_config.use_deferred_moe_finalize and max_deferred_tokens > 0:
+            token_counts.append(min(max_tokens, max_deferred_tokens))
+
+    return tuple(dict.fromkeys(token_counts))
+
+
 def _flashinfer_autotune_token_counts(
     runner: "GPUModelRunner", *, include_bf16: bool = True
 ) -> tuple[int, ...]:
@@ -324,7 +344,8 @@ def _flashinfer_autotune_token_counts(
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
         token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
-    return tuple(token_counts)
+    token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
+    return tuple(dict.fromkeys(token_counts))
 
 
 def _run_flashinfer_autotune_dummy_runs(

@@ -462,7 +462,9 @@ class FusedMoEExperts(ABC):
     # the active experts kernel.
     consumes_expert_mask: bool = False
     # Stop after GEMM2 on every call and return an UnfinalizedMoEOutput. Set
-    # once, through FusedMoEKernel.enable_deferred_moe_finalize.
+    # once, through FusedMoEKernel.enable_deferred_moe_finalize -- unlike
+    # moe_config.should_defer_moe_finalize, a per-call choice that only the
+    # monolithic experts read.
     defer_moe_finalize: bool = False
 
     def __init__(

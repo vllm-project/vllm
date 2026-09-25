@@ -282,7 +282,11 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
         num_tokens = hidden_states.shape[0]
-        defer = self.defer_moe_finalize
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.defer_moe_finalize or self.moe_config.should_defer_moe_finalize(
+            num_tokens
+        )
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=num_tokens,

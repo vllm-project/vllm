@@ -230,7 +230,9 @@ class TrtLlmMxfp4ExpertsMonolithic(
             x_quant = hidden_states
             x_scale = None
         num_tokens = hidden_states.shape[0]
-        defer = self.defer_moe_finalize
+        defer = self.defer_moe_finalize or self.moe_config.should_defer_moe_finalize(
+            num_tokens
+        )
         finalized_output = None
         if not defer:
             finalized_output = torch.empty(
