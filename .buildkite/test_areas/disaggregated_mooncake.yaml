@@ -71,7 +71,7 @@ steps:
     - vllm/v1/worker/gpu/model_states/
     - vllm/v1/worker/gpu/mm/
     - tests/v1/cudagraph/test_encoder_cudagraph.py
-    - tests/models/multimodal/generation/test_vit_cudagraph.py
+    - tests/models/multimodal/standard/_vit_cudagraph.py
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/
     - requirements/kv_connectors.txt
@@ -138,7 +138,7 @@ steps:
       - vllm/v1/worker/gpu/model_states/
       - vllm/v1/worker/gpu/mm/
       - tests/v1/cudagraph/test_encoder_cudagraph.py
-      - tests/models/multimodal/generation/test_vit_cudagraph.py
+      - tests/models/multimodal/standard/_vit_cudagraph.py
       - examples/disaggregated/disaggregated_encoder/
       - tests/v1/ec_connector/
       - requirements/kv_connectors.txt

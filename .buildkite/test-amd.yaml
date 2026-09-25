@@ -2212,21 +2212,6 @@ steps:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
-- label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper" # TBD
-  timeout_in_minutes: 70
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/multimodal
-  commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/omni/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/standard/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/standard/test_memory_leak.py --ignore models/multimodal/standard/test_vit_cudagraph.py --ignore models/multimodal/processing
-  - pytest -v -s models/multimodal/standard/test_vit_cudagraph.py -m core_model
-  - pytest -v -s models/multimodal/standard/test_memory_leak.py -m core_model
-  - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/test_whisper.py -m core_model
-
 - label: ":amd: (MI300) Multimodal Processor Shard %N" # TBD
   timeout_in_minutes: 115
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -3294,7 +3279,7 @@ steps:
   - vllm/v1/worker/gpu/model_states/
   - vllm/v1/worker/gpu/mm/
   - tests/v1/cudagraph/test_encoder_cudagraph.py
-  - tests/models/multimodal/generation/test_vit_cudagraph.py
+  - tests/models/multimodal/standard/_vit_cudagraph.py
   - examples/disaggregated/disaggregated_encoder/
   - tests/v1/ec_connector/
   - requirements/kv_connectors.txt
@@ -4914,7 +4899,7 @@ steps:
   commands:
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/omni/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/standard/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/standard/test_memory_leak.py --ignore models/multimodal/standard/test_vit_cudagraph.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/standard/test_vit_cudagraph.py -m core_model
-  - pytest -v -s models/multimodal/standard/test_memory_leak.py -m core_model
+  - pytest models/multimodal/standard/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/test_whisper.py -m core_model
 
 #-----------------------------------------------------  mi355 · models / quantized  -----------------------------------------------------#
