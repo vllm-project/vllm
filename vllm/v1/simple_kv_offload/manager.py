@@ -49,8 +49,6 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadWorkerMetadata,
 )
 from vllm.v1.simple_kv_offload.metrics import (
-    LOAD_PHASE_COMPLETED,
-    LOAD_PHASE_ISSUED,
     OUTCOME_TO_FIELD,
     MetricName,
     SimpleCPUOffloadStats,
@@ -269,7 +267,6 @@ class SimpleCPUOffloadScheduler:
         self.boundary_store_stats = BoundaryStoreStats()
         # Interval stats state drained by get_stats()
         self._boundary_stats_snapshot = BoundaryStoreStats()
-        self._interval_load_blocks_issued = 0
         self._interval_load_blocks_completed = 0
 
         # For TP/PP: track partial store completions across steps.
@@ -558,7 +555,6 @@ class SimpleCPUOffloadScheduler:
             for req_id in load_req_ids:
                 self._reqs_to_load[req_id].load_event = load_event
             self._load_event_to_reqs[load_event] = load_req_ids
-            self._interval_load_blocks_issued += len(load_gpu)
 
         result = SimpleCPUOffloadMetadata(
             load_event=load_event,
@@ -989,18 +985,10 @@ class SimpleCPUOffloadScheduler:
                 stats.increase_counter(MetricName.SAVE_OUTCOMES, delta, (outcome,))
         self._boundary_stats_snapshot = replace(current)
 
-        if self._interval_load_blocks_issued:
-            stats.increase_counter(
-                MetricName.LOAD_BLOCKS,
-                self._interval_load_blocks_issued,
-                (LOAD_PHASE_ISSUED,),
-            )
-            self._interval_load_blocks_issued = 0
         if self._interval_load_blocks_completed:
             stats.increase_counter(
                 MetricName.LOAD_BLOCKS,
                 self._interval_load_blocks_completed,
-                (LOAD_PHASE_COMPLETED,),
             )
             self._interval_load_blocks_completed = 0
 

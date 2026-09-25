@@ -49,7 +49,7 @@ The following metrics are exposed:
 
 These metrics are exposed when the `SimpleCPUOffloadConnector` KV connector
 is configured (e.g. `--kv-transfer-config='{"kv_connector":
-"SimpleCPUOffloadConnector", "kv_role": "kv_both", "extra_config":
+"SimpleCPUOffloadConnector", "kv_role": "kv_both", "kv_connector_extra_config":
 {"kv_offload_backend": "disk", "disk_path": "/mnt/nvme/kv"}}'`). They are
 updated once per engine step.
 

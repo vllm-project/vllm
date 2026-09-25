@@ -110,14 +110,14 @@ def test_build_kv_connector_stats_none_and_empty() -> None:
 def test_stats_round_trip_through_serialized_dict() -> None:
     stats = SimpleCPUOffloadStats()
     stats.increase_counter(SAVE_OUTCOMES, 3, ("stored",))
-    stats.increase_counter(LOAD_BLOCKS, 4, ("issued",))
+    stats.increase_counter(LOAD_BLOCKS, 4)
     stats.set_gauge(USED_BLOCKS, 7)
     stats.set_gauge(INFO, 1, ("cpu", "false", "false", "64"))
 
     rebuilt = SimpleCPUOffloadConnector.build_kv_connector_stats(data=stats.to_dict())
     assert isinstance(rebuilt, SimpleCPUOffloadStats)
     assert _values(rebuilt, SAVE_OUTCOMES) == {("stored",): 3}
-    assert _values(rebuilt, LOAD_BLOCKS) == {("issued",): 4}
+    assert _values(rebuilt, LOAD_BLOCKS) == {(): 4}
     assert _values(rebuilt, USED_BLOCKS) == {(): 7}
     assert _values(rebuilt, INFO) == {("cpu", "false", "false", "64"): 1}
 
@@ -144,24 +144,24 @@ def test_stats_aggregate_merges_types_from_other() -> None:
     stats1.set_gauge(USED_BLOCKS, 1)
 
     stats2 = SimpleCPUOffloadStats()
-    stats2.increase_counter(LOAD_BLOCKS, 2, ("issued",))
+    stats2.increase_counter(LOAD_BLOCKS, 2)
 
     stats1.aggregate(stats2)
     assert stats1.data[_StatsKey.TYPES][LOAD_BLOCKS] == _MetricType.COUNTER
-    assert _values(stats1, LOAD_BLOCKS) == {("issued",): 2}
+    assert _values(stats1, LOAD_BLOCKS) == {(): 2}
 
 
 def test_stats_reduce_and_reset() -> None:
     stats = SimpleCPUOffloadStats()
     stats.increase_counter(SAVE_OUTCOMES, 3, ("stored",))
     stats.set_gauge(PENDING_STORE_BLOCKS, 4)
-    stats.increase_counter(LOAD_BLOCKS, 9, ("issued",))
+    stats.increase_counter(LOAD_BLOCKS, 9)
     stats.set_gauge(INFO, 1, ("cpu", "false", "false", "64"))
 
     reduced = stats.reduce()
     assert reduced[f"{SAVE_OUTCOMES}:{('stored',)}"] == 3
     assert reduced[PENDING_STORE_BLOCKS] == 4
-    assert reduced[f"{LOAD_BLOCKS}:{('issued',)}"] == 9
+    assert reduced[LOAD_BLOCKS] == 9
     assert not any(key.startswith(INFO) for key in reduced)
 
     stats.reset()
@@ -210,11 +210,7 @@ def test_prom_metrics_registers_tier1_metrics() -> None:
         "engine",
         "outcome",
     ]
-    assert defs[LOAD_BLOCKS].kwargs["labelnames"] == [
-        "model_name",
-        "engine",
-        "phase",
-    ]
+    assert defs[LOAD_BLOCKS].kwargs["labelnames"] == ["model_name", "engine"]
     assert defs[INFO].kwargs["labelnames"] == [
         "model_name",
         "engine",
@@ -241,7 +237,7 @@ def test_prom_metrics_observe_routes_each_series() -> None:
             },
             data={
                 SAVE_OUTCOMES: {("stored",): 3},
-                LOAD_BLOCKS: {("issued",): 4, ("completed",): 2},
+                LOAD_BLOCKS: {(): 4},
                 USED_BLOCKS: {(): 5},
                 PENDING_STORE_BLOCKS: {(): 1},
                 INFO: {("cpu", "false", "false", "64"): 1},
@@ -250,8 +246,7 @@ def test_prom_metrics_observe_routes_each_series() -> None:
     )
 
     assert prom._metrics[(0, SAVE_OUTCOMES, ("stored",))].increments == [3]
-    assert prom._metrics[(0, LOAD_BLOCKS, ("issued",))].increments == [4]
-    assert prom._metrics[(0, LOAD_BLOCKS, ("completed",))].increments == [2]
+    assert prom._metrics[(0, LOAD_BLOCKS, ())].increments == [4]
     assert prom._metrics[(0, USED_BLOCKS, ())].set_values == [5]
     assert prom._metrics[(0, PENDING_STORE_BLOCKS, ())].set_values == [1]
     assert prom._metrics[(0, INFO, ("cpu", "false", "false", "64"))].set_values == [1]
@@ -414,7 +409,7 @@ def test_manager_info_labels_page_cache_false_for_cpu_backend() -> None:
     assert set(_values(stats, INFO)) == {sched._info_labelvalues}
 
 
-def test_manager_counts_load_blocks_issued_and_completed() -> None:
+def test_manager_counts_load_blocks_completed() -> None:
     fixture = make_scheduler(num_cpu_blocks=8)
     sched = fixture.scheduler
 
@@ -430,18 +425,18 @@ def test_manager_counts_load_blocks_issued_and_completed() -> None:
 
     sched.build_connector_meta(make_scheduler_output({}))
     stats = sched.get_stats()
-    assert _values(stats, LOAD_BLOCKS) == {("issued",): 2}
+    assert LOAD_BLOCKS not in stats.data[_StatsKey.DATA]
 
     sched.update_connector_output(
         KVConnectorOutput(finished_recving={request.request_id})
     )
     stats = sched.get_stats()
-    assert _values(stats, LOAD_BLOCKS) == {("completed",): 2}
+    assert _values(stats, LOAD_BLOCKS) == {(): 2}
 
 
 def test_manager_abandoned_load_counts_as_completed_after_reset() -> None:
-    """Pins issued/completed balance: loads abandoned by reset() that still
-    finish on the worker are credited to the completed counter.
+    """Loads abandoned by reset() that still finish on the worker are
+    counted as loaded blocks.
     """
     fixture = make_scheduler(num_cpu_blocks=8)
     sched = fixture.scheduler
@@ -458,7 +453,7 @@ def test_manager_abandoned_load_counts_as_completed_after_reset() -> None:
 
     sched.build_connector_meta(make_scheduler_output({}))
     stats = sched.get_stats()
-    assert _values(stats, LOAD_BLOCKS) == {("issued",): 2}
+    assert LOAD_BLOCKS not in stats.data[_StatsKey.DATA]
 
     assert sched.reset() is False
     assert set(sched._abandoned_reqs_to_load) == {request.request_id}
@@ -468,4 +463,4 @@ def test_manager_abandoned_load_counts_as_completed_after_reset() -> None:
     )
     assert sched._abandoned_reqs_to_load == {}
     stats = sched.get_stats()
-    assert _values(stats, LOAD_BLOCKS) == {("completed",): 2}
+    assert _values(stats, LOAD_BLOCKS) == {(): 2}

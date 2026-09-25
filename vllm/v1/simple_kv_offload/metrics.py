@@ -41,9 +41,6 @@ OUTCOME_TO_FIELD = {
     "skipped_in_flight": "skipped_in_flight",
 }
 
-LOAD_PHASE_ISSUED = "issued"
-LOAD_PHASE_COMPLETED = "completed"
-
 INFO_LABELS = ["backend", "page_cache", "lazy_offload", "capacity_blocks"]
 
 
@@ -197,11 +194,11 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
         self._counter_load_blocks = self._counter_cls(
             name="vllm:simple_kv_offload_load_blocks_total",
             documentation=(
-                "KV blocks involved in offload loads by phase: issued when "
-                "dispatched to workers, completed when the load finished "
-                "successfully."
+                "KV blocks restored to GPU from the offload pool, counted "
+                "when a load finishes. This is prefill work avoided "
+                "through offload cache hits."
             ),
-            labelnames=self._labelnames + ["phase"],
+            labelnames=self._labelnames,
         )
         self._gauge_used_blocks = self._gauge_cls(
             name="vllm:simple_kv_offload_used_blocks",
@@ -246,7 +243,7 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
         }
         self._num_label_values: dict[str, int] = {
             MetricName.SAVE_OUTCOMES: 1,
-            MetricName.LOAD_BLOCKS: 1,
+            MetricName.LOAD_BLOCKS: 0,
             MetricName.USED_BLOCKS: 0,
             MetricName.PENDING_STORE_BLOCKS: 0,
             MetricName.INFO: len(INFO_LABELS),
