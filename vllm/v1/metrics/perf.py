@@ -453,6 +453,29 @@ class SlidingWindowAttentionParser(Parser):
         return args
 
 
+class LinearAttentionLayerParser(Parser):
+    """Counts linear-attention layers from the per-layer type list.
+    Provides: num_linear_attn_layers
+
+    Hybrid models such as Qwen3-Next and Qwen3.5 mark their Gated DeltaNet
+    layers as ``"linear_attention"`` in ``layer_types``. Unlike sliding-window
+    layers, these are present whether or not ``sliding_window`` is set.
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Count ``"linear_attention"`` entries in ``layer_types``."""
+        hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        layer_types = getattr(hf_text_config, "layer_types", None)
+        args.num_linear_attn_layers = 0
+        if isinstance(layer_types, list):
+            args.num_linear_attn_layers = sum(
+                1
+                for lt in layer_types[: args.num_hidden_layers]
+                if lt == "linear_attention"
+            )
+        return args
+
+
 class AttentionQuantizationConfigParser(Parser):
     """Parses quantization configuration for attention layers.
     Overrides: weight_byte_size
@@ -511,6 +534,9 @@ class AttentionMetrics(ComponentMetrics):
     sliding_window: int | None = Field(None)
     num_swa_layers: int = Field(0, ge=0)
 
+    # From LinearAttentionLayerParser
+    num_linear_attn_layers: int = Field(0, ge=0)
+
     @classmethod
     def component_type(cls) -> str:
         """Return the component registry key for standard (non-MLA) attention."""
@@ -529,11 +555,15 @@ class AttentionMetrics(ComponentMetrics):
             BaseConfigParser(),
             BaseAttentionConfigParser(),
             SlidingWindowAttentionParser(),
+            LinearAttentionLayerParser(),
             AttentionQuantizationConfigParser(),
         )
 
     def _layer_counts(self, per_gpu: bool) -> tuple[float, float, float]:
         """Return ``(L, L_full, L_swa)``, the layer counts to bill for.
+
+        ``L`` counts only softmax-attention layers: linear-attention layers of
+        hybrid models are billed by ``LinearAttentionMetrics`` instead.
 
         Per-GPU counts divide each global count by ``pp_size`` independently.
         Deriving the sublayer split after reducing ``L`` instead rounds a
@@ -549,7 +579,7 @@ class AttentionMetrics(ComponentMetrics):
         whose layers do not divide evenly across stages has no single integer
         answer here.
         """
-        L = float(self.num_hidden_layers)
+        L = float(self.num_hidden_layers - self.num_linear_attn_layers)
         L_swa = float(self.num_swa_layers)
         L_full = L - L_swa
 
@@ -728,6 +758,178 @@ class AttentionMetrics(ComponentMetrics):
             "qkv_output": int(T * (q + 2 * kv) * d * self.activation_byte_size * L),
             "kv_cache": int(2 * T * kv * d * self.cache_byte_size * L),
             "out_output": int(T * D * self.activation_byte_size * L),
+        }
+
+
+#### Linear Attention ####
+
+
+class GatedDeltaNetConfigParser(Parser):
+    """Parses Gated DeltaNet (linear attention) configuration.
+    Provides: linear_num_key_heads, linear_num_value_heads, linear_key_head_dim,
+    linear_value_head_dim, linear_conv_kernel_dim, conv_state_byte_size,
+    recurrent_state_byte_size
+
+    Raises InvalidComponent when the model has no linear-attention layers, so
+    LinearAttentionMetrics is skipped for everything else.
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Parse GDN head layout and the dtypes of its per-request state."""
+        if args.num_linear_attn_layers == 0:
+            raise InvalidComponent("Model has no linear-attention layers")
+
+        cfg = vllm_config.model_config.hf_text_config
+        args.linear_num_key_heads = get_required(cfg, "linear_num_key_heads")
+        args.linear_num_value_heads = get_required(cfg, "linear_num_value_heads")
+        args.linear_key_head_dim = get_required(cfg, "linear_key_head_dim")
+        args.linear_value_head_dim = get_required(cfg, "linear_value_head_dim")
+        args.linear_conv_kernel_dim = get_required(cfg, "linear_conv_kernel_dim")
+
+        # Same dtype resolution as MambaStateDtypeCalculator._mamba_state_dtype.
+        model_dtype = vllm_config.model_config.dtype
+        cache_config = vllm_config.cache_config
+        conv_dtype = get_kv_cache_torch_dtype(
+            cache_config.mamba_cache_dtype, model_dtype
+        )
+        ssm_cache_dtype = cache_config.mamba_ssm_cache_dtype
+        recurrent_dtype = (
+            conv_dtype
+            if ssm_cache_dtype == "auto"
+            else STR_DTYPE_TO_TORCH_DTYPE[ssm_cache_dtype]
+        )
+        args.conv_state_byte_size = get_dtype_size(conv_dtype)
+        args.recurrent_state_byte_size = get_dtype_size(recurrent_dtype)
+
+        return args
+
+
+class LinearAttentionMetrics(ComponentMetrics):
+    """Gated DeltaNet layers of hybrid models (Qwen3-Next, Qwen3.5).
+
+    Each step reads the layer weights and, per scheduled request, reads and
+    writes a fixed-size conv state and recurrent state. Nothing grows with
+    context length.
+    """
+
+    # From BaseConfigParser
+    hidden_size: int = Field(..., gt=0)
+    activation_byte_size: int = Field(..., gt=0)
+    tp_size: int = Field(..., gt=0)
+    pp_size: int = Field(..., gt=0)
+
+    # From LinearAttentionLayerParser
+    num_linear_attn_layers: int = Field(..., gt=0)
+
+    # From GatedDeltaNetConfigParser
+    linear_num_key_heads: int = Field(..., gt=0)
+    linear_num_value_heads: int = Field(..., gt=0)
+    linear_key_head_dim: int = Field(..., gt=0)
+    linear_value_head_dim: int = Field(..., gt=0)
+    linear_conv_kernel_dim: int = Field(..., gt=0)
+    conv_state_byte_size: int = Field(..., gt=0)
+    recurrent_state_byte_size: int = Field(..., gt=0)
+
+    # From BaseConfigParser, overridden by AttentionQuantizationConfigParser
+    weight_byte_size: int | float = Field(..., gt=0)
+
+    @classmethod
+    def component_type(cls) -> str:
+        """Return the component registry key for linear-attention layers."""
+        return "linear_attn"
+
+    @classmethod
+    def get_parser(cls) -> ParserChain:
+        """Return the parser chain for LinearAttentionMetrics."""
+        return ParserChain(
+            BaseConfigParser(),
+            LinearAttentionLayerParser(),
+            GatedDeltaNetConfigParser(),
+            AttentionQuantizationConfigParser(),
+        )
+
+    def _dims(self, per_gpu: bool) -> tuple[float, int, int, int, int, int]:
+        """Return ``(L, Hv, key_dim, value_dim, conv_dim, in_proj_dim)``.
+
+        Heads are split across TP ranks (see
+        ``MambaStateShapeCalculator.gated_delta_net_state_shape``); the layer
+        count is divided by ``pp_size`` as in ``AttentionMetrics._layer_counts``.
+        """
+        L = float(self.num_linear_attn_layers)
+        Hk, Hv = self.linear_num_key_heads, self.linear_num_value_heads
+        if per_gpu:
+            L /= self.pp_size
+            Hk = max(1, Hk // self.tp_size)
+            Hv = max(1, Hv // self.tp_size)
+        key_dim = Hk * self.linear_key_head_dim
+        value_dim = Hv * self.linear_value_head_dim
+        conv_dim = 2 * key_dim + value_dim
+        # in_proj_qkvz (q, k, v, z) + in_proj_ba (b, a)
+        in_proj_dim = 2 * key_dim + 2 * value_dim + 2 * Hv
+        return L, Hv, key_dim, value_dim, conv_dim, in_proj_dim
+
+    def _state_bytes_per_request(self, Hv: int, conv_dim: int) -> int:
+        """Bytes of conv state plus recurrent state held by one request."""
+        conv = conv_dim * (self.linear_conv_kernel_dim - 1) * self.conv_state_byte_size
+        recurrent = (
+            Hv
+            * self.linear_value_head_dim
+            * self.linear_key_head_dim
+            * self.recurrent_state_byte_size
+        )
+        return conv + recurrent
+
+    def get_num_flops_breakdown(
+        self, ctx: ExecutionContext, per_gpu: bool = True
+    ) -> dict[str, int]:
+        """Compute FLOPs for linear-attention layers.
+
+        The recurrent term counts three ``dk x dv`` matrix-vector products per
+        token and value head (retrieve, delta update, readout); gating and
+        normalization are ignored.
+        """
+        D, T = self.hidden_size, ctx.total_num_tokens()
+        L, Hv, _, value_dim, conv_dim, in_proj_dim = self._dims(per_gpu)
+        dk, dv = self.linear_key_head_dim, self.linear_value_head_dim
+
+        return {
+            "in_proj": int(2 * T * D * in_proj_dim * L),
+            "conv": int(2 * T * conv_dim * self.linear_conv_kernel_dim * L),
+            "recurrent": int(3 * 2 * T * Hv * dk * dv * L),
+            "out_proj": int(2 * T * value_dim * D * L),
+        }
+
+    def get_read_bytes_breakdown(
+        self, ctx: ExecutionContext, per_gpu: bool = True
+    ) -> dict[str, int]:
+        """Compute read traffic: weights, activations, and per-request state."""
+        D, T = self.hidden_size, ctx.total_num_tokens()
+        L, Hv, _, value_dim, conv_dim, in_proj_dim = self._dims(per_gpu)
+        R = ctx.num_prefill_requests + ctx.num_decode_requests
+        act, w = self.activation_byte_size, self.weight_byte_size
+
+        return {
+            "in_proj_input": int(T * D * act * L),
+            "in_proj_weight": int(D * in_proj_dim * w * L),
+            "conv_weight": int(conv_dim * self.linear_conv_kernel_dim * w * L),
+            "state": int(R * self._state_bytes_per_request(Hv, conv_dim) * L),
+            "out_input": int(T * value_dim * act * L),
+            "out_weight": int(value_dim * D * w * L),
+        }
+
+    def get_write_bytes_breakdown(
+        self, ctx: ExecutionContext, per_gpu: bool = True
+    ) -> dict[str, int]:
+        """Compute write traffic: activations and the updated per-request state."""
+        D, T = self.hidden_size, ctx.total_num_tokens()
+        L, Hv, _, _, conv_dim, in_proj_dim = self._dims(per_gpu)
+        R = ctx.num_prefill_requests + ctx.num_decode_requests
+        act = self.activation_byte_size
+
+        return {
+            "in_proj_output": int(T * in_proj_dim * act * L),
+            "state": int(R * self._state_bytes_per_request(Hv, conv_dim) * L),
+            "out_output": int(T * D * act * L),
         }
 
 
