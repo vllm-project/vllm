@@ -53,6 +53,52 @@ def format_summary(capture: OpCapture) -> str:
     return "\n".join(lines)
 
 
+def format_gaps(capture: OpCapture) -> str | None:
+    """Render what would keep the model from running on this platform.
+
+    Returns:
+        The section, or None when the capture found no gaps.
+
+    """
+    lines = []
+    if capture.failure is not None:
+        failure = capture.failure
+        where = failure.module or "top level"
+        if module_type := capture.module_types.get(failure.module):
+            where = f"{where} [{module_type}]"
+        lines += [
+            f"  Forward pass stopped in {where}, after {len(capture.ops)} ops:",
+            f"    {failure.error}",
+        ]
+        if failure.location:
+            lines.append(f"    at {failure.location}")
+        if placeholder_ops := capture.placeholder_ops:
+            lines.append(
+                f"    may be a knock-on effect of the placeholder for "
+                f"{placeholder_ops[0].name}, if it is shape-related"
+            )
+    if capture.missing_kernels:
+        platform = capture.selection.platform
+        lines.append(f"  No {platform} kernel registered (would fail on device):")
+        lines += [f"    {name}" for name in capture.missing_kernels]
+    if placeholders := Counter(op.name for op in capture.placeholder_ops):
+        lines.append(
+            "  Output shapes unknown, placeholders used (add to OVERRIDES; "
+            "shapes after the first are guesses):"
+        )
+        lines += [f"    {name} (x{count})" for name, count in placeholders.items()]
+    if capture.materialized:
+        platform = capture.selection.platform
+        lines.append(
+            f"  Placed on {platform} despite the meta device (explicit `device=` "
+            f"in model code), {len(capture.materialized)} tensors, e.g.:"
+        )
+        lines += [f"    {name}" for name in capture.materialized[:3]]
+    if not lines:
+        return None
+    return "\n".join(["Platform gaps", *lines])
+
+
 @dataclass
 class _Node:
     """One module in the call tree, holding the ops it issued directly."""
@@ -122,12 +168,13 @@ def format_tree(capture: OpCapture, show_shapes: bool = True) -> str:
 
 
 def format_report(capture: OpCapture, show_shapes: bool = False) -> str:
-    """Render the full report: selection metadata, tree, and summary table."""
+    """Render the full report: selection metadata, gaps, tree, and summary."""
     sections = [
         format_selection(capture.selection),
+        format_gaps(capture),
         format_tree(capture, show_shapes=show_shapes),
         format_summary(capture),
     ]
     if capture.trace_path is not None:
         sections.append(f"Chakra execution trace: {capture.trace_path}")
-    return "\n\n".join(sections)
+    return "\n\n".join(section for section in sections if section)

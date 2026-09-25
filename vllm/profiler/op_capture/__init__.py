@@ -15,6 +15,7 @@ themselves rather than being decomposed.
 
 from vllm.profiler.op_capture.capture import (
     BatchSpec,
+    CaptureFailure,
     ForwardHarness,
     OpCapture,
     SelectionMetadata,
@@ -37,6 +38,7 @@ from vllm.profiler.op_capture.trace import (
 
 __all__ = [
     "BatchSpec",
+    "CaptureFailure",
     "ForwardHarness",
     "OpCapture",
     "OpRecorder",

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Records the operators a model dispatches, attributed to the issuing module."""
 
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,7 +14,11 @@ from torch.nn.modules.module import (
 )
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from vllm.profiler.op_capture.meta_ops import LEAF_NAMESPACES
+from vllm.profiler.op_capture.meta_ops import (
+    LEAF_NAMESPACES,
+    UnsupportedMetaOpError,
+    placeholder_outputs,
+)
 from vllm.utils.torch_utils import DIRECT_REGISTERED_OPS
 
 _DTYPE_ABBREVIATIONS = {
@@ -79,6 +84,8 @@ class RecordedOp:
     another custom op's kernel issued it, and so on."""
     inputs: tuple[str, ...] = ()
     outputs: tuple[str, ...] = ()
+    placeholder: bool = False
+    """Whether the outputs are placeholders, the op's shapes being unknown."""
 
     @property
     def is_custom(self) -> bool:
@@ -107,10 +114,14 @@ class OpRecorder(TorchDispatchMode):
         model: Model whose `named_modules()` supplies the dotted module paths.
         dispatch_key: Dispatch key the model's kernels are registered under,
             `"Meta"` for a meta-device capture.
+        keep_going: Give an op that raises `UnsupportedMetaOpError`
+            placeholder outputs and carry on, instead of propagating the error.
 
     """
 
-    def __init__(self, model: nn.Module, dispatch_key: str = "Meta"):
+    def __init__(
+        self, model: nn.Module, dispatch_key: str = "Meta", keep_going: bool = False
+    ):
         super().__init__()
         self.ops: list[RecordedOp] = []
         self.module_types: dict[str, str] = {}
@@ -122,6 +133,8 @@ class OpRecorder(TorchDispatchMode):
         self._children: dict[int, dict[int, str]] = {}
         self._stack: list[tuple[nn.Module, str, str]] = []
         self._handles: list[Any] = []
+        self._keep_going = keep_going
+        self._raised_in: list[tuple[BaseException, str]] = []
         self._entered = 0
         self._depth = 0
 
@@ -170,7 +183,18 @@ class OpRecorder(TorchDispatchMode):
 
     def _exit_module(self, module: nn.Module, args: Any, output: Any) -> None:
         if self._stack and self._stack[-1][0] is module:
-            self._stack.pop()
+            _, path, _ = self._stack.pop()
+            # Called while the exception is still being handled, innermost
+            # module first.
+            exception = sys.exc_info()[1]
+            if exception is not None and all(
+                seen is not exception for seen, _ in self._raised_in
+            ):
+                self._raised_in.append((exception, path))
+
+    def module_raising(self, exception: BaseException) -> str | None:
+        """Dotted path of the innermost module `exception` propagated out of."""
+        return next((path for seen, path in self._raised_in if seen is exception), None)
 
     def record_launch(
         self, name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -228,7 +252,13 @@ class OpRecorder(TorchDispatchMode):
             finally:
                 self._depth -= 1
         else:
-            result = func(*args, **kwargs)
+            try:
+                result = func(*args, **kwargs)
+            except UnsupportedMetaOpError:
+                if not self._keep_going:
+                    raise
+                result = placeholder_outputs(func._schema, args, kwargs)
+                record.placeholder = True
         result = _marshalable(result)
         record.outputs = () if result is None else (describe(result),)
         return result

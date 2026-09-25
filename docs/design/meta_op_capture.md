@@ -106,6 +106,28 @@ MATCH
 
 Normalization keeps operator names, operand shapes and types, and drops run-specific ids. It also drops everything issued from inside a native or compiled operator, since meta shape inference and real kernels do different work there.
 
+### Finding what blocks a model on this platform
+
+A capture normally stops at the first problem. `--keep-going` (`keep_going=True` from Python) collects them in one run and adds a **Platform gaps** section to the report. Here DeepSeek-V4-Pro was captured with an older `vllm_xpu_kernels` than `requirements/xpu.txt` pins:
+
+```text
+Platform gaps
+  Forward pass stopped in model.layers.0.ffn.experts [MoERunner], after 162 ops:
+    RuntimeError: _moe_C::topk_softplus_sqrt() expected at most 10 argument(s) but received 12 argument(s). ...
+    at vllm/_custom_ops.py:2356 in topk_hash_softplus_sqrt
+  Placed on xpu despite the meta device (explicit `device=` in model code), 91 tensors, e.g.:
+    model.layers.0.attn.compressor.ape
+```
+
+It lists four kinds of gap:
+
+- **Where the forward pass stopped.** Model code failed outside any kernel, for example on an op the platform's extension does not define or a call with the wrong arguments. The report gives the module, the error and the vLLM source line. The ops recorded up to that point are kept.
+- **Ops with no kernel for this platform.** A meta capture never runs a real kernel, so an op registered only for another backend would otherwise pass unnoticed. Every captured op is checked against the platform's dispatch key (`capture.missing_kernels`).
+- **Ops with unknown output shapes.** These get placeholder outputs shaped like their first tensor argument and are marked `placeholder`. Shapes after the first placeholder are guesses, so a shape error that follows one may be a knock-on effect, and the report says so. Add the op to `OVERRIDES` and rerun.
+- **Tensors model code placed on the real device**, by passing `device=` explicitly instead of following the default device (`capture.materialized`).
+
+A model that fails to build, for example because its implementation needs another platform, still raises, since nothing is recorded before that point.
+
 ### From Python
 
 ```python
@@ -149,3 +171,6 @@ print([op.name for op in capture.custom_ops])
 
 `ValueError: ForwardHarness runs in a single process ...` or `... exceeds the scheduler budget ...`
 : Set the parallel sizes to 1, or raise `max_num_batched_tokens` / `max_num_seqs` in `engine_args`.
+
+`AssertionError: Tensors left the meta device: [...]`
+: Model code created these parameters or buffers with an explicit `device=`, so they were allocated on the accelerator. Construct them on the default device instead. `--keep-going` reports them without failing.

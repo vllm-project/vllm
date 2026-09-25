@@ -12,11 +12,13 @@ from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.meta_loader import MetaModelLoader
+from vllm.model_executor.models.qwen2 import Qwen2MLP
 from vllm.platforms import current_platform
 from vllm.profiler.op_capture import (
     BatchSpec,
     ForwardHarness,
     OpCapture,
+    OpRecorder,
     UnsupportedMetaOpError,
     capture_model_ops,
     compare_devices,
@@ -24,6 +26,7 @@ from vllm.profiler.op_capture import (
     meta_ops,
     register_meta_impls,
 )
+from vllm.profiler.op_capture import recorder as recorder_module
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -31,13 +34,13 @@ LAYER_PREFIX = "model.layers."
 ATTENTION_OP = "vllm::unified_attention_with_output"
 
 
-def _capture(num_hidden_layers: int) -> OpCapture:
+def _capture(num_hidden_layers: int, keep_going: bool = False) -> OpCapture:
     engine_args = EngineArgs(
         model=MODEL,
         max_model_len=1024,
         hf_overrides={"num_hidden_layers": num_hidden_layers},
     )
-    return capture_model_ops(MODEL, engine_args=engine_args)
+    return capture_model_ops(MODEL, engine_args=engine_args, keep_going=keep_going)
 
 
 def _ops_by_layer(capture: OpCapture) -> dict[str, list[str]]:
@@ -59,9 +62,9 @@ def capture() -> OpCapture:
 def leaf_library(monkeypatch) -> torch.library.Library:
     """A namespace `register_meta_impls` treats as a compiled extension."""
     namespace = "_test_leaf_C"
-    monkeypatch.setattr(
-        meta_ops, "LEAF_NAMESPACES", meta_ops.LEAF_NAMESPACES | {namespace}
-    )
+    namespaces = meta_ops.LEAF_NAMESPACES | {namespace}
+    monkeypatch.setattr(meta_ops, "LEAF_NAMESPACES", namespaces)
+    monkeypatch.setattr(recorder_module, "LEAF_NAMESPACES", namespaces)
     library = torch.library.Library(namespace, "FRAGMENT")
     yield library
     library._destroy()
@@ -145,6 +148,46 @@ def test_leaf_op_with_unreadable_shape_fails_loudly(leaf_library):
 
     with pytest.raises(UnsupportedMetaOpError, match="guesses"):
         torch.ops._test_leaf_C.guesses(torch.empty(4, device="meta"), 2)
+
+
+def test_keep_going_substitutes_placeholders_for_unknown_shapes(leaf_library):
+    """Every gap in one run: an op with no meta shape is marked, not fatal."""
+    leaf_library.define("guesses(Tensor x, int n) -> Tensor")
+    register_meta_impls()
+
+    x = torch.empty(4, 2, device="meta")
+    with OpRecorder(torch.nn.Module(), keep_going=True) as recorder:
+        out = torch.ops._test_leaf_C.guesses(x, 2)
+        out.add_(1)
+    assert out.shape == x.shape
+    assert [op.placeholder for op in recorder.ops] == [True, False]
+
+
+def test_op_registered_for_another_backend_only_is_flagged(leaf_library):
+    """Meta never runs the platform's kernel, so an absent one must be found."""
+    leaf_library.define("fills(Tensor(a!) out) -> ()")
+    leaf_library.impl("fills", lambda out: None, "CPU")
+
+    assert meta_ops.has_kernel_for("_test_leaf_C::fills", "CPU")
+    assert not meta_ops.has_kernel_for("_test_leaf_C::fills", "CUDA")
+
+
+def test_keep_going_reports_where_the_forward_pass_stopped(monkeypatch):
+    """An error no placeholder can bridge ends the capture where it happened."""
+
+    def unsupported(self, x):
+        raise RuntimeError("no kernel for this")
+
+    monkeypatch.setattr(Qwen2MLP, "forward", unsupported)
+    capture = _capture(num_hidden_layers=1, keep_going=True)
+
+    assert capture.failure is not None
+    assert capture.failure.error == "RuntimeError: no kernel for this"
+    assert capture.failure.module == "model.layers.0.mlp"
+    assert capture.failure.location.startswith("vllm/model_executor/models/qwen2.py:")
+    assert capture.ops
+    assert all(".mlp" not in op.module for op in capture.ops)
+    assert not capture.missing_kernels
 
 
 def test_register_meta_impls_never_replaces_a_kernel():

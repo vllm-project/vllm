@@ -11,6 +11,7 @@ comes from the `meta` load format, so an HF config is all that is needed.
 """
 
 import os
+import traceback
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.platforms import current_platform
 from vllm.profiler.op_capture.meta_ops import (
+    has_kernel_for,
     register_meta_impls,
     skip_meta_triton_launches,
 )
@@ -142,6 +144,36 @@ class SelectionMetadata:
     head_size: int
 
 
+@dataclass(frozen=True)
+class CaptureFailure:
+    """Why a `keep_going` forward pass stopped before finishing."""
+
+    error: str
+    """Exception type and message."""
+    module: str
+    """Dotted path of the innermost module the exception left, `""` for none."""
+    location: str
+    """Innermost vLLM source line on the traceback, outside this package."""
+
+    @classmethod
+    def from_exception(
+        cls, exception: BaseException, module: str | None
+    ) -> "CaptureFailure":
+        vllm_root = Path(vllm.__file__).parent
+        package = Path(__file__).parent
+        location = ""
+        for frame in traceback.extract_tb(exception.__traceback__):
+            path = Path(frame.filename)
+            if path.is_relative_to(vllm_root) and not path.is_relative_to(package):
+                relative = path.relative_to(vllm_root.parent)
+                location = f"{relative}:{frame.lineno} in {frame.name}"
+        return cls(
+            error=f"{type(exception).__name__}: {exception}",
+            module=module or "",
+            location=location,
+        )
+
+
 @dataclass
 class OpCapture:
     """An ordered operator capture plus everything needed to interpret it."""
@@ -154,10 +186,23 @@ class OpCapture:
     """Class name of every module reached, keyed by dotted path."""
     trace_path: str | None = None
     """Where the Chakra execution trace was written, when one was requested."""
+    missing_kernels: tuple[str, ...] = ()
+    """Captured ops with no kernel for the platform's dispatch key, which would
+    fail on the real device."""
+    failure: CaptureFailure | None = None
+    """Why the forward pass stopped early; `ops` then ends where it did."""
+    materialized: tuple[str, ...] = ()
+    """Parameters and buffers model code put on a real device despite `meta`,
+    reported by a `keep_going` capture instead of failing it."""
 
     @property
     def custom_ops(self) -> list[RecordedOp]:
         return [op for op in self.ops if op.is_custom]
+
+    @property
+    def placeholder_ops(self) -> list[RecordedOp]:
+        """Ops given placeholder outputs; shapes after the first are guesses."""
+        return [op for op in self.ops if op.placeholder]
 
 
 class ForwardHarness:
@@ -227,6 +272,7 @@ class ForwardHarness:
         self._attn_metadata: dict[str, Any] = {}
         self._slot_mappings: dict[str, torch.Tensor] = {}
         self._recorder: OpRecorder | None = None
+        self.failure: CaptureFailure | None = None
         self._exit_stack = ExitStack()
 
     def __enter__(self) -> "ForwardHarness":
@@ -448,8 +494,13 @@ class ForwardHarness:
             hidden_states = self.model(input_ids=input_ids, positions=positions)
             return self.model.compute_logits(hidden_states[last_token_indices])
 
-    def record(self) -> OpRecorder:
+    def record(self, keep_going: bool = False) -> OpRecorder:
         """Run the forward path, recording every dispatched operator in order.
+
+        Args:
+            keep_going: Give ops with unknown output shapes placeholder outputs,
+                and if the forward pass still fails, keep the ops recorded so
+                far and set `failure` instead of raising.
 
         Returns:
             The recorder, holding the ordered operators and the modules reached.
@@ -457,10 +508,18 @@ class ForwardHarness:
         """
         assert self.model is not None, "Use ForwardHarness as a context manager"
         key = "Meta" if self.is_meta else current_platform.dispatch_key
-        with OpRecorder(self.model, dispatch_key=key) as recorder:
+        with OpRecorder(
+            self.model, dispatch_key=key, keep_going=keep_going
+        ) as recorder:
             self._recorder = recorder
             try:
                 self.run_forward()
+            except Exception as exception:
+                if not keep_going:
+                    raise
+                self.failure = CaptureFailure.from_exception(
+                    exception, recorder.module_raising(exception)
+                )
             finally:
                 self._recorder = None
         return recorder
@@ -492,15 +551,10 @@ class ForwardHarness:
             head_size=getattr(first, "head_size", 0),
         )
 
-    def assert_on_meta(self) -> None:
-        """Check that nothing about the model escaped the meta device.
-
-        Raises:
-            AssertionError: If any parameter or buffer was materialized.
-
-        """
+    def materialized_tensors(self) -> list[str]:
+        """Parameters and buffers that model code placed on a real device."""
         assert self.model is not None, "Use ForwardHarness as a context manager"
-        materialized = [
+        return [
             name
             for name, tensor in (
                 *self.model.named_parameters(),
@@ -508,6 +562,15 @@ class ForwardHarness:
             )
             if tensor.device.type != "meta"
         ]
+
+    def assert_on_meta(self) -> None:
+        """Check that nothing about the model escaped the meta device.
+
+        Raises:
+            AssertionError: If any parameter or buffer was materialized.
+
+        """
+        materialized = self.materialized_tensors()
         assert not materialized, f"Tensors left the meta device: {materialized}"
 
 
@@ -518,6 +581,7 @@ def capture_model_ops(
     batch: BatchSpec | None = None,
     trace_path: str | os.PathLike | None = None,
     engine_args: EngineArgs | None = None,
+    keep_going: bool = False,
 ) -> OpCapture:
     """Capture the operators a model executes under vLLM.
 
@@ -529,6 +593,10 @@ def capture_model_ops(
         trace_path: When set, also write a Chakra execution trace of the
             recorded forward pass there.
         engine_args: Base engine args, for overrides such as `max_model_len`.
+        keep_going: Collect every gap in one run rather than stopping at the
+            first: ops with unknown output shapes get placeholder outputs, and a
+            forward pass that still fails returns what it recorded, with
+            `failure` set. A model that fails to build still raises.
 
     Returns:
         The ordered operator list together with the selection metadata it is
@@ -545,9 +613,19 @@ def capture_model_ops(
             if trace_path is None
             else capture_execution_trace(Path(trace_path))
         ):
-            recorder = harness.record()
-        if harness.is_meta:
+            recorder = harness.record(keep_going=keep_going)
+        materialized: list[str] = []
+        if harness.is_meta and keep_going:
+            materialized = harness.materialized_tensors()
+        elif harness.is_meta:
             harness.assert_on_meta()
+        dispatch_key = current_platform.dispatch_key
+        missing = {
+            op.name
+            for op in recorder.ops
+            if not op.name.startswith("triton::")
+            and not has_kernel_for(op.name, dispatch_key)
+        }
         return OpCapture(
             model=model,
             batch=harness.batch,
@@ -555,4 +633,7 @@ def capture_model_ops(
             ops=recorder.ops,
             module_types=recorder.module_types,
             trace_path=None if trace_path is None else str(trace_path),
+            missing_kernels=tuple(sorted(missing)),
+            failure=harness.failure,
+            materialized=tuple(materialized),
         )

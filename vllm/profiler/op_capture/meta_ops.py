@@ -247,6 +247,77 @@ def _make_leaf_kernel(schema: FunctionSchema) -> Callable[..., Any]:
     return unsupported
 
 
+_PORTABLE_DISPATCH_KEYS = (
+    "CompositeExplicitAutograd",
+    "CompositeExplicitAutogradNonFunctional",
+    "CompositeImplicitAutograd",
+)
+
+
+def has_kernel_for(qualified_name: str, dispatch_key: str) -> bool:
+    """Whether an op would find a kernel on a device with `dispatch_key`.
+
+    A meta capture never runs the platform's kernels, so an op registered only
+    for another backend is captured as if it existed. This tells the two apart.
+
+    Args:
+        qualified_name: Op name as recorded, e.g. `"_C::rms_norm"`.
+        dispatch_key: The platform's dispatch key, e.g. `"XPU"`.
+
+    Returns:
+        Whether the op has a kernel for that key or a device-agnostic one.
+
+    """
+    return any(
+        torch._C._dispatch_has_kernel_for_dispatch_key(qualified_name, key)
+        for key in (dispatch_key, *_PORTABLE_DISPATCH_KEYS)
+    )
+
+
+_SCALAR_PLACEHOLDERS = {"int": 0, "SymInt": 0, "float": 0.0, "bool": False}
+
+
+def placeholder_outputs(
+    schema: FunctionSchema, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
+    """Outputs of the declared types for an op whose output shapes are unknown.
+
+    Every tensor output is shaped like the op's first tensor argument, so shapes
+    downstream of a placeholder are guesses.
+
+    Args:
+        schema: Schema of the op.
+        args: Its positional arguments.
+        kwargs: Its keyword arguments.
+
+    Returns:
+        One placeholder per declared return, unpacked when there is one.
+
+    Raises:
+        UnsupportedMetaOpError: If the op has no tensor argument to shape by, or
+            returns a type with no placeholder.
+
+    """
+    like = next(
+        (v for v in (*args, *kwargs.values()) if isinstance(v, torch.Tensor)), None
+    )
+    outputs: list[Any] = []
+    for ret in schema.returns:
+        return_type = str(ret.type)
+        if like is not None and return_type in ("Tensor", "Tensor?"):
+            outputs.append(torch.empty_like(like))
+        elif return_type == "Tensor[]":
+            outputs.append([])
+        elif return_type in _SCALAR_PLACEHOLDERS:
+            outputs.append(_SCALAR_PLACEHOLDERS[return_type])
+        else:
+            raise UnsupportedMetaOpError(
+                f"No placeholder for {_qualified_name(schema)}, which returns "
+                f"{return_type}"
+            )
+    return outputs[0] if len(outputs) == 1 else tuple(outputs)
+
+
 _libraries: dict[str, Library] = {}
 _registered: set[str] = set()
 

@@ -15,6 +15,9 @@ Chakra execution traces agree, as a regression check:
 
     python examples/features/profiling/capture_model_ops.py \
         --model Qwen/Qwen2.5-0.5B-Instruct --verify-against cuda
+
+Pass `--keep-going` to list every op standing between a model and this platform
+in one run, rather than stopping at the first.
 """
 
 import argparse
@@ -37,6 +40,11 @@ def create_parser() -> FlexibleArgumentParser:
     parser.add_argument("--shapes", action="store_true", help="Show operand shapes.")
     parser.add_argument(
         "--trace", type=Path, default=None, help="Write a Chakra execution trace here."
+    )
+    parser.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="Record past ops that cannot run here and report them all.",
     )
     parser.add_argument(
         "--verify-against",
@@ -64,7 +72,9 @@ def main(args: argparse.Namespace) -> int:
         print(format_diff(diff))
         return 0 if diff.equal else 1
 
-    capture = capture_model_ops(args.model, batch=batch, trace_path=args.trace)
+    capture = capture_model_ops(
+        args.model, batch=batch, trace_path=args.trace, keep_going=args.keep_going
+    )
     print(format_report(capture, show_shapes=args.shapes))
     return 0
 
