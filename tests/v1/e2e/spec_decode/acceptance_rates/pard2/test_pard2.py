@@ -50,10 +50,12 @@ def test_pard2_acceptance_length(vllm_runner):
 def test_pard2_anchor_acceptance_length(vllm_runner):
     """PARD-2 must see token 0 (with a zero target feature) as the draft's first row.
 
-    Feeding the draft an EAGLE-style left-shifted sequence drops that row. This
-    checkpoint depends on it, so acceptance collapses from ~7.7 to ~2.0 --- a
-    threshold the Llama test above cannot catch, since that draft is only mildly
-    affected. Measured 7.72 with the anchor row, 1.99 without.
+    Feeding the draft a left-shifted sequence drops that row. This checkpoint
+    depends on it, so acceptance collapses to ~2.0 --- something the Llama test
+    above cannot catch, since that draft is only mildly affected.
+
+    These prompts measure 5.19; the ~7.7 reported for this checkpoint elsewhere
+    is on PARD-2's own eval set with its system prompt.
     """
     prompts = _build_gsm8k_prompts(num_questions=50, num_shots=5)[0]
 
@@ -74,7 +76,7 @@ def test_pard2_anchor_acceptance_length(vllm_runner):
         spec_runner.llm.generate(prompts, SamplingParams(temperature=0, max_tokens=256))
         acceptance_len = compute_acceptance_len(spec_runner.llm.get_metrics())
 
-    min_acceptance_len = 6.0
+    min_acceptance_len = 4.0
     print(
         f"PARD-2 anchor acceptance length: {acceptance_len:.4f} "
         f"(min {min_acceptance_len})"
