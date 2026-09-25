@@ -451,6 +451,91 @@ def test_flashinfer_trtllm_decode_varlen(
     torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol)
 
 
+@torch.inference_mode
+def test_flashinfer_xqa_nvfp4_spec_decode_with_baseline() -> None:
+    """NVFP4 XQA accepts the packed causal mask used by spec decode."""
+    torch.set_default_device("cuda")
+    set_random_seed(42)
+
+    batch_size = 3
+    q_len = 8
+    num_qo_heads, num_kv_heads = 24, 4
+    head_size = 256
+    block_size = 16
+    num_blocks = 512
+    sm_scale = float(1.0 / (head_size**0.5))
+
+    query = torch.randn(
+        batch_size * q_len,
+        num_qo_heads,
+        head_size,
+        dtype=torch.bfloat16,
+    )
+    kv_cache = torch.randn(
+        num_blocks,
+        2,
+        num_kv_heads,
+        block_size,
+        head_size,
+        dtype=torch.bfloat16,
+    )
+    kv_cache, kv_cache_sf, kv_scale, ref_kv_cache, _ = make_quantized_kv_cache(
+        kv_cache, FP4_DTYPE, block_size, head_size
+    )
+
+    seq_lens = torch.tensor([257, 769, 1024], dtype=torch.int32)
+    max_num_blocks = round_up(int(seq_lens.max()), block_size) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (batch_size, max_num_blocks), dtype=torch.int32
+    )
+    kv_indptr, kv_indices, kv_last_page_lens = build_paged_kv_metadata(
+        seq_lens, block_tables, block_size
+    )
+    q_indptr = torch.arange(0, (batch_size + 1) * q_len, q_len, dtype=torch.int32)
+    workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.int8)
+
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        float_workspace_buffer=workspace, kv_layout="HND", backend="fa2"
+    )
+    wrapper.plan(
+        qo_indptr=q_indptr,
+        paged_kv_indptr=kv_indptr,
+        paged_kv_indices=kv_indices,
+        paged_kv_last_page_len=kv_last_page_lens,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim_qk=head_size,
+        page_size=block_size,
+        causal=True,
+        sm_scale=sm_scale,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+    )
+    reference = wrapper.run(query, ref_kv_cache)
+    output = torch.empty_like(query)
+    mask_u32 = ((1 << torch.arange(1, q_len + 1)) - 1).to(torch.uint32)
+    mask = mask_u32.view(torch.uint16).reshape(q_len, 2)
+    mask = mask.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+    workspace.zero_()
+
+    flashinfer.decode.xqa_batch_decode_with_kv_cache(
+        query=query,
+        kv_cache=kv_cache,
+        workspace_buffer=workspace,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        max_seq_len=int(seq_lens.max()),
+        bmm1_scale=kv_scale * sm_scale,
+        bmm2_scale=kv_scale,
+        out=output,
+        kv_layout="HND",
+        q_len_per_req=q_len,
+        mask=mask,
+        kv_cache_sf=kv_cache_sf,
+    )
+    torch.testing.assert_close(reference, output, atol=0.5, rtol=0.5)
+
+
 @pytest.mark.parametrize("dtype", DTYPE)
 @pytest.mark.parametrize("quant_dtypes", QUANT_DTYPES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
