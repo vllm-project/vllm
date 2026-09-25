@@ -36,53 +36,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _index_expert_mapping(
-    mapping: list[tuple[str, str, int, str]],
-) -> dict[int, dict[str, list[int]]] | None:
-    """Index `mapping` positions by weight_name length, then by weight_name.
-
-    Returns None unless every weight_name starts with "experts.", which
-    `_match_expert_mapping` relies on to find matches by lookup.
-    """
-    if any(not w.startswith("experts.") for _, w, _, _ in mapping):
-        return None
-    index: dict[int, dict[str, list[int]]] = {}
-    for i, (_, weight_name, _, _) in enumerate(mapping):
-        index.setdefault(len(weight_name), {}).setdefault(weight_name, []).append(i)
-    return index
-
-
-def _match_expert_mapping(
-    mapping: list[tuple[str, str, int, str]],
-    index: dict[int, dict[str, list[int]]] | None,
-    qual_name: str,
-    is_fused: bool,
-) -> list[tuple[str, str, int, str]]:
-    """Return the `mapping` entries whose weight_name occurs in `qual_name`.
-
-    Same entries, in the same order, as scanning `mapping` with substring
-    checks. For fused weights only the first run of consecutive matches is
-    kept. With an index, a weight_name can only occur where `qual_name` has
-    "experts.", so only those positions are looked up.
-    """
-    if index is None:
-        matches = [i for i, (_, w, _, _) in enumerate(mapping) if w in qual_name]
-    else:
-        found: set[int] = set()
-        start = qual_name.find("experts.")
-        while start >= 0:
-            for length, by_name in index.items():
-                found.update(by_name.get(qual_name[start : start + length], ()))
-            start = qual_name.find("experts.", start + 1)
-        matches = sorted(found)
-    if is_fused:
-        run = 1
-        while run < len(matches) and matches[run] == matches[0] + run:
-            run += 1
-        matches = matches[:run]
-    return [mapping[i] for i in matches]
-
-
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
@@ -936,14 +889,38 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
-        mapping_index = _index_expert_mapping(expert_mapping)
+        # Group entries by the logical expert ID in the checkpoint name to avoid
+        # scanning all experts for each tensor. Preserve entry order and all
+        # physical destinations, including EPLB replicas. Fused tensors and
+        # names that cannot be indexed safely still use the full scan.
+        mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
+        for entry in expert_mapping:
+            prefix, _, suffix = entry[1].partition(".")
+            expert_key, sep, _ = suffix.partition(".")
+            if (
+                prefix != "experts"
+                or not expert_key
+                or (expert_key.isdecimal() and not sep)
+            ):
+                mapping_by_expert.clear()
+                break
+            if expert_key.isdecimal():
+                mapping_by_expert.setdefault(expert_key, []).append(entry)
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
             # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
-            for param_name, weight_name, expert_id, shard_id in _match_expert_mapping(
-                expert_mapping, mapping_index, qual_name, is_fused
-            ):
+            mapping = expert_mapping
+            if not is_fused and qual_name.count("experts.") == 1:
+                expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+                mapping = mapping_by_expert.get(expert_key, expert_mapping)
+            matched = False
+            for param_name, weight_name, expert_id, shard_id in mapping:
+                if weight_name not in qual_name:
+                    if matched and is_fused:
+                        break
+                    continue
+                matched = True
                 is_per_expert_fused_w13 = (
                     not is_fused
                     and shard_id in {"w1", "w3"}
