@@ -1976,6 +1976,28 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    def _handle_nan_logits(
+        self,
+        request: Request,
+        num_nans: int,
+        nan_abort_req_ids: set[str],
+        nan_block_ids_to_evict: set[int],
+    ) -> bool:
+        """Record the NaN count and queue an abort if fault tolerance is enabled."""
+        request.num_nans_in_logits = num_nans
+        if not self.enable_nan_fault_tolerance or num_nans <= 0:
+            return False
+
+        logger.warning(
+            "Request %s aborted: %d NaN values in logits",
+            request.request_id,
+            num_nans,
+        )
+        nan_abort_req_ids.add(request.request_id)
+        for group in self.kv_cache_manager.get_block_ids(request.request_id):
+            nan_block_ids_to_evict.update(group)
+        return True
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2116,18 +2138,17 @@ class Scheduler(SchedulerInterface):
 
             # NaN abort must happen before check_stop/_free_request so
             # get_block_ids still returns the request's blocks.
-            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
-                request.num_nans_in_logits = num_nans_in_logits[req_id]
-                if self.enable_nan_fault_tolerance and request.num_nans_in_logits > 0:
-                    logger.warning(
-                        "Request %s aborted: %d NaN values in logits",
-                        req_id,
-                        request.num_nans_in_logits,
-                    )
-                    nan_abort_req_ids.add(req_id)
-                    for group in self.kv_cache_manager.get_block_ids(req_id):
-                        nan_block_ids_to_evict.update(group)
-                    continue
+            if (
+                num_nans_in_logits is not None
+                and req_id in num_nans_in_logits
+                and self._handle_nan_logits(
+                    request,
+                    num_nans_in_logits[req_id],
+                    nan_abort_req_ids,
+                    nan_block_ids_to_evict,
+                )
+            ):
+                continue
 
             # Check for stop and update request status.
             if new_token_ids:
