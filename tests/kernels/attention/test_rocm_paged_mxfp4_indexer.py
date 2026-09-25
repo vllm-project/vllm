@@ -278,32 +278,10 @@ BLOCKS = pytest.mark.parametrize("block", [128, 64])
 
 
 @BLOCKS
-@pytest.mark.parametrize("ratio", [2, 1])
-def test_k_cache_is_the_kernels_preshuffled_order(ratio, block):
-    """The writer stores what aiter's preshuffle_cache makes of the natural
-    bytes, page by page, inside the pool and nowhere else."""
-    from aiter.ops.triton.attention.pa_mqa_logits_mxfp4 import preshuffle_cache
-
+def test_k_store_stays_inside_its_pages(block):
+    """The writer touches only its pages of the block-major pool. What they hold
+    is checked by the layer tests, which read them back through aiter's kernel."""
     case = _Case([700, 333], block)
-    cache = case.cache[ratio]
-    entries = cache.shape[1]
-    for req, n in enumerate(case.seq_lens):
-        ctx = n // ratio
-        natural = case.natural[ratio][case.offsets[req] : case.offsets[req] + ctx, 0]
-        for p in range(cdiv(ctx, entries)):
-            page = torch.zeros(entries, WIDTH, dtype=torch.uint8, device=DEVICE)
-            chunk = natural[p * entries : (p + 1) * entries]
-            page[: chunk.shape[0]] = chunk
-            values, scales = preshuffle_cache(
-                page[None, :, : HEAD_DIM // 2],
-                page[None, :, HEAD_DIM // 2 :],
-                HEADS,
-                HEAD_DIM,
-            )
-            stored = cache[int(case.block_table[req, p])].reshape(-1)
-            torch.testing.assert_close(
-                stored, torch.cat([values.reshape(-1), scales.reshape(-1)])
-            )
     assert int(case.pool[~case.page_bytes].count_nonzero()) == 0
 
 
