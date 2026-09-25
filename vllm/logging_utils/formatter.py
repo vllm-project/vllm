@@ -91,11 +91,20 @@ class ColoredFormatter(NewLineFormatter):
         "CRITICAL": "\033[35m",  # Magenta
     }
     GREY = "\033[90m"  # Grey for timestamp and file info
+    PROCESS_PREFIX_COLOR = "\033[0;36m"
+    PROCESS_PREFIX_RESET = "\033[0;0m"
     RESET = "\033[0m"
 
     def __init__(self, fmt, datefmt=None, style="%", *, log_level: str | None = None):
         # Inject grey color codes into format string for timestamp and file info
         if fmt:
+            # Wrap process prefix with cyan
+            fmt = fmt.replace(
+                "(%(vllm_process_name)s pid=%(process)d)",
+                f"{self.PROCESS_PREFIX_COLOR}"
+                "(%(vllm_process_name)s pid=%(process)d)"
+                f"{self.PROCESS_PREFIX_RESET}",
+            )
             # Wrap %(asctime)s with grey
             fmt = fmt.replace("%(asctime)s", f"{self.GREY}%(asctime)s{self.RESET}")
             # Wrap [%(fileinfo)s:%(lineno)d] with grey

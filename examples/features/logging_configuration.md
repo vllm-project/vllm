@@ -75,7 +75,8 @@ To begin, first, create an appropriate JSON logging configuration file:
     {
       "formatters": {
         "json": {
-          "class": "pythonjsonlogger.jsonlogger.JsonFormatter"
+          "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+          "format": "%(asctime)s %(levelname)s %(name)s %(vllm_process_name)s %(process)d %(message)s"
         }
       },
       "handlers": {
@@ -103,6 +104,22 @@ Finally, run vLLM with the custom logging configuration JSON file:
 vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
     --logging-config.pylogging_config_file /path/to/logging_config.json
 ```
+
+Each vLLM log record is one JSON object and includes `vllm_process_name`, which
+identifies vLLM's logical process (including worker ranks where applicable).
+The standard `process` record attribute contains the operating-system PID.
+vLLM avoids altering `stdout` or `stderr`, so no text is prepended to JSON
+log records.
+
+This applies to records emitted through the configured Python loggers. A JSON
+formatter cannot convert unrelated output into JSON, such as a third-party
+library writing directly to `stdout` or `stderr`; configure or route such
+output separately when a consumer requires every collected line to be JSON.
+
+When serving, `VLLM_LOGGING_CONFIG_PATH` is also used as Uvicorn's logging
+configuration. This example configures only `vllm`; configure `uvicorn`,
+`uvicorn.error`, and `uvicorn.access` with a JSON handler when those server
+logs must also be structured.
 
 ### Example 2: Silence a particular vLLM logger
 
