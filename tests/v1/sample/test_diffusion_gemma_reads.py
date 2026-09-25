@@ -121,6 +121,7 @@ def _denoise_once(
     width: int = CL,
     embed_weight: torch.Tensor | None = None,
     embed_dtype: torch.dtype = torch.float32,
+    logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One compiled denoise step over ``slots`` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it.
@@ -133,7 +134,7 @@ def _denoise_once(
     sampled = torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width]
     num_sampled = torch.zeros(n, dtype=torch.int32, device=device)
     _compiled_sample_step(
-        torch.zeros(n * width, VOCAB, device=device),
+        torch.zeros(n * width, VOCAB, device=device) if logits is None else logits,
         decode_slots,
         decode_idx,
         decode_slots,
@@ -319,6 +320,19 @@ def test_read_emits_at_convergence_while_generation_waits_for_commit(width, step
     sampled, counts = _denoise_once(states, [0], width=width)
     assert counts.tolist() == [width]
     assert torch.equal(sampled[0], states.argmax_canvas[0, :width].int())
+
+
+def test_masked_logits_keep_a_finite_entropy():
+    """top_k/top_p mask logits to -inf, which made the entropy NaN, so the slot
+    never came out confident. A row with one live column has zero entropy."""
+    states = _states()
+    states.add_request(0)
+    logits = torch.full((CL, VOCAB), float("-inf"), device="cuda")
+    logits[:, 3] = 0.0
+
+    _denoise_once(states, [0], logits=logits)
+
+    assert bool(states.confident[0])
 
 
 def test_batch_allowed_needs_one_shared_set():

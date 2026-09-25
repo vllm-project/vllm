@@ -531,7 +531,10 @@ def _compiled_sample_step(
     log_probs = scaled.log_softmax(dim=-1)
     probs = log_probs.exp()
 
-    token_entropy = -(probs * log_probs).sum(dim=-1)  # [num_decode, CL]
+    # top_k/top_p leave -inf logits, where probs * log_probs is 0 * -inf =
+    # NaN. A NaN entropy fails the confidence check on every step and makes
+    # the entropy-bound sort arbitrary, so every block runs to its step cap.
+    token_entropy = -torch.where(probs > 0, probs * log_probs, 0.0).sum(dim=-1)
     # A canvas truncated near max_model_len is zero-padded up to CL by the
     # caller; those padded rows are uniform (max entropy, argmax 0), so they
     # never trigger early convergence and are stable, and only the real
