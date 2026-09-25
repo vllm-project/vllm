@@ -47,8 +47,15 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # Persistent target hidden-state staging buffer: the context K/V store
         # captured in the draft CUDA graph reads this fixed address at replay.
+        # Width is the draft's own hidden size, NOT self.hidden_size: the base
+        # class hc-widens the latter for MTP-style drafters whose forward eats
+        # the target's pre-hc_head residual, while this buffer only stores what
+        # precompute_and_store_context_kv consumes (combine_hidden_states output).
         self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            self.max_num_tokens,
+            self.draft_model_config.get_hidden_size(),
+            dtype=self.dtype,
+            device=device,
         )
 
         # Multimodal inputs not currently supported.

@@ -5,8 +5,10 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
@@ -96,3 +98,50 @@ def test_dummy_run_keeps_already_fitting_parallel_draft_batch():
 def test_dummy_run_keeps_default_speculator_batch():
     scheduler_output = _run_dummy_batch(_DefaultSpeculator())
     assert len(scheduler_output.num_scheduled_tokens) == 512
+
+
+@pytest.mark.parametrize("hc_mult", [1, 4])
+def test_context_kv_staging_buffer_keeps_draft_hidden_size(monkeypatch, hc_mult):
+    # The base class hc-widens hidden_size for MTP-style drafters whose forward
+    # consumes the target's pre-hc_head residual. DFlash never feeds hidden
+    # states to its draft forward; the staging buffer only holds
+    # combine_hidden_states output for the context-KV store, which is the
+    # draft's own hidden size.
+    monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: True)
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            hc_mult=hc_mult,
+            is_causal=True,
+            num_hidden_layers=1,
+            mask_token_id=99,
+        ),
+        get_hidden_size=lambda: 64,
+        get_vocab_size=lambda: 32,
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            num_speculative_tokens=3,
+            draft_model_config=draft_model_config,
+            use_local_argmax_reduction=False,
+            draft_sample_method="greedy",
+            enable_adaptive_verification=False,
+            is_dspark_prefill_only=lambda: False,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            max_model_len=32,
+            dtype=torch.float32,
+            use_fp64_gumbel=False,
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            data_parallel_size=1,
+            data_parallel_rank=0,
+        ),
+    )
+
+    speculator = DFlashSpeculator(vllm_config, torch.device("cpu"))
+
+    assert speculator.hidden_size == 64 * hc_mult
+    assert speculator.hidden_states.shape == (8, 64)
