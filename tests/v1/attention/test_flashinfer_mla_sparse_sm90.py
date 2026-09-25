@@ -327,8 +327,8 @@ _NO_KPOOL = object()
     ids=["kpool4", "kpool_none", "no_kpool_attr"],
 )
 def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens):
-    """kpool must come from the model config or the tail pool is never
-    read."""
+    """The builder took kpool from the KV cache spec, whose tokens_per_state is
+    1, so the tail pool was never read."""
     monkeypatch.setattr(
         sm90_mod.FlashInferMLASparseMetadataBuilder,
         "__init__",
