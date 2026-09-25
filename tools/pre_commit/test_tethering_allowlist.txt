@@ -50,6 +50,10 @@ tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated
 
 # tests/models/ - the models_*.yaml jobs run specific paths, not all of models/.
 tests/models/deepseek_v32/test_sequence_parallel.py  # no models_*.yaml job collects this path
+tests/models/deepseek_v41/test_fse_routing.py  # CPU unit tests for DeepSeek-V4.1 FSE routing and padding
+tests/models/deepseek_v41/test_quant_config.py  # CPU unit tests for DeepSeek-V4.1 quant config and block discovery
+tests/models/deepseek_v41/test_vl_streaming.py  # CPU unit tests for DeepSeek-V4.1 VLM non-materialized weight streaming
+tests/models/deepseek_v41/test_weights_mapper_engram.py  # CPU unit tests for DeepSeek-V4.1 engram scale key mapping
 tests/models/test_deepseek_v4_dspark_rocm.py  # added by #52362 (2026-09-21), no models_*.yaml job collects this path
 tests/models/test_deepseek_v4_fi_moe_ep.py  # no models_*.yaml job collects this path
 tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py  # no models_*.yaml job collects this path
