@@ -21,7 +21,7 @@ _FUSED_WO_A_MAX_TOKENS = 32
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
-    method = getattr(layer.wo_b, "scheme", getattr(layer.wo_b, "quant_method", None))
+    method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
         current_platform.is_device_capability_family(100)
         # WO-A is FP8 with per-32 scales, and WO-B takes MXFP8 input directly.

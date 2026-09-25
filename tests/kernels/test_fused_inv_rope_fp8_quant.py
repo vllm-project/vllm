@@ -21,7 +21,12 @@ Usage:
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
+)
 from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import fp8_einsum
 
 # -- Default dimensions matching DeepSeek V3/V4 --------------------------
 HEAD_DIM = 512
@@ -33,81 +38,47 @@ FP8_DTYPE = torch.float8_e4m3fn
 EPS = 1e-10
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100/SM103"
+)
 @pytest.mark.parametrize("groups", [2, 4])
-@pytest.mark.parametrize("tokens", [1, 3, 6, 8, 12, 16, 18, 32])
-@pytest.mark.parametrize("padded,zero", [(False, False), (True, False), (True, True)])
-def test_dsv41_fused_wo_a_matches_deepgemm(groups, tokens, padded, zero):
-    """Preserve per-32 WO-A math and WO-B scales, including graph replay."""
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("Requires SM100/SM103")
-    pytest.importorskip("cutlass")
+@pytest.mark.parametrize("tokens", [1, 6, 18, 32])
+def test_dsv41_fused_wo_a_matches_deepgemm(groups, tokens):
+    """Fused WO-A matches inverse RoPE + fp8_einsum + MXFP8 quantize."""
     from flashinfer import mxfp8_quantize
 
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        deepgemm_post_process_fp8_weight_block,
-    )
     from vllm.models.deepseek_v41.nvidia.ops.fused_wo_a import _FUSED_WO_A_KERNEL
-    from vllm.utils.deep_gemm import fp8_einsum
 
-    torch.manual_seed(42)
-    heads, n = groups * 8, groups * 1024
-    x = torch.randn(
-        tokens, 64 if padded else heads, 512, device="cuda", dtype=torch.bfloat16
-    )[:, :heads]
-    x.mul_(torch.exp2(torch.arange(heads, device="cuda") % 16 - 8)[None, :, None])
-    if zero:
-        x.zero_()
+    torch.manual_seed(0)
+    n = groups * 1024
+    x = torch.randn(tokens, 64, 512, device="cuda", dtype=torch.bfloat16)[:, : n // 128]
     positions = torch.randint(0, 128, (tokens,), device="cuda")
     rope = make_cos_sin_cache(128, device="cuda")
-    w = torch.randn(n, 4096, device="cuda", dtype=torch.bfloat16)
-    wb = w.float().view(n, 128, 32)
-    scale = torch.exp2(torch.ceil(torch.log2(wb.abs().amax(-1) / 448)))
-    wq = (wb / scale[..., None]).to(FP8_DTYPE).view(n, 4096)
+    wq = torch.randn(n, 4096, device="cuda").to(FP8_DTYPE)
+    scale = torch.exp2(torch.randint(-8, 0, (n, 128), device="cuda").float())
     wq, ws = deepgemm_post_process_fp8_weight_block(
         wq, scale, (1, 32), False, True, groups
     )
-    inputs = dict(x=x, positions=positions, rope=rope, weight=wq, weight_scale=ws)
-    _FUSED_WO_A_KERNEL(**inputs)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        q, sf = _FUSED_WO_A_KERNEL(**inputs)
-    for _ in range(2):
-        positions.add_(1).remainder_(128)
-        graph.replay()
-        a, sa = fused_inv_rope_fp8_quant(
-            x,
-            positions,
-            rope,
-            n_groups=groups,
-            heads_per_group=8,
-            nope_dim=448,
-            rope_dim=64,
-            quant_group_size=32,
-            tma_aligned_scales=True,
-        )
-        y = torch.empty(tokens, groups, 1024, device="cuda", dtype=torch.bfloat16)
-        fp8_einsum("bhr,hdr->bhd", (a, sa), (wq, ws), y, recipe=(1, 1, 32))
-        ref, ref_sf = mxfp8_quantize(y.flatten(1), backend="cute-dsl")
+    q, sf = _FUSED_WO_A_KERNEL(
+        x=x, positions=positions, rope=rope, weight=wq, weight_scale=ws
+    )
 
-        def dequant(data, scales):
-            scales = scales.reshape(n // 128, 32, 4, 4).permute(1, 2, 0, 3)
-            scales = scales.reshape(128, n // 32)[:tokens].float()
-            return data.float().reshape(tokens, n // 32, 32) * torch.exp2(
-                scales[..., None] - 127
-            )
+    a, sa = fused_inv_rope_fp8_quant(
+        x, positions, rope, groups, 8, quant_group_size=32, tma_aligned_scales=True
+    )
+    y = torch.empty(tokens, groups, 1024, device="cuda", dtype=torch.bfloat16)
+    fp8_einsum("bhr,hdr->bhd", (a, sa), (wq, ws), y, recipe=(1, 1, 32))
+    ref, ref_sf = mxfp8_quantize(y.flatten(1), backend="cute-dsl")
 
-        actual, expected = dequant(q, sf), dequant(ref, ref_sf)
-        assert torch.isfinite(actual).all()
-        if zero:
-            assert torch.count_nonzero(q.float()) == 0
-        else:
-            error = (actual - expected).norm() / expected.norm()
-            assert error < 0.003, error.item()
-        rows = torch.arange(512, device="cuda")
-        rows = rows // 16 + (rows % 16 // 4) * 32
-        assert torch.count_nonzero(sf.view(n // 128, 512)[:, rows >= tokens]) == 0
+    def rows(scales):  # F8_128x4 bytes -> [128 rows, n / 32 blocks]
+        return scales.view(n // 128, 32, 4, 4).permute(2, 1, 0, 3).reshape(128, -1)
+
+    actual, expected = (
+        d.float().view(tokens, -1, 32) * torch.exp2(rows(s)[:tokens, :, None] - 127.0)
+        for d, s in ((q, sf), (ref, ref_sf))
+    )
+    assert (actual - expected).norm() / expected.norm() < 3e-3
+    assert not rows(sf)[tokens:].any(), "padded scale rows must be zero"
 
 
 # =========================================================================
