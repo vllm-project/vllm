@@ -187,6 +187,9 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
+        # Reject drafts of requests without a proposal (e.g. a padded P/D first step).
+        unproposed = ~self.sampler.req_states.has_proposed_drafts[expanded_idx_mapping]
+        draft_sampled.masked_fill_(unproposed & (expanded_local_pos > 0), -1)
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
