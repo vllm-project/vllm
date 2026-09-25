@@ -51,8 +51,7 @@ and provision transport limits and memory accordingly.
 For example, start a standard inference server with scale-out endpoints enabled:
 
 ```bash
-VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct
+vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-scale-out
 ```
 
 Send a Responses request and use `jq` to extract the `token_ids` field:
