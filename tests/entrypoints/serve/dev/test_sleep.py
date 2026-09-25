@@ -1,12 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import AsyncMock
+
+import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.serve.dev.sleep.api_router import attach_router
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fails", [False, True])
+def test_release_kv_cache_memory_route(fails):
+    app = FastAPI()
+    app.state.engine_client = AsyncMock()
+    release = app.state.engine_client.release_kv_cache_memory
+    if fails:
+        release.side_effect = RuntimeError("requires a completed pause first")
+    attach_router(app)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/release_kv_cache_memory")
+
+    assert response.status_code == (500 if fails else 200)
+    release.assert_awaited_once_with()
 
 
 def test_sleep_mode():
@@ -63,7 +86,7 @@ def test_sleep_mode():
         )
         assert response.status_code == 200
 
-        # is sleeping should be false after waking up any part of the engine
+        # Partial wake keeps the engine sleeping.
         response = requests.get(remote_server.url_for("is_sleeping"))
         assert response.status_code == 200
         assert response.json().get("is_sleeping") is True
@@ -87,8 +110,7 @@ def test_sleep_mode():
 
 
 def _get_sleep_metrics_from_api(response: requests.Response):
-    """Return (awake, weights_offloaded, discard_all)"""
-
+    """Return (awake, weights_offloaded, discard_all)."""
     awake, weights_offloaded, discard_all = None, None, None
 
     for family in text_string_to_metric_families(response.text):

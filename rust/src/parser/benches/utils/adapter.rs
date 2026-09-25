@@ -3,13 +3,11 @@
 
 use std::sync::Arc;
 
-use vllm_parser::tool::{
-    Result, StructuralTagBuilder, Tool, ToolParser, ToolParserError, ToolParserOutput,
-};
+use vllm_parser::tool::{Result, Tool, ToolParser, ToolParserError, ToolParserOutput};
 use vllm_parser::unified::{
     UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
 };
-use vllm_tokenizer::Tokenizer;
+use vllm_tokenizer::{DecodedText, Tokenizer};
 
 /// Tokenizer stub used by unified-parser benchmarks.
 struct BenchTokenizer;
@@ -89,17 +87,16 @@ impl<T: UnifiedParser> ToolParser for UnifiedToolParserAdapter<T> {
         self.inner.preserve_special_tokens()
     }
 
-    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        self.inner.structural_tag_builder()
-    }
-
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
         self.inner.tool_call_id(tool_index)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         let mut unified_output = UnifiedParserOutput::default();
-        let result = self.inner.parse_into(chunk, &mut unified_output).map_err(map_unified_error);
+        let result = self
+            .inner
+            .parse_into(DecodedText::unattributed(chunk), &mut unified_output)
+            .map_err(map_unified_error);
         append_unified_output(unified_output, output)?;
         result
     }

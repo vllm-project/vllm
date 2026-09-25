@@ -51,15 +51,17 @@ def _selector_walk_kernel(
             other=0,
         )
 
-        # Candidate ids key the noise, matching the target's own sampling.
-        position = tl.load(sample_pos_ptr + flat) - 1
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
+        sample_pos = tl.load(sample_pos_ptr + flat) - 1
         _, index = gumbel_noised_argmax(
             scores,
             candidates,
             mask & valid,
             seed,
-            position,
+            sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
+            IS_DRAFTING=True,
             USE_FP64=USE_FP64,
         )
 
@@ -106,26 +108,93 @@ def _cache_draft_logits_kernel(
     tl.store(cached_candidate_ptr + cache_base + offsets, token_ids, mask=mask)
 
 
+class CandidateSampler:
+    """The shared DFlash2/LiLiCorr candidate walk and realized proposal cache."""
+
+    def __init__(
+        self, max_num_reqs: int, num_steps: int, top_k: int, device: torch.device
+    ):
+        self.num_steps = num_steps
+        self.top_k = top_k
+        self.scores = torch.empty(
+            max_num_reqs, num_steps, top_k, dtype=torch.float32, device=device
+        )
+        self.cached_candidate_ids = torch.zeros(
+            self.scores.shape, dtype=torch.int64, device=device
+        )
+
+    def sample(
+        self,
+        candidate_ids: torch.Tensor,
+        scores: torch.Tensor,
+        num_reqs: int,
+        sample_pos: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+        use_fp64: bool,
+    ) -> None:
+        candidate_ids = candidate_ids.contiguous()
+        sample_pos = sample_pos.contiguous()
+        idx_mapping = idx_mapping.contiguous()
+        block_k = triton.next_power_of_2(self.top_k)
+        _selector_walk_kernel[(num_reqs,)](
+            scores.contiguous(),
+            candidate_ids.contiguous(),
+            sample_pos,
+            idx_mapping,
+            temperature,
+            seeds,
+            draft_tokens,
+            self.scores,
+            num_steps=self.num_steps,
+            top_k=self.top_k,
+            BLOCK_K=block_k,
+            SAMPLE_PROBABILISTIC=draft_logits is not None,
+            USE_FP64=use_fp64,
+            num_warps=1,
+        )
+
+        if draft_logits is not None:
+            self._cache_draft_logits(
+                candidate_ids, num_reqs * self.num_steps, idx_mapping, draft_logits
+            )
+
+    def _cache_draft_logits(
+        self,
+        candidate_ids: torch.Tensor,
+        num_sample: int,
+        idx_mapping: torch.Tensor,
+        draft_logits: torch.Tensor,
+    ) -> None:
+        block_k = triton.next_power_of_2(self.top_k)
+        _cache_draft_logits_kernel[(num_sample,)](
+            draft_logits,
+            self.cached_candidate_ids,
+            candidate_ids,
+            self.scores,
+            idx_mapping,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            num_steps=self.num_steps,
+            top_k=self.top_k,
+            BLOCK_K=block_k,
+            num_warps=1,
+        )
+
+
 class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
+    _candidate_top_k_key = "selector_top_k"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         draft_config = self.draft_model_config.hf_config.dflash_config
-        self.selector_top_k = int(draft_config["selector_top_k"])
-        self._anchor_indices = (
-            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
-            * self.num_query_per_req
-        )
-        self._selector_scores = torch.empty(
-            self.max_num_reqs,
-            self.num_speculative_steps,
-            self.selector_top_k,
-            dtype=torch.float32,
-            device=device,
-        )
-        self._cached_candidate_ids = torch.zeros(
-            self._selector_scores.shape, dtype=torch.int64, device=device
+        self.top_k = int(draft_config[self._candidate_top_k_key])
+        self.candidate_sampler = CandidateSampler(
+            self.max_num_reqs, self.num_speculative_steps, self.top_k, device
         )
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
@@ -133,48 +202,6 @@ class DFlash2Speculator(DFlashSpeculator):
         # distribution; -inf because the cache kernel writes only the K
         # candidates.
         return torch.float32, -float("inf")
-
-    def _sample_path(
-        self,
-        candidate_ids: torch.Tensor,
-        scores: torch.Tensor,
-        num_reqs: int,
-    ) -> None:
-        block_k = triton.next_power_of_2(self.selector_top_k)
-        _selector_walk_kernel[(num_reqs,)](
-            scores.contiguous(),
-            candidate_ids.contiguous(),
-            self.sample_pos,
-            self.sample_idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.draft_tokens,
-            self._selector_scores,
-            num_steps=self.num_speculative_steps,
-            top_k=self.selector_top_k,
-            BLOCK_K=block_k,
-            SAMPLE_PROBABILISTIC=self.draft_logits is not None,
-            USE_FP64=self.use_fp64_gumbel,
-            num_warps=1,
-        )
-
-    def _cache_draft_logits(self, candidate_ids: torch.Tensor, num_sample: int) -> None:
-        draft_logits = self.draft_logits
-        assert draft_logits is not None
-        block_k = triton.next_power_of_2(self.selector_top_k)
-        _cache_draft_logits_kernel[(num_sample,)](
-            draft_logits,
-            self._cached_candidate_ids,
-            candidate_ids,
-            self._selector_scores,
-            self.sample_idx_mapping,
-            draft_logits.stride(0),
-            draft_logits.stride(1),
-            num_steps=self.num_speculative_steps,
-            top_k=self.selector_top_k,
-            BLOCK_K=block_k,
-            num_warps=1,
-        )
 
     def _generate_draft(
         self,
@@ -200,16 +227,39 @@ class DFlash2Speculator(DFlashSpeculator):
             hidden_states.flatten(0, 1)
         )
         candidate_ids = candidate_ids.view(
-            num_reqs, self.num_speculative_steps, self.selector_top_k
+            num_reqs, self.num_speculative_steps, self.top_k
         )
         unary_logits = unary_logits.view_as(candidate_ids)
-        anchor_token_ids = self.input_buffers.input_ids[self._anchor_indices[:num_reqs]]
-        scores = self.model.model.candidate_selector(
+        scores = self._score_candidates(candidate_ids, unary_logits, hidden_states)
+        self.candidate_sampler.sample(
             candidate_ids,
-            unary_logits,
-            hidden_states,
-            anchor_token_ids,
+            scores,
+            num_reqs,
+            self.sample_pos,
+            self.sample_idx_mapping,
+            self.temperature,
+            self.seeds,
+            self.draft_tokens,
+            self.draft_logits,
+            self.use_fp64_gumbel,
         )
-        self._sample_path(candidate_ids, scores, num_reqs)
-        if self.draft_logits is not None:
-            self._cache_draft_logits(candidate_ids, num_sample)
+        if self.enable_adaptive_verification:
+            self._maybe_predict_acceptance(
+                self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
+                self.sample_idx_mapping[:num_sample],
+                self.sample_col[:num_sample],
+            )
+
+    def _score_candidates(
+        self,
+        candidate_ids: torch.Tensor,
+        unary_logits: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = candidate_ids.shape[0]
+        anchor_token_ids = self.input_buffers.input_ids[
+            : num_reqs * self.num_query_per_req : self.num_query_per_req
+        ]
+        return self.model.model.candidate_selector(
+            candidate_ids, unary_logits, hidden_states, anchor_token_ids
+        )

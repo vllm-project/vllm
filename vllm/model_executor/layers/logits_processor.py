@@ -15,6 +15,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -73,9 +74,9 @@ class LogitsProcessor(PluggableLayer):
         logits_as_input: bool = False,
         soft_cap: float | None = None,
     ) -> None:
-        """
-        Args:
-            scale: A scaling factor to apply to the logits.
+        """Args:
+        scale: A scaling factor to apply to the logits.
+
         """
         super().__init__()
         self.scale = scale
@@ -99,12 +100,15 @@ class LogitsProcessor(PluggableLayer):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         if self.logits_as_input:
             logits = hidden_states
         else:
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            logits = self._get_logits(
+                hidden_states, lm_head, embedding_bias, skip_gather
+            )
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
@@ -141,7 +145,12 @@ class LogitsProcessor(PluggableLayer):
                 lm_head, hidden_states, bias=embedding_bias
             )
 
-        if not isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod):
+        # A quant config that excludes lm_head hands out UnquantizedLinearMethod
+        # rather than UnquantizedEmbeddingMethod, so accept both: either way the
+        # weight is plain and `lm_head.weight` can be cast directly.
+        if not isinstance(
+            lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        ):
             raise ValueError(
                 "A head_dtype different from the model dtype is only "
                 "supported for an unquantized lm_head."
@@ -173,9 +182,12 @@ class LogitsProcessor(PluggableLayer):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if skip_gather:
+            return logits
 
         # Gather logits for TP
         if lm_head.tp_size > 1:
@@ -244,6 +256,8 @@ class LogitsProcessor(PluggableLayer):
         hidden_states: torch.Tensor,
         k: int,
         embedding_bias: torch.Tensor | None = None,
+        *,
+        return_log_probs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Vocab-parallel top-k without all-gathering full logits.
 
@@ -251,7 +265,9 @@ class LogitsProcessor(PluggableLayer):
         the values as well as the global ids. Communication is
         O(batch * 2k * tp_size) rather than O(batch * vocab_size).
 
-        Scale and soft cap are applied to the k selected values rather than
+        With return_log_probs, values use the full-vocabulary log-partition.
+
+        Otherwise scale and soft cap are applied to the k selected values rather than
         the whole vocabulary; both are monotonic, so the selection is the same
         and only k entries are touched.
         """
@@ -262,11 +278,25 @@ class LogitsProcessor(PluggableLayer):
             )
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if return_log_probs:
+            if self.soft_cap is not None:
+                logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+            if self.scale != 1.0:
+                logits = logits * self.scale
 
         # Mask out padding entries beyond org_vocab_size on this shard.
         num_pad = lm_head.shard_indices.num_org_vocab_padding
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")
+
+        if return_log_probs:
+            log_partition = torch.logsumexp(logits.float(), dim=-1, keepdim=True)
+            if lm_head.tp_size > 1:
+                log_partition = torch.logsumexp(
+                    tensor_model_parallel_all_gather(log_partition, dim=-1),
+                    dim=-1,
+                    keepdim=True,
+                )
 
         values, ids = _topk(logits, k)
         # Convert shard-local indices to global vocab indices.
@@ -279,6 +309,8 @@ class LogitsProcessor(PluggableLayer):
             ids = ids.gather(-1, selected)
 
         values = values.float()
+        if return_log_probs:
+            return ids, values - log_partition
         if self.scale != 1.0:
             values = values * self.scale
         if self.soft_cap is not None:

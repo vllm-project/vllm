@@ -66,7 +66,7 @@ from vllm.platforms import PlatformEnum
             "MarlinMxfp8LinearKernel",
             "EmulationMxfp8LinearKernel",
             init_mxfp8_linear_kernel,
-            {},
+            {"weight_shape": (2048, 2048)},
         ),
         (
             B12xTensorFP8ScaledMMLinearKernel,
@@ -115,7 +115,9 @@ def test_b12x_backend_registration_priority_and_selection(
     assert names.index(before) < names.index(kernel_cls.__name__) < names.index(after)
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
     monkeypatch.setattr(
         kernel_cls,
         "is_supported",
@@ -128,6 +130,27 @@ def test_b12x_backend_registration_priority_and_selection(
     )
 
     assert isinstance(initializer(**kwargs), kernel_cls)
+
+
+def test_b12x_module_lookup_is_dynamo_safe(monkeypatch) -> None:
+    import vllm.utils.b12x as b12x_utils
+
+    module = types.ModuleType("b12x.gemm.blockscaled")
+    module.run = lambda x: x + 1  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        b12x_utils._B12X_SUBMODULES,
+        "b12x.gemm.blockscaled",
+        module,
+    )
+
+    @torch.compile(backend="eager", fullgraph=True)
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        blockscaled = b12x_utils.get_b12x_blockscaled()
+        assert blockscaled is not None
+        return blockscaled.run(x)  # type: ignore[attr-defined]
+
+    x = torch.ones(1)
+    torch.testing.assert_close(forward(x), x + 1)
 
 
 def test_b12x_tensor_fp8_can_implement_supported_config() -> None:
@@ -342,7 +365,7 @@ def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(
 
 def test_b12x_mxfp8_can_implement_supported_config() -> None:
     can_implement, reason = B12xMxfp8LinearKernel.can_implement(
-        Mxfp8LinearLayerConfig()
+        Mxfp8LinearLayerConfig(weight_shape=(256, 512))
     )
 
     assert can_implement
@@ -763,7 +786,14 @@ def test_b12x_backend_preserves_w4a16_fallback(monkeypatch) -> None:
     import vllm.model_executor.kernels.linear as linear_mod
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
+    monkeypatch.setitem(
+        linear_mod._POSSIBLE_NVFP4_KERNELS,
+        PlatformEnum.CUDA,
+        [B12xNvFp4LinearKernel, MarlinNvFp4LinearKernel],
+    )
     monkeypatch.setattr(
         MarlinNvFp4LinearKernel,
         "is_supported",

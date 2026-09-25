@@ -26,7 +26,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -580,7 +580,7 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
@@ -597,14 +597,12 @@ class FunAudioChatDummyInputsBuilder(
             1,
             (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
         )
-        num_audios = int(mm_counts.get("audio", 0))
 
-        audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=int(mm_counts.get("audio", 0)),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -612,20 +610,32 @@ class FunAudioChatDummyInputsBuilder(
 class FunAudioChatMultiModalProcessor(
     BaseMultiModalProcessor[FunAudioChatProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
+
+        if not mm_data:
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt)])
+        input_ids = torch.tensor([tokenizer.encode(prompt_text)])
 
-        audios = mm_data.get("audios", [])
+        audios = mm_data.get("audio", [])
         if not audios:
-            return BatchFeature({"input_ids": input_ids})
+            processed_data = BatchFeature({"input_ids": input_ids})
+            return self._finalize_hf_mm_data(
+                mm_data, hf_kwargs, passthrough_data, processed_data
+            )
+        assert isinstance(audios, Sequence)
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -676,7 +686,10 @@ class FunAudioChatMultiModalProcessor(
             "feature_exist_mask": torch.ones((len(wavs),), dtype=torch.bool),
         }
 
-        return BatchFeature({"input_ids": input_ids, **mm_inputs})
+        processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -738,7 +751,7 @@ class FunAudioChatMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_funaudiochat,
             )
         ]

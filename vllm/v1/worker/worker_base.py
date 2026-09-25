@@ -12,7 +12,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
@@ -55,8 +55,7 @@ class WorkerBase:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ) -> None:
-        """
-        Initialize common worker components.
+        """Initialize common worker components.
 
         Args:
             vllm_config: Complete vLLM configuration
@@ -65,6 +64,7 @@ class WorkerBase:
             distributed_init_method: Distributed initialization method
             is_driver_worker: Whether this worker handles driver
                 responsibilities
+
         """
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -118,12 +118,19 @@ class WorkerBase:
 
         Returns:
             Compilation times (language_model, encoder) in seconds.
+
         """
         raise NotImplementedError
 
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def synchronize_device(self) -> None:
+        """Block until in-flight device work completes; backends outside
+        ``torch.accelerator`` must override with their own wait."""
+        if torch.accelerator.is_available():
+            torch.accelerator.synchronize()
 
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
@@ -203,8 +210,7 @@ class WorkerBase:
 
 
 class WorkerWrapperBase:
-    """
-    This class represents one process in an executor/engine. It is responsible
+    """This class represents one process in an executor/engine. It is responsible
     for lazily initializing the worker and handling the worker's lifecycle.
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
@@ -216,8 +222,7 @@ class WorkerWrapperBase:
         rpc_rank: int = 0,
         global_rank: int | None = None,
     ) -> None:
-        """
-        Initialize the worker wrapper with the given vllm_config and rpc_rank.
+        """Initialize the worker wrapper with the given vllm_config and rpc_rank.
         Note: rpc_rank is the rank of the worker in the executor. In most cases,
         it is also the rank of the worker in the distributed group. However,
         when multiple executors work together, they can be different.
@@ -246,8 +251,7 @@ class WorkerWrapperBase:
 
     @instrument(span_name="Worker init")
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
-        """
-        Here we inject some common logic before initializing the worker.
+        """Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
@@ -263,6 +267,12 @@ class WorkerWrapperBase:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+
+        # Let the platform replace core Triton kernels (e.g. CPU fallback
+        # implementations) before any worker or model code can launch them.
+        from vllm.platforms import current_platform
+
+        current_platform.register_triton_kernel_overrides()
 
         parallel_config = vllm_config.parallel_config
         if isinstance(parallel_config.worker_cls, str):
@@ -311,26 +321,10 @@ class WorkerWrapperBase:
             )
 
         shared_worker_lock = kwargs.pop("shared_worker_lock", None)
-        if shared_worker_lock is None:
-            msg = (
-                "Missing `shared_worker_lock` argument from executor. "
-                "This argument is needed for mm_processor_cache_type='shm'."
-            )
-
-            mm_config = vllm_config.model_config.multimodal_config
-            if mm_config and mm_config.mm_processor_cache_type == "shm":
-                raise ValueError(msg)
-            else:
-                logger.warning_once(msg)
-
-            self.mm_receiver_cache = None
-        else:
-            self.mm_receiver_cache = (
-                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
-                    vllm_config,
-                    shared_worker_lock,
-                )
-            )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            vllm_config,
+            shared_worker_lock,
+        )
 
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization

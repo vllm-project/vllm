@@ -31,6 +31,61 @@ else:
     VllmConfig = None
 
 
+def _cpu_mamba_backend(vllm_config: VllmConfig) -> str:
+    """Return the CPU state backend selected by the model configuration."""
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return "none"
+
+    hf_config = getattr(model_config, "hf_text_config", None)
+    model_type = str(getattr(hf_config, "model_type", "")).lower()
+    architecture = str(getattr(model_config, "architecture", "")).lower()
+    layer_types = getattr(hf_config, "layer_types", None)
+    has_linear_attention = isinstance(layer_types, (list, tuple)) and (
+        "linear_attention" in layer_types
+    )
+
+    try:
+        has_inner_state = bool(model_config.has_inner_state)
+    except (AttributeError, RuntimeError):
+        has_inner_state = False
+
+    if not (has_inner_state or has_linear_attention):
+        return "none"
+
+    fallback_backend = model_type or architecture or "unknown"
+    if not has_linear_attention:
+        return fallback_backend
+
+    try:
+        model_cls, _ = model_config.registry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+    except Exception:
+        return fallback_backend
+
+    try:
+        state_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    except Exception:
+        return fallback_backend
+
+    if not isinstance(state_dtypes, tuple) or len(state_dtypes) != 2:
+        return fallback_backend
+
+    if vllm_config.cache_config.mamba_ssm_cache_dtype == "float16":
+        cache_dtype = torch.float16
+    elif vllm_config.cache_config.mamba_ssm_cache_dtype == "bfloat16":
+        cache_dtype = torch.bfloat16
+    else:
+        return fallback_backend
+
+    if state_dtypes[1] == cache_dtype:
+        return "gdn"
+
+    return fallback_backend
+
+
 def get_max_threads(pid=0):
     if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(pid))
@@ -126,9 +181,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cpu.set_device(device)
 
     @classmethod
@@ -146,16 +199,37 @@ class CpuPlatform(Platform):
         if model_config is not None:
             model_config.disable_cascade_attn = True
 
+        # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
+        # which is still being resolved while this platform class is loading.
+        from vllm.triton_utils import HAS_TRITON
+
+        if cls.get_cpu_architecture() == CpuArchEnum.X86 and not HAS_TRITON:
+            logger.warning_once(
+                "Triton is not installed. triton-cpu is expected on x86 CPUs."
+            )
+
         cache_config = vllm_config.cache_config
+
+        is_deepseek_v4 = (
+            model_config is not None
+            and getattr(model_config.hf_config, "model_type", None) == "deepseek_v4"
+        )
 
         # The CPU MLA decode kernel only compiles with block_size=16 today
         # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
         # the default block size regardless of user preference to avoid a
         # runtime kernel dispatch failure. AMX MLA has no such constraint
         # (same AMX-available condition as get_attn_backend_cls), so it's
-        # excluded from this override.
-        cpu_mla_enabled = model_config is not None and getattr(
-            model_config, "use_mla", False
+        # excluded from this override. DeepSeek-V4 is also excluded here and
+        # handled in its own branch below: its sparse-MLA and indexer
+        # backends declare block_size=256 as their only supported kernel
+        # block size (DeepseekV4SparseMLABackend/DeepseekV4IndexerBackend),
+        # so it needs the same override-regardless-of-preference treatment
+        # as CPU MLA, just with a different value.
+        cpu_mla_enabled = (
+            not is_deepseek_v4
+            and model_config is not None
+            and getattr(model_config, "use_mla", False)
         )
         amx_mla_enabled = (
             cpu_mla_enabled
@@ -164,6 +238,21 @@ class CpuPlatform(Platform):
             and vllm_config.attention_config.backend != AttentionBackendEnum.CPU_MLA
         )
         reference_cpu_mla_enabled = cpu_mla_enabled and not amx_mla_enabled
+        # DeepSeek-V4's CPU attention/indexer kernels
+        # (csrc/cpu/sgl-kernels/{flash_mla,store_cache,compressor,
+        # paged_mqa_logits,topk}.cpp) are AMX-kernel-backed and built on the
+        # same paged/position-indexed conventions as the GPU/XPU backends
+        # (block_table/slot_mapping addressing throughout, chunk metadata
+        # that already carries per-token causal offsets for partial/extend
+        # continuation) -- so they support chunked prefill and prefix
+        # caching the same way. `amx_mla_enabled` above deliberately
+        # excludes DeepSeek-V4 (it has its own block-size requirements,
+        # unrelated to chunked-prefill support), so it can't be reused here.
+        amx_mla_or_dsv4_enabled = amx_mla_enabled or (
+            is_deepseek_v4
+            and cls.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
         if reference_cpu_mla_enabled:
             if cache_config.user_specified_block_size and cache_config.block_size != 16:
                 logger.warning(
@@ -172,6 +261,17 @@ class CpuPlatform(Platform):
                     cache_config.block_size,
                 )
             cache_config.block_size = 16
+        elif is_deepseek_v4:
+            if (
+                cache_config.user_specified_block_size
+                and cache_config.block_size != 256
+            ):
+                logger.warning(
+                    "DeepSeek-V4 CPU backend requires block_size=256, "
+                    "overriding user-specified block_size=%s.",
+                    cache_config.block_size,
+                )
+            cache_config.block_size = 256
         elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
@@ -181,16 +281,27 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
-        # Accelerated GDN (AMX tiles or AVX-512BF16 VDPBF16PS) requires
-        # float32 SSM state.
+        # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
             torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
-            cache_config.mamba_ssm_cache_dtype = "float32"
-            logger.warning(
-                "Reset SSM cache type to float32 for accelerated GDN mamba attention."
-            )
+            mamba_backend = _cpu_mamba_backend(vllm_config)
+            if (
+                cache_config.mamba_ssm_cache_dtype in ("float16", "bfloat16")
+                and mamba_backend == "gdn"
+            ):
+                logger.info(
+                    "Using %s SSM state storage for the CPU accelerated GDN backend.",
+                    cache_config.mamba_ssm_cache_dtype,
+                )
+            else:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.warning(
+                    "Reset SSM cache type to float32 for accelerated GDN mamba "
+                    "backend '%s'.",
+                    mamba_backend,
+                )
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
@@ -293,11 +404,23 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # For efficient conv state memory access. The C++ causal_conv1d
-        # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
-        # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
-        if torch.cpu._is_avx512_bf16_supported():
-            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+        # NIXL's Mamba descriptors require DS conv state storage. Select it
+        # before cache shapes are created, while preserving an explicit layout.
+        conv_state_layout_env = "VLLM_SSM_CONV_STATE_LAYOUT"
+        if conv_state_layout_env not in os.environ:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            uses_nixl = kv_transfer_config is not None and any(
+                kv_transfer_config.has_connector(name)
+                for name in (
+                    "NixlConnector",
+                    "NixlPullConnector",
+                    "NixlPushConnector",
+                )
+            )
+            if uses_nixl:
+                os.environ[conv_state_layout_env] = "DS"
+            elif torch.cpu._is_avx512_bf16_supported():
+                os.environ[conv_state_layout_env] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
@@ -373,7 +496,11 @@ class CpuPlatform(Platform):
             vllm_config.parallel_config.tensor_parallel_size
         )
 
-        if model_config is not None and model_config.use_mla and not amx_mla_enabled:
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and not amx_mla_or_dsv4_enabled
+        ):
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
@@ -392,16 +519,15 @@ class CpuPlatform(Platform):
             return
 
         # reconcile attention and mamba page sizes
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
 
-        cls._align_hybrid_block_size(vllm_config, backend_cls)
+        cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
-        """
-        Discover NUMA topology and keep the last physical core of each numa
+        """Discover NUMA topology and keep the last physical core of each numa
         into one core group list for nixl start_kv_load()
         """
         SYS_NODE = "/sys/devices/system/node"
@@ -410,6 +536,7 @@ class CpuPlatform(Platform):
         if not (os.path.exists(SYS_NODE) and os.path.exists(SYS_CPU)):
             return []
 
+        use_highest_sibling = cls.get_cpu_architecture() == CpuArchEnum.X86
         core_rsv_for_kv = []
         for node in os.listdir(SYS_NODE):
             if not node.startswith("node") or not node[4:].isdigit():
@@ -442,7 +569,7 @@ class CpuPlatform(Platform):
                 else:
                     siblings = [cpu_id]
 
-                phys = min(siblings)
+                phys = max(siblings) if use_highest_sibling else min(siblings)
 
                 if phys not in seen_phys:
                     seen_phys.add(phys)
@@ -462,9 +589,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        """
-        Get device specific communicator class for distributed communication.
-        """
+        """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
 
     @classmethod
@@ -497,26 +622,84 @@ class CpuPlatform(Platform):
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
-                        logger.warning_once("Failed to import from vllm._C: %r", e)
+                        logger.warning_once(
+                            "Failed to import from vllm._C: %s", repr(e)
+                        )
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
                     except ImportError as e:
                         if ignored_msg not in e.msg:
                             logger.warning_once(
-                                "Failed to import from vllm._C_AVX512: %r", e
+                                "Failed to import from vllm._C_AVX512: %s", repr(e)
                             )
             else:
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
-                        logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
+                        logger.warning_once(
+                            "Failed to import from vllm._C_AVX2: %s", repr(e)
+                        )
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
-                logger.warning_once("Failed to import from vllm._C: %r", e)
+                logger.warning_once("Failed to import from vllm._C: %s", repr(e))
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Fallback C++ implementations for core Triton kernels.
+
+        Used when the Triton-CPU backend is unavailable. When Triton-CPU is
+        present, the Triton kernels can run natively and the overrides
+        would only shadow them, so registration is skipped.
+        """
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            return
+
+        from vllm.triton_utils.dispatcher import register_kernels
+        from vllm.utils import cpu_triton_utils as cpu_tl
+
+        register_kernels(
+            {
+                "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel": (
+                    cpu_tl._compute_slot_mapping_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel": (
+                    cpu_tl._eagle_step_slot_mapping_metadata_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_prepare_inputs_padded_kernel": (
+                    cpu_tl._eagle_prepare_inputs_padded_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_prepare_next_token_padded_kernel": (
+                    cpu_tl._eagle_prepare_next_token_padded_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.copy_and_expand_eagle_inputs_kernel": (
+                    cpu_tl._copy_and_expand_eagle_inputs_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.copy_and_expand_dflash_inputs_kernel": (
+                    cpu_tl._copy_and_expand_dflash_inputs_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel": (
+                    cpu_tl._rejection_greedy_sample_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel": (
+                    cpu_tl._rejection_random_sample_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.expand_kernel": (
+                    cpu_tl._expand_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel": (
+                    cpu_tl._sample_recovered_tokens_kernel_impl
+                ),
+                "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": (
+                    cpu_tl._batch_memcpy_impl
+                ),
+            }
+        )
 
     @classmethod
     def pack_kv_cache(
@@ -524,9 +707,7 @@ class CpuPlatform(Platform):
         kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
-        """
-        Rewrite the kv cache shape for the current platform.
-        """
+        """Rewrite the kv cache shape for the current platform."""
         # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
         from vllm._custom_ops import cpu_attn_reshape_and_cache

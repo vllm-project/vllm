@@ -52,6 +52,31 @@ def _run_test(
         vllm_model.embed(texts)
         vllm_model.embed([""], images=images)
 
+        # Mixed image+text batch must not skip the text encoder (#53091).
+        mixed_outputs = vllm_outputs_per_case[2]
+        check_embeddings_close(
+            embeddings_0_lst=[vllm_outputs_per_case[0][0]],
+            embeddings_1_lst=[mixed_outputs[0]],
+            name_0="text_only",
+            name_1="mixed_text",
+        )
+        check_embeddings_close(
+            embeddings_0_lst=[vllm_outputs_per_case[1][0]],
+            embeddings_1_lst=[mixed_outputs[1]],
+            name_0="image_only",
+            name_1="mixed_image",
+        )
+        empty_text = vllm_model.embed([""])
+        empty_sim = torch.nn.functional.cosine_similarity(
+            torch.tensor(mixed_outputs[0]),
+            torch.tensor(empty_text[0]),
+            dim=0,
+        )
+        assert empty_sim < 0.99, (
+            "Mixed-batch text embedding collapsed to the empty-string vector "
+            f"(cosine={empty_sim:.4f})"
+        )
+
     with hf_runner(model, dtype=dtype, auto_cls=CLIPModel) as hf_model:
         hf_outputs_per_case = []
         for input_texts, input_images in input_cases:
@@ -101,6 +126,7 @@ def test_models(
     input_cases = [
         (HF_TEXT_PROMPTS, text_images),
         (HF_IMAGE_PROMPTS, images),
+        ([HF_TEXT_PROMPTS[0], HF_IMAGE_PROMPTS[0]], [None, images[0]]),
     ]
 
     _run_test(

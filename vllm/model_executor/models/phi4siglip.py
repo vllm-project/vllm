@@ -11,10 +11,10 @@ from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig, Siglip2VisionConfig
+from transformers import BatchFeature, PreTrainedConfig, Siglip2VisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -125,15 +126,14 @@ class Phi4SiglipDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         size = self.info.get_image_size_with_most_features()
         return {
             "image": self._get_dummy_images(
                 width=size.width,
                 height=size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
         }
@@ -142,31 +142,8 @@ class Phi4SiglipDummyInputsBuilder(
 class Phi4SiglipMultiModalProcessor(
     BaseMultiModalProcessor[Phi4SiglipProcessingInfo],
 ):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-        # The HF processor's tokenizer_image_token() replaces the "<image>"
-        # string with IMAGE_TOKEN_INDEX (-200) in input_ids.  This breaks
-        # vLLM's prompt-replacement pipeline which needs to find "<image>"
-        # as normal sub-tokens.  Re-tokenize with the plain tokenizer so
-        # that "<image>" stays as sub-tokens and can be located by
-        # PromptReplacement.
-        # NOTE: tokenizer.__call__() (not .encode()) must be used so that
-        # added/special tokens like <|user|>, <|end|> are kept as single IDs.
-        tokenizer = self.info.get_tokenizer()
-        new_ids = tokenizer(prompt).input_ids
-        processed["input_ids"] = torch.tensor([new_ids])
-
-        return processed
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
         self,
@@ -185,6 +162,8 @@ class Phi4SiglipMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
+
         def get_replacement(item_idx: int):
             # Read the actual patch grid from the NaFlex processor's
             # spatial_shapes output (same pattern as LFM2-VL).  This avoids
@@ -199,7 +178,9 @@ class Phi4SiglipMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="image",
-                target=DEFAULT_IMAGE_TOKEN,
+                target=cached_encode(
+                    tokenizer, DEFAULT_IMAGE_TOKEN, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]
@@ -211,11 +192,10 @@ class Phi4SiglipMultiModalProcessor(
 
 
 class Phi4SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - d: Max number of patches (padded across images in the batch)
-        - fd: Features per patch (patch_size * patch_size * channels)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - d: Max number of patches (padded across images in the batch)
+    - fd: Features per patch (patch_size * patch_size * channels)
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -255,7 +235,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
 

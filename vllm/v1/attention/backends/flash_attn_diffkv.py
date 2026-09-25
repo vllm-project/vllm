@@ -87,6 +87,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             head_size_v=FlashAttentionDiffKVBackend.head_size_v,
             has_sinks=self.sinks is not None,
         )
+        self.fa4_hd256 = False
 
     def do_kv_cache_update(
         self,
@@ -130,17 +131,25 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size_v]
             kv_cache: shape =
                 [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size_v]
         NOTE: FP8 quantization, flash-attn expect the size of
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
+
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
