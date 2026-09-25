@@ -11,12 +11,16 @@ from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
+)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.transformers_utils.configs.qwen4_exp import (
@@ -30,7 +34,13 @@ from vllm.v1.attention.backends.short_conv_attn import (
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-from ..common.ple import PLEVocabParallelEmbedding
+from ..common.ngram_embedding import (
+    Qwen4ExpPLEDeviceEmbedding,
+    Qwen4ExpPLEEmbeddingMethod,
+    Qwen4ExpPLEPinnedHostEmbedding,
+)
+
+logger = init_logger(__name__)
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
@@ -172,6 +182,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         max_num_reqs: int,
         prefix: str,
         layer_name: str,
+        *,
+        data_parallel_rank: int = 0,
+        quant_config: QuantizationConfig | None = None,
+        params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -224,11 +238,39 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
         padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
-        self.ngram_embedding = PLEVocabParallelEmbedding(
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        embedding_prefix = f"{prefix}.ngram_embedding"
+        embedding_quant_method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            quant_config,
+            embedding_prefix,
+            getattr(config, "ple_embedding_dtype", None),
+        )
+        engram_config = get_current_vllm_config().engram_config
+        embedding_cls = (
+            Qwen4ExpPLEPinnedHostEmbedding
+            if engram_config is not None and engram_config.cpu_offload
+            else Qwen4ExpPLEDeviceEmbedding
+        )
+        self.ngram_embedding = embedding_cls(
             padded_vocab_size,
             self.head_dim,
+            params_dtype=params_dtype,
             padding_size=divisor,
-            prefix=f"{prefix}.ngram_embedding",
+            prefix=embedding_prefix,
+            embedding_method=embedding_quant_method,
+            num_ngram_heads=self.ngram_heads,
+            max_total_tokens=max_total_tokens,
+            data_parallel_rank=data_parallel_rank,
+        )
+        logger.info(
+            "Initialized AMD PLE embedding %s: quantization_method=%s, "
+            "weight_dtype=%s, weight_device=%s, pinned=%s",
+            embedding_prefix,
+            type(embedding_quant_method).__name__,
+            self.ngram_embedding.weight.dtype,
+            self.ngram_embedding.weight.device,
+            self.ngram_embedding.weight.is_pinned(),
         )
         self.register_buffer(
             "positions_buffer",
@@ -344,9 +386,21 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
             id_blocks.append(ids[request_indices, adjusted_columns])
         ngram_ids = torch.cat(id_blocks, dim=-1)
+        embedding = self.ngram_embedding
+        if embedding.supports_prefetch:
+            output = ngram_ids.new_empty(
+                (ngram_ids.shape[0], self.embedding_dim),
+                dtype=embedding.weight.dtype,
+            )
+            torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(
+                ngram_ids,
+                output,
+                self.layer_name,
+            )
+            return output
         output = ngram_ids.new_empty(
             (ngram_ids.shape[0], self.embedding_dim),
-            dtype=self.ngram_embedding.params_dtype,
+            dtype=embedding.params_dtype,
         )
         torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding(
             ngram_ids,
@@ -459,6 +513,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             vllm_config.scheduler_config.max_num_seqs,
             f"{prefix}.ple_embedding",
             prefix,
+            data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
+            quant_config=quant_config,
+            params_dtype=model_config.dtype,
         )
         self.key_proj = ReplicatedLinear(
             int(config.ple_embed_dim),
@@ -1044,6 +1101,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 f"{hidden_states.shape[0]}"
             )
         embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
+        embeddings = self.ple_embedding.ngram_embedding.dequantize(
+            embeddings,
+            self.ple_embedding.ngram_embedding.params_dtype,
+        )
         key, _ = self.key_proj(embeddings)
         value, _ = self.value_proj(embeddings)
         token_count = hidden_states.shape[0]
@@ -1081,6 +1142,24 @@ def qwen4_exp_amd_ple_ngram_embedding(
     output.copy_(result)
 
 
+def qwen4_exp_amd_ple_ngram_embedding_pinned(
+    ngram_ids: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Run the pinned PLE UVA lookup outside Inductor's FX graph.
+
+    Same rationale as the device-path escape: keeping the large embedding weight
+    out of the graph prevents AOT compile-time autotuning from materializing a
+    synthetic copy of the weight.
+    """
+    layer = get_forward_context().no_compile_layers[layer_name]
+    if not isinstance(layer, Qwen4ExpPLELayer):
+        raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
+    result = layer.ple_embedding.ngram_embedding.sync_lookup(ngram_ids).flatten(-2)
+    output.copy_(result)
+
+
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     output: torch.Tensor,
@@ -1094,6 +1173,13 @@ def qwen4_exp_ple_short_conv(
 direct_register_custom_op(
     op_name="qwen4_exp_amd_ple_ngram_embedding",
     op_func=qwen4_exp_amd_ple_ngram_embedding,
+    mutates_args=["output"],
+)
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_amd_ple_ngram_embedding_pinned",
+    op_func=qwen4_exp_amd_ple_ngram_embedding_pinned,
     mutates_args=["output"],
 )
 
