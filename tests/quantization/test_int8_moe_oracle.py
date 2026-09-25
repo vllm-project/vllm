@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
+    make_int8_moe_quant_config,
     select_int8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -61,6 +62,34 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
         routing_method=RoutingMethodType.Renormalize,
         moe_backend=moe_backend,
     )
+
+
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+def test_int8_quant_config_preserves_independent_scale_layouts(
+    per_act_token_quant: bool, per_out_ch_quant: bool
+) -> None:
+    w1_scale = torch.ones((2, 4))
+    w2_scale = torch.ones((2, 3))
+    a1_scale = torch.ones(1)
+    a2_scale = torch.ones(1)
+
+    quant_config = make_int8_moe_quant_config(
+        int8_backend=Int8MoeBackend.TRITON,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+    )
+
+    assert quant_config.per_act_token_quant is per_act_token_quant
+    assert quant_config.per_out_ch_quant is per_out_ch_quant
+    assert quant_config.w1_scale is w1_scale
+    assert quant_config.w2_scale is w2_scale
+    assert quant_config.a1_scale is a1_scale
+    assert quant_config.a2_scale is a2_scale
 
 
 @requires_int8_moe

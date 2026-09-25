@@ -434,6 +434,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
+                per_out_ch_quant=self.per_out_ch_quant,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -555,6 +556,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w2_bias,
+                per_out_ch_quant=self.per_out_ch_quant,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:

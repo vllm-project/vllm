@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
@@ -43,7 +46,11 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
+    enable_swap_ab,
     moe_use_td_hw_supported,
+)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
@@ -59,7 +66,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
+    quantize_weights,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.triton_utils import tl
@@ -70,12 +81,14 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
-    captured: dict[str, torch.Tensor] = {}
+    captured: dict[str, Any] = {}
 
     class FakeKernel:
         def __getitem__(self, grid):
             def launch(*args, **kwargs) -> None:
                 captured["a_scale"] = args[4]
+                captured["per_act_token_quant"] = kwargs["per_act_token_quant"]
+                captured["per_out_ch_quant"] = kwargs["per_out_ch_quant"]
 
             return launch
 
@@ -101,12 +114,432 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
         use_int8_w8a16=False,
         use_int4_w4a16=False,
         per_channel_quant=False,
+        per_out_ch_quant=True,
     )
 
     captured_scale = captured["a_scale"]
     assert a_scale.ndim == 0
     assert captured_scale.shape == (1,)
     assert captured_scale.data_ptr() == a_scale.data_ptr()
+    assert captured["per_act_token_quant"] is False
+    assert captured["per_out_ch_quant"] is True
+
+
+def _run_nonblock_w8a8_scale_case(
+    quant_dtype: torch.dtype,
+    per_act_token_quant: bool,
+    per_out_ch_quant: bool,
+    b_scale_shape: str = "native",
+    scalar_a_as_vector: bool = False,
+    tokens: int = 8,
+    size: int = 128,
+    block_m: int = 16,
+    use_aligned_routing: bool = False,
+) -> None:
+    if (
+        quant_dtype == torch.float8_e4m3fn
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("float8_e4m3fn requires compute capability 8.9 or newer")
+
+    experts, topk = 4, 2
+    a = torch.ones((tokens, size), dtype=quant_dtype, device="cuda")
+    eye = torch.eye(size, dtype=torch.float32, device="cuda").to(quant_dtype)
+    b = eye.unsqueeze(0).repeat(experts, 1, 1)
+    topk_ids = torch.tensor(
+        [[3, 1], [0, 2], [1, 3], [2, 0]],
+        dtype=torch.int32,
+        device="cuda",
+    ).repeat((tokens + 3) // 4, 1)[:tokens]
+
+    token_scales = torch.tensor(
+        [[0.25], [0.5], [1.0], [2.0]],
+        dtype=torch.float32,
+        device="cuda",
+    ).repeat((tokens + 3) // 4, 1)[:tokens]
+    a_scale = token_scales if per_act_token_quant else torch.tensor(0.5, device="cuda")
+    if scalar_a_as_vector:
+        a_scale = a_scale.reshape(1)
+
+    expert_scales = torch.tensor(
+        [0.25, 0.5, 1.0, 2.0], dtype=torch.float32, device="cuda"
+    )
+    if per_out_ch_quant:
+        channel_scales = torch.ones((experts, size), dtype=torch.float32, device="cuda")
+        channel_scales[:, 0] = 2.0
+        channel_scales[:, 1] = 0.5
+        logical_b_scale = expert_scales[:, None] * channel_scales
+    else:
+        logical_b_scale = expert_scales
+
+    if b_scale_shape == "native":
+        b_scale = logical_b_scale
+    elif b_scale_shape == "E":
+        storage = torch.empty((experts, 2), dtype=torch.float32, device="cuda")
+        storage[:, 0] = logical_b_scale
+        b_scale = storage[:, 0]
+    elif b_scale_shape == "E1":
+        storage = torch.empty((experts, 2), dtype=torch.float32, device="cuda")
+        storage[:, 0] = logical_b_scale
+        b_scale = storage[:, :1]
+    elif b_scale_shape == "E11":
+        storage = torch.empty((experts, 1, 2), dtype=torch.float32, device="cuda")
+        storage[:, 0, 0] = logical_b_scale
+        b_scale = storage[:, :, :1]
+    elif b_scale_shape == "EN":
+        storage = torch.empty((experts, size, 2), dtype=torch.float32, device="cuda")
+        storage[:, :, 0] = logical_b_scale
+        b_scale = storage[:, :, 0]
+    elif b_scale_shape == "EN1":
+        storage = torch.empty((experts, size, 2), dtype=torch.float32, device="cuda")
+        storage[:, :, 0] = logical_b_scale
+        b_scale = storage[:, :, :1]
+    else:
+        raise AssertionError(f"unexpected scale shape: {b_scale_shape}")
+
+    if use_aligned_routing:
+        sorted_token_ids, kernel_expert_ids, num_tokens_post_padded = (
+            fused_moe_module.moe_align_block_size(
+                topk_ids, block_m, experts, expert_map=None
+            )
+        )
+        valid_rows = (
+            sorted_token_ids[: num_tokens_post_padded.item()] < tokens * topk
+        ).view(-1, block_m)
+        assert torch.any(valid_rows.sum(dim=1) > 1)
+    else:
+        sorted_token_ids = None
+        kernel_expert_ids = topk_ids.flatten()
+        num_tokens_post_padded = torch.tensor(
+            [tokens * topk * block_m], dtype=torch.int32, device="cuda"
+        )
+
+    output = torch.empty((tokens, topk, size), dtype=torch.bfloat16, device="cuda")
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=a,
+        B=b,
+        C=output,
+        A_scale=a_scale,
+        B_scale=b_scale,
+        topk_weights=None,
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=kernel_expert_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+        mul_routed_weight=False,
+        top_k=topk,
+        config={
+            "BLOCK_SIZE_M": block_m,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 4,
+            "num_stages": 3,
+        },
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
+        use_int8_w8a8=quant_dtype == torch.int8,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+    )
+
+    expected = torch.empty_like(output)
+    for token in range(tokens):
+        activation_scale = token_scales[token, 0] if per_act_token_quant else a_scale
+        for slot in range(topk):
+            expert = topk_ids[token, slot]
+            weight_scale = (
+                logical_b_scale[expert] if per_out_ch_quant else expert_scales[expert]
+            )
+            expected[token, slot] = (activation_scale * weight_scale).to(expected.dtype)
+
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("quant_dtype", [torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_nonblock_w8a8_scale_layouts(
+    quant_dtype: torch.dtype,
+    per_act_token_quant: bool,
+    per_out_ch_quant: bool,
+) -> None:
+    """Activation and weight scale layouts are independent kernel inputs."""
+    _run_nonblock_w8a8_scale_case(quant_dtype, per_act_token_quant, per_out_ch_quant)
+
+
+@pytest.mark.parametrize("quant_dtype", [torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    ("per_out_ch_quant", "b_scale_shape"),
+    [(False, "E"), (False, "E1"), (False, "E11"), (True, "EN"), (True, "EN1")],
+)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_nonblock_w8a8_scale_shapes_and_strides(
+    quant_dtype: torch.dtype,
+    per_out_ch_quant: bool,
+    b_scale_shape: str,
+) -> None:
+    """Supported scale shapes retain expert and channel strides."""
+    _run_nonblock_w8a8_scale_case(
+        quant_dtype,
+        per_act_token_quant=not per_out_ch_quant,
+        per_out_ch_quant=per_out_ch_quant,
+        b_scale_shape=b_scale_shape,
+        scalar_a_as_vector=per_out_ch_quant,
+    )
+
+
+@pytest.mark.parametrize("tokens", [1, 17])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_nonblock_w8a8_scale_tail(tokens: int) -> None:
+    """Token and output-channel tails keep the routed scale mapping."""
+    _run_nonblock_w8a8_scale_case(
+        torch.int8,
+        per_act_token_quant=False,
+        per_out_ch_quant=True,
+        b_scale_shape="EN1",
+        scalar_a_as_vector=True,
+        tokens=tokens,
+        size=160,
+    )
+
+
+@pytest.mark.parametrize(
+    ("per_act_token_quant", "per_out_ch_quant"), [(False, True), (True, False)]
+)
+@pytest.mark.parametrize("block_m", [32, 64])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="requires CUDA SM90",
+)
+def test_nonblock_fp8_scale_layouts_swap_ab(
+    per_act_token_quant: bool,
+    per_out_ch_quant: bool,
+    block_m: int,
+) -> None:
+    """Non-matching FP8 scale layouts work with SWAP_AB both on and off."""
+    assert enable_swap_ab(block_m, 64) is (block_m < 64)
+    _run_nonblock_w8a8_scale_case(
+        torch.float8_e4m3fn,
+        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+        tokens=17,
+        block_m=block_m,
+        use_aligned_routing=True,
+    )
+
+
+def _static_int8_moe_reference(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    a2_scale_override: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Independent reference for both static INT8 GEMMs."""
+
+    def quantize(value: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        return torch.round(value.float() / scale.float()).clamp(-128, 127)
+
+    intermediate = layer.intermediate_size_per_partition
+    a1_scale = layer.w13_input_scale.reshape(()).float()
+    a2_scale = (
+        a2_scale_override.reshape(()).float()
+        if a2_scale_override is not None
+        else layer.w2_input_scale.reshape(()).float()
+    )
+    a1_q = quantize(x, a1_scale)
+    outputs = []
+    for token in range(x.shape[0]):
+        slots = []
+        for slot in range(topk_ids.shape[1]):
+            expert = int(topk_ids[token, slot])
+            w13_acc = torch.mv(layer.w13_weight[expert].float(), a1_q[token])
+            w13_out = (
+                w13_acc * a1_scale * layer.w13_weight_scale[expert].reshape(-1).float()
+            ).to(x.dtype)
+            activated = (F.silu(w13_out[:intermediate]) * w13_out[intermediate:]).to(
+                x.dtype
+            )
+            a2_q = quantize(activated, a2_scale)
+            w2_acc = torch.mv(layer.w2_weight[expert].float(), a2_q)
+            slots.append(
+                (
+                    w2_acc
+                    * a2_scale
+                    * layer.w2_weight_scale[expert].reshape(-1).float()
+                    * topk_weights[token, slot]
+                ).to(x.dtype)
+            )
+        outputs.append(torch.stack(slots).sum(dim=0))
+    return torch.stack(outputs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_quark_static_int8_moe_channel_scale_indexing(workspace_init):
+    """Static activation and per-channel weight scales are indexed separately."""
+    experts, hidden, intermediate, tokens, topk = 4, 128, 128, 8, 2
+    dtype = torch.bfloat16
+    moe_config = FusedMoEConfig(
+        num_experts=experts,
+        num_local_experts=experts,
+        num_logical_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=dtype,
+        has_bias=False,
+        moe_backend="triton",
+        max_num_tokens=tokens,
+    )
+    method = QuarkW8A8Int8MoEMethod(
+        moe_config, kInt8StaticChannelSym, kInt8StaticTensorSym
+    )
+    layer = torch.nn.Module()
+    layer.intermediate_size_per_partition = intermediate
+    layer.local_num_experts = experts
+    layer.global_num_experts = experts
+    layer.activation = MoEActivation.SILU
+    layer.expert_map = None
+    layer.apply_router_weight_on_input = False
+    with torch.device("cuda"):
+        method.create_weights(layer, experts, hidden, intermediate, dtype)
+
+    eye = torch.eye(hidden, dtype=torch.float32, device="cuda").to(torch.int8)
+    layer.w13_weight.copy_(torch.cat((eye, eye), dim=0).unsqueeze(0))
+    layer.w2_weight.copy_(eye.unsqueeze(0))
+    layer.w13_weight_scale.fill_(1.0)
+    layer.w2_weight_scale.fill_(1.0)
+    layer.w13_input_scale.fill_(1.0 / 16)
+    layer.w2_input_scale.fill_(1.0 / 16)
+    method.process_weights_after_loading(layer)
+
+    assert method.moe_kernel is None
+    assert method.moe_quant_config is not None
+    assert method.moe_quant_config.per_act_token_quant is False
+    assert method.moe_quant_config.per_out_ch_quant is True
+
+    x = torch.ones((tokens, hidden), dtype=dtype, device="cuda")
+    ids = torch.tensor([[3, 1], [0, 1]] * 4, dtype=torch.int32, device="cuda")
+    weights = torch.full((tokens, topk), 0.5, device="cuda")
+    routed_to_3 = (ids == 3).any(dim=1)
+    expected_base = torch.full_like(x, 0.75)
+
+    def forward() -> torch.Tensor:
+        result = method.apply(layer, x.clone(), weights, ids, None, None)
+        torch.cuda.synchronize()
+        return result
+
+    with set_current_vllm_config(VllmConfig()):
+        torch.testing.assert_close(forward(), expected_base, rtol=0, atol=0)
+        for attr, expected_value in (
+            ("w13_weight_scale", 1.25),
+            ("w2_weight_scale", 1.125),
+        ):
+            scale = getattr(layer, attr)
+            saved = scale.clone()
+            scale[3, 0].mul_(2)
+            expected = expected_base.clone()
+            expected[routed_to_3, 0] = expected_value
+            torch.testing.assert_close(forward(), expected, rtol=0, atol=0)
+            scale.copy_(saved)
+
+            scale[2].mul_(4)
+            torch.testing.assert_close(forward(), expected_base, rtol=0, atol=0)
+            scale.copy_(saved)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_quark_static_int8_moe_distinct_gemm_scales(workspace_init):
+    """A1/A2 and W13/W2 scales remain distinct through both GEMMs."""
+    experts, hidden, tokens, topk = 4, 128, 8, 2
+    dtype = torch.bfloat16
+    moe_config = FusedMoEConfig(
+        num_experts=experts,
+        num_local_experts=experts,
+        num_logical_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=hidden,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=dtype,
+        has_bias=False,
+        moe_backend="triton",
+        max_num_tokens=tokens,
+    )
+    method = QuarkW8A8Int8MoEMethod(
+        moe_config, kInt8StaticChannelSym, kInt8StaticTensorSym
+    )
+    layer = torch.nn.Module()
+    layer.intermediate_size_per_partition = hidden
+    layer.local_num_experts = experts
+    layer.global_num_experts = experts
+    layer.activation = MoEActivation.SILU
+    layer.expert_map = None
+    layer.apply_router_weight_on_input = False
+    with torch.device("cuda"):
+        method.create_weights(layer, experts, hidden, hidden, dtype)
+
+    eye = torch.eye(hidden, dtype=torch.float32, device="cuda").to(torch.int8)
+    layer.w13_weight.copy_(torch.cat((eye, eye), dim=0).unsqueeze(0))
+    layer.w2_weight.copy_(eye.unsqueeze(0))
+    w13_scales = layer.w13_weight_scale.view(experts, 2 * hidden)
+    w2_scales = layer.w2_weight_scale.view(experts, hidden)
+    gate_scales = torch.tensor([0.5, 0.75, 1.0, 1.25], device="cuda")
+    up_scales = torch.tensor([1.0, 1.25, 1.5, 1.75], device="cuda")
+    output_scales = torch.tensor([0.5, 1.0, 1.5, 2.0], device="cuda")
+    w13_scales[:, :hidden].copy_(gate_scales[:, None])
+    w13_scales[:, hidden:].copy_(up_scales[:, None])
+    w13_scales[:, 0].mul_(2)
+    w13_scales[:, 1].mul_(0.5)
+    w13_scales[:, hidden].mul_(0.5)
+    w13_scales[:, hidden + 1].mul_(2)
+    w2_scales.copy_(output_scales[:, None])
+    w2_scales[:, 0].mul_(1.5)
+    w2_scales[:, 1].mul_(0.5)
+    layer.w13_input_scale.fill_(1.0 / 16)
+    layer.w2_input_scale.fill_(1.0 / 8)
+    method.process_weights_after_loading(layer)
+
+    token_values = torch.tensor([1.25, 1.5, 0.75, 1.0] * 2, dtype=dtype, device="cuda")
+    x = token_values[:, None].expand(tokens, hidden).contiguous()
+    ids = torch.tensor(
+        [[3, 1], [0, 2], [1, 3], [2, 0]] * 2,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    weights = torch.tensor(
+        [[0.25, 0.75], [0.5, 0.5], [0.75, 0.25], [0.5, 0.5]] * 2,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    expected = _static_int8_moe_reference(layer, x, ids, weights)
+    wrong_a2 = _static_int8_moe_reference(
+        layer, x, ids, weights, a2_scale_override=layer.w13_input_scale
+    )
+    assert not torch.equal(expected, wrong_a2)
+
+    with set_current_vllm_config(VllmConfig()):
+        actual = method.apply(layer, x.clone(), weights, ids, None, None)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    saved_a2_scale = layer.w2_input_scale.clone()
+    layer.w2_input_scale.copy_(layer.w13_input_scale)
+    with set_current_vllm_config(VllmConfig()):
+        wrong_actual = method.apply(layer, x.clone(), weights, ids, None, None)
+    layer.w2_input_scale.copy_(saved_a2_scale)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(wrong_actual, wrong_a2, rtol=0, atol=0)
 
 
 def iterative_moe(
