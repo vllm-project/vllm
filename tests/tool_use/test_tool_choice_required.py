@@ -8,10 +8,10 @@ import regex as re
 from openai.types.responses import FunctionTool, WebSearchTool
 from pydantic import TypeAdapter
 
+from vllm.entrypoints.generate.base.protocol import FunctionDefinition
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
     find_tool_parameters,
