@@ -74,7 +74,7 @@ def test_multi_thread_safetensors_local_expert_ids_filtering(synthetic_safetenso
         max_workers=2,
         local_expert_ids=[0],
     )
-    loaded_dict = dict(list(iterator))
+    loaded_dict = dict(iterator)
 
     # All dense layers must be present
     for i in range(8):
