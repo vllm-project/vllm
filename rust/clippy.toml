@@ -1,0 +1,3 @@
+disallowed-types = [
+    { path = "prometheus_client::metrics::histogram::Histogram", reason = "it locks on every observation; use `vllm_metrics::Histogram`" },
+]

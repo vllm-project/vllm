@@ -3,10 +3,9 @@
 
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::U64Counter;
+use crate::{Histogram, U64Counter};
 
 const HTTP_REQUEST_DURATION_BUCKETS: [f64; 3] = [0.1, 0.5, 1.0];
 const HTTP_REQUEST_DURATION_HIGHR_BUCKETS: [f64; 21] = [

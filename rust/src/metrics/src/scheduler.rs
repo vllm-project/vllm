@@ -7,10 +7,9 @@ use std::sync::{Arc, Mutex};
 use itertools::Itertools as _;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{F64Gauge, HistogramFamily, U64Counter, U64Gauge};
+use crate::{F64Gauge, Histogram, HistogramFamily, U64Counter, U64Gauge};
 
 const KV_CACHE_RESIDENCY_BUCKETS: [f64; 21] = [
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
