@@ -88,9 +88,7 @@ def test_amd_fused_sigmoid_gating_matches_recurrence(
     v = torch.randn_like(q)
     a = torch.randn(1, total, num_heads, head_dim, device=DEVICE, dtype=dtype)
     if strided_beta:
-        beta_storage = torch.randn(
-            1, total, num_heads + 3, device=DEVICE, dtype=dtype
-        )
+        beta_storage = torch.randn(1, total, num_heads + 3, device=DEVICE, dtype=dtype)
         b = beta_storage[..., :num_heads]
     else:
         b = torch.randn(1, total, num_heads, device=DEVICE, dtype=dtype)
@@ -98,10 +96,8 @@ def test_amd_fused_sigmoid_gating_matches_recurrence(
     dt_bias = torch.randn(num_heads, head_dim, device=DEVICE, dtype=torch.float32)
     cu_seqlens = torch.arange(0, total + 1, seq_len, device=DEVICE, dtype=torch.int32)
     # Slot 0 is the reserved null block. Each sequence owns seq_len contiguous slots.
-    indices = (
-        torch.arange(1, total + 1, device=DEVICE, dtype=torch.int32).view(
-            num_seqs, seq_len
-        )
+    indices = torch.arange(1, total + 1, device=DEVICE, dtype=torch.int32).view(
+        num_seqs, seq_len
     )
     state = torch.randn(
         total + 1,
