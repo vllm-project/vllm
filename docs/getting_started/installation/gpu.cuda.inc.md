@@ -46,6 +46,32 @@ export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
 ```
 
+#### Install FlashInfer precompiled kernels {#install-flashinfer-kernels}
+
+vLLM's CUDA installation includes `flashinfer-python`. The optional
+`flashinfer-cubin` and `flashinfer-jit-cache` packages provide precompiled CUDA
+kernels that reduce downloads and compilation at startup. Install them from
+FlashInfer's wheel indexes using `flashinfer download-kernels`.
+
+After installing vLLM, run the following in the same Python environment:
+
+```bash
+flashinfer download-kernels
+flashinfer show-config
+```
+
+The command automatically selects kernel packages matching the installed
+`flashinfer-python` and PyTorch CUDA versions and supports uv environments.
+Let vLLM select its required `flashinfer-python` version instead of maintaining
+a separate FlashInfer version pin in your build script.
+Use `flashinfer download-kernels --dry-run` to inspect the installation commands.
+
+For custom container images, run this step after installing vLLM and PyTorch in
+the Python environment that will be included in the final image. These packages
+provide precompiled kernels, but some workloads may still require JIT compilation.
+See the [FlashInfer CLI documentation](https://docs.flashinfer.ai/cli.html#download-kernels)
+for CUDA overrides and nightly kernel wheels.
+
 #### Install the latest code
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
@@ -102,6 +128,9 @@ This command will do the following:
 1. Identify the corresponding base commit in the main branch.
 1. Download the pre-built wheel of the base commit.
 1. Use its compiled libraries and `vllm-rs` binary in the installation.
+
+To also install FlashInfer's optional precompiled kernels, follow
+[Install FlashInfer precompiled kernels](#install-flashinfer-kernels) after the editable install.
 
 !!! note
     1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
