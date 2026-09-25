@@ -215,7 +215,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]
     model: str | None = None
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
     top_logprobs: int | None = 0
@@ -226,7 +226,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: AnyResponseFormat | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
@@ -624,6 +624,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # Default sampling parameters for chat completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
@@ -661,28 +663,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: dict,
     ) -> SamplingParams:
-        # Default parameters
-        if (repetition_penalty := self.repetition_penalty) is None:
-            repetition_penalty = default_sampling_params.get(
-                "repetition_penalty",
-                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+        # Priority: user -> server default -> OpenAI default
+        sampling_params = {
+            name: (
+                value
+                if (value := getattr(self, name)) is not None
+                else default_sampling_params.get(name, default)
             )
-        if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
-            )
-        if (top_p := self.top_p) is None:
-            top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
-            )
-        if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
-            )
-        if (min_p := self.min_p) is None:
-            min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
-            )
+            for name, default in self._DEFAULT_SAMPLING_PARAMS.items()
+        }
 
         # Merge server-default stop_token_ids (e.g., model-specific tokens
         # like </call> for gpt-oss) with any request-specified ones
@@ -709,14 +698,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            presence_penalty=self.presence_penalty,
-            frequency_penalty=self.frequency_penalty,
-            repetition_penalty=repetition_penalty,
-            temperature=temperature,
+            **sampling_params,
             watermarking=self.watermarking,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
