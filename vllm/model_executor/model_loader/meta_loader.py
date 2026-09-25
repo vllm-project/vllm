@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
+from vllm.model_executor.layers.quantization.kv_cache import KVCacheScaleParameter
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -46,5 +47,20 @@ class MetaModelLoader(BaseModelLoader):
                     model_config=model_config,
                     prefix=prefix,
                 )
-            process_weights_after_loading(model, model_config, META_DEVICE)
+            _restore_kv_cache_scales(model)
+            # CPU, so the restored scales are not moved back to meta.
+            process_weights_after_loading(model, model_config, torch.device("cpu"))
         return model.eval()
+
+
+def _restore_kv_cache_scales(model: nn.Module) -> None:
+    """Give KV-cache scales their "not in checkpoint" value back.
+
+    Post-processing branches on these scalars, and on `meta` the -1.0
+    sentinel is lost. Restoring it takes the same path as a checkpoint without
+    KV-cache scales.
+    """
+    for module in model.modules():
+        for name, param in list(module.named_parameters(recurse=False)):
+            if isinstance(param, KVCacheScaleParameter) and param.is_meta:
+                setattr(module, name, KVCacheScaleParameter())

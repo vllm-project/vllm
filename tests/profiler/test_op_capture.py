@@ -102,6 +102,18 @@ def test_capture_allocates_no_accelerator_memory():
     assert capture.selection.device == "meta"
 
 
+def test_kv_cache_scales_survive_meta_loading():
+    """KV-cache scale post-processing branches on values meta tensors lack."""
+    engine_args = EngineArgs(
+        model=MODEL,
+        max_model_len=1024,
+        quantization="fp8",
+        hf_overrides={"num_hidden_layers": 1},
+    )
+    capture = capture_model_ops(MODEL, engine_args=engine_args)
+    assert any(op.name == ATTENTION_OP for op in capture.ops)
+
+
 def test_attention_is_recorded_once_per_layer(capture):
     attention = [op for op in capture.ops if op.name == ATTENTION_OP]
     layers = capture.selection.num_attention_layers
@@ -188,6 +200,45 @@ def test_keep_going_reports_where_the_forward_pass_stopped(monkeypatch):
     assert capture.ops
     assert all(".mlp" not in op.module for op in capture.ops)
     assert not capture.missing_kernels
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU kernels")
+def test_xpu_mhc_overrides_match_the_kernels():
+    """Hand-written output shapes must agree with what the kernel returns."""
+    tokens, hc_mult, hidden_size = 5, 4, 256
+    mix = (2 + hc_mult) * hc_mult
+    residual = torch.randn(
+        tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device="xpu"
+    )
+    pre_args = (
+        residual,
+        torch.randn(mix, hc_mult * hidden_size, device="xpu") * 0.01,
+        torch.ones(3, device="xpu"),
+        torch.zeros(mix, device="xpu"),
+        1e-6,
+        1e-6,
+        1e-6,
+        2.0,
+        3,
+    )
+    post_mix, comb_mix, _ = torch.ops._xpu_C.mhc_pre(*pre_args)
+    post_args = (torch.randn_like(residual[:, 0]), residual, post_mix, comb_mix)
+    for name, args in (
+        ("mhc_pre", pre_args),
+        ("mhc_post", post_args),
+        ("mhc_fused_post_pre", post_args + pre_args[1:]),
+    ):
+        op = getattr(torch.ops._xpu_C, name)
+        real = op(*args)
+        arguments = {
+            argument.name: value.to("meta") if torch.is_tensor(value) else value
+            for argument, value in zip(op.default._schema.arguments, args)
+        }
+        fake = meta_ops.OVERRIDES[f"_xpu_C::{name}"](arguments)
+        real, fake = (t if isinstance(t, tuple) else (t,) for t in (real, fake))
+        assert [(t.shape, t.dtype) for t in fake] == [
+            (t.shape, t.dtype) for t in real
+        ], name
 
 
 def test_register_meta_impls_never_replaces_a_kernel():
