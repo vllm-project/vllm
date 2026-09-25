@@ -81,7 +81,7 @@ class InputBatch:
     is_prefilling_np: np.ndarray
     # == np.any(is_prefilling_np)
     has_prefill: bool
-    # No prefills, or a uniform batch with only one-token prompt tail prefills.
+    # No prefills, or only prefill rows that run as decodes.
     decode_graph_eligible: bool
 
     # [num_tokens_after_padding]
@@ -114,6 +114,11 @@ class InputBatch:
 
     # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+
+    # [num_reqs] prefilling rows that schedule one new prompt token (excluding
+    # drafts) over existing context and so compute exactly like decodes.
+    # None if there are no prefills.
+    prefill_runs_as_decode_np: np.ndarray | None = None
 
     @classmethod
     def make_dummy(

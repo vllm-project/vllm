@@ -174,7 +174,6 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
-    is_uniform_query_len,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
@@ -1237,48 +1236,51 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping_np
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        has_prefill = bool(is_prefilling_np.any())
 
         num_draft_tokens_np = None
         if draft_tokens:
+            num_drafts_iter = (len(draft_tokens.get(req_id, ())) for req_id in req_ids)
             num_draft_tokens_np = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-                dtype=np.int32,
-                count=num_reqs,
+                num_drafts_iter, dtype=np.int32, count=num_reqs
             )
             if self.adaptive_verification is not None:
                 num_toks = self.adaptive_verification.get_num_tokens(
                     num_tokens_per_req, draft_tokens
                 )
 
-        has_prefill = bool(is_prefilling_np.any())
-        is_uniform = is_uniform_query_len(num_reqs, num_toks, max_query_len)
-        decode_graph_eligible = not has_prefill
-        if has_prefill and is_uniform and self.pcp_manager is None:
-            # One-token prompt tails over existing context (possibly padded with
-            # placeholder drafts) run as decodes. PCP partitions prefill rows.
+        prefill_runs_as_decode_np = None
+        if has_prefill and self.pcp_manager is None:
+            # One new prompt token over existing context (possibly padded with
+            # placeholder drafts) runs as a decode. PCP partitions prefill rows.
             num_new_tokens = num_scheduled_tokens
             if num_draft_tokens_np is not None:
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
-            is_tail = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
-            decode_graph_eligible = bool((is_tail | ~is_prefilling_np).all())
+            one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
 
-        uniform_tok_count = None
-        if is_uniform and decode_graph_eligible:
-            uniform_tok_count = max_query_len
+        decode_graph_eligible = not has_prefill
+        if prefill_runs_as_decode_np is not None:
+            decode_graph_eligible = bool(
+                (prefill_runs_as_decode_np | ~is_prefilling_np).all()
+            )
 
         batch_state = BatchReqState(
             req_ids=req_ids,
             num_scheduled_tokens=num_scheduled_tokens,
-            num_draft_tokens_np=num_draft_tokens_np,
             num_tokens=num_toks,
+            num_draft_tokens_np=num_draft_tokens_np,
             idx_mapping_np=idx_mapping_np,
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             is_prefilling_np=is_prefilling_np,
             has_prefill=has_prefill,
             decode_graph_eligible=decode_graph_eligible,
+            prefill_runs_as_decode_np=prefill_runs_as_decode_np,
         )
-        return batch_state, uniform_tok_count
+        return batch_state, get_uniform_decode_token_count(
+            num_reqs, num_toks, max_query_len, decode_graph_eligible
+        )
 
     def prepare_inputs(
         self,
@@ -1461,6 +1463,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
             decode_graph_eligible=batch_req_state.decode_graph_eligible,
+            prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=is_padding,
@@ -2327,16 +2330,17 @@ class BatchReqState(NamedTuple):
 
     req_ids: list[str]
     num_scheduled_tokens: np.ndarray  # [num_reqs]
-    num_draft_tokens_np: np.ndarray | None  # [num_reqs], None if no drafts
     # May be less than scheduler_output.total_num_scheduled_tokens:
     # adaptive verification trims the draft budget before running.
     num_tokens: int
+    num_draft_tokens_np: np.ndarray | None  # [num_reqs], None if no drafts
     idx_mapping_np: np.ndarray  # [num_reqs]
     prefill_len_np: np.ndarray  # [num_reqs]
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
     has_prefill: bool
     decode_graph_eligible: bool
+    prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
 
 
 def sort_batch_req_ids(

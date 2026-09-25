@@ -129,6 +129,30 @@ def test_prompt_chunk_of_decode_query_len_is_not_uniform_decode():
     assert _uniform_token_count({"p0": (0, 8)}, 8) is None
 
 
+def test_one_new_prompt_token_over_context_runs_as_decode():
+    # A prompt tail padded with placeholder drafts and a one-token mid-prompt
+    # chunk both compute like decodes. A fresh one-token prompt and a real
+    # multi-token chunk don't.
+    batch = {"d0": (16, 16), "tail": (128, 129), "mid": (64, 129)}
+    batch.update({"fresh": (0, 1), "chunk": (120, 129)})
+    runner = _make_runner(batch, decode_query_len=4)
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"d0": 4, "tail": 4, "mid": 1, "fresh": 1, "chunk": 4},
+        total_num_scheduled_tokens=14,
+        scheduled_spec_decode_tokens={"d0": [1, 2, 3], "tail": [-1] * 3},
+    )
+    state, _ = runner.gather_batch_req_state(scheduler_output, False)
+    assert state is not None
+    runs_as_decode = dict(zip(state.req_ids, state.prefill_runs_as_decode_np))
+    assert runs_as_decode == {
+        "d0": False,
+        "tail": True,
+        "mid": True,
+        "fresh": False,
+        "chunk": False,
+    }
+
+
 def test_one_token_prompt_tail_with_prior_context_is_uniform_decode():
     # Replaying the last prompt token over existing context (full prefix-cache
     # hit or P/D KV import) computes exactly like a decode.

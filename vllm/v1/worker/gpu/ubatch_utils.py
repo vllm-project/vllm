@@ -181,6 +181,11 @@ def _slice_input_batch(
             req_start:req_stop
         ],
         is_prefilling_np=input_batch.is_prefilling_np[req_start:req_stop],
+        prefill_runs_as_decode_np=(
+            None
+            if input_batch.prefill_runs_as_decode_np is None
+            else input_batch.prefill_runs_as_decode_np[req_start:req_stop]
+        ),
         input_ids=input_batch.input_ids[tok_start:tok_stop],
         positions=input_batch.positions[tok_start:tok_stop],
         is_padding=input_batch.is_padding[tok_start:tok_stop],
