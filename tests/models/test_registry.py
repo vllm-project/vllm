@@ -131,6 +131,7 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
         # ("MLPSpeculatorPreTrainedModel", False, False),
         ("DeepseekV2ForCausalLM", True, False),
         ("Qwen2VLForConditionalGeneration", True, True),
+        ("Glm5NextForCausalLM", False, False),
     ],
 )
 def test_registry_is_pp(model_arch, is_pp, init_cuda):
