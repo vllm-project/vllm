@@ -4,6 +4,7 @@
 import io
 from collections.abc import Iterable
 
+import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -54,6 +56,31 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
+_DRAFT_LAYER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.])layers\.(\d+)")
+
+
+def _add_global_draft_layer_exclusions(
+    quant_config: QuantizationConfig | None,
+    start_layer_id: int,
+    num_hidden_layers: int,
+) -> None:
+    """Add runtime layer aliases for checkpoint-local quant exclusions."""
+    if quant_config is None or start_layer_id == 0:
+        return
+    exclusions = getattr(quant_config, "exclude_modules", None)
+    if not isinstance(exclusions, list):
+        return
+
+    def offset_local_layer(match: re.Match[str]) -> str:
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_hidden_layers:
+            return match.group(0)
+        return f"layers.{layer_idx + start_layer_id}"
+
+    for exclusion in tuple(exclusions):
+        global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
+        if global_exclusion != exclusion and global_exclusion not in exclusions:
+            exclusions.append(global_exclusion)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -394,6 +421,9 @@ class DFlashQwen3Model(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        _add_global_draft_layer_exclusions(
+            self.quant_config, start_layer_id, self.config.num_hidden_layers
+        )
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
@@ -473,14 +503,25 @@ class DFlashQwen3Model(nn.Module):
         has_bias: bool,
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
+        self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
+        self._context_q_sizes = [a.q_size for a in layers_attn]
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+        if all(
+            isinstance(proj.quant_method, UnquantizedLinearMethod)
+            for proj in self._context_qkv_projs
+        ):
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+            else:
+                self._fused_kv_bias = None
         else:
+            # Quantized linear weights may use packed storage that cannot be
+            # consumed by F.linear. Run each projection through its quant method.
+            self._fused_kv_weight = None
             self._fused_kv_bias = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
@@ -548,17 +589,26 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
+        if self._fused_kv_weight is not None:
+            all_kv_flat = F.linear(
+                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            )
+            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+        else:
+            layer_kv = []
+            for proj, q_size in zip(
+                self._context_qkv_projs, self._context_q_sizes, strict=True
+            ):
+                qkv, _ = proj(normed_context_states)
+                layer_kv.append(
+                    qkv[:, q_size:].view(num_ctx, 2, num_kv_heads, head_dim)
+                )
+            all_kv = torch.stack(layer_kv, dim=1)
+
         # Single contiguous copy that separates K/V and transposes to
-        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
+        # layer-major layout. Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-        all_kv = (
-            all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
-            .permute(2, 1, 0, 3, 4)
-            .contiguous()
-        )
+        all_kv = all_kv.permute(2, 1, 0, 3, 4).contiguous()
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         return all_k, all_v
@@ -724,6 +774,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            quant_config=(
+                get_draft_quant_config(vllm_config)
+                if getattr(self.config, "has_own_lm_head", False)
+                else None
+            ),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(
