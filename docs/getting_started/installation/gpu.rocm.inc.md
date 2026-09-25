@@ -226,7 +226,7 @@ You can find more information about vLLM's wheels in
 #### Full build (with compilation) {#full-build}
 
 !!! tip
-    - If you found that the following installation step does not work for you, please refer to [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base). Dockerfile is a form of installation steps.
+    - If you found that the following installation step does not work for you, please refer to [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base). Dockerfile is a form of installation steps.
 
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
@@ -260,7 +260,7 @@ You can find more information about vLLM's wheels in
     ```
 
     !!! note
-        - The validated `$TRITON_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - The validated `$TRITON_BRANCH` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
         - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention.git)
@@ -280,7 +280,7 @@ You can find more information about vLLM's wheels in
     ```
 
     !!! note
-        - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
 
 3. Optionally, if you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
 
@@ -295,7 +295,7 @@ You can find more information about vLLM's wheels in
 
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
 
 4. Optionally, if you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
 
@@ -309,7 +309,7 @@ You can find more information about vLLM's wheels in
 
     !!! note
         - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
 
 5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
 
@@ -352,8 +352,9 @@ You can find more information about vLLM's wheels in
 vLLM offers official Docker images for deployment.
 The images can be used to run OpenAI compatible server and are available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
 
-- `vllm/vllm-openai-rocm:latest` — stable release
-- `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch, use this if you want the latest features and fixes
+- `vllm/vllm-openai-rocm:latest` — stable release, built on ROCm 10.0 (also tagged `latest-rocm100`)
+- `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch on ROCm 10.0 (also tagged `nightly-rocm100`), use this if you want the latest features and fixes
+- `vllm/vllm-openai-rocm:latest-rocm72` / `nightly-rocm72` — the same builds on the legacy ROCm 7.2 stack, kept for a transition period
 
 ```bash
 docker run --rm \
@@ -441,7 +442,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 7.0 by default, but also supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, and 6.4, in older vLLM branches.
+[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 10.0 (installed from TheRock wheels) by default. The legacy ROCm 7.2 stack is available as [docker/Dockerfile.rocm_72](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72) with [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base); older vLLM branches support ROCm 5.7 through 7.0.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 - `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)

@@ -325,7 +325,7 @@ RUN --mount=type=bind,source=pyproject.toml,target=${COMMON_WORKDIR}/vllm/pyproj
     --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         cmake/external_projects/triton_kernels.cmake \
-        || echo "WARNING: Dockerfile.rock ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
+        || echo "WARNING: Dockerfile.rocm ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && export CCACHE_BASEDIR="$PWD" \
     && echo "=== ccache stats before ROCm native build ===" \
     && (ccache --show-stats || true) \
@@ -673,7 +673,7 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 RUN --mount=type=cache,target=/root/.cache/uv \
     { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         vllm/cmake/external_projects/triton_kernels.cmake \
-        || echo "WARNING: Dockerfile.rock ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
+        || echo "WARNING: Dockerfile.rocm ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && cd vllm \
     && uv pip install --system setuptools_scm regex
 
