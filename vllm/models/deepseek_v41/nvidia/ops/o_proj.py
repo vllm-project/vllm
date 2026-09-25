@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DSV4.1 output projection with a small-batch SM100 fusion."""
+"""DSV4.1 output projection with a small-batch SM100/SM103 fusion."""
 
 import torch
 from torch import nn
@@ -55,7 +55,7 @@ def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
 def dsv41_o_proj(
     layer: nn.Module, attn_out: torch.Tensor, positions: torch.Tensor
 ) -> torch.Tensor:
-    """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100 batches."""
+    """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches."""
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache
     if 1 <= o.shape[0] <= _FUSED_WO_A_MAX_TOKENS and _can_fuse_wo_a(layer):
