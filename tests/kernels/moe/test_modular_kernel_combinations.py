@@ -16,6 +16,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_aiter, has_deep_ep, has_deep_gemm
@@ -75,7 +76,7 @@ def assert_aiter_quant_scheme_case(config: Config) -> None:
     indirectly through the general quant-config sweep.
     See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if getattr(fe_cls, "__name__", "") != "AiterExperts":
+    if fe_cls is not AiterExperts:
         return
 
     if config.quant_config is None:
@@ -96,7 +97,7 @@ def assert_aiter_activation_case(config: Config) -> None:
     AiterExperts being reached only indirectly through the general
     activation sweep. See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if getattr(fe_cls, "__name__", "") != "AiterExperts":
+    if fe_cls is not AiterExperts:
         return
 
     assert fe_cls._supports_activation(config.activation), (
@@ -151,7 +152,7 @@ def rank_worker(
             if (
                 topk == 1
                 and config.supports_apply_weight_on_input()
-                and getattr(config.fused_experts_type, "__name__", "") == "AiterExperts"
+                and config.fused_experts_type is AiterExperts
                 and config.quant_block_shape is not None
             ):
                 print(
@@ -167,7 +168,7 @@ def rank_worker(
             # https://github.com/vllm-project/vllm/issues/57029
             if (
                 config.world_size > 1
-                and getattr(config.fused_experts_type, "__name__", "") == "AiterExperts"
+                and config.fused_experts_type is AiterExperts
                 and getattr(config.prepare_finalize_type, "__name__", "")
                 in ("DeepEPHTPrepareAndFinalize", "MoriPrepareAndFinalize")
             ):
@@ -205,7 +206,7 @@ def rank_worker(
 
             is_aiter_fp8 = (
                 _cp.is_rocm()
-                and getattr(config.fused_experts_type, "__name__", "") == "AiterExperts"
+                and config.fused_experts_type is AiterExperts
                 and config.quant_config is not None
             )
             if is_aiter_fp8:
@@ -265,7 +266,7 @@ def is_nyi_config(config: Config) -> bool:
             return True
 
     if config.activation != MoEActivation.SILU:
-        if getattr(config.fused_experts_type, "__name__", "") != "AiterExperts":
+        if config.fused_experts_type is not AiterExperts:
             return True  # AITER-only for this axis, for now
         if config.quant_dtype is not None:
             return True  # unquantized-only for this axis, for now
@@ -573,9 +574,6 @@ def test_aiter_moe_sorting_backend_dispatch_env_matrix(
             "_USE_FLYDSL_MOE_SORTING)."
         )
 
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
-    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
     )
@@ -656,9 +654,6 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
     test_rocm_aiter_moe.py by driving the real AiterExperts.apply() call
     instead of supplying moe_sorting_dispatch_policy directly.
     """
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
-    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
     )
