@@ -665,9 +665,8 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None or not speculative_config.use_eagle():
             return 0
-        if speculative_config.use_multi_module_mtp():
-            # Each MTP module reads one token further ahead than the one before
-            # it, so the chain needs num_speculative_tokens of runway at a
+        if speculative_config.use_multi_module_mtp() or speculative_config.use_dspark():
+            # Multi-module MTP and DSpark need the full draft runway at a
             # chunked-prefill boundary.
             return self.num_speculative_tokens
         # Eagle-family drafters read only the immediate next token.
