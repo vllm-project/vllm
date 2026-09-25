@@ -296,7 +296,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
-        invalid_draft_positions: torch.Tensor | None = None,
+        invalid_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -310,9 +310,8 @@ class RejectionSampler:
         # verification sees the copy: `apply_sampling_params` and watermarking
         # keep the real draft ids.
         verify_draft_sampled = draft_sampled
-        if invalid_draft_positions is not None:
-            verify_draft_sampled = draft_sampled.clone()
-            verify_draft_sampled[invalid_draft_positions] = -1
+        if invalid_drafts is not None:
+            verify_draft_sampled = draft_sampled.masked_fill(invalid_drafts, -1)
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
