@@ -111,7 +111,8 @@
 /tests/v1/structured_output @mgoin @aarnphm @arpera
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /tests/lora @jeejeelee
-/tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
+/tests/models/language/generation/hybrid @tdoublep @tomeras91
+/tests/models/language/generation/test_granite_4_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche
 /tests/v1/kv_connector @ApostaC @orozery @ivanium
 /tests/v1/kv_offload @ApostaC @orozery
