@@ -27,6 +27,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    align_remote_regions_by_layer,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -277,7 +280,12 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
             [d_raw.data_ptr() + 64 + 2 * 256, 64, 0],
         ]
         aligned = msgspec.msgpack.encode(metadata)
-        producer._align_remote_regions_by_layer(metadata)
+        align_remote_regions_by_layer(
+            metadata,
+            producer._transfer_layer_names,
+            producer._transfer_layer_region_indices,
+            producer.block_len_per_layer,
+        )
         assert msgspec.msgpack.encode(metadata) == aligned
 
 

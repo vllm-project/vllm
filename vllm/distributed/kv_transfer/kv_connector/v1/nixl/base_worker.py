@@ -59,7 +59,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    align_remote_regions_by_layer,
     get_representative_spec_type,
+    select_remote_regions,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -447,95 +449,6 @@ class NixlBaseConnectorWorker:
     def _requires_layer_name_routing(self) -> bool:
         """Whether PP push must match HMA/packed layers by name, not region index."""
         return self.pp_size > 1 and self._tracks_region_layers()
-
-    def _align_remote_regions_by_layer(
-        self, nixl_agent_meta: NixlAgentMetadata
-    ) -> None:
-        """Select remote regions for this PP stage in local layer order."""
-        remote_region_layers = nixl_agent_meta.region_members
-        # Region-index routing here would silently transfer stale KV.
-        assert remote_region_layers, "Remote advertised no region_members"
-        assert (
-            len(nixl_agent_meta.kv_caches_base_addr)
-            == len(nixl_agent_meta.block_lens)
-            == len(nixl_agent_meta.block_strides)
-            == len(remote_region_layers)
-        ), "Remote region metadata lengths disagree"
-        assert all(
-            values is None or len(values) == len(remote_region_layers)
-            for values in (
-                nixl_agent_meta.region_num_blocks,
-                nixl_agent_meta.region_group_ids,
-                nixl_agent_meta.region_names,
-                nixl_agent_meta.region_mem_types,
-            )
-        ), "Remote region metadata lengths disagree"
-
-        remote_region_by_layer: dict[str, int] = {}
-        for region_idx, layer_names in enumerate(remote_region_layers):
-            for layer_name in layer_names:
-                assert layer_name not in remote_region_by_layer, (
-                    f"Remote advertised layer {layer_name!r} in multiple regions"
-                )
-                remote_region_by_layer[layer_name] = region_idx
-
-        missing = [
-            name
-            for name in self._transfer_layer_names
-            if name not in remote_region_by_layer
-        ]
-        assert not missing, f"Remote is missing locally owned layers: {missing}"
-
-        packed_regions = {
-            remote_region_by_layer[name]
-            for name in nixl_agent_meta.packed_member_layouts
-        }
-        remote_regions = [
-            remote_region_by_layer[name] for name in self._transfer_layer_names
-        ]
-        nixl_agent_meta.kv_caches_base_addr = [
-            nixl_agent_meta.kv_caches_base_addr[i] for i in remote_regions
-        ]
-        nixl_agent_meta.block_lens = [
-            nixl_agent_meta.block_lens[i] for i in remote_regions
-        ]
-        nixl_agent_meta.block_strides = [
-            nixl_agent_meta.block_strides[i] for i in remote_regions
-        ]
-        if nixl_agent_meta.region_num_blocks is not None:
-            nixl_agent_meta.region_num_blocks = [
-                nixl_agent_meta.region_num_blocks[i] for i in remote_regions
-            ]
-        if nixl_agent_meta.region_group_ids is not None:
-            nixl_agent_meta.region_group_ids = [
-                nixl_agent_meta.region_group_ids[i] for i in remote_regions
-            ]
-        if nixl_agent_meta.region_mem_types is not None:
-            nixl_agent_meta.region_mem_types = [
-                nixl_agent_meta.region_mem_types[i] for i in remote_regions
-            ]
-        if nixl_agent_meta.region_names is not None:
-            nixl_agent_meta.region_names = list(self._transfer_layer_names)
-        if nixl_agent_meta.packed_member_layouts:
-            for i, layer_name in enumerate(self._transfer_layer_names):
-                if remote_regions[i] not in packed_regions:
-                    continue
-                assert layer_name in nixl_agent_meta.packed_member_layouts, (
-                    f"Remote packed layer {layer_name!r} has no layout"
-                )
-                offset, page_size = nixl_agent_meta.packed_member_layouts[layer_name]
-                assert (
-                    0 <= offset < offset + page_size <= nixl_agent_meta.block_lens[i]
-                ), f"Remote packed layer {layer_name!r} escapes its block"
-                local_region = self._transfer_layer_region_indices[i]
-                assert page_size == self.block_len_per_layer[local_region], (
-                    f"Packed MLA page sizes must match for layer {layer_name!r}"
-                )
-                nixl_agent_meta.kv_caches_base_addr[i] += offset
-                nixl_agent_meta.block_lens[i] = page_size
-            nixl_agent_meta.packed_member_layouts = {}
-        # One layer per region keeps a second alignment pass a no-op.
-        nixl_agent_meta.region_members = [[name] for name in self._transfer_layer_names]
 
     def __init__(
         self,
@@ -2260,7 +2173,12 @@ class NixlBaseConnectorWorker:
                     "Attention-HMA push does not support decode TP greater than "
                     "prefill TP yet"
                 )
-            self._align_remote_regions_by_layer(nixl_agent_meta)
+            align_remote_regions_by_layer(
+                nixl_agent_meta,
+                self._transfer_layer_names,
+                self._transfer_layer_region_indices,
+                self.block_len_per_layer,
+            )
         elif (
             self.pp_size > 1
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
@@ -2271,25 +2189,7 @@ class NixlBaseConnectorWorker:
             start = self._remote_region_offset
             end = start + num_local_regions
             assert len(nixl_agent_meta.kv_caches_base_addr) >= end
-            nixl_agent_meta.kv_caches_base_addr = nixl_agent_meta.kv_caches_base_addr[
-                start:end
-            ]
-            nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
-            nixl_agent_meta.block_strides = nixl_agent_meta.block_strides[start:end]
-            if nixl_agent_meta.region_num_blocks is not None:
-                nixl_agent_meta.region_num_blocks = nixl_agent_meta.region_num_blocks[
-                    start:end
-                ]
-            if nixl_agent_meta.region_group_ids is not None:
-                nixl_agent_meta.region_group_ids = nixl_agent_meta.region_group_ids[
-                    start:end
-                ]
-            if nixl_agent_meta.region_names is not None:
-                nixl_agent_meta.region_names = nixl_agent_meta.region_names[start:end]
-            if nixl_agent_meta.region_mem_types is not None:
-                nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
-                    start:end
-                ]
+            select_remote_regions(nixl_agent_meta, range(start, end))
 
         ### Register remote engine in TransferTopology (idempotent).
         physical_blocks_per_logical = (
