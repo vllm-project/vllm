@@ -5,19 +5,19 @@
 
 Usage:
     # Autotune all registered kernels
-    python scripts/autotune_helion_kernels.py
+    python tools/autotune_helion_kernels.py
 
     # Autotune specific kernel
-    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8
+    python tools/autotune_helion_kernels.py --kernels silu_mul_fp8
 
     # Autotune multiple kernels
-    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8 rms_norm_fp8
+    python tools/autotune_helion_kernels.py --kernels silu_mul_fp8 rms_norm_fp8
 
     # Force re-autotuning
-    python scripts/autotune_helion_kernels.py --force
+    python tools/autotune_helion_kernels.py --force
 
     # List available kernels
-    python scripts/autotune_helion_kernels.py --list
+    python tools/autotune_helion_kernels.py --list
 """
 
 import argparse

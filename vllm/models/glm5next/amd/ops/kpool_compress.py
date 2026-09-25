@@ -357,7 +357,9 @@ def _kpool_tail_seed_kernel(
     k = tl.load(key_ptr + i * HEAD_DIM + offs, mask=m)
     s = tl.load(score_ptr + i * HEAD_DIM + offs, mask=m)
     tl.store(tail_ptr + base + offs, k, mask=m)
-    tl.store(tail_ptr + base + KPOOL_HEAD + offs, s, mask=m)
+    tl.store(
+        tail_ptr + block_base + KPOOL_HEAD + (t % RING) * HEAD_DIM + offs, s, mask=m
+    )
 
 
 def kpool_seed_tail_cache(
@@ -429,10 +431,7 @@ def _kpool_decode_update_batched_kernel(
     the tail-ring slots that tokens t < t* (same request) just stashed in this
     same invocation. ``tl.range`` iterates sequentially within the program, so
     those stashes are visible to the later completion read. Cross-request
-    programs are independent (distinct tail blocks). With NEXT_N < POOL_SIZE
-    (the spec-verify case: NEXT_N ~= num_spec+1, POOL_SIZE=16) at most one
-    completion can occur per request per call, but the ordered loop is correct
-    for any NEXT_N.
+    programs are independent (distinct tail blocks). RING >= POOL_SIZE.
     """
     req = tl.program_id(0)
     offs = tl.arange(0, BLOCK_D)
@@ -446,7 +445,7 @@ def _kpool_decode_update_batched_kernel(
         pos_valid = (cache_loc >= 0) & (pos >= 0)
 
         slot = safe_pos % POOL_SIZE
-        phys_slot = safe_pos % RING  # RING >= POOL_SIZE; see Glm5NextTailCache
+        phys_slot = safe_pos % RING
 
         # Derive the tail block from THIS token's tail_slot (the request's block
         # is constant across a pool, but a padded / invalid entry carries a

@@ -22,25 +22,25 @@ Two baselines are supported (``--baseline``):
 
 Usage:
     # List available kernels
-    python scripts/benchmark_helion_kernels.py --list
+    python tools/benchmark_helion_kernels.py --list
 
     # Benchmark a kernel against the autotune baseline (default)
-    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant
+    python tools/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant
 
     # Benchmark against the CUDA baseline
-    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+    python tools/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --baseline cuda
 
     # Check numerics against the performance baseline instead of eager
-    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+    python tools/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --baseline cuda --numerics-with-perf-baseline
 
     # Disable CUDA graph capture and save results
-    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+    python tools/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --no-cudagraph --output results.json
 
     # Only verify numerics, skipping the timing runs
-    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+    python tools/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --numerics-only
 """
 

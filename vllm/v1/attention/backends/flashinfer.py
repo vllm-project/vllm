@@ -423,7 +423,7 @@ class FlashInferBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
         # on Blackwell); advertise them only when usable so selection never
         # picks a large kernel block we cannot serve.
@@ -1563,8 +1563,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
                 )
                 max_q_len_prefill = int(query_lens_prefill_cpu.max().item())
+                prefill_block_tables = block_table_tensor[prefill_start:]
+                if (
+                    self.q_data_type_prefill != FP8_DTYPE
+                    and self.cache_dtype.startswith("fp8")
+                ):
+                    seq_lens_cpu_upper_bound = (
+                        common_attn_metadata.seq_lens_cpu_upper_bound
+                    )
+                    max_prefill_seq_len = max_seq_len
+                    if seq_lens_cpu_upper_bound is not None:
+                        max_prefill_seq_len = int(
+                            seq_lens_cpu_upper_bound[prefill_start:num_reqs]
+                            .max()
+                            .item()
+                        )
+                    # Dequantization allocates one page per table entry and
+                    # indexes rows by their logical width.
+                    prefill_block_tables = canonicalize_singleton_dim_strides(
+                        prefill_block_tables[
+                            :, : cdiv(max_prefill_seq_len, page_size)
+                        ].contiguous()
+                    )
                 attn_metadata.prefill = TRTLLMPrefill(
-                    block_tables=block_table_tensor[prefill_start:],
+                    block_tables=prefill_block_tables,
                     seq_lens=prefill_seq_lens,
                     cum_seq_lens_q=qo_indptr_prefill_gpu,
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,

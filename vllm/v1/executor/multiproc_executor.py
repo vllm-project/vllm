@@ -42,7 +42,7 @@ from vllm.distributed.parallel_state import (
     model_parallel_is_initialized,
 )
 from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
@@ -853,6 +853,9 @@ class WorkerProc:
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
         This runs a background process"""
+        if logging_config := getattr(kwargs["vllm_config"], "logging_config", None):
+            configure_logging(logging_config)
+
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error

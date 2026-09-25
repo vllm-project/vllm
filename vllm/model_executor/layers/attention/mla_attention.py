@@ -735,13 +735,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = kv_cache.squeeze(1)
         if (
             self._vllm_config.kernel_config.enable_jit_warmup
-            and self.attn_backend.get_name()
-            in (
-                "FLASHMLA_SPARSE",
-                "FLASHINFER_MLA_SPARSE",
-                "FLASHINFER_MLA_SPARSE_SM120",
-                "DEEPSEEK_V32_INDEXER",
-            )
+            and self._uses_flat_kv_cache()
         ):
             from vllm.v1.attention.backends.mla.sparse_utils import (
                 _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
@@ -753,6 +747,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._vllm_config,
                 block_stride_rows=self.kv_cache.stride(0) // row_width,
             )
+
+    def _uses_flat_kv_cache(self) -> bool:
+        backend = self.attn_backend.get_name()
+        return backend == "FLASHINFER_MLA_SPARSE" or (
+            backend == "FLASHMLA_SPARSE"
+            and self.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla")
+        )
 
     @property
     def chunked_prefill_workspace_size(self) -> int:

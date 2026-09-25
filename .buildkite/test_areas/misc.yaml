@@ -29,9 +29,9 @@ steps:
     - pytest -v -s v1/sample
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Sample"
+      label: ":amd: (MI355 DPX) V1 Sample"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -51,9 +51,9 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Logits + Oracle"
+      label: ":amd: (MI355 DPX) V1 Logits + Oracle"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -96,9 +96,9 @@ steps:
     - pytest -v -s -m 'not cpu_test' v1/core
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Core"
+      label: ":amd: (MI355 DPX) V1 Core"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -116,9 +116,9 @@ steps:
     - pytest -v -s v1/streaming_input
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Executor + Worker"
+      label: ":amd: (MI355 DPX) V1 Executor + Worker"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -135,9 +135,9 @@ steps:
     - pytest -v -s v1/simple_kv_offload
   mirror:
     amd:
-      label: ":amd: (MI300) V1 KV Offload"
+      label: ":amd: (MI355 DPX) V1 KV Offload"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -155,9 +155,9 @@ steps:
     - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) V1 KV Connectors Shard %N"
+      label: ":amd: (MI355 DPX) V1 KV Connectors Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -182,9 +182,9 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Metrics + LM Eval"
+      label: ":amd: (MI355 DPX) V1 Metrics + LM Eval"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -239,9 +239,9 @@ steps:
     - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
   mirror:
     amd:
-      label: ":amd: (MI355) Extract Hidden States Integration Single GPU"
+      label: ":amd: (MI355 DPX) Extract Hidden States Integration Single GPU"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace
@@ -328,9 +328,9 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
   mirror:
     amd:
-      label: ":amd: (MI355) Regression"
+      label: ":amd: (MI355 DPX) Regression"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 25
       depends_on:
       - image-build-amd
@@ -370,9 +370,9 @@ steps:
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
   mirror:
     amd:
-      label: ":amd: (MI300) Examples"
+      label: ":amd: (MI355 DPX) Examples"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 75
       source_file_dependencies:
       - vllm/entrypoints
@@ -472,9 +472,9 @@ steps:
   - pytest -v -s utils_
   mirror:
     amd:
-      label: ":amd: (MI355) Async Engine, Inputs, Utils, Worker"
+      label: ":amd: (MI355 DPX) Async Engine, Inputs, Utils, Worker"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -518,6 +518,7 @@ steps:
   - vllm/v1/
   - tests/test_envs.py
   - tests/test_outputs.py
+  - tests/test_pcp_dp.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
   - tests/test_sampling_params.py
@@ -538,6 +539,7 @@ steps:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
   - pytest -v -s test_outputs.py
+  - pytest -v -s test_pcp_dp.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_sampling_params.py
@@ -665,9 +667,9 @@ steps:
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
   mirror:
     amd:
-      label: ":amd: (MI355) Acceptance Length (Large Models)"
+      label: ":amd: (MI355 DPX) Acceptance Length (Large Models)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd

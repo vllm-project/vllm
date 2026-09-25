@@ -796,11 +796,11 @@ def make_quant_config(
         return None, QuantizedWeights(w13_weight=w1, w2_weight=w2)
 
     if quantization == "fp8":
-        return Fp8Config(True), _quantize_fp8_halves(w1, w2)
+        return Fp8Config(), _quantize_fp8_halves(w1, w2)
 
     if quantization == "fp8_blocked":
         block_shape = [128, 128]
-        return Fp8Config(True, weight_block_size=block_shape), _quantize_fp8_halves(
+        return Fp8Config(weight_block_size=block_shape), _quantize_fp8_halves(
             w1, w2, block_shape
         )
 
@@ -1484,6 +1484,7 @@ def _run_one_config(
     use_shared_experts: bool,
     use_gate: bool,
     use_routed_input_transform: bool,
+    input_scale: float = 1.0,
     **kwargs,
 ) -> None:
     """Generic test loop that sets up environment and delegates to test_body_fn.
@@ -1530,6 +1531,8 @@ def _run_one_config(
 
         # Extract data from test_data
         hidden_states = test_data.hidden_states
+        if input_scale != 1.0:
+            hidden_states = hidden_states * input_scale
         router_logits = test_data.router_logits
         w1 = test_data.w1
         w2 = test_data.w2
@@ -1982,7 +1985,140 @@ def _parallel_worker_rocm_deepep(
             os._exit(exit_code)
 
 
-# TODO: add cudagraphs/torch.compile tests
+def _test_body_mori_graph(
+    moe_layer: MoERunner,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    num_tokens_across_dp: torch.Tensor,
+    baseline_output: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
+        MoriPrepareAndFinalize,
+    )
+
+    kernel = moe_layer._quant_method.moe_kernel
+    assert kernel is not None
+    assert isinstance(kernel.prepare_finalize, MoriPrepareAndFinalize)
+    assert isinstance(kernel.fused_experts, AiterExperts)
+    assert not kernel.prepare_finalize.use_fp8_dispatch
+
+    def check(actual: torch.Tensor, expected: torch.Tensor) -> None:
+        torch.testing.assert_close(actual, expected, atol=3.5e-2, rtol=3.5e-2)
+        # These inputs produce small outputs; an absolute-only budget can
+        # accept all-zero output. Also bound error relative to the reference.
+        ref_norm = expected.float().norm()
+        assert ref_norm > 0
+        assert (actual.float() - expected.float()).norm() < 3.5e-2 * ref_norm
+
+    # Forward-context metadata belongs on CPU, outside graph capture.
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp.cpu(),
+    ):
+        initial_hidden = hidden_states.clone()
+        initial_router = router_logits.clone()
+        for _ in range(2):
+            eager_output = moe_layer(hidden_states, router_logits)
+        saved_eager_output = eager_output.clone()
+        torch.accelerator.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured_output = moe_layer(hidden_states, router_logits)
+        graph.replay()
+        original_output = captured_output.clone()
+        check(original_output, baseline_output)
+
+        for scale, shift in [(-0.5, 1), (1.75, 3)]:
+            hidden_states.copy_(initial_hidden * scale)
+            router_logits.copy_(initial_router.roll(shift, dims=-1))
+            expected = moe_layer(hidden_states, router_logits).clone()
+            graph.replay()
+            check(captured_output, expected)
+            assert (expected.float() - original_output.float()).norm() > (
+                0.1 * original_output.float().norm()
+            )
+
+        # Later calls must not overwrite an earlier eager return tensor.
+        check(eager_output, saved_eager_output)
+        check(original_output, baseline_output)
+        return baseline_output, original_output
+
+
+def _mori_graph_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    m: int,
+    n: int,
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+    _run_one_config(
+        vllm_config=vllm_config,
+        ep_size=2,
+        dp_size=2,
+        tp_size=1,
+        dp_rank=pgi.rank,
+        tp_rank=0,
+        is_sequence_parallel=False,
+        m=m,
+        n=n,
+        k=512,
+        num_experts=8,
+        top_k=2,
+        quantization=None,
+        backend="mori_high_throughput",
+        test_body_fn=_test_body_mori_graph,
+        use_shared_experts=False,
+        use_gate=False,
+        use_routed_input_transform=False,
+        input_scale=1.0 + pgi.rank,
+    )
+
+
+@pytest.mark.parametrize("m,n", [(1, 256), (32, 512), (45, 256)])
+def test_moe_layer_mori_graph(m: int, n: int, monkeypatch):
+    """BF16 EP dispatch/combine preserves routing and outputs across replays."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if not current_platform.is_rocm() or not has_mori():
+        pytest.skip("Requires ROCm and MoRI")
+    if not is_aiter_found_and_supported():
+        pytest.skip("Requires supported AITER kernels")
+    if current_platform.device_count() < 2:
+        pytest.skip("Requires two GPUs")
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+    compilation_config = CompilationConfig()
+    compilation_config.pass_config.fuse_allreduce_rms = False
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            tensor_parallel_size=1,
+            enable_expert_parallel=True,
+            all2all_backend="mori_high_throughput",
+        ),
+        compilation_config=compilation_config,
+        scheduler_config=SchedulerConfig.default_factory(
+            max_num_batched_tokens=64, max_num_seqs=64
+        ),
+    )
+    parallel_launch_with_config(2, _mori_graph_worker, vllm_config, None, m, n)
+
+
+# TODO: add torch.compile tests and graph coverage for other backends.
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("enable_eplb", [False, True])

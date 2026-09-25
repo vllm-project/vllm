@@ -1224,7 +1224,7 @@ class RoutedExperts(PluggableLayer):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
         This is called by the runner after router selection (for modular kernels)
@@ -1239,7 +1239,7 @@ class RoutedExperts(PluggableLayer):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts.
+            Finalized routed states or a deferred-finalize output.
 
         """
         assert not self.quant_method.is_monolithic

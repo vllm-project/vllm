@@ -982,6 +982,8 @@ class VllmRunner:
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
     - `enforce_eager`: Set to `False` to test CUDA graph.
+    - `kernel_config.enable_jit_warmup`: Set to `False` to reduce test startup
+      time.
     """
 
     def __init__(
@@ -1009,6 +1011,8 @@ class VllmRunner:
             if default_torch_num_threads is None
             else set_default_torch_num_threads(default_torch_num_threads)
         )
+
+        kwargs.setdefault("kernel_config", {"enable_jit_warmup": False})
 
         if not kwargs.get("compilation_config", None):
             # Note(@tdoublep): This is set to 4 because some tests (e.g., hybrid
@@ -1426,16 +1430,20 @@ def temporary_enable_log_propagate():
     import logging
 
     logger = logging.getLogger("vllm")
+    previous_propagate = logger.propagate
     logger.propagate = True
     yield
-    logger.propagate = False
+    logger.propagate = previous_propagate
 
 
 @pytest.fixture()
 def caplog_vllm(temporary_enable_log_propagate, caplog):
-    # To capture vllm log, we should enable propagate=True temporarily
-    # because caplog depends on logs propagated to the root logger.
-    yield caplog
+    # caplog depends on logs propagated to the root logger. The vLLM logger
+    # inherits this INFO level until runtime initialization configures it.
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        yield caplog
 
 
 @pytest.fixture()
@@ -1784,6 +1792,24 @@ def disable_deepgemm_ue8m0(monkeypatch):
         # Clear cache so the next time it is used it is processed with the
         # default VLLM_USE_DEEP_GEMM_E8M0  setting.
         is_deep_gemm_e8m0_used.cache_clear()
+
+
+@pytest.fixture
+def gpu_memory_cleared():
+    """Wait for prior tests to release GPU memory on gfx950."""
+    if not current_platform.is_rocm():
+        return
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_ratio=0.08,
+            timeout_s=30,
+            stable_duration_s=1,
+        )
 
 
 def _should_clean_gpu_memory_between_tests() -> bool:

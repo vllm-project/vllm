@@ -506,3 +506,98 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+PROMPT_EMBEDS_HIDDEN = 8
+PROMPT_EMBEDS_LEN = 4
+
+
+def _make_input_batch(is_pooling_model: bool = False) -> InputBatch:
+    return InputBatch(
+        max_num_reqs=2,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=is_pooling_model,
+    )
+
+
+def _make_embeds_request(req_id: str, pooling: bool = False) -> CachedRequestState:
+    from vllm.pooling_params import PoolingParams
+
+    return CachedRequestState(
+        req_id=req_id,
+        prompt_token_ids=None,
+        prompt_embeds=torch.randn(PROMPT_EMBEDS_LEN, PROMPT_EMBEDS_HIDDEN),
+        mm_features=[],
+        sampling_params=None if pooling else SamplingParams(),
+        pooling_params=PoolingParams(task="classify") if pooling else None,
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=0,
+        output_token_ids=[],
+    )
+
+
+def _make_token_request(req_id: str) -> CachedRequestState:
+    return CachedRequestState(
+        req_id=req_id,
+        prompt_token_ids=[10, 11, 12, 13],
+        mm_features=[],
+        sampling_params=SamplingParams(),
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=0,
+        output_token_ids=[],
+    )
+
+
+def test_remove_request_releases_prompt_embeds():
+    """A finished prompt-embeds request must not keep its tensor referenced by
+    the persistent batch; an empty batch owns no prompt embeds."""
+    input_batch = _make_input_batch()
+    req = _make_embeds_request("embeds-req")
+    input_batch.add_request(req)
+    req_index = input_batch.req_id_to_index[req.req_id]
+    assert req_index in input_batch.req_prompt_embeds
+
+    input_batch.remove_request(req.req_id)
+    input_batch.condense()
+
+    assert req_index not in input_batch.req_prompt_embeds
+    assert not input_batch.req_prompt_embeds
+
+
+def test_reused_slot_does_not_retain_prompt_embeds():
+    """Reusing a vacated slot with a token-id request must not keep the previous
+    occupant's prompt-embeds tensor alive."""
+    input_batch = _make_input_batch()
+    embeds_req = _make_embeds_request("embeds-req")
+    input_batch.add_request(embeds_req)
+    slot = input_batch.req_id_to_index[embeds_req.req_id]
+
+    input_batch.remove_request(embeds_req.req_id)
+    input_batch.condense()
+
+    token_req = _make_token_request("token-req")
+    input_batch.add_request(token_req)
+    assert input_batch.req_id_to_index[token_req.req_id] == slot
+    assert slot not in input_batch.req_prompt_embeds
+
+
+def test_pooling_model_releases_prompt_embeds():
+    """The cleanup must run before remove_request's pooling-model early return."""
+    input_batch = _make_input_batch(is_pooling_model=True)
+    req = _make_embeds_request("pool-embeds-req", pooling=True)
+    input_batch.add_request(req)
+    req_index = input_batch.req_id_to_index[req.req_id]
+    assert req_index in input_batch.req_prompt_embeds
+
+    input_batch.remove_request(req.req_id)
+    input_batch.condense()
+
+    assert req_index not in input_batch.req_prompt_embeds
