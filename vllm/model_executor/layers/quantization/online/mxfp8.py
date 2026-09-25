@@ -41,10 +41,6 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     FP8 with block-32 scales) during weight loading.
     """
 
-    def __init__(self):
-        super().__init__()
-        self.kernel = init_mxfp8_linear_kernel()
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -71,6 +67,8 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
             params_dtype,
             **extra_weight_attrs,
         )
+
+        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

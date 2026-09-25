@@ -29,7 +29,7 @@ import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
     get_model_conversion_mapping,
@@ -433,9 +433,9 @@ class Base(
     def _vocab_embeddings(self) -> set[nn.Embedding]:
         """The `nn.Embedding`s in `self.model` which hold a vocab table."""
 
-        def vocab_sizes(config: PretrainedConfig):
+        def vocab_sizes(config: PreTrainedConfig):
             for key, value in vars(config).items():
-                if isinstance(value, PretrainedConfig):
+                if isinstance(value, PreTrainedConfig):
                     yield from vocab_sizes(value)
                 elif "vocab_size" in key and isinstance(value, int):
                     yield value
