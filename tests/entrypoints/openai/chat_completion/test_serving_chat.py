@@ -798,52 +798,354 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
 
 
 @pytest.mark.asyncio
-async def test_streaming_reasoning_usage_counts_across_deltas():
-    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
-    serving._include_reasoning_tokens_details = True
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize("include_reasoning", [True, False])
+@pytest.mark.parametrize("include_details", [True, False])
+@pytest.mark.parametrize("separate_finish", [True, False])
+@pytest.mark.parametrize(
+    "stream_options, force_usage, include_usage, continuous_usage",
+    [
+        (None, False, False, False),
+        ({"include_usage": True}, False, True, False),
+        ({"include_usage": True, "continuous_usage_stats": True}, False, True, True),
+        ({"include_usage": False, "continuous_usage_stats": True}, False, False, False),
+        (None, True, True, True),
+    ],
+)
+async def test_streaming_reasoning_usage_counts_across_deltas(
+    n,
+    include_reasoning,
+    include_details,
+    separate_finish,
+    stream_options,
+    force_usage,
+    include_usage,
+    continuous_usage,
+):
+    """Final usage needs one recount per choice, not per streamed delta."""
+    serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=False, enable_force_include_usage=force_usage
+    )
+    serving._include_reasoning_tokens_details = include_details
     serving.model_config = None
 
-    parser = MagicMock()
-    parser.parse_delta.side_effect = [
-        DeltaMessage(reasoning="reasoning"),
-        DeltaMessage(content="answer"),
-    ]
-    parser.count_reasoning_tokens.side_effect = lambda token_ids: sum(
-        token_id == 20 for token_id in token_ids
-    )
-    serving.parser_cls = MagicMock(return_value=parser)
-
-    first = _make_metrics_request_output(metrics=None, token_ids=(10, 20))
-    first.outputs[0].text = "<think>reasoning"
-    first.outputs[0].finish_reason = None
-    second = _make_metrics_request_output(metrics=None, token_ids=(11, 30))
-    second.outputs[0].text = "</think>answer"
+    parsers = [MagicMock() for _ in range(n)]
+    request_outputs = []
+    num_steps = 3 if separate_finish else 2
+    for parser in parsers:
+        parser.parse_delta.side_effect = [
+            DeltaMessage(reasoning="reasoning") if include_reasoning else None,
+            DeltaMessage(content="answer"),
+            DeltaMessage(),
+        ]
+        parser.count_reasoning_tokens.side_effect = lambda token_ids: sum(
+            token_id == 20 for token_id in token_ids
+        )
+    serving.parser_cls = MagicMock(side_effect=parsers)
+    for step in range(num_steps):
+        for i in reversed(range(n)):
+            tokens = ((10,) + (20,) * (i + 1), (11, 20, 30), ())[step]
+            result = _make_metrics_request_output(metrics=None, token_ids=tokens)
+            result.outputs[0].index = i
+            result.outputs[0].text = ("<think>reasoning", "</think>answer", "")[step]
+            finished = step == num_steps - 1
+            result.outputs[0].finish_reason = "stop" if finished else None
+            result.finished = finished and i == 0
+            request_outputs.append(result)
 
     request = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "Test prompt"}],
         max_tokens=10,
         stream=True,
-        stream_options={"include_usage": True},
+        n=n,
+        include_reasoning=include_reasoning,
+        return_token_ids=True,
+        stream_options=stream_options,
     )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-test-id")
     chunks: list[dict[str, Any]] = []
     async for line in serving.chat_completion_stream_generator(
         request,
-        _stream_request_outputs(first, second),
+        _stream_request_outputs(*request_outputs),
         "chatcmpl-test-id",
         "test-model",
         conversation=[{"role": "user", "content": "Test"}],
         tokenizer=MagicMock(),
-        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        request_metadata=metadata,
     ):
         payload = line.removeprefix("data: ").strip()
         if payload != "[DONE]":
             chunks.append(json.loads(payload))
 
-    usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
-    assert usage_chunks[-1]["usage"]["completion_tokens_details"] == {
-        "reasoning_tokens": 1
-    }
+    assert all("error" not in chunk for chunk in chunks)
+    expected_count = sum(i + 2 for i in range(n))
+    expected_details = {"reasoning_tokens": expected_count} if include_details else None
+    assert metadata.final_usage_info is not None
+    assert metadata.final_usage_info.model_dump()["completion_tokens_details"] == (
+        expected_details
+    )
+    final_chunks = [chunk for chunk in chunks if not chunk["choices"]]
+    assert len(final_chunks) == int(include_usage)
+    if include_usage:
+        assert final_chunks[0]["usage"].get("completion_tokens_details") == (
+            expected_details
+        )
+    for i, parser in enumerate(parsers):
+        expected_calls = (
+            (num_steps if continuous_usage else 1) if include_details else 0
+        )
+        assert parser.count_reasoning_tokens.call_count == expected_calls
+        if include_details:
+            assert parser.count_reasoning_tokens.call_args.args == (
+                (10,) + (20,) * (i + 1) + (11, 20, 30),
+            )
+        choices = [
+            chunk
+            for chunk in chunks
+            if chunk["choices"] and chunk["choices"][0]["index"] == i
+        ]
+        assert (
+            "".join(c["choices"][0]["delta"].get("content") or "" for c in choices)
+            == "answer"
+        )
+        if not include_reasoning:
+            assert all(c["choices"][0].get("token_ids") is None for c in choices)
+        if continuous_usage and include_details:
+            counts = [
+                c["usage"]["completion_tokens_details"]["reasoning_tokens"]
+                for c in choices
+            ]
+            expected_counts = [0, i + 1] if include_reasoning else [0]
+            assert counts == expected_counts + [i + 2] * (num_steps - 1)
+
+
+def _reasoning_lifecycle_output(
+    index: int = 0,
+    tokens: tuple[int, ...] = (20, 30),
+    text: str = "answer",
+    finish: str | None = None,
+) -> RequestOutput:
+    result = _make_metrics_request_output(None, tokens)
+    result.outputs[0].index = index
+    result.outputs[0].text = text
+    result.outputs[0].finish_reason = finish
+    result.finished = finish is not None
+    return result
+
+
+_EMPTY_OUTPUTS = _reasoning_lifecycle_output(tokens=(), text="")
+_EMPTY_OUTPUTS.outputs = []
+
+_REASONING_LIFECYCLE_CASES = [
+    ("empty-generator", 1, [], 0, 0),
+    ("empty-outputs", 1, [_EMPTY_OUTPUTS], 0, 0),
+    (
+        "empty-finish",
+        1,
+        [_reasoning_lifecycle_output(tokens=(), text="", finish="stop")],
+        0,
+        0,
+    ),
+    (
+        "empty-prefill",
+        1,
+        [
+            _reasoning_lifecycle_output(tokens=(), text=""),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        2,
+        1,
+    ),
+    (
+        "one-empty-choice",
+        2,
+        [_reasoning_lifecycle_output(index=1, finish="stop")],
+        2,
+        1,
+    ),
+    (
+        "uneven-finish",
+        2,
+        [
+            _reasoning_lifecycle_output(index=1, finish="stop"),
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(tokens=(20,), finish="stop"),
+        ],
+        5,
+        3,
+    ),
+    (
+        "empty-final-delta",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(tokens=(), text="", finish="stop"),
+        ],
+        2,
+        1,
+    ),
+    (
+        "ignore-finished-choice",
+        2,
+        [
+            _reasoning_lifecycle_output(index=1, finish="stop"),
+            _reasoning_lifecycle_output(index=1, tokens=(20, 20, 20)),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        4,
+        2,
+    ),
+    ("exception-before", 1, [RuntimeError("fixture engine error")], None, None),
+    (
+        "exception-after",
+        1,
+        [_reasoning_lifecycle_output(), RuntimeError("fixture engine error")],
+        None,
+        None,
+    ),
+    (
+        "generation-error",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(finish="error"),
+        ],
+        None,
+        None,
+    ),
+    (
+        "cancel-after",
+        1,
+        [_reasoning_lifecycle_output(), asyncio.CancelledError()],
+        None,
+        None,
+    ),
+    (
+        "close-after",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        None,
+        None,
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_mode", ["none", "final", "continuous"])
+@pytest.mark.parametrize(
+    "name, n, outputs, expected_tokens, expected_reasoning",
+    _REASONING_LIFECYCLE_CASES,
+    ids=[case[0] for case in _REASONING_LIFECYCLE_CASES],
+)
+async def test_streaming_reasoning_usage_lifecycle_edges(
+    usage_mode,
+    name,
+    n,
+    outputs,
+    expected_tokens,
+    expected_reasoning,
+):
+    """Cancel, errors, and empty choices still match baseline stream usage."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving._include_reasoning_tokens_details = True
+    parsers = [MagicMock() for _ in range(n)]
+    for parser in parsers:
+        parser.parse_delta.side_effect = lambda **kwargs: DeltaMessage(
+            content=kwargs["delta_text"]
+        )
+        parser.count_reasoning_tokens.side_effect = lambda ids: ids.count(20)
+    serving.parser_cls = MagicMock(side_effect=parsers)
+    stream_options = (
+        None
+        if usage_mode == "none"
+        else {
+            "include_usage": True,
+            "continuous_usage_stats": usage_mode == "continuous",
+        }
+    )
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        stream=True,
+        n=n,
+        return_token_ids=True,
+        stream_options=stream_options,
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-lifecycle")
+
+    async def source():
+        for result in outputs:
+            if isinstance(result, BaseException):
+                raise result
+            yield result
+
+    iterator = source()
+    stream = serving.chat_completion_stream_generator(
+        request,
+        iterator,
+        "chatcmpl-lifecycle",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+    )
+    chunks: list[object] = []
+    outcome = "exhausted"
+    try:
+        async for line in stream:
+            raw = line.removeprefix("data: ").strip()
+            if raw == "[DONE]":
+                chunks.append(raw)
+                continue
+            item = json.loads(raw)
+            chunks.append(item)
+            if name == "close-after" and any(
+                choice["delta"].get("content") for choice in item.get("choices", [])
+            ):
+                await stream.aclose()
+                outcome = "closed"
+                break
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+    finally:
+        await stream.aclose()
+        await iterator.aclose()
+
+    error_chunks = [c for c in chunks if isinstance(c, dict) and "error" in c]
+    call_count = sum(parser.count_reasoning_tokens.call_count for parser in parsers)
+    if expected_tokens is not None:
+        assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks
+        assert metadata.final_usage_info is not None
+        assert metadata.final_usage_info.completion_tokens == expected_tokens
+        assert (
+            metadata.final_usage_info.completion_tokens_details.reasoning_tokens
+            == expected_reasoning
+        )
+        nonempty_choices = sum(
+            bool(parser.count_reasoning_tokens.call_args) for parser in parsers
+        )
+        if usage_mode == "continuous":
+            assert call_count >= nonempty_choices
+        else:
+            assert call_count == nonempty_choices
+        return
+
+    assert metadata.final_usage_info is None
+    if name in {"cancel-after", "close-after"}:
+        assert outcome == ("cancelled" if name == "cancel-after" else "closed")
+        assert "[DONE]" not in chunks and not error_chunks
+    else:
+        assert outcome == "exhausted" and chunks[-1] == "[DONE]"
+        assert len(error_chunks) == 1
+    if usage_mode != "continuous" or name == "exception-before":
+        assert call_count == 0
+    else:
+        assert call_count >= 1
 
 
 @pytest.mark.asyncio
