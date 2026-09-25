@@ -109,15 +109,18 @@ def test_gsm8k_correctness(config_filename):
             "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
         )
 
-    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
         or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
     ):
-        pytest.skip(
-            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
-            "due to agent pool disk space issues and pod evictions."
-        )
+        from vllm.platforms.rocm import on_gfx950
+
+        # Retain the legacy pool's infrastructure guard while MI355 runs these.
+        if not on_gfx950():
+            pytest.skip(
+                "Skipping DeepSeek-V3.2 and DeepSeek-R1 on non-GFX950 ROCm "
+                "platforms due to agent pool disk space issues and pod evictions."
+            )
     if current_platform.is_rocm() and (
         "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
     ):
