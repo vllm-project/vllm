@@ -1458,7 +1458,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 # fall back to the unified_attention triton kernel which
                 # handles both correctly.
                 _MIN_HEAD_SIZE_FOR_LL4MI = 64
-                use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
+                use_unified_attention = (
+                    self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
+                    or self.sliding_window[0] != -1
+                )
 
                 if use_unified_attention:
                     k_descale, v_descale = self._get_kv_cache_descales(
