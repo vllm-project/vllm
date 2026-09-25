@@ -18,6 +18,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
+from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
@@ -1133,6 +1134,38 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
+@triton.jit
+def _mamba_align_block_table_kernel(
+    out_ptr,
+    block_table_ptr,
+    block_table_stride,
+    seq_lens_ptr,
+    block_size,
+    n_out,
+    BLOCK: tl.constexpr,
+):
+    """Gather the last ``n_out`` block-table entries of each request.
+
+    One program per request. This replaces a five-statement PyTorch expression
+    that expanded to seven kernels over a ``(num_reqs,)`` tensor -- one element
+    in a single-request decode -- so almost all of its cost was launch
+    overhead rather than work.
+    """
+    req_idx = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    # A zero-length request in a CUDA graph has an invalid block table; clamp
+    # to 0 so it reads a valid row, exactly as the previous clamp_ did.
+    start = tl.maximum((seq_len - 1) // block_size, 0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < n_out
+    vals = tl.load(
+        block_table_ptr + req_idx * block_table_stride + start + offs,
+        mask=mask,
+        other=0,
+    )
+    tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -1158,16 +1191,23 @@ def mamba_get_block_table_tensor(
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
-        # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
-        # to handle the invalid block table.
-        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
-        start_indices.clamp_(min=0)
-        # Use int32 for arithmetic to avoid dtype promotion overhead,
-        # then convert to int64 for gather (which requires Long indices)
-        offsets = torch.arange(
-            1 + kv_cache_spec.num_speculative_blocks,
-            device=block_table.device,
-            dtype=torch.int32,
+        # The arithmetic here is trivial -- a divide, a clamp, an arange, an
+        # add, a cast and a gather -- but as PyTorch ops it was seven kernel
+        # launches over a (num_reqs,) tensor, which holds a single element in a
+        # one-request decode. One Triton kernel does the same work in one
+        # launch. Zero-length requests in a CUDA graph still clamp to row 0.
+        num_reqs = block_table.shape[0]
+        n_out = 1 + kv_cache_spec.num_speculative_blocks
+        out = block_table.new_empty((num_reqs, n_out))
+        if num_reqs == 0:
+            return out
+        _mamba_align_block_table_kernel[(num_reqs,)](
+            out,
+            block_table,
+            block_table.stride(0),
+            seq_lens,
+            kv_cache_spec.block_size,
+            n_out,
+            BLOCK=triton.next_power_of_2(n_out),
         )
-        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
-        return torch.gather(block_table, 1, indices_to_gather)
+        return out
