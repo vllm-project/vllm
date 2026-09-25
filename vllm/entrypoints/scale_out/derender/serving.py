@@ -179,6 +179,7 @@ class ServingDerender(BaseServing):
             usage=usage,
             prompt_logprobs=gen.prompt_logprobs,
             kv_transfer_params=gen.kv_transfer_params,
+            metrics=gen.metrics,
         )
 
     async def derender_completion_response(
@@ -245,6 +246,9 @@ class ServingDerender(BaseServing):
             choices=choices,
             usage=usage,
             kv_transfer_params=kv_params,
+            # Metrics describe one prompt. Parallel samples are already
+            # suppressed by /generate; multi-prompt responses cannot be merged.
+            metrics=first.metrics if len(request.generate_responses) == 1 else None,
         )
 
     async def derender_chat_stream_response(

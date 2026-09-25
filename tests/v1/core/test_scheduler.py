@@ -19,6 +19,10 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputSchedulerConnector,
+    AuxRequestOutput,
+)
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
@@ -36,6 +40,10 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.diffusion_scheduler import (
+    DiffusionAsyncScheduler,
+    diffusion_canvas_width,
+)
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -55,7 +63,6 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
-    RoutedExpertsLists,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
@@ -136,21 +143,18 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
-def test_routed_experts_prompt_start_at_prompt_end():
+@pytest.mark.parametrize("max_tokens", [1, 2])
+def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""
     scheduler = create_scheduler()
-    (request,) = create_requests(num_requests=1)
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
-    num_tokens = scheduler_output.num_scheduled_tokens[request.request_id]
-
-    manager = Mock()
-    manager.routed_experts_by_slot = np.empty((0, 1, 1), dtype=np.uint8)
-    manager.get.return_value = np.empty((0, 1, 1), dtype=np.uint8)
-    scheduler.enable_return_routed_experts = True
-    scheduler.routed_experts_mgr = manager
-    scheduler._re_block_ids = {request.request_id: []}
+    assert scheduler_output.aux_output_connector_metadata.requests == {
+        request.request_id: request.num_prompt_tokens
+    }
 
     outputs = scheduler.update_from_output(
         scheduler_output,
@@ -161,21 +165,23 @@ def test_routed_experts_prompt_start_at_prompt_end():
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
-            routed_experts=RoutedExpertsLists(
-                routing_data=np.zeros((num_tokens, 1, 1), dtype=np.uint8),
-                slot_mapping=np.arange(num_tokens),
-            ),
+            aux_output_connector_output={
+                request.request_id: AuxRequestOutput(
+                    request.num_prompt_tokens,
+                    np.empty((0, 1, 1), dtype=np.uint8),
+                )
+            },
         ),
     )
 
-    manager.get.assert_called_once_with(
-        [], request.num_prompt_tokens, token_start=request.num_prompt_tokens
-    )
-    assert outputs[request.client_index].outputs[0].routed_experts.shape == (0, 1, 1)
+    output = outputs[request.client_index].outputs[0]
+    assert output.new_token_ids == [0]
+    assert output.routed_experts.shape == (0, 1, 1)
 
 
 def test_finish_request():
     scheduler = create_scheduler()
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -184,6 +190,7 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+        scheduler.aux_output_connector.request_finished.assert_called_with(request)
 
 
 def test_get_num_unfinished_requests():
@@ -757,6 +764,56 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[0].request_id] == 1
     assert output2.num_scheduled_tokens[requests[1].request_id] == 1
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
+
+
+def test_long_prefill_threshold_ignored_when_alone():
+    """A lone long prefill is not capped by the threshold: it has no other
+    request to starve."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+    )
+    request = create_requests(num_requests=1, num_tokens=2000)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 1024
+
+
+def test_long_prefill_threshold_applies_with_other_requests():
+    """The threshold caps the prefill as soon as another request is queued."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 400
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
+def test_long_prefill_threshold_floored_by_fair_share():
+    """With the adaptive flag, the effective threshold never falls below the
+    fair share of the token budget: max_num_batched_tokens / num queued +
+    running requests."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=100,
+        long_prefill_token_threshold_adaptive=True,
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [long_req, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # 100 is below the fair share (1024 // 2 = 512), so the floor binds.
+    assert output.num_scheduled_tokens[long_req.request_id] == 512
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
 def test_update_from_output_routes_sampling_masks_by_request():
@@ -1373,6 +1430,31 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_processes_stale_aux_output():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler.aux_output_connector = Mock()
+    scheduler._preempt_request(request, 0.0)
+    scheduler.aux_output_connector.request_finished.assert_called_once_with(request)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
+
+
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""
@@ -1461,6 +1543,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -1477,10 +1560,20 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
+    scheduler.aux_output_connector.reset.assert_not_called()
 
-    # Reset prefix cache with reset_running_requests=True. All running requests
-    # Should be pushed back to the waiting queue and kv cache should be freed
+    with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    # pause(mode="keep") also waits for scheduled model outputs to drain.
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    with pytest.raises(RuntimeError, match="model output is in flight"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    for request in requests:
+        request.num_in_flight_tokens = 0
+
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.aux_output_connector.reset.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)
@@ -1488,6 +1581,16 @@ def test_scheduler_reset_prefix_cache():
 
     for i, request in enumerate(requests):
         assert scheduler.waiting[i] == request
+
+
+@pytest.mark.parametrize("reset_successful", [False, True])
+def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=reset_successful)
+
+    assert scheduler.reset_prefix_cache() is reset_successful
+    assert scheduler.aux_output_connector.reset.call_count == int(reset_successful)
 
 
 def test_kv_cache_release_after_keep_pause_preserves_requests():
@@ -3791,10 +3894,10 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
+    scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
@@ -5987,6 +6090,201 @@ def test_unavailable_encoder_input_fails_the_request_as_retryable():
     assert [o.finish_reason for o in engine_outputs] == [FinishReason.ERROR]
 
 
+def _create_mm_request_with_embedding_positions(
+    request_id: str, identifier: str, is_embed: list[bool]
+) -> Request:
+    return create_requests(
+        num_requests=1,
+        num_tokens=len(is_embed),
+        mm_hashes_list=[[identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=len(is_embed),
+                    is_embed=torch.tensor(is_embed),
+                )
+            ]
+        ],
+        req_ids=[request_id],
+    )[0]
+
+
+def test_encoder_cache_accepts_matching_embed_count():
+    """An actively referenced entry is reused when embedding counts match."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-client-uuid"
+    owner = _create_mm_request_with_embedding_positions(
+        "owner", identifier, [True, True, True, False, False, False]
+    )
+    compatible = _create_mm_request_with_embedding_positions(
+        "compatible", identifier, [True, False, True, False, True, False, False]
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    scheduler.add_request(compatible)
+
+    scheduler_output = scheduler.schedule()
+
+    assert compatible.request_id in scheduler_output.num_scheduled_tokens
+    assert compatible.request_id not in scheduler.encoder_cache_mismatch_reqs
+    assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
+
+
+def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):
+    """A completed request's freeable entry rejects an incompatible reuse."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-client-uuid"
+    owner = _create_mm_request_with_embedding_positions(
+        "owner", identifier, [True, True, True, False, False, False]
+    )
+    mismatched = _create_mm_request_with_embedding_positions(
+        "mismatched", identifier, [True, True, True, True, False, False]
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    scheduler.encoder_cache_manager.free(owner)
+    freeable_slots_before = scheduler.encoder_cache_manager.num_freeable_slots
+    scheduler.add_request(mismatched)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert mismatched.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert (
+        "multimodal identifier 'reused-client-uuid' holds 3 embeddings"
+        in caplog_vllm.text
+        and "expects 4" in caplog_vllm.text
+    )
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert mismatched.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.encoder_cache_mismatch_reqs
+    assert mismatched.request_id not in scheduler.requests
+    assert scheduler.encoder_cache_manager.cached[identifier] == set()
+    assert (
+        mismatched.request_id not in scheduler.encoder_cache_manager.request_cached_ids
+    )
+    assert scheduler.encoder_cache_manager.freeable[identifier] == 3
+    assert scheduler.encoder_cache_manager.num_freeable_slots == freeable_slots_before
+    output = outputs[mismatched.client_index].outputs[0]
+    assert output.request_id == mismatched.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+    healthy = create_requests(num_requests=1, req_ids=["healthy"], num_tokens=6)[0]
+    scheduler.add_request(healthy)
+    next_output = scheduler.schedule()
+    assert healthy.request_id in next_output.num_scheduled_tokens
+
+
+def test_encoder_cache_embed_count_mismatch_restores_prior_hit_state():
+    """A prior hit is released when a later mismatch fails the request."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    manager = scheduler.encoder_cache_manager
+    valid_identifier = "valid-reuse"
+    mismatch_identifier = "mismatched-reuse"
+    valid_owner = _create_mm_request_with_embedding_positions(
+        "valid-owner", valid_identifier, [True, True, False]
+    )
+    mismatch_owner = _create_mm_request_with_embedding_positions(
+        "mismatch-owner", mismatch_identifier, [True, True, True, False]
+    )
+    manager.allocate(valid_owner, 0)
+    manager.free(valid_owner)
+    manager.allocate(mismatch_owner, 0)
+    manager.free(mismatch_owner)
+    freeable_slots_before = manager.num_freeable_slots
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=7,
+        mm_hashes_list=[[valid_identifier, mismatch_identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=3,
+                    is_embed=torch.tensor([True, True, False]),
+                ),
+                PlaceholderRange(
+                    offset=3,
+                    length=4,
+                    is_embed=torch.tensor([True, True, True, True]),
+                ),
+            ]
+        ],
+        req_ids=["partially-mutated"],
+    )[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id in manager.cached[valid_identifier]
+    assert valid_identifier not in manager.freeable
+    assert manager.num_freeable_slots == freeable_slots_before - 2
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id not in scheduler.requests
+    assert request.request_id not in manager.request_cached_ids
+    assert manager.cached[valid_identifier] == set()
+    assert manager.freeable[valid_identifier] == 2
+    assert manager.freeable[mismatch_identifier] == 3
+    assert manager.num_freeable_slots == freeable_slots_before
+    output = outputs[request.client_index].outputs[0]
+    assert output.finish_reason == FinishReason.ERROR
+
+
+def test_encoder_cache_rejects_mismatched_embed_count_within_request():
+    """One request cannot reuse an identifier with a different embed count."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    identifier = "reused-within-request"
+    request = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_hashes_list=[[identifier, identifier]],
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=0,
+                    length=4,
+                    is_embed=torch.tensor([True, True, False, False]),
+                ),
+                PlaceholderRange(
+                    offset=4,
+                    length=4,
+                    is_embed=torch.tensor([True, True, True, False]),
+                ),
+            ]
+        ],
+        req_ids=["mismatched-within-request"],
+    )[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.encoder_cache_mismatch_reqs
+    assert identifier not in scheduler.encoder_cache_manager.cached
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.encoder_cache_mismatch_reqs
+    assert request.request_id not in scheduler.requests
+    output = outputs[request.client_index].outputs[0]
+    assert output.request_id == request.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+
 def test_free_encoder_inputs_defers_for_eagle_lookahead():
     """With EAGLE speculative decoding, the encoder input is retained one extra
     position so the drafter's +1 look-ahead mm-embedding gather (which reads one
@@ -6794,3 +7092,141 @@ def test_update_draft_token_ids_in_output_strips_padding():
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
+def test_diffusion_canvas_width_defaults_to_the_served_canvas():
+    def req(extra):
+        return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra))
+
+    assert diffusion_canvas_width(req(None), 64) == 64
+    assert diffusion_canvas_width(req({}), 64) == 64
+    assert diffusion_canvas_width(req({"diffusion_canvas_length": 16}), 64) == 16
+    assert diffusion_canvas_width(SimpleNamespace(sampling_params=None), 64) == 64
+
+
+def _diffusion_request(req_id: str, extra_args: dict) -> Request:
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=64, req_ids=[req_id]
+    )
+    request.sampling_params.extra_args = extra_args
+    return request
+
+
+@pytest.fixture
+def diffusion_model_runner(monkeypatch):
+    # These CPU tests only exercise scheduling, not Triton kernels.
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+
+def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        diffusion_canvas_length=8,
+        scheduler_cls=DiffusionAsyncScheduler,
+        **kwargs,
+    )
+    assert isinstance(scheduler, DiffusionAsyncScheduler)
+    return scheduler
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
+    config = create_scheduler(
+        async_scheduling=async_scheduling, diffusion_canvas_length=8
+    ).vllm_config.scheduler_config
+    assert config.get_scheduler_cls() is (
+        DiffusionAsyncScheduler if config.async_scheduling else Scheduler
+    )
+
+
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_narrows_the_canvas_per_request():
+    scheduler = _diffusion_scheduler()
+    wide = _diffusion_request("wide", {})
+    narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
+    scheduler.add_request(wide)
+    scheduler.add_request(narrow)
+
+    # The prefill step lays down the served canvas as placeholders.
+    scheduler.schedule()
+    output = scheduler.schedule()
+    assert output.scheduled_spec_decode_tokens["wide"] == [-1] * 8
+    assert output.scheduled_spec_decode_tokens["narrow"] == [-1] * 4
+    assert output.num_scheduled_tokens["narrow"] == 4
+    assert narrow.num_output_placeholders == 4
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
+    """Padded worker drafts must be narrowed before scheduling or grammar validation."""
+    scheduler = _diffusion_scheduler()
+    wide = _diffusion_request("wide", {})
+    narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
+    for request in (wide, narrow):
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    _model_output(scheduler, prefill, [[], []])
+
+    if structured:
+        for request in (wide, narrow):
+            request.structured_output_request = SimpleNamespace(
+                grammar=_RecordingGrammar(), reasoning_ended=True
+            )
+    tokens = list(range(8)) if structured else [-1] * 8
+    drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
+    output = scheduler.schedule()
+    scheduler.update_draft_token_ids_in_output(drafts, output)
+
+    assert output.scheduled_spec_decode_tokens == {
+        "wide": tokens,
+        "narrow": tokens[:4],
+    }
+    assert output.num_scheduled_tokens == {"wide": 8, "narrow": 4}
+    if structured:
+        assert wide.structured_output_request.grammar.seen == [tokens]
+        assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
+
+
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
+    scheduler = _diffusion_scheduler()
+    one = _diffusion_request(
+        "one", {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    )
+    two = _diffusion_request(
+        "two", {"diffusion_read_only": True, "diffusion_max_steps": 2}
+    )
+    # Only reads are deferred. A capped generation keeps its extra async step.
+    gen = _diffusion_request("gen", {"diffusion_max_steps": 1})
+    for request in (one, two, gen):
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"one", "two", "gen"}
+    assert one.num_output_placeholders == 8
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"two", "gen"}
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
+    # The deferral is renewed every call.
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
+
+
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
+    scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
+    read = _diffusion_request(
+        "read", {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    )
+    scheduler.add_request(read)
+
+    scheduler.schedule()
+    assert read.next_decode_eligible_step == 4
+    for _ in range(2):
+        assert "read" not in scheduler.schedule().num_scheduled_tokens
+    assert "read" in scheduler.schedule().num_scheduled_tokens
+    assert read.next_decode_eligible_step == 7
+    # Deferring this step alone would ask for 6. The PP wait to 7 stands.
+    assert "read" not in scheduler.schedule().num_scheduled_tokens
+    assert read.next_decode_eligible_step == 7
