@@ -985,18 +985,43 @@ def test_replicated_layout_supported_cache_shapes(
     assert _replicated_layout(kv_cache_config), case
 
 
-def test_replicated_layout_bare_mla_with_packed_indexer_qualifies():
+@pytest.mark.parametrize(
+    ("main_spec", "add_spec", "expected"),
+    [
+        (
+            _mla_spec(head_size=512),
+            _mla_spec(head_size=128, dtype=torch.uint8),  # indexer.k_cache spec
+            True,
+        ),
+        (
+            _mla_spec(head_size=512),
+            _full_attention_spec(),
+            False,
+        ),
+    ],
+    ids=["uniform-mla-indexer", "uniform-mla-fa"],
+)
+def test_replicated_layout_for_dsa_style_groups(
+    main_spec: KVCacheSpec, add_spec: KVCacheSpec, expected: bool
+):
+    """KV Cache groups with packed-specs inside a UniformTypeKVCacheSpec."""
     num_blocks = 4
-    main_spec = _mla_spec(head_size=512)
-    indexer_spec = _mla_spec(head_size=128, dtype=torch.uint8)
     main_layers = [f"main_{i}" for i in range(61)]
-    indexer_layers = [f"indexer_{i}" for i in range(61)]
-    # A DSA-style group: the main pages and the smaller indexer pages are packed one
-    # after the other. Both specs are MLAAttentionSpec with num_kv_heads==1, so all
-    # TP ranks hold identical data. replicated_layout=True is correct.
+    add_layers = [f"add_{i}" for i in range(61)]
+
     main_bytes = main_spec.page_size_bytes * len(main_layers)
-    indexer_bytes = indexer_spec.page_size_bytes * len(indexer_layers)
-    size = (main_bytes + indexer_bytes) * num_blocks
+    add_bytes = add_spec.page_size_bytes * len(add_layers)
+    size = (main_bytes + add_bytes) * num_blocks
+
+    kv_cache_specs = {
+        **{layer: main_spec for layer in main_layers},
+        **{layer: add_spec for layer in add_layers},
+    }
+    layer_names = main_layers + add_layers
+    group_spec: KVCacheSpec = UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs
+    )
+
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -1008,16 +1033,16 @@ def test_replicated_layout_bare_mla_with_packed_indexer_qualifies():
             ),
             KVCacheTensor(
                 size=size,
-                layers=indexer_layers,
-                layer_stride=indexer_spec.page_size_bytes * num_blocks,
-                block_stride=indexer_spec.page_size_bytes,
+                layers=add_layers,
+                layer_stride=add_spec.page_size_bytes * num_blocks,
+                block_stride=add_spec.page_size_bytes,
                 offset=main_bytes * num_blocks,
             ),
         ],
-        kv_cache_groups=[KVCacheGroupSpec(main_layers + indexer_layers, main_spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names, group_spec)],
     )
 
-    assert _replicated_layout(kv_cache_config)
+    assert _replicated_layout(kv_cache_config) == expected
 
 
 @pytest.mark.parametrize(
