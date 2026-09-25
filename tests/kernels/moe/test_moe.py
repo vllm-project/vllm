@@ -1102,22 +1102,31 @@ def test_fused_marlin_moe(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-@pytest.mark.parametrize("bad_dtype", [torch.bfloat16, torch.half])
-def test_fused_marlin_moe_rejects_non_fp32_topk_weights(bad_dtype):
-    """moe_wna16_marlin_gemm reads topk_weights as fp32.
-
-    Passing any other dtype used to be silently reinterpreted as float
-    (and read out of bounds for 2-byte dtypes), so the op must reject it.
+@pytest.mark.parametrize(
+    "topk_weights_shape,topk_weights_dtype,match",
+    [
+        ((8, 2), torch.bfloat16, "topk_weights must be float"),
+        ((8, 2), torch.half, "topk_weights must be float"),
+        ((15,), torch.float32, "topk_weights has 15 elements"),
+    ],
+)
+def test_fused_marlin_moe_rejects_invalid_topk_weights(
+    topk_weights_shape, topk_weights_dtype, match
+):
+    """moe_wna16_marlin_gemm reads topk_weights as fp32 and indexes it up to
+    size_m * top_k, so any other dtype or a shorter tensor must be rejected.
     """
     import vllm._custom_ops as ops
 
-    e, m, n, k, topk = 4, 8, 64, 64, 2
+    # n and k must admit a valid marlin thread config, otherwise the call
+    # raises for an unrelated reason even without the checks under test.
+    e, m, n, k, topk = 4, 8, 128, 128, 2
     moe_block_size = 16
 
     def _dev(shape, dtype):
         return torch.zeros(shape, device="cuda", dtype=dtype)
 
-    with pytest.raises(RuntimeError, match="topk_weights must be float"):
+    with pytest.raises(RuntimeError, match=match):
         ops.moe_wna16_marlin_gemm(
             _dev((m, k), torch.half),
             None,
@@ -1131,7 +1140,7 @@ def test_fused_marlin_moe_rejects_non_fp32_topk_weights(bad_dtype):
             _dev((m * topk,), torch.int32),
             _dev((m * topk // moe_block_size + 1,), torch.int32),
             _dev((1,), torch.int32),
-            _dev((m, topk), bad_dtype),
+            _dev(topk_weights_shape, topk_weights_dtype),
             moe_block_size=moe_block_size,
             top_k=topk,
             mul_topk_weights=True,
@@ -1190,6 +1199,40 @@ def test_moe_wna16_gemm_rejects_mismatched_dtypes(mismatched, bad_dtype):
             _dev((e, n, k // group_size), scales_dtype),
             None,
             _dev((m, topk), torch.float32),
+            _dev((m * topk,), torch.int32),
+            _dev((m * topk // block_size_m + 1,), torch.int32),
+            _dev((1,), torch.int32),
+            topk,
+            block_size_m,
+            64,
+            group_size,
+            4,
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_moe_wna16_gemm_rejects_short_topk_weights():
+    """moe_wna16_gemm indexes topk_weights up to size_m * top_k, so a shorter
+    tensor must be rejected.
+    """
+    import vllm._custom_ops as ops
+
+    e, m, n, k, topk = 4, 8, 64, 64, 2
+    group_size = 32
+    block_size_m = 16
+    dtype = torch.half
+
+    def _dev(shape, tensor_dtype):
+        return torch.zeros(shape, device="cuda", dtype=tensor_dtype)
+
+    with pytest.raises(RuntimeError, match="topk_weights has 15 elements"):
+        ops.moe_wna16_gemm(
+            _dev((m, k), dtype),
+            _dev((m * topk, n), dtype),
+            _dev((e, n, k // 2), torch.uint8),
+            _dev((e, n, k // group_size), dtype),
+            None,
+            _dev((m * topk - 1,), torch.float32),
             _dev((m * topk,), torch.int32),
             _dev((m * topk // block_size_m + 1,), torch.int32),
             _dev((1,), torch.int32),

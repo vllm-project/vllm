@@ -412,6 +412,10 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
   STD_TORCH_CHECK(
       topk_weights.scalar_type() == torch::headeronly::ScalarType::Float,
       "scalar type of topk_weights must be float");
+  STD_TORCH_CHECK(
+      topk_weights.numel() >= size_m * top_k, "topk_weights has ",
+      topk_weights.numel(),
+      " elements, expected at least size_m * top_k = ", size_m * top_k);
 
   vllm::ScalarTypeId a_type_id, c_type_id, s_type_id;
 

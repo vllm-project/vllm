@@ -298,6 +298,12 @@ torch::stable::Tensor moe_wna16_gemm(
                   "scalar type of b_scales must match input");
   STD_TORCH_CHECK(output.scalar_type() == input.scalar_type(),
                   "scalar type of output must match input");
+  if (topk_weights.has_value()) {
+    STD_TORCH_CHECK(topk_weights->numel() >= input.size(0) * top_k,
+                    "topk_weights has ", topk_weights->numel(),
+                    " elements, expected at least size_m * top_k = ",
+                    input.size(0) * top_k);
+  }
 
   torch::stable::zero_(output);
 
