@@ -68,7 +68,8 @@ _WORKSPACE_BYTES = 128 * 1024 * 1024
 # below and the int-workspace clamp in _SM90State work around this by
 # planning from sync-free upper bounds; delete them once FlashInfer accepts
 # an upper-bound plan() that clamps kv_end internally, or exposes a
-# GPU-side plan API (upstream ask in flashinfer-ai/flashinfer, see
+# GPU-side plan API (upstream ask:
+# https://github.com/flashinfer-ai/flashinfer/issues/5559, see
 # vllm-project/vllm#58684).
 # FlashInfer MLAPlanInfo layout (scheduler.cuh) field indices.
 _PLAN_INFO_LEN = 18
