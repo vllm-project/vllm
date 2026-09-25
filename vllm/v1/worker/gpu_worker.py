@@ -922,11 +922,23 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
-        if not self.use_v2_model_runner:
-            return self._compile_or_warm_up_model()
-        # MRV2 warmup forwards record expert load like real ones.
-        with self.model_runner.eplb.suppress():  # type: ignore
-            return self._compile_or_warm_up_model()
+        # All warmup phases below run synthetic steps whose sampled outputs are
+        # discarded. The PP sampled-token broadcast would carry no payload, and
+        # its side-stream NCCL ops can overlap the next step's activation p2p
+        # and deadlock the pipeline, so keep it disabled for the whole warmup
+        # window and restore it before serving.
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            pp_handler.set_disabled(True)
+        try:
+            if not self.use_v2_model_runner:
+                return self._compile_or_warm_up_model()
+            # MRV2 warmup forwards record expert load like real ones.
+            with self.model_runner.eplb.suppress():  # type: ignore
+                return self._compile_or_warm_up_model()
+        finally:
+            if pp_handler is not None:
+                pp_handler.set_disabled(False)
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
