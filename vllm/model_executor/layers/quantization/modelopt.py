@@ -843,10 +843,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # activation scales in convert_to_nvfp4_moe_kernel_format, so no
         # other change is needed.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
-        vllm_config = get_current_vllm_config_or_none()
-        hf_config = (
-            vllm_config.model_config.hf_config if vllm_config is not None else None
-        )
+        model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
+        hf_config = model_config.hf_config if model_config is not None else None
         self.per_token_activation = bool(
             getattr(hf_config, "nvfp4_per_token_activation", False)
         )
