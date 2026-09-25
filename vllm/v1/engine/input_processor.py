@@ -449,6 +449,7 @@ class InputProcessor:
             sampling_params = params.clone()
             # Resolve on the request-local copy: `params` may be shared across
             # prompts, requests and even engines by the caller.
+            assert watermarking is not None
             self.apply_watermarking(sampling_params, watermarking)
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
