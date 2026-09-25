@@ -147,6 +147,10 @@ class Platform:
     # empty string means the device does not support ray
     ray_device_key: str = ""
 
+    @classmethod
+    def log_warnings(cls) -> None:
+        """Log platform-specific diagnostics after logging is configured."""
+
     # platform-agnostic way to specify the device control environment variable,
     # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
     # hint: search for "get_visible_accelerator_ids_env_var" in
@@ -365,6 +369,19 @@ class Platform:
             logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Override core Triton kernels with platform implementations.
+
+        Platforms whose Triton kernels need replacement implementations
+        (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
+        override this method and call
+        :func:`vllm.triton_utils.dispatcher.register_kernels`
+        with their overrides. It runs during model runner init, before any
+        kernel launch. The default implementation does nothing.
+        """
+        return
 
     @classmethod
     def get_attn_backend_cls(
