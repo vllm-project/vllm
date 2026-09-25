@@ -14,11 +14,13 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -396,7 +398,6 @@ def test_ple_fp8_embedding_uses_int8_for_parallel_reduce(monkeypatch) -> None:
 def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         ignored_layers=[],
         weight_block_size=[128, 128],
     )
@@ -422,12 +423,11 @@ def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
     with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
 
-    dynamic_fp8_config = Fp8Config(
-        is_checkpoint_fp8_serialized=False,
-        ignored_layers=[],
+    online_fp8_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear="fp8_per_tensor")
     )
-    with pytest.raises(NotImplementedError, match="serialized FP8"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(dynamic_fp8_config, prefix)
+    with pytest.raises(NotImplementedError, match="OnlineQuantizationConfig"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(online_fp8_config, prefix)
 
 
 def test_ple_embedding_respects_modelopt_exclusion() -> None:
