@@ -180,6 +180,9 @@ def fused_topk_bias(
         if (
             scoring_func == "sqrtsoftplus"
             and hash_indices_table is None
+            # dsv4_topk marks padded rows with a -1 sentinel, which unsigned
+            # indices cannot represent; keep the generic path for that pair.
+            and (padding_mask is None or output_indices_dtype != torch.uint32)
             and can_use_dsv4_topk(
                 gating_output,
                 e_score_correction_bias,
