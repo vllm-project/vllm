@@ -52,6 +52,65 @@ ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
+@pytest.fixture
+def enable_aiter_mqa(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    with monkeypatch.context() as context:
+        context.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        yield
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@requires_gfx950
+@pytest.mark.parametrize("column_scales", [False, True], ids=["vector", "column"])
+@torch.inference_mode()
+def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
+    column_scales, monkeypatch, enable_aiter_mqa
+) -> None:
+    """The vLLM AITER dispatch preserves ragged masking and per-token scales."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    assert rocm_aiter_ops.is_enabled(), "AITER is required on gfx950"
+    assert mod.mqa_logits_module() is not None, "AITER MQA logits are required"
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    dtype = current_platform.fp8_dtype()
+    q = torch.randn(7, 32, 128, device=device).to(dtype)
+    k = torch.randn(259, 128, device=device).to(dtype)
+    scales = torch.linspace(0.25, 1.25, k.shape[0], device=device)
+    if column_scales:
+        scales = scales[:, None]
+    weights = torch.rand(q.shape[:2], device=device) / q.shape[1]
+    starts = torch.tensor([0, 3, 128, 5, 0, 257, 259], device=device, dtype=torch.int32)
+    ends = torch.tensor(
+        [1, 129, 259, 5, 259, 259, 259], device=device, dtype=torch.int32
+    )
+
+    module = mod.mqa_logits_module()
+    implementation = module.fp8_mqa_logits
+    calls = 0
+
+    def traced_implementation(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return implementation(*args, **kwargs)
+
+    monkeypatch.setattr(module, "fp8_mqa_logits", traced_implementation)
+    actual = mod.rocm_fp8_mqa_logits(q, (k, scales), weights, starts, ends)
+    assert calls == 1
+    score = torch.einsum("mhd,nd->mhn", q.float(), k.float()) * scales.reshape(-1)
+    expected = (score.relu() * weights[..., None]).sum(dim=1)
+    positions = torch.arange(k.shape[0], device=device)
+    valid = (positions >= starts[:, None]) & (positions < ends[:, None])
+    assert actual.shape == expected.shape
+    assert actual.dtype == torch.float32
+    assert torch.equal(torch.isneginf(actual), ~valid)
+    torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
+
+
 def _ref_global_topk_ragged(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
@@ -1235,8 +1294,14 @@ def test_sparse_attn_decode_mxfp8_output() -> None:
         (1100, 8),
     ],
 )
+@pytest.mark.parametrize("block_scales", [False, True])
 @torch.inference_mode()
-def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
+def test_rocm_mxfp8_wo_a_bmm(
+    num_tokens: int, n_groups: int, block_scales: bool
+) -> None:
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _as_block32_scale,
+    )
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         _mxfp8_e4m3_quantize_torch,
     )
@@ -1251,6 +1316,11 @@ def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
     w, w_scale = _mxfp8_e4m3_quantize_torch(
         torch.randn(n_groups * o_lora_rank, group_dim, device=device)
     )
+    if block_scales:
+        # A 32x32 checkpoint loads as per-row scales that repeat every 32 rows;
+        # RocmDotScaledMxfp8LinearKernel compacts them before wo_a sees them.
+        w_scale = _as_block32_scale(w_scale[::32].repeat_interleave(32, dim=0))
+        assert w_scale is not None
     wo_a = SimpleNamespace(weight=w, weight_scale=w_scale)
 
     out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
@@ -1258,7 +1328,9 @@ def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
     expected = torch.einsum(
         "tgd,grd->tgr",
         _mxfp8_dequant(a, a_scale).view(num_tokens, n_groups, group_dim),
-        _mxfp8_dequant(w, w_scale).view(n_groups, o_lora_rank, group_dim),
+        _mxfp8_dequant(
+            w, w_scale.repeat_interleave(w.shape[0] // w_scale.shape[0], 0)
+        ).view(n_groups, o_lora_rank, group_dim),
     )
     torch.testing.assert_close(out.float(), expected.flatten(1), atol=5e-2, rtol=1e-2)
 
