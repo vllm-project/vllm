@@ -38,6 +38,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
+    from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
@@ -195,6 +196,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.max_num_reqs,
                 device,
                 watermark_config.allow_target_only_watermarking,
+                self.num_speculative_steps,
+                watermark_config.deduplicate_contexts,
+                watermark_config.deduplicate_contexts_max_history,
             )
 
         self.supports_mm_inputs = False
@@ -406,7 +410,12 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            sampled = gumbel_sample(
+            sampler = (
+                gumbel_sample
+                if self.draft_watermarker is None
+                else self.draft_watermarker.sample
+            )
+            sampled = sampler(
                 logits,
                 idx_mapping,
                 temperature,
@@ -418,10 +427,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-            if self.draft_watermarker is not None:
-                sampled = self.draft_watermarker.sample(
-                    logits, sampled, idx_mapping, temperature
-                )
         elif self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         else:
@@ -457,11 +462,19 @@ class DraftModelSpeculator(BaseSpeculator):
             self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def prepare_watermarking(
-        self, contexts: torch.Tensor, watermarking: torch.Tensor
+        self,
+        sampler: "GPUWatermarkSampler",
+        idx_mapping: torch.Tensor,
     ) -> None:
         if self.draft_watermarker is None:
             return
-        self.draft_watermarker.prepare(contexts, watermarking)
+        self.draft_watermarker.prepare(
+            sampler._get_contexts(idx_mapping),
+            sampler.watermarking.gpu[idx_mapping],
+            sampler.req_states.all_token_ids.gpu,
+            sampler.req_states.prompt_len.gpu,
+            sampler.req_states.total_len.gpu,
+        )
 
     def _copy_request_inputs(
         self,

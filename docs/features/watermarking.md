@@ -77,30 +77,17 @@ watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
 because their recovery tokens are watermarked.
 
-Speculative-decoding token paths do not currently support generation-side
-context deduplication. The configured `deduplicate_contexts` policy is not
-applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
-
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
 
-## Algorithms
-
-### Gumbel-max
-
-Gumbel-max derives a deterministic pseudorandom value from the key, prior token
-context, and every candidate token, then uses the resulting Gumbel noise for
-categorical sampling. See
-[Aaronson's original presentation](https://simons.berkeley.edu/sites/default/files/2024-10/LLM24-2%20Slides%20-%20Scott%20Aaronson.pdf).
-
-Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
-bypass watermarking and emit a warning once per worker.
+## Context deduplication
 
 When a token context is repeated, generation can use ordinary sampling for that
 occurrence. Reusing the repeated context leads to a bias over the sequence, as
 certain token choices would be correlated. Ordinary sampling at these positions
 allows for single-sequence non-distortion (see section G.3 of the
 [SynthID-Text supplementary materials](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf)).
+This also applies to drafter watermarking during speculative decoding.
 The detector independently deduplicates contexts so repeated keyed random
 vectors are not treated as independent evidence, meaning that context
 deduplication at generation time does not reduce the watermarking signal, unless
@@ -142,6 +129,18 @@ vllm serve MODEL \
   --watermark-config \
   '{"algorithm":"gumbel","key":42,"deduplicate_contexts":"all"}'
 ```
+
+## Algorithms
+
+### Gumbel-max
+
+Gumbel-max derives a deterministic pseudorandom value from the key, prior token
+context, and every candidate token, then uses the resulting Gumbel noise for
+categorical sampling. See
+[Aaronson's original presentation](https://simons.berkeley.edu/sites/default/files/2024-10/LLM24-2%20Slides%20-%20Scott%20Aaronson.pdf).
+
+Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
+bypass watermarking and emit a warning once per worker.
 
 ### Dual-key Gumbel-max
 

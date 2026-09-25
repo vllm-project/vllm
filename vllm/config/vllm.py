@@ -1337,13 +1337,6 @@ class VllmConfig:
                     "share of output tokens supplied by accepted drafts.",
                     scope="global",
                 )
-            if watermark_config.deduplicate_contexts != "none":
-                logger.warning_once(
-                    "Context deduplication is not supported with speculative "
-                    "decoding and will not be applied to accepted drafts, "
-                    "rejection-recovery tokens, or bonus tokens.",
-                    scope="global",
-                )
             if watermark_config.algorithm == "dual_key_gumbel" and (
                 watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
             ):
