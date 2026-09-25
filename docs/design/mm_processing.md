@@ -80,11 +80,11 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 - The flag is **enabled by default** for all models that support it.
 - Currently, it’s on by default for these architectures:
 
-| name         | Architecture                         | Example HF Models                                     |
-|--------------|--------------------------------------|-------------------------------------------------------|
-| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
-| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
-| `mistral3`   | `Mistral3ForConditionalGeneration`   | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
+| name         | Architecture                         | Input layout  | Example HF Models                                     |
+|--------------|--------------------------------------|---------------|-------------------------------------------------------|
+| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `patches_chw` | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
+| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `patches_chw` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
+| `mistral3`   | `Mistral3ForConditionalGeneration`   | `chw`         | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
 
 #### Key Properties and Gains
 
