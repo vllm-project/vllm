@@ -17,7 +17,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -53,7 +53,7 @@ from .utils import (
 class LummaAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -179,7 +179,7 @@ class LummaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-def _check_supported(config: PretrainedConfig) -> None:
+def _check_supported(config: PreTrainedConfig) -> None:
     if not getattr(config, "shared_kv", False):
         raise NotImplementedError("Lumma with shared_kv=False is not supported yet.")
     if getattr(config, "layer_sharing_repeats", 1) > 1:
@@ -220,6 +220,7 @@ class LummaModel(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        self.embedding_proj: ReplicatedLinear | None = None
         if factorized and pp_group.is_first_rank:
             self.embedding_proj = ReplicatedLinear(
                 config.embedding_rank,
@@ -228,8 +229,6 @@ class LummaModel(nn.Module):
                 quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.embedding_proj",
             )
-        else:
-            self.embedding_proj = None
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -306,7 +305,7 @@ class LummaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
         factorized = getattr(config, "factorized_embedding", False)
-        self.lm_head_proj = None
+        self.lm_head_proj: ReplicatedLinear | None = None
         if get_pp_group().is_last_rank:
             if factorized:
                 self.lm_head_proj = ReplicatedLinear(
