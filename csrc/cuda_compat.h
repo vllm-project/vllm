@@ -68,6 +68,23 @@ struct Utils {
 #endif
 
 #ifndef USE_ROCM
+  #define VLLM_SHFL_UP_SYNC(var, lane_delta) \
+    __shfl_up_sync(uint32_t(-1), var, lane_delta)
+#else
+  #define VLLM_SHFL_UP_SYNC(var, lane_delta) __shfl_up(var, lane_delta)
+#endif
+
+#ifndef USE_ROCM
+  #define VLLM_BALLOT_MASK_T uint32_t
+  #define VLLM_BALLOT(pred) __ballot_sync(uint32_t(-1), pred)
+  #define VLLM_POPC(mask) __popc(mask)
+#else
+  #define VLLM_BALLOT_MASK_T uint64_t
+  #define VLLM_BALLOT(pred) __ballot(pred)
+  #define VLLM_POPC(mask) __popcll(mask)
+#endif
+
+#ifndef USE_ROCM
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     cudaFuncSetAttribute(FUNC, cudaFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #else

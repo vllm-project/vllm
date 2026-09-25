@@ -567,7 +567,10 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
     # Set in pre_register_and_update, so it exists only on the driver; Ray
     # workers are separate processes and copy env vars by allowlist.
-    additional_env_vars: list[str] = ["GPU_PINNED_MIN_XFER_SIZE"]
+    additional_env_vars: list[str] = [
+        "GPU_PINNED_MIN_XFER_SIZE",
+        "GPU_FORCE_BLIT_COPY_SIZE",
+    ]
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
@@ -961,6 +964,11 @@ class RocmPlatform(Platform):
         # registration's MMU notifier makes KFD suspend our queues. In KB, so
         # 4 GiB.
         os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
+        # Route batched KV copies to SDMA instead of the blit kernel. HIP sends
+        # copies at or below this size through a blit kernel, which faults once
+        # enough of them are outstanding -- HiSparse's host mirror submits
+        # ~160k descriptors per step. SDMA has no such limit. In KB.
+        os.environ.setdefault("GPU_FORCE_BLIT_COPY_SIZE", "4")
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:

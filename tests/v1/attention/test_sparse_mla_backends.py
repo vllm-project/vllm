@@ -7,6 +7,7 @@ from collections import deque
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -22,6 +23,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import (
     CUDAGraphMode,
@@ -34,9 +36,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import mla_attention
-from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
+from vllm.model_executor.layers.attention.mla_attention import (
+    _canonicalize_sparse_mla_kv_cache_dtype,
+    _use_masked_mha,
+)
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
+    SharedTopkIndicesBuffer,
     SparseMLACommonImpl,
     SparseMLAPrefillMetadata,
     _is_masked_mha_available,
@@ -46,29 +52,9 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
-
-# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
-# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
-# forward_mqa interface but needs validation on ROCm hardware.
-if not current_platform.is_cuda():
-    pytest.skip(
-        "Sparse MLA backend tests currently only support CUDA. "
-        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
-        allow_module_level=True,
-    )
-
-from vllm.model_executor.layers.attention.mla_attention import (
-    _canonicalize_sparse_mla_kv_cache_dtype,
-)
-from vllm.model_executor.layers.attention.sparse_mla_attention import (
-    SharedTopkIndicesBuffer,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla import index_group as index_group_module
-from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
-    FlashAttnMLASparseImpl,
-)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
     FlashInferMLASparseMetadataBuilder,
@@ -101,12 +87,23 @@ from vllm.v1.hisparse import runtime as hisparse_runtime
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
+    PagedCacheView,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+
+requires_cuda_backend = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="requires a CUDA-only sparse-MLA attention backend",
+)
+
+requires_rocm_backend = pytest.mark.skipif(
+    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+    reason="requires the ROCm AITER sparse-MLA attention backend",
+)
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -129,6 +126,7 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 DEVICE_TYPE = current_platform.device_type
 
 
+@requires_cuda_backend
 def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     """Weight absorption must not change the model's attention temperature."""
     model_scale = 256**-0.5
@@ -188,6 +186,25 @@ def test_hisparse_routes_prefill_to_sparse_mqa():
     layer = SimpleNamespace(hisparse_cache=object())
 
     assert not mla_attention.MLAAttention._use_sparse_mha(layer, SimpleNamespace())
+
+
+def test_paged_cache_view_binds_page_padded_backing():
+    """ROCm pads the KV backing to a page, leaving a partial trailing block."""
+    block_size, row_width, num_blocks = 16, 576, 3
+    block_stride = block_size * row_width
+    raw = torch.zeros(num_blocks * block_stride + 2048, dtype=torch.uint8)
+
+    view = PagedCacheView.bind(
+        raw,
+        dtype=torch.uint8,
+        row_width=row_width,
+        byte_offset=0,
+        block_stride=block_stride,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    assert view.attention_cache.shape == (num_blocks, block_size, row_width)
 
 
 def test_hisparse_metadata_keeps_short_prefill_indexer_enabled():
@@ -3192,7 +3209,14 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     assert lse is None
 
 
+@requires_cuda_backend
 def test_flashattn_hisparse_decode_uses_index_group():
+    # Imported lazily: vllm.vllm_flash_attn needs the CUDA FA extensions and
+    # raises ImportError on ROCm, which would take the whole module down.
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseImpl,
+    )
+
     num_tokens = 4
     q_nope = torch.empty(num_tokens, 2, 3, device=DEVICE_TYPE)
     q_rope = torch.empty(num_tokens, 2, 1, device=DEVICE_TYPE)
@@ -3261,6 +3285,325 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     assert lse is None
     index_group.convert_decode_logical_to_physical_topk.assert_called_once()
     impl._run_mqa_kernel.assert_called_once()
+
+
+ROCM_NUM_HEADS = 16  # A multiple of AITER's 16-head floor, so q is not padded.
+ROCM_KV_LORA_RANK = 8
+ROCM_TOPK = 128  # The remap kernel tiles columns by 128 and asserts divisibility.
+
+
+def _rocm_rows(*values_per_row):
+    """Build a ``-1``-padded ``[rows, ROCM_TOPK]`` index tensor."""
+    padded = [list(v) + [-1] * (ROCM_TOPK - len(v)) for v in values_per_row]
+    return torch.tensor(padded, dtype=torch.int32, device=DEVICE_TYPE)
+
+
+def _rocm_impl(index_group):
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.kv_cache_dtype = "auto"
+    impl.num_heads = ROCM_NUM_HEADS
+    impl.kv_lora_rank = ROCM_KV_LORA_RANK
+    impl.index_group = index_group
+    impl.index_group_index = 0
+    return impl
+
+
+def _rocm_metadata(num_tokens, num_decode_tokens, num_decodes, num_prefills):
+    def zeros(n, fill=0):
+        return torch.full((n,), fill, dtype=torch.int32, device=DEVICE_TYPE)
+
+    return SimpleNamespace(
+        num_actual_tokens=num_tokens,
+        num_decode_tokens=num_decode_tokens,
+        num_decodes=num_decodes,
+        num_prefills=num_prefills,
+        topk_tokens=ROCM_TOPK,
+        block_size=1,
+        decode_max_query_len=1,
+        max_query_len=num_tokens - num_decode_tokens,
+        qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32, device=DEVICE_TYPE),
+        paged_kv_indptr=zeros(num_tokens + 1),
+        paged_kv_indices=zeros(num_tokens * ROCM_TOPK, fill=-7),
+        paged_kv_last_page_len=zeros(num_tokens, fill=1),
+        req_id_per_token=zeros(num_tokens),
+    )
+
+
+def _rocm_capture_forward_mla(impl):
+    """Stub ``_forward_mla``, recording the KV base and indices it was handed."""
+    calls = []
+
+    def fake(layer, q, kv_cache, attn_metadata, *, token_slice=None):
+        source = token_slice if token_slice is not None else attn_metadata
+        span = int(source.paged_kv_indptr[-1])
+        calls.append(
+            SimpleNamespace(
+                kv_cache=kv_cache,
+                num_tokens=q.shape[0],
+                indptr=source.paged_kv_indptr.clone(),
+                indices=source.paged_kv_indices[:span].clone(),
+                num_decode_tokens=source.num_decode_tokens,
+                num_prefills=source.num_prefills,
+            )
+        )
+        return (
+            torch.zeros(
+                q.shape[0],
+                ROCM_NUM_HEADS,
+                ROCM_KV_LORA_RANK,
+                dtype=q.dtype,
+                device=DEVICE_TYPE,
+            ),
+            None,
+        )
+
+    impl._forward_mla = fake
+    return calls
+
+
+def _rocm_index_group(*, physical_kv_cache, resident=True, staged=None):
+    group = object.__new__(HiSparseMLAIndexGroup)
+    group.physical_kv_cache = MagicMock(return_value=physical_kv_cache)
+    group.cache = MagicMock(
+        return_value=SimpleNamespace(all_context_pages_resident=resident)
+    )
+    group.stage_prefill_rows = MagicMock(return_value=staged)
+    return group
+
+
+def _rocm_kv_buffer(num_rows):
+    return torch.zeros(
+        num_rows, 1, ROCM_KV_LORA_RANK, dtype=torch.bfloat16, device=DEVICE_TYPE
+    )
+
+
+def _rocm_forward_mqa(impl, q, kv_cache, metadata):
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    return ROCMAiterMLASparseImpl.forward_mqa(
+        impl, q, kv_cache, metadata, SimpleNamespace()
+    )
+
+
+@requires_rocm_backend
+def test_rocm_hisparse_decode_attends_hot_buffer_with_ragged_indices():
+    """Decode reads ``physical_kv_cache``, flattened from the resolver's rows."""
+    num_tokens = 3
+    hot = _rocm_kv_buffer(64)
+    # Row 1 is short: its padding must drop out and shrink that row's span.
+    physical = _rocm_rows([10, 11, 12, 13], [20, 21], [30, 31, 32])
+    group = _rocm_index_group(physical_kv_cache=hot)
+    group.convert_decode_logical_to_physical_topk = MagicMock(return_value=physical)
+
+    impl = _rocm_impl(group)
+    impl.topk_indices_buffer = torch.zeros(
+        num_tokens, ROCM_TOPK, dtype=torch.int32, device=DEVICE_TYPE
+    )
+    calls = _rocm_capture_forward_mla(impl)
+    metadata = _rocm_metadata(num_tokens, num_tokens, num_tokens, 0)
+    q = torch.zeros(num_tokens, ROCM_NUM_HEADS, ROCM_KV_LORA_RANK, device=DEVICE_TYPE)
+
+    output, lse = _rocm_forward_mqa(
+        impl, q, torch.empty(1, device=DEVICE_TYPE), metadata
+    )
+
+    assert lse is None
+    assert output.shape == (num_tokens, ROCM_NUM_HEADS, ROCM_KV_LORA_RANK)
+    group.convert_decode_logical_to_physical_topk.assert_called_once()
+    group.stage_prefill_rows.assert_not_called()
+
+    assert len(calls) == 1
+    # The hot buffer, not the paged KV cache passed to forward_mqa.
+    assert calls[0].kv_cache.data_ptr() == hot.data_ptr()
+    assert calls[0].indptr.tolist() == [0, 4, 6, 9]
+    assert calls[0].indices.tolist() == [10, 11, 12, 13, 20, 21, 30, 31, 32]
+
+
+@requires_rocm_backend
+def test_rocm_hisparse_prefill_attends_staged_rows_when_not_resident():
+    """A non-resident prefill stages host rows and attends those instead."""
+    num_tokens = 2
+    staged_cache = _rocm_kv_buffer(32)
+    # block_size 1, so the remap is a straight block_table lookup.
+    block_table = torch.tensor([[5, 6, 7, 8]], dtype=torch.int32, device=DEVICE_TYPE)
+    req_ids = torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE_TYPE)
+    group = _rocm_index_group(
+        physical_kv_cache=_rocm_kv_buffer(64),
+        resident=False,
+        staged=(staged_cache, block_table, req_ids),
+    )
+    group.convert_decode_logical_to_physical_topk = MagicMock()
+
+    impl = _rocm_impl(group)
+    impl.topk_indices_buffer = _rocm_rows([0, 1, 2], [3])
+    calls = _rocm_capture_forward_mla(impl)
+    metadata = _rocm_metadata(num_tokens, 0, 0, 1)
+    q = torch.zeros(num_tokens, ROCM_NUM_HEADS, ROCM_KV_LORA_RANK, device=DEVICE_TYPE)
+
+    _rocm_forward_mqa(impl, q, torch.empty(1, device=DEVICE_TYPE), metadata)
+
+    group.convert_decode_logical_to_physical_topk.assert_not_called()
+    group.stage_prefill_rows.assert_called_once()
+
+    assert len(calls) == 1
+    assert calls[0].kv_cache.data_ptr() == staged_cache.data_ptr()
+    assert calls[0].indptr.tolist() == [0, 3, 4]
+    assert calls[0].indices.tolist() == [5, 6, 7, 8]
+
+
+@requires_rocm_backend
+def test_rocm_hisparse_mixed_batch_splits_kv_bases():
+    """A mixed batch attends two bases and concatenates the two outputs."""
+    num_decode_tokens, num_prefill_tokens = 1, 2
+    num_tokens = num_decode_tokens + num_prefill_tokens
+    hot = _rocm_kv_buffer(64)
+    staged_cache = _rocm_kv_buffer(32)
+    block_table = torch.tensor([[5, 6, 7, 8]], dtype=torch.int32, device=DEVICE_TYPE)
+    req_ids = torch.zeros(num_prefill_tokens, dtype=torch.int32, device=DEVICE_TYPE)
+    group = _rocm_index_group(
+        physical_kv_cache=hot,
+        resident=True,  # Ignored: a batch with decode tokens always stages.
+        staged=(staged_cache, block_table, req_ids),
+    )
+    group.convert_decode_logical_to_physical_topk = MagicMock(
+        return_value=_rocm_rows([40, 41])
+    )
+
+    impl = _rocm_impl(group)
+    impl.topk_indices_buffer = _rocm_rows([0, 1, 2, 3], [0, 1], [2])
+    calls = _rocm_capture_forward_mla(impl)
+    metadata = _rocm_metadata(num_tokens, num_decode_tokens, 1, 1)
+    q = torch.zeros(num_tokens, ROCM_NUM_HEADS, ROCM_KV_LORA_RANK, device=DEVICE_TYPE)
+
+    output, _ = _rocm_forward_mqa(impl, q, torch.empty(1, device=DEVICE_TYPE), metadata)
+
+    assert output.shape == (num_tokens, ROCM_NUM_HEADS, ROCM_KV_LORA_RANK)
+    group.stage_prefill_rows.assert_called_once()
+
+    decode_call, prefill_call = calls
+    assert decode_call.kv_cache.data_ptr() == hot.data_ptr()
+    assert decode_call.num_tokens == num_decode_tokens
+    assert decode_call.num_decode_tokens == num_decode_tokens
+    assert decode_call.num_prefills == 0
+    assert decode_call.indices.tolist() == [40, 41]
+
+    assert prefill_call.kv_cache.data_ptr() == staged_cache.data_ptr()
+    assert prefill_call.num_tokens == num_prefill_tokens
+    assert prefill_call.num_decode_tokens == 0
+    assert prefill_call.num_prefills == 1
+    assert prefill_call.indices.tolist() == [5, 6, 7]
+
+
+@requires_rocm_backend
+def test_rocm_non_hisparse_index_group_keeps_paged_kv_cache():
+    """The plain sparse path must not be diverted onto a hot buffer."""
+    num_tokens = 2
+    paged = _rocm_kv_buffer(64)
+    impl = _rocm_impl(index_group=None)
+    impl.topk_indices_buffer = torch.zeros(
+        num_tokens, ROCM_TOPK, dtype=torch.int32, device=DEVICE_TYPE
+    )
+    calls = _rocm_capture_forward_mla(impl)
+    metadata = _rocm_metadata(num_tokens, num_tokens, num_tokens, 0)
+    metadata.block_table = torch.zeros(1, 4, dtype=torch.int32, device=DEVICE_TYPE)
+    q = torch.zeros(num_tokens, ROCM_NUM_HEADS, ROCM_KV_LORA_RANK, device=DEVICE_TYPE)
+
+    _rocm_forward_mqa(impl, q, paged, metadata)
+
+    assert len(calls) == 1
+    assert calls[0].kv_cache.data_ptr() == paged.data_ptr()
+
+
+def _reference_ragged(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten a ``-1``-padded dense top-k the way the kernel should."""
+    counts = (dense >= 0).sum(axis=1)
+    indptr = np.zeros(dense.shape[0] + 1, dtype=np.int32)
+    np.cumsum(counts, out=indptr[1:])
+    flat = np.concatenate([row[row >= 0] for row in dense]) if dense.size else dense
+    return indptr, flat.astype(np.int32)
+
+
+def _run_compact_ragged(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        compact_topk_to_ragged_triton,
+    )
+
+    dense_gpu = torch.from_numpy(dense).to(DEVICE_TYPE)
+    expected_indptr, expected_flat = _reference_ragged(dense)
+    indptr = torch.from_numpy(expected_indptr).to(DEVICE_TYPE)
+    # Poison the destination so any row the kernel fails to write is visible.
+    out = torch.full(
+        (max(int(expected_indptr[-1]), 1),),
+        -7,
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    compact_topk_to_ragged_triton(dense_gpu, indptr, out)
+    return out[: int(expected_indptr[-1])].cpu().numpy(), expected_flat
+
+
+@requires_rocm_backend
+@pytest.mark.parametrize("width", [1, 32, 64, 65, 128])
+def test_rocm_compact_ragged_full_rows(width):
+    """Fully valid rows flatten to a contiguous copy at every top-k width."""
+    dense = np.arange(3 * width, dtype=np.int32).reshape(3, width)
+    actual, expected = _run_compact_ragged(dense)
+    np.testing.assert_array_equal(actual, expected)
+
+
+@requires_rocm_backend
+def test_rocm_compact_ragged_drops_interior_padding():
+    """A ``-1`` in the middle of a row must drop out, not displace a valid id."""
+    dense = np.array(
+        [
+            [10, -1, 11, -1, 12, -1, -1, -1],
+            [-1, -1, -1, -1, -1, -1, -1, -1],
+            [20, 21, 22, 23, 24, 25, 26, 27],
+            [-1, 30, -1, -1, -1, -1, -1, 31],
+        ],
+        dtype=np.int32,
+    )
+    actual, expected = _run_compact_ragged(dense)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(
+        actual, [10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 30, 31]
+    )
+
+
+@requires_rocm_backend
+@pytest.mark.parametrize("width", [33, 128])
+def test_rocm_compact_ragged_random_rows(width):
+    """Randomly ragged rows of differing length match the NumPy reference."""
+    rng = np.random.default_rng(width)
+    num_tokens = 17
+    dense = rng.integers(0, 4096, size=(num_tokens, width)).astype(np.int32)
+    keep = rng.integers(0, width + 1, size=num_tokens)
+    for token, num_valid in enumerate(keep):
+        dense[token, num_valid:] = -1
+        # Shuffle so the valid entries are not always a leading prefix.
+        rng.shuffle(dense[token])
+    actual, expected = _run_compact_ragged(dense)
+    np.testing.assert_array_equal(actual, expected)
+
+
+@requires_rocm_backend
+def test_rocm_compact_ragged_leaves_tail_untouched():
+    """The kernel writes exactly indptr[-1] entries and nothing beyond."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        compact_topk_to_ragged_triton,
+    )
+
+    dense = torch.tensor([[5, -1, 6, -1]], dtype=torch.int32, device=DEVICE_TYPE)
+    indptr = torch.tensor([0, 2], dtype=torch.int32, device=DEVICE_TYPE)
+    out = torch.full((8,), -7, dtype=torch.int32, device=DEVICE_TYPE)
+    compact_topk_to_ragged_triton(dense, indptr, out)
+    np.testing.assert_array_equal(out.cpu().numpy(), [5, 6, -7, -7, -7, -7, -7, -7])
 
 
 def test_hisparse_resident_prefill_uses_attention_block_stride():

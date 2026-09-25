@@ -18,6 +18,7 @@
 #include "torch_utils.h"
 #include "ops.h"
 #include "../cuda_utils.h"
+#include "../cuda_compat.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -29,7 +30,8 @@
 
 namespace {
 
-constexpr int kWarpSize = 32;
+// CUDA vs ROCm distinction
+#define kWarpSize WARP_SIZE
 // Sentinel in the shared top-k scratch: entry already resolved (hit /
 // newest / invalid), no miss handling needed.
 constexpr int32_t kTokenDone = -1;
@@ -46,6 +48,17 @@ bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
   return attributes.type == cudaMemoryTypeHost;
 }
 
+#ifdef USE_ROCM
+typedef unsigned int vec16_t __attribute__((ext_vector_type(4)));
+  #define VLLM_LOAD_STREAM(ptr) __builtin_nontemporal_load(ptr)
+  #define VLLM_STORE_STREAM(ptr, val) __builtin_nontemporal_store(val, ptr)
+#else
+typedef uint4 vec16_t;
+  #define VLLM_LOAD_STREAM(ptr) __ldcg(ptr)
+  #define VLLM_STORE_STREAM(ptr, val) __stcg(ptr, val)
+#endif
+static_assert(sizeof(vec16_t) == 16, "vec16_t must be a 16-byte vector");
+
 __device__ __forceinline__ int32_t hash_slot(int32_t key, int32_t hash_size) {
   // Knuth multiplicative hash for the open-addressing table.
   return static_cast<int32_t>((static_cast<uint32_t>(key) * 2654435761u) %
@@ -61,10 +74,10 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
                          static_cast<uintptr_t>(row_bytes);
   if ((alignment & 15) == 0) {
     const int64_t num_vec = row_bytes / 16;
-    const uint4* src4 = reinterpret_cast<const uint4*>(src);
-    uint4* dst4 = reinterpret_cast<uint4*>(dst);
+    const vec16_t* src4 = reinterpret_cast<const vec16_t*>(src);
+    vec16_t* dst4 = reinterpret_cast<vec16_t*>(dst);
     for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-      __stcg(dst4 + j, __ldcg(src4 + j));
+      VLLM_STORE_STREAM(dst4 + j, VLLM_LOAD_STREAM(src4 + j));
     }
     return;
   }
@@ -74,13 +87,13 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
     const unsigned int* src_words = reinterpret_cast<const unsigned int*>(src);
     unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
     for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
-      __stcg(dst_words + j, __ldcg(src_words + j));
+      VLLM_STORE_STREAM(dst_words + j, VLLM_LOAD_STREAM(src_words + j));
     }
     return;
   }
 
   for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
-    __stcg(dst + j, __ldcg(src + j));
+    VLLM_STORE_STREAM(dst + j, VLLM_LOAD_STREAM(src + j));
   }
 }
 
@@ -92,12 +105,10 @@ __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
       reinterpret_cast<uintptr_t>(dst) | static_cast<uintptr_t>(row_bytes);
   if ((alignment & 15) == 0) {
     const int64_t num_vec = row_bytes / 16;
-    uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
+    vec16_t* dst4 = reinterpret_cast<vec16_t*>(dst);
+    const vec16_t zero = {0u, 0u, 0u, 0u};
     for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-      uint64_t* d = dst8 + j * 2;
-      asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(0ULL),
-                   "l"(0ULL)
-                   : "memory");
+      VLLM_STORE_STREAM(dst4 + j, zero);
     }
     return;
   }
@@ -106,13 +117,13 @@ __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
     const int64_t num_words = row_bytes / 4;
     unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
     for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
-      __stcg(dst_words + j, 0u);
+      VLLM_STORE_STREAM(dst_words + j, 0u);
     }
     return;
   }
 
   for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
-    __stcg(dst + j, static_cast<char>(0));
+    VLLM_STORE_STREAM(dst + j, static_cast<char>(0));
   }
 }
 
@@ -134,23 +145,23 @@ __device__ __forceinline__ void zero_cache_row_warp(int lane_id, char* cache,
                 row_bytes);
 }
 
-// In-place inclusive scan over s_data[offset, count) performed by warp 0,
-// carrying `accumulator` across calls. Returns the running total.
+// In-place inclusive scan performed by warp 0 over num chunk counters produced
 __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
                                                    int offset, int count,
-                                                   int accumulator) {
-  int idx = lane_id + offset;
-  int val = (idx < count) ? s_data[idx] : 0;
+                                                   int width, int accumulator) {
+  const int idx = lane_id + offset;
+  const bool active = lane_id < width && idx < count;
+  int val = active ? s_data[idx] : 0;
 #pragma unroll
-  for (int i = 1; i < 32; i *= 2) {
-    int n = __shfl_up_sync(0xffffffff, val, i);
+  for (int i = 1; i < kWarpSize; i *= 2) {
+    int n = VLLM_SHFL_UP_SYNC(val, i);
     if (lane_id >= i) val += n;
   }
   val += accumulator;
-  if (idx < count) {
+  if (active) {
     s_data[idx] = val;
   }
-  return __shfl_sync(0xffffffff, val, 31);
+  return VLLM_SHFL_SYNC(val, kWarpSize - 1);
 }
 
 __device__ __forceinline__ int64_t
@@ -253,7 +264,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   const int tid = threadIdx.x;
   const int warp_id = tid / kWarpSize;
   const int lane_id = tid % kWarpSize;
-  const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
+  const VLLM_BALLOT_MASK_T lanes_before =
+      ((VLLM_BALLOT_MASK_T)1 << lane_id) - 1;
 
   const int32_t* row_topk =
       global_indices + static_cast<int64_t>(batch_row) * input_row_stride;
@@ -430,24 +442,24 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     int local_hit_off = 0;
     int local_evict_off = 0;
     if (has_valid_chunk) {
-      const unsigned int hit_mask = __ballot_sync(0xFFFFFFFF, is_hit);
-      const unsigned int evict_mask = __ballot_sync(0xFFFFFFFF, is_evictable);
-      local_hit_off = __popc(hit_mask & lanes_before);
-      local_evict_off = __popc(evict_mask & lanes_before);
+      const VLLM_BALLOT_MASK_T hit_mask = VLLM_BALLOT(is_hit);
+      const VLLM_BALLOT_MASK_T evict_mask = VLLM_BALLOT(is_evictable);
+      local_hit_off = VLLM_POPC(hit_mask & lanes_before);
+      local_evict_off = VLLM_POPC(evict_mask & lanes_before);
       if (lane_id == 0) {
-        s_chunk_off[chunk_idx + 1] = __popc(hit_mask);
-        s_evict_off[chunk_idx + 1] = __popc(evict_mask);
+        s_chunk_off[chunk_idx + 1] = VLLM_POPC(hit_mask);
+        s_evict_off[chunk_idx + 1] = VLLM_POPC(evict_mask);
       }
     }
     __syncthreads();
 
     if (warp_id == 0) {
-      total_hit_count =
-          warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
-                              num_buffer_chunks + 1, total_hit_count);
-      total_evict_count =
-          warp_inclusive_scan(s_evict_off, lane_id, chunk_idx + 1,
-                              num_buffer_chunks + 1, total_evict_count);
+      total_hit_count = warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
+                                            num_buffer_chunks + 1, NUM_WARPS,
+                                            total_hit_count);
+      total_evict_count = warp_inclusive_scan(
+          s_evict_off, lane_id, chunk_idx + 1, num_buffer_chunks + 1, NUM_WARPS,
+          total_evict_count);
       if (tid == 0) {
         s_counters[0] = total_hit_count;
       }
@@ -494,18 +506,18 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
     int local_miss_off = 0;
     if (has_valid_chunk) {
-      const unsigned int miss_mask = __ballot_sync(0xFFFFFFFF, is_miss);
-      local_miss_off = __popc(miss_mask & lanes_before);
+      const VLLM_BALLOT_MASK_T miss_mask = VLLM_BALLOT(is_miss);
+      local_miss_off = VLLM_POPC(miss_mask & lanes_before);
       if (lane_id == 0) {
-        s_chunk_off[chunk_idx + 1] = __popc(miss_mask);
+        s_chunk_off[chunk_idx + 1] = VLLM_POPC(miss_mask);
       }
     }
     __syncthreads();
 
     if (warp_id == 0) {
-      miss_running_total =
-          warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
-                              num_token_chunks + 1, miss_running_total);
+      miss_running_total = warp_inclusive_scan(
+          s_chunk_off, lane_id, chunk_idx + 1, num_token_chunks + 1, NUM_WARPS,
+          miss_running_total);
     }
     __syncthreads();
 
@@ -845,8 +857,6 @@ void hisparse_resolve_residency(
                   "hot-cache rows must be contiguous");
   const int64_t hot_block_size = hot_cache.size(1);
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
-  const int64_t hot_block_stride =
-      hot_cache.stride(0) * hot_cache.element_size();
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
   const auto launch_rows = static_cast<int32_t>(num_rows);
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
@@ -1048,6 +1058,12 @@ void hisparse_resolve_residency(
   const int64_t valid_count_stride =
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
+#ifdef USE_ROCM
+  constexpr size_t kMaxLdsBytes = 64 * 1024;
+  STD_TORCH_CHECK(smem_bytes <= kMaxLdsBytes, "HiSparse residency needs ",
+                  smem_bytes, " bytes of LDS but CDNA allows at most ",
+                  kMaxLdsBytes, "; reduce top_k or the hot-buffer size");
+#else
   if (smem_bytes > 48 * 1024) {
     const cudaError_t attribute_error = cudaFuncSetAttribute(
         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
@@ -1055,6 +1071,7 @@ void hisparse_resolve_residency(
                     "failed to configure HiSparse swap-in shared memory: ",
                     cudaGetErrorString(attribute_error));
   }
+#endif
   kernel<<<launch_rows, kBlockSize, smem_bytes, stream>>>(
       hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), request_ids_ptr,
@@ -1155,7 +1172,8 @@ void hisparse_gather_plan(
   // layers' misses (index-sharing replay), so per-row copy parallelism is
   // the throughput limiter on cold rows.
   constexpr int kBlockSize = 1024;
-  constexpr int kNumWarps = kBlockSize / kWarpSize;
+  // Not constexpr: on ROCm the host-side WARP_SIZE is a runtime device query.
+  const int kNumWarps = kBlockSize / kWarpSize;
   // Interleave columns over enough blocks per row to cover the device even
   // for few-row launches (local-prefill staging's single-row layout, small
   // decode batches), keeping >= 1 column per warp.

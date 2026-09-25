@@ -1791,8 +1791,16 @@ class VllmConfig:
             self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
-            if not current_platform.is_cuda():
-                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if not (current_platform.is_cuda() or current_platform.is_rocm()):
+                raise ValueError("HiSparse requires NVIDIA CUDA or AMD ROCm.")
+            if current_platform.is_rocm() and (
+                self.cache_config is not None
+                and self.cache_config.cache_dtype == "fp8_ds_mla"
+            ):
+                raise ValueError(
+                    "HiSparse on ROCm does not support the fp8_ds_mla KV cache "
+                    "dtype; use auto, bfloat16, or fp8."
+                )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")
             if self.parallel_config.decode_context_parallel_size > 1:

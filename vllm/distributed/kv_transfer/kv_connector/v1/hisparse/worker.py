@@ -22,6 +22,8 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -39,6 +41,8 @@ if TYPE_CHECKING:
         HiSparseConnectorMetadata,
     )
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
 
 
 class _DMADescriptors(NamedTuple):
@@ -154,12 +158,16 @@ def _is_hisparse_host_writer(
     return shared_host_region is None or get_tensor_model_parallel_rank() == 0
 
 
+def _use_ipc_host_events() -> bool:
+    return not current_platform.is_rocm()
+
+
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
-    if shared_host_region is None:
+    if shared_host_region is None or not _use_ipc_host_events():
         return torch.Event(), torch.Event()
 
     events: tuple[torch.Event, torch.Event] | None = None
@@ -297,6 +305,7 @@ class HiSparseConnectorWorker:
             deque()
         )
         self._dma_submitted = False
+        self._step_in_flight = False
         self._per_layer_mirrored: set[int] = set()
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
@@ -308,6 +317,7 @@ class HiSparseConnectorWorker:
             for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
             if cache.runtime.is_group_leader
         )
+        self._ipc_host_events = _use_ipc_host_events()
         self.host_write_events = _create_hisparse_host_events(
             shared_host_region, is_host_writer, device
         )
@@ -401,6 +411,7 @@ class HiSparseConnectorWorker:
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
+        self.sync_host_writes(previous_host_write_event)
         self._release_completed_dma_descriptors()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         if self._slot_mapping_staging is not None:
@@ -408,6 +419,7 @@ class HiSparseConnectorWorker:
         self._set_row_mirrors(mirrors)
         self._dma_submitted = False
         self._clear_forward_mirror_state()
+        self._step_in_flight = True
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
             handle.mirror_from_resident = True
@@ -432,7 +444,15 @@ class HiSparseConnectorWorker:
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
 
+    def sync_host_writes(self, event: torch.Event) -> None:
+        if self.shared_host_region is None or self._ipc_host_events:
+            return
+        if self.is_host_writer:
+            event.synchronize()
+        get_tp_group().barrier()
+
     def _clear_forward_mirror_state(self) -> None:
+        self._step_in_flight = False
         self._per_layer_mirrored.clear()
         self._submitted_mirror_layers.clear()
         for handle in self.cache_handles:
@@ -686,6 +706,9 @@ class HiSparseConnectorWorker:
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
         if not handle.host_mirror_required:
+            return
+        if not self._step_in_flight:
+            # Don't mirror on warmup/dummy; connector disabled
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
