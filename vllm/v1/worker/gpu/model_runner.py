@@ -1091,11 +1091,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @contextmanager
     def preserve_serving_state(self) -> Iterator[None]:
-        """Keep the elastic EP warmup out of the request pool and the KV cache.
-
-        Unlike MRV1 this expects the commit to have drained running requests
-        with the "wait" pause, so any slot still held is evicted rather than kept.
-        """
+        """Keep the elastic EP warmup out of the request pool and the KV cache."""
         # After the drain only parked streaming sessions still hold a slot, and
         # those are re-added from NewRequestData on their next chunk.
         self._remove_all_requests()
