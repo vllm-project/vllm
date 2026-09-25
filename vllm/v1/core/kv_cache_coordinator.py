@@ -362,11 +362,10 @@ class KVCacheCoordinator(ABC):
         for group_idx, group_blocks in enumerate(computed_blocks):
             if group_blocks:
                 manager = self.single_type_managers[group_idx]
-                group = self.kv_cache_config.kv_cache_groups[group_idx]
                 manager.block_pool.emit_cached_block_events(
                     request,
                     len(group_blocks),
-                    group.kv_cache_spec.block_size,
+                    manager.block_size,
                     group_idx,
                 )
 

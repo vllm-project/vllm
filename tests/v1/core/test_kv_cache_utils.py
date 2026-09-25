@@ -316,6 +316,25 @@ def test_effective_attention_block_size_matches_events(dcp):
         if isinstance(event, BlockStored)
     ] == [block_size]
 
+    manager.free(request)
+    manager.take_events()
+    reused_request = make_request(
+        "block-size-reused",
+        list(range(2 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    reused_request.kv_cache_report_mode = "full"
+    manager.get_computed_blocks(reused_request)
+    reused_events = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    assert len(reused_events) == 1
+    assert reused_events[0].block_size == block_size
+    assert len(reused_events[0].token_ids) == (
+        len(reused_events[0].block_hashes) * reused_events[0].block_size
+    )
+
 
 def new_kv_cache_spec(
     block_size=16,
