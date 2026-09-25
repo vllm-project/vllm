@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
+    VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
@@ -123,6 +124,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
+    VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -131,6 +133,7 @@ if TYPE_CHECKING:
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
+    VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
@@ -156,7 +159,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
-    VLLM_PLE_CPU_OFFLOAD: bool = True
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -213,7 +215,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
-    VLLM_KIMI_K3_GEMM_RS: bool = False
+    VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -317,7 +319,6 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
@@ -924,6 +925,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
     ),
+    # Using a flag to control microbatch on XPU device, users on XPU device can
+    # decide to disable it when they needed.
+    "VLLM_XPU_PP_MICROBATCH": lambda: bool(
+        int(os.getenv("VLLM_XPU_PP_MICROBATCH", "1"))
+    ),
     # When True and distributed_executor_backend="ray", use RayExecutorV2
     # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
@@ -1182,6 +1188,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
         in ("1", "true")
     ),
+    # Maximum compiler threads per worker for registered CUDA Triton JIT warmup.
+    # Set to 1 for serial warmup. Does not affect runtime JIT or autotuning.
+    "VLLM_TRITON_JIT_WARMUP_NUM_THREADS": lambda: int(
+        os.getenv("VLLM_TRITON_JIT_WARMUP_NUM_THREADS", "4")
+    ),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
         os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower()
@@ -1230,6 +1241,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
+    # Set to 1 to dequantize MXFP4 weights to BF16 once at load time and run as
+    # a BF16 checkpoint (no per-step weight dequant). This improves emulation
+    # latency at the cost of additional device memory. Default off.
+    "VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD": lambda: (
+        os.getenv("VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD", "False").lower()
+        in ("true", "1")
+    ),
     # On hardware without a native MXFP8 kernel (e.g. ROCm gfx942 / MI300), the
     # MXFP8 emulation path dequantizes weights MXFP8->BF16 once at load time and
     # runs as a BF16 checkpoint (no per-step dequant). Set to 0 to fall back to
@@ -1524,7 +1542,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
     ),
-    # The activation dtype config for humming kernel
+    # The activation dtype config for humming kernel. Explicit schemas disable
+    # fallback unless the config includes "allow_fallback": true.
     "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
     ),
@@ -1621,9 +1640,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
-    # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
-    # row-parallel projections. All TP ranks must belong to one NVLink domain.
-    "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
+    # Fuse eligible sequence-parallel row-parallel projections with their TP
+    # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
+    # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
+    # ranks must belong to one NVLink domain.
+    "VLLM_ENABLE_GEMM_RS": lambda: bool(int(os.getenv("VLLM_ENABLE_GEMM_RS", "0"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -2065,8 +2086,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
-    # Store n-gram embedding tables in pinned CPU memory for UVA lookup.
-    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "1"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
@@ -2130,10 +2149,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
-    ),
-    # Whether enable XPU graph on Intel GPU
-    "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
-        int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
     # Force N-contiguous weight layout for all XPU unquantized linears.
     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
@@ -2269,6 +2284,7 @@ def compile_factors() -> dict[str, object]:
     hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",

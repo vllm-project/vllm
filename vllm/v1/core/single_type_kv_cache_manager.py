@@ -143,9 +143,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
-        # ``CacheConfig.enable_mamba_fine_grained_prefix_cache``, narrowed and set
+        # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
         # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
-        self.fine_grained_prefix_cache = False
+        self.shared_prefix_checkpoint = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -492,6 +492,8 @@ class SingleTypeKVCacheManager(ABC):
                 can resume at, from ``get_replay_boundaries``.
 
         """
+        if not self.kv_cache_spec.prefix_cacheable:
+            return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
@@ -2076,7 +2078,7 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
-        if self.use_eagle:
+        if self.drop_eagle_checkpoint_block:
             # Eagle groups match one hash unit past the candidate and drop it,
             # so register the tail one unit lower.
             latest_prompt_hash_boundary = max(
@@ -2088,7 +2090,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # running state block, mutated in place, which equals what its key
         # promises only after that step's forward.
         if num_tokens != latest_prompt_hash_boundary and not (
-            self.fine_grained_prefix_cache
+            self.shared_prefix_checkpoint
             and num_tokens == request.shared_prefix_boundary
             and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
         ):
