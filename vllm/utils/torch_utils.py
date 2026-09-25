@@ -7,6 +7,7 @@ import os
 import random
 import sys
 import threading
+import weakref
 from collections import deque
 from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -736,6 +737,21 @@ def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     return t.pin_memory() if PIN_MEMORY else t
 
 
+def _pinned_uint8_buffer(nbytes: int) -> torch.Tensor:
+    """Allocate a pinned buffer of exactly `nbytes`.
+
+    `pin_memory=True` rounds the size up to a power of two, so register a
+    regular allocation with cudaHostRegister instead when possible.
+    """
+    if torch.cuda.is_available():
+        buf = torch.empty(nbytes, dtype=torch.uint8)
+        cudart = torch.cuda.cudart()
+        if cudart.cudaHostRegister(buf.data_ptr(), nbytes, 0).value == 0:
+            weakref.finalize(buf, cudart.cudaHostUnregister, buf.data_ptr())
+            return buf
+    return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+
+
 class PinnedStagingBuffer:
     """Fixed-size pinned host buffer for staging async host-to-device copies.
 
@@ -811,7 +827,7 @@ class PinnedStagingBuffer:
         if size > self.capacity:
             return None
         if self._buf is None:
-            self._buf = torch.empty(self.capacity, dtype=torch.uint8, pin_memory=True)
+            self._buf = _pinned_uint8_buffer(self.capacity)
         regions = self._regions
         # Drop regions whose copies have completed.
         while regions and regions[0][2] is not None and regions[0][2].query():
