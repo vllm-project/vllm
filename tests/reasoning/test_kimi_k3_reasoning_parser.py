@@ -19,6 +19,9 @@ SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
+OPEN_IDS = [1, 2, 3]
+CLOSE_IDS = [4, 2, 3]
+RESPONSE_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
 
 
 class DummyTokenizer:
@@ -117,6 +120,54 @@ def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
     assert parser.is_reasoning_end([*stale_close, *new_open, *stale_close])
     # open with no close yet -> not ended
     assert not parser.is_reasoning_end([*new_open])
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "expected"),
+    [
+        pytest.param(
+            [*OPEN_IDS, 9, 10, *CLOSE_IDS, *RESPONSE_OPEN_IDS, 11],
+            2,
+            id="open_and_close_markers",
+        ),
+        pytest.param(
+            [9, 10, *CLOSE_IDS, *RESPONSE_OPEN_IDS, 11],
+            2,
+            id="open_marker_consumed_as_generation_prefix",
+        ),
+        pytest.param([*RESPONSE_OPEN_IDS, 11, 12], 0, id="response_only"),
+        pytest.param([*OPEN_IDS, 9, 10], 2, id="unterminated_after_open"),
+        pytest.param([9, 10, 11], 3, id="unterminated_without_markers"),
+        pytest.param([], 0, id="empty"),
+        pytest.param([9, 4, 2, 10], 4, id="partial_close_marker_is_reasoning"),
+        pytest.param(
+            [*OPEN_IDS, 9, *RESPONSE_OPEN_IDS, 11],
+            2 + len(RESPONSE_OPEN_IDS),
+            id="response_open_inside_open_think_is_reasoning",
+        ),
+    ],
+)
+def test_count_reasoning_tokens_matches_think_channel(token_ids, expected):
+    """reasoning_tokens must cover exactly what extract_reasoning labels as
+    reasoning: marker tokens are excluded and a consumed generation prefix
+    means the output starts inside the think channel."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    assert parser.count_reasoning_tokens(token_ids) == expected
+
+
+def test_count_reasoning_tokens_is_zero_when_thinking_disabled():
+    parser = KimiK3ReasoningParser(
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+    )
+
+    assert parser.count_reasoning_tokens([*OPEN_IDS, 9, 10, *CLOSE_IDS]) == 0
+
+
+def test_count_reasoning_tokens_through_delegating_parser():
+    parser = ReasoningOnlyParser(DummyTokenizer())
+
+    assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS, 11]) == 1
 
 
 def test_streaming_split_open_marker_is_held_back():
@@ -248,10 +299,6 @@ def test_adjust_request_keeps_xtml_markers_contiguous():
     assert adjusted.skip_special_tokens is False
     if hasattr(adjusted, "spaces_between_special_tokens"):
         assert adjusted.spaces_between_special_tokens is False
-
-
-OPEN_IDS = [1, 2, 3]
-CLOSE_IDS = [4, 2, 3]
 
 
 def _reference_is_reasoning_end(input_ids: list[int]) -> bool:
