@@ -404,6 +404,24 @@ def _get_kv_b_proj_input_dtype(
     return weight_dtype
 
 
+def split_kv_b_proj(
+    kv_b_proj: nn.Module,
+    out_dtype: torch.dtype,
+    kv_lora_rank: int,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dequantize ``kv_b_proj`` and return ``W_UK [L,N,P]``, ``W_UV [L,N,V]``."""
+    weight = get_and_maybe_dequant_weights(kv_b_proj, out_dtype=out_dtype).T
+    assert weight.shape == (
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+    ), f"kv_b_proj weight {tuple(weight.shape)} vs {kv_lora_rank=} {num_heads=}"
+    weight = weight.view(kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim)
+    return weight.split([qk_nope_head_dim, v_head_dim], dim=-1)
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -717,13 +735,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = kv_cache.squeeze(1)
         if (
             self._vllm_config.kernel_config.enable_jit_warmup
-            and self.attn_backend.get_name()
-            in (
-                "FLASHMLA_SPARSE",
-                "FLASHINFER_MLA_SPARSE",
-                "FLASHINFER_MLA_SPARSE_SM120",
-                "DEEPSEEK_V32_INDEXER",
-            )
+            and self._uses_flat_kv_cache()
         ):
             from vllm.v1.attention.backends.mla.sparse_utils import (
                 _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
@@ -735,6 +747,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._vllm_config,
                 block_stride_rows=self.kv_cache.stride(0) // row_width,
             )
+
+    def _uses_flat_kv_cache(self) -> bool:
+        backend = self.attn_backend.get_name()
+        return backend == "FLASHINFER_MLA_SPARSE" or (
+            backend == "FLASHMLA_SPARSE"
+            and self.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla")
+        )
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -1221,13 +1240,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return
 
-        # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-
         if self.dcp_q_replicate:
             # qrep wired here: validate unsupported decode backends once.
             assert self.q_pad_num_heads in (None, self.num_heads), (
@@ -1243,24 +1255,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "FP4/FP8 MLA BMM paths."
                 )
 
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), (
-            f"{kv_b_proj_weight.shape=}, "
-            f"{self.kv_lora_rank=}, "
-            f"{self.num_heads=}, "
-            f"{self.qk_nope_head_dim=}, "
-            f"{self.v_head_dim=}"
-        )
-        kv_b_proj_weight = kv_b_proj_weight.view(
+        W_UK, W_UV = split_kv_b_proj(
+            self.kv_b_proj,
+            act_dtype,
             self.kv_lora_rank,
             self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            self.qk_nope_head_dim,
+            self.v_head_dim,
         )
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
@@ -1365,11 +1366,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 **common_kwargs,
                 sliding_window=self.sliding_window,
             )
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             **common_kwargs,
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
+        # SM100 FlashMLA paged kernels also express TMA coordinates in token rows.
+        uses_tma_rows = (
+            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
+            and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
+            and current_platform.is_device_capability_family(100)
+        )
+        if self._uses_flat_kv_cache() or uses_tma_rows:
+            spec = replace(spec, block_stride_alignment=spec.state_content_size_bytes)
+        return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
@@ -2471,6 +2481,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
@@ -2635,6 +2646,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                max_query_len=min(
+                    common_attn_metadata.max_query_len, self.reorder_batch_threshold
+                ),
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
             )
 

@@ -4,9 +4,16 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
+from tests.v1.attention.test_gdn_metadata_builder import (
+    BLOCK_SIZE,
+    DEVICE,
+    _create_gdn_builder,
+)
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.recoverssm_metadata import (
@@ -34,6 +41,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         query_start_loc_np=torch.tensor([0, 1], dtype=torch.int32).numpy(),
         query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
+        max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
@@ -56,6 +64,79 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
+
+
+def test_padded_prompt_tail_builds_as_spec_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-token prompt tail over prior state, padded with K placeholder
+    drafts (e.g. a P/D decode-node arrival), must reach the GDN builder as a
+    spec-decode row. Built as a prefill, the placeholder tokens are folded into
+    the recurrent state and can't be rolled back.
+    """
+    k = 3
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
+    state.model_config = SimpleNamespace(max_model_len=8192)
+    state._align_mode = False
+    state.recoverssm = None
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+
+    # A verify decode, a padded prompt tail (128 of 129 prompt tokens already
+    # computed), and a fresh prompt chunk of the same length.
+    query_lens = [k + 1] * 3
+    seq_lens = [50, 128 + k + 1, k + 1]
+    is_prefilling = [False, True, True]
+    query_start_loc = np.array([0, 4, 8, 12], dtype=np.int32)
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        num_tokens=12,
+        num_reqs_after_padding=3,
+        num_tokens_after_padding=12,
+        idx_mapping=torch.arange(3),
+        query_start_loc_np=query_start_loc,
+        query_start_loc=torch.from_numpy(query_start_loc),
+        num_scheduled_tokens=np.array(query_lens, dtype=np.int32),
+        num_draft_tokens_per_req=np.array([k, k, 0], dtype=np.int32),
+        max_query_len=None,
+        seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        is_prefilling_np=np.array(is_prefilling),
+        prefill_len_np=np.array([40, 129, 100], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([40, 128, 0], dtype=np.int32),
+        dcp_local_seq_lens=None,
+        positions=torch.zeros(12, dtype=torch.int64),
+        prompt_lens=None,
+    )
+    build_attn_metadata = Mock(return_value={})
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_attn_metadata)
+    state.prepare_attn(
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+    mamba_metadata = build_attn_metadata.call_args.kwargs[
+        "model_specific_attn_metadata"
+    ]
+
+    builder = _create_gdn_builder(num_speculative_tokens=k)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor(is_prefilling))
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=mamba_metadata.num_accepted_tokens,
+        num_decode_draft_tokens_cpu=mamba_metadata.num_decode_draft_tokens_cpu,
+    )
+
+    # Only the fresh prompt chunk needs the prefill kernels.
+    assert meta.num_spec_decodes == 2
+    assert meta.num_prefills == 1
+    assert meta.num_prefill_tokens == k + 1
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
