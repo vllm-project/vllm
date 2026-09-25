@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 import inspect
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -295,7 +295,9 @@ def FusedMoEFactory(
             else target.__init__
         )
         sig = inspect.signature(fn)
-        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        if any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
             return kwargs
         return {k: v for k, v in kwargs.items() if k in sig.parameters}
 
@@ -318,13 +320,13 @@ def FusedMoEFactory(
             # The member variable must be set in the same way as the router since
             # some quantization methods can access it.
             "routed_scaling_factor": (
-                routed_scaling_factor
-                if not apply_routed_scale_to_output
-                else 1.0
+                routed_scaling_factor if not apply_routed_scale_to_output else 1.0
             ),
             "e_score_correction_bias": e_score_correction_bias,
             "num_fused_shared_experts": num_fused_shared_experts,
-            "skip_padding": (skip_padding and moe_parallel_config.use_deepep_v2_kernels),
+            "skip_padding": (
+                skip_padding and moe_parallel_config.use_deepep_v2_kernels
+            ),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net

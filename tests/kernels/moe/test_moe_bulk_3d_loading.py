@@ -93,6 +93,7 @@ def _create_routed_experts_layer(
 
     class DummyMapManager:
         num_fused_shared_experts = 0
+
         def map_global_to_local(self, expert_id: int) -> int:
             start_exp = ep_rank * num_local_experts
             end_exp = (ep_rank + 1) * num_local_experts
@@ -107,20 +108,94 @@ def _create_routed_experts_layer(
     # Allocate parameters
     intermediate_per_rank = intermediate_size // tp_size
     experts.w13_weight = torch.nn.Parameter(
-        torch.zeros(num_local_experts, 2 * intermediate_per_rank, hidden_dim, device=device, dtype=dtype)
+        torch.zeros(
+            num_local_experts,
+            2 * intermediate_per_rank,
+            hidden_dim,
+            device=device,
+            dtype=dtype,
+        )
     )
     experts.w2_weight = torch.nn.Parameter(
-        torch.zeros(num_local_experts, hidden_dim, intermediate_per_rank, device=device, dtype=dtype)
+        torch.zeros(
+            num_local_experts,
+            hidden_dim,
+            intermediate_per_rank,
+            device=device,
+            dtype=dtype,
+        )
     )
     experts.w13_weight.weight_loader = experts.weight_loader
     experts.w2_weight.weight_loader = experts.weight_loader
     return experts
 
 
+def _load_weights_via_unbind(
+    layer: RoutedExperts,
+    weights_dict: list[tuple[str, torch.Tensor]],
+    is_transposed: bool = False,
+) -> None:
+    for name, weight in weights_dict:
+        if "gate_up_proj" in name:
+            shard_id_list = [("w1", 0), ("w3", 1)]
+            fused_weight = layer._orient_fused_weight(weight, is_transposed)
+            for shard_id, chunk_idx in shard_id_list:
+                experts_shard = fused_weight.chunk(2, dim=1)[chunk_idx]
+                for exp_id, exp_tensor in enumerate(experts_shard.unbind()):
+                    layer.w13_weight.weight_loader(
+                        param=layer.w13_weight,
+                        loaded_weight=exp_tensor,
+                        weight_name="model.layers.0.mlp.experts.w13_weight",
+                        shard_id=shard_id,
+                        expert_id=exp_id,
+                    )
+        elif "down_proj" in name:
+            fused_weight = layer._orient_fused_weight(weight, is_transposed)
+            for exp_id, exp_tensor in enumerate(fused_weight.unbind()):
+                layer.w2_weight.weight_loader(
+                    param=layer.w2_weight,
+                    loaded_weight=exp_tensor,
+                    weight_name="model.layers.0.mlp.experts.w2_weight",
+                    shard_id="w2",
+                    expert_id=exp_id,
+                )
+
+
+def _load_2d_weights_via_unbind(
+    layer: RoutedExperts,
+    gate_weights: list[torch.Tensor],
+    up_weights: list[torch.Tensor],
+    down_weights: list[torch.Tensor],
+) -> None:
+    for i in range(len(gate_weights)):
+        layer.w13_weight.weight_loader(
+            param=layer.w13_weight,
+            loaded_weight=gate_weights[i],
+            weight_name="model.layers.0.mlp.experts.w13_weight",
+            shard_id="w1",
+            expert_id=i,
+        )
+        layer.w13_weight.weight_loader(
+            param=layer.w13_weight,
+            loaded_weight=up_weights[i],
+            weight_name="model.layers.0.mlp.experts.w13_weight",
+            shard_id="w3",
+            expert_id=i,
+        )
+        layer.w2_weight.weight_loader(
+            param=layer.w2_weight,
+            loaded_weight=down_weights[i],
+            weight_name="model.layers.0.mlp.experts.w2_weight",
+            shard_id="w2",
+            expert_id=i,
+        )
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("is_transposed", [False, True])
 def test_bulk_3d_vs_unbind_equivalence(tp_rank: int, is_transposed: bool):
-    """Verify that bulk 3D loading produces exact bitwise identical weights to unbind."""
+    """Verify that bulk 3D loading produces exact bitwise identical weights
+    to unbind."""
     num_experts = 8
     hidden_dim = 128
     intermediate_size = 256
@@ -128,11 +203,19 @@ def test_bulk_3d_vs_unbind_equivalence(tp_rank: int, is_transposed: bool):
 
     torch.manual_seed(42 + tp_rank)
     if is_transposed:
-        gate_up_weight = torch.randn(num_experts, hidden_dim, 2 * intermediate_size, dtype=torch.bfloat16)
-        down_weight = torch.randn(num_experts, intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        gate_up_weight = torch.randn(
+            num_experts, hidden_dim, 2 * intermediate_size, dtype=torch.bfloat16
+        )
+        down_weight = torch.randn(
+            num_experts, intermediate_size, hidden_dim, dtype=torch.bfloat16
+        )
     else:
-        gate_up_weight = torch.randn(num_experts, 2 * intermediate_size, hidden_dim, dtype=torch.bfloat16)
-        down_weight = torch.randn(num_experts, hidden_dim, intermediate_size, dtype=torch.bfloat16)
+        gate_up_weight = torch.randn(
+            num_experts, 2 * intermediate_size, hidden_dim, dtype=torch.bfloat16
+        )
+        down_weight = torch.randn(
+            num_experts, hidden_dim, intermediate_size, dtype=torch.bfloat16
+        )
 
     weights_dict = [
         ("gate_up_proj", gate_up_weight),
@@ -159,31 +242,7 @@ def test_bulk_3d_vs_unbind_equivalence(tp_rank: int, is_transposed: bool):
         tp_rank=tp_rank,
         is_fused_transposed=is_transposed,
     )
-
-    for name, weight in weights_dict:
-        if "gate_up_proj" in name:
-            shard_id_list = [("w1", 0), ("w3", 1)]
-            fused_weight = layer_unbind._orient_fused_weight(weight, is_transposed)
-            for shard_id, chunk_idx in shard_id_list:
-                experts_shard = fused_weight.chunk(2, dim=1)[chunk_idx]
-                for exp_id, exp_tensor in enumerate(experts_shard.unbind()):
-                    layer_unbind.w13_weight.weight_loader(
-                        param=layer_unbind.w13_weight,
-                        loaded_weight=exp_tensor,
-                        weight_name="model.layers.0.mlp.experts.w13_weight",
-                        shard_id=shard_id,
-                        expert_id=exp_id,
-                    )
-        elif "down_proj" in name:
-            fused_weight = layer_unbind._orient_fused_weight(weight, is_transposed)
-            for exp_id, exp_tensor in enumerate(fused_weight.unbind()):
-                layer_unbind.w2_weight.weight_loader(
-                    param=layer_unbind.w2_weight,
-                    loaded_weight=exp_tensor,
-                    weight_name="model.layers.0.mlp.experts.w2_weight",
-                    shard_id="w2",
-                    expert_id=exp_id,
-                )
+    _load_weights_via_unbind(layer_unbind, weights_dict, is_transposed)
 
     assert torch.equal(layer_bulk.w13_weight, layer_unbind.w13_weight)
     assert torch.equal(layer_bulk.w2_weight, layer_unbind.w2_weight)
@@ -192,7 +251,7 @@ def test_bulk_3d_vs_unbind_equivalence(tp_rank: int, is_transposed: bool):
 @pytest.mark.parametrize("ep_rank", [0, 1])
 @pytest.mark.parametrize("tp_rank", [0, 1])
 def test_bulk_3d_with_linear_ep(ep_rank: int, tp_rank: int):
-    """Verify that bulk 3D loading with linear Expert Parallelism produces bitwise identical weights."""
+    """Verify that bulk 3D loading with linear EP produces bitwise identical weights."""
     num_experts = 8
     hidden_dim = 128
     intermediate_size = 256
@@ -200,8 +259,12 @@ def test_bulk_3d_with_linear_ep(ep_rank: int, tp_rank: int):
     ep_size = 2
 
     torch.manual_seed(100 + ep_rank * 10 + tp_rank)
-    gate_up_weight = torch.randn(num_experts, 2 * intermediate_size, hidden_dim, dtype=torch.bfloat16)
-    down_weight = torch.randn(num_experts, hidden_dim, intermediate_size, dtype=torch.bfloat16)
+    gate_up_weight = torch.randn(
+        num_experts, 2 * intermediate_size, hidden_dim, dtype=torch.bfloat16
+    )
+    down_weight = torch.randn(
+        num_experts, hidden_dim, intermediate_size, dtype=torch.bfloat16
+    )
 
     weights_dict = [
         ("gate_up_proj", gate_up_weight),
@@ -228,31 +291,7 @@ def test_bulk_3d_with_linear_ep(ep_rank: int, tp_rank: int):
         ep_size=ep_size,
         ep_rank=ep_rank,
     )
-
-    for name, weight in weights_dict:
-        if "gate_up_proj" in name:
-            shard_id_list = [("w1", 0), ("w3", 1)]
-            fused_weight = layer_unbind._orient_fused_weight(weight, False)
-            for shard_id, chunk_idx in shard_id_list:
-                experts_shard = fused_weight.chunk(2, dim=1)[chunk_idx]
-                for exp_id, exp_tensor in enumerate(experts_shard.unbind()):
-                    layer_unbind.w13_weight.weight_loader(
-                        param=layer_unbind.w13_weight,
-                        loaded_weight=exp_tensor,
-                        weight_name="model.layers.0.mlp.experts.w13_weight",
-                        shard_id=shard_id,
-                        expert_id=exp_id,
-                    )
-        elif "down_proj" in name:
-            fused_weight = layer_unbind._orient_fused_weight(weight, False)
-            for exp_id, exp_tensor in enumerate(fused_weight.unbind()):
-                layer_unbind.w2_weight.weight_loader(
-                    param=layer_unbind.w2_weight,
-                    loaded_weight=exp_tensor,
-                    weight_name="model.layers.0.mlp.experts.w2_weight",
-                    shard_id="w2",
-                    expert_id=exp_id,
-                )
+    _load_weights_via_unbind(layer_unbind, weights_dict, is_transposed=False)
 
     assert torch.equal(layer_bulk.w13_weight, layer_unbind.w13_weight)
     assert torch.equal(layer_bulk.w2_weight, layer_unbind.w2_weight)
@@ -261,16 +300,26 @@ def test_bulk_3d_with_linear_ep(ep_rank: int, tp_rank: int):
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("arrival_order", ["sequential", "reverse", "interleaved"])
 def test_online_2d_buffering_equivalence(tp_rank: int, arrival_order: str):
-    """Verify online 2D-to-3D layer staging produces bitwise identical weights to unbind."""
+    """Verify online 2D-to-3D layer staging produces bitwise identical weights
+    to unbind."""
     num_experts = 8
     hidden_dim = 128
     intermediate_size = 256
     tp_size = 2
 
     torch.manual_seed(200 + tp_rank)
-    gate_weights = [torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16) for _ in range(num_experts)]
-    up_weights = [torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16) for _ in range(num_experts)]
-    down_weights = [torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16) for _ in range(num_experts)]
+    gate_weights = [
+        torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    up_weights = [
+        torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    down_weights = [
+        torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
 
     weights_2d = []
     if arrival_order == "sequential":
@@ -309,28 +358,7 @@ def test_online_2d_buffering_equivalence(tp_rank: int, arrival_order: str):
         tp_size=tp_size,
         tp_rank=tp_rank,
     )
-    for i in range(num_experts):
-        layer_unbind.w13_weight.weight_loader(
-            param=layer_unbind.w13_weight,
-            loaded_weight=gate_weights[i],
-            weight_name="model.layers.0.mlp.experts.w13_weight",
-            shard_id="w1",
-            expert_id=i,
-        )
-        layer_unbind.w13_weight.weight_loader(
-            param=layer_unbind.w13_weight,
-            loaded_weight=up_weights[i],
-            weight_name="model.layers.0.mlp.experts.w13_weight",
-            shard_id="w3",
-            expert_id=i,
-        )
-        layer_unbind.w2_weight.weight_loader(
-            param=layer_unbind.w2_weight,
-            loaded_weight=down_weights[i],
-            weight_name="model.layers.0.mlp.experts.w2_weight",
-            shard_id="w2",
-            expert_id=i,
-        )
+    _load_2d_weights_via_unbind(layer_unbind, gate_weights, up_weights, down_weights)
 
     assert torch.equal(layer_online.w13_weight, layer_unbind.w13_weight)
     assert torch.equal(layer_online.w2_weight, layer_unbind.w2_weight)
@@ -339,7 +367,8 @@ def test_online_2d_buffering_equivalence(tp_rank: int, arrival_order: str):
 @pytest.mark.parametrize("ep_rank", [0, 1])
 @pytest.mark.parametrize("tp_rank", [0, 1])
 def test_online_2d_buffering_with_linear_ep(ep_rank: int, tp_rank: int):
-    """Verify online 2D buffering with linear EP filters non-local experts and matches unbind."""
+    """Verify online 2D buffering with linear EP filters non-local experts
+    and matches unbind."""
     num_experts = 8
     hidden_dim = 128
     intermediate_size = 256
@@ -347,9 +376,18 @@ def test_online_2d_buffering_with_linear_ep(ep_rank: int, tp_rank: int):
     ep_size = 2
 
     torch.manual_seed(300 + ep_rank * 10 + tp_rank)
-    gate_weights = [torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16) for _ in range(num_experts)]
-    up_weights = [torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16) for _ in range(num_experts)]
-    down_weights = [torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16) for _ in range(num_experts)]
+    gate_weights = [
+        torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    up_weights = [
+        torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    down_weights = [
+        torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
 
     weights_2d = []
     for i in range(num_experts):
@@ -377,35 +415,15 @@ def test_online_2d_buffering_with_linear_ep(ep_rank: int, tp_rank: int):
         ep_size=ep_size,
         ep_rank=ep_rank,
     )
-    for i in range(num_experts):
-        layer_unbind.w13_weight.weight_loader(
-            param=layer_unbind.w13_weight,
-            loaded_weight=gate_weights[i],
-            weight_name="model.layers.0.mlp.experts.w13_weight",
-            shard_id="w1",
-            expert_id=i,
-        )
-        layer_unbind.w13_weight.weight_loader(
-            param=layer_unbind.w13_weight,
-            loaded_weight=up_weights[i],
-            weight_name="model.layers.0.mlp.experts.w13_weight",
-            shard_id="w3",
-            expert_id=i,
-        )
-        layer_unbind.w2_weight.weight_loader(
-            param=layer_unbind.w2_weight,
-            loaded_weight=down_weights[i],
-            weight_name="model.layers.0.mlp.experts.w2_weight",
-            shard_id="w2",
-            expert_id=i,
-        )
+    _load_2d_weights_via_unbind(layer_unbind, gate_weights, up_weights, down_weights)
 
     assert torch.equal(layer_online.w13_weight, layer_unbind.w13_weight)
     assert torch.equal(layer_online.w2_weight, layer_unbind.w2_weight)
 
 
 def test_online_2d_buffering_partial_flush():
-    """Verify incomplete/partial expert streams drain cleanly via residual flush without error."""
+    """Verify incomplete/partial expert streams drain cleanly via residual
+    flush without error."""
     num_experts = 8
     hidden_dim = 128
     intermediate_size = 256
@@ -417,9 +435,24 @@ def test_online_2d_buffering_partial_flush():
     partial_experts = [1, 3, 5]
     weights_2d = []
     for i in partial_experts:
-        weights_2d.append((f"{i}.gate_proj.weight", torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)))
-        weights_2d.append((f"{i}.up_proj.weight", torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)))
-        weights_2d.append((f"{i}.down_proj.weight", torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16)))
+        weights_2d.append(
+            (
+                f"{i}.gate_proj.weight",
+                torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16),
+            )
+        )
+        weights_2d.append(
+            (
+                f"{i}.up_proj.weight",
+                torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16),
+            )
+        )
+        weights_2d.append(
+            (
+                f"{i}.down_proj.weight",
+                torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16),
+            )
+        )
 
     layer_online = _create_routed_experts_layer(
         num_experts=num_experts,
@@ -429,7 +462,8 @@ def test_online_2d_buffering_partial_flush():
         tp_rank=tp_rank,
     )
     loaded_names = list(layer_online.load_weights(weights_2d))
-    # Each partial expert yields through residual drain (3 experts * 3 projections = 9 yields)
+    # Each partial expert yields through residual drain
+    # (3 experts * 3 projections = 9 yields)
     assert len(loaded_names) == 9
 
     layer_unbind = _create_routed_experts_layer(
@@ -482,8 +516,18 @@ def test_online_2d_per_expert_fused_w13():
     torch.manual_seed(500)
     weights_2d = []
     for i in range(num_experts):
-        weights_2d.append((f"{i}.gate_up_proj.weight", torch.randn(2 * intermediate_size, hidden_dim, dtype=torch.bfloat16)))
-        weights_2d.append((f"{i}.down_proj.weight", torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16)))
+        weights_2d.append(
+            (
+                f"{i}.gate_up_proj.weight",
+                torch.randn(2 * intermediate_size, hidden_dim, dtype=torch.bfloat16),
+            )
+        )
+        weights_2d.append(
+            (
+                f"{i}.down_proj.weight",
+                torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16),
+            )
+        )
 
     layer_online = _create_routed_experts_layer(
         num_experts=num_experts,
@@ -536,9 +580,8 @@ def test_online_2d_per_expert_fused_w13():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA GPU")
 def test_online_2d_buffering_on_cuda_gpu():
-    """Verify online host pinned staging transfers to CUDA GPU with exact bitwise match to CPU."""
-    if not torch.cuda.is_available():
-        return
+    """Verify online host pinned staging transfers to CUDA GPU with exact
+    bitwise match to CPU."""
     num_experts = 8
     hidden_dim = 128
     intermediate_size = 256
@@ -546,9 +589,18 @@ def test_online_2d_buffering_on_cuda_gpu():
     tp_rank = 0
 
     torch.manual_seed(42)
-    gate_weights = [torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16) for _ in range(num_experts)]
-    up_weights = [torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16) for _ in range(num_experts)]
-    down_weights = [torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16) for _ in range(num_experts)]
+    gate_weights = [
+        torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    up_weights = [
+        torch.randn(intermediate_size, hidden_dim, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    down_weights = [
+        torch.randn(hidden_dim, intermediate_size, dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
 
     weights_2d = []
     for i in range(num_experts):
@@ -578,21 +630,3 @@ def test_online_2d_buffering_on_cuda_gpu():
 
     assert torch.equal(layer_cuda.w13_weight.cpu(), layer_cpu.w13_weight)
     assert torch.equal(layer_cuda.w2_weight.cpu(), layer_cpu.w2_weight)
-
-
-if __name__ == "__main__":
-    for tp in (0, 1):
-        for transposed in (False, True):
-            test_bulk_3d_vs_unbind_equivalence(tp, transposed)
-    for ep in (0, 1):
-        for tp in (0, 1):
-            test_bulk_3d_with_linear_ep(ep, tp)
-    for tp in (0, 1):
-        for order in ("sequential", "reverse", "interleaved"):
-            test_online_2d_buffering_equivalence(tp, order)
-    for ep in (0, 1):
-        for tp in (0, 1):
-            test_online_2d_buffering_with_linear_ep(ep, tp)
-    test_online_2d_buffering_partial_flush()
-    test_online_2d_per_expert_fused_w13()
-    test_online_2d_buffering_on_cuda_gpu()

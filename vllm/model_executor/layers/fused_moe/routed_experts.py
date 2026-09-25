@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 
+import regex as re
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -634,13 +634,16 @@ class RoutedExperts(PluggableLayer):
     def _check_and_flush_staging(
         self, buf_key: int, param: torch.nn.Parameter, shard_id: str
     ) -> None:
-        if not hasattr(self, "_host_staging_buffers") or buf_key not in self._host_staging_buffers:
+        if (
+            not hasattr(self, "_host_staging_buffers")
+            or buf_key not in self._host_staging_buffers
+        ):
             return
         counts = self._host_staging_counts[buf_key]
         num_local_experts = param.data.shape[0]
         is_complete = False
         if shard_id == "w2":
-            is_complete = (len(counts["w2"]) == num_local_experts)
+            is_complete = len(counts["w2"]) == num_local_experts
         elif shard_id in ("w1", "w3", "w13", "gate_up"):
             is_act_and_mul = getattr(self.moe_config, "is_act_and_mul", True)
             if is_act_and_mul:
@@ -649,12 +652,12 @@ class RoutedExperts(PluggableLayer):
                     and len(counts["w3"]) == num_local_experts
                 )
             else:
-                is_complete = (len(counts["w1"]) == num_local_experts)
+                is_complete = len(counts["w1"]) == num_local_experts
 
         if is_complete:
             host_buffer = self._host_staging_buffers.pop(buf_key)
             self._host_staging_counts.pop(buf_key, None)
-            is_cuda = (param.data.device.type == "cuda")
+            is_cuda = param.data.device.type == "cuda"
             if is_cuda:
                 event = torch.cuda.Event()
                 param.data.copy_(host_buffer, non_blocking=True)
@@ -670,13 +673,15 @@ class RoutedExperts(PluggableLayer):
         for buf_key, host_buffer in list(self._host_staging_buffers.items()):
             for p in self.parameters():
                 if id(p) == buf_key:
-                    is_cuda = (p.data.device.type == "cuda")
+                    is_cuda = p.data.device.type == "cuda"
                     if is_cuda:
                         event = torch.cuda.Event()
                         p.data.copy_(host_buffer, non_blocking=True)
                         event.record()
                         pool_key = (tuple(p.data.shape), p.data.dtype)
-                        RoutedExperts._HOST_STAGING_POOL[pool_key].append((host_buffer, event))
+                        RoutedExperts._HOST_STAGING_POOL[pool_key].append(
+                            (host_buffer, event)
+                        )
                     else:
                         p.data.copy_(host_buffer)
                     break
@@ -740,9 +745,8 @@ class RoutedExperts(PluggableLayer):
             loaded_weight = loaded_weight.t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3", "w13", "gate_up"):
-            raise ValueError(
-                f"shard_id must be in ['w1','w2','w3','w13','gate_up'] but got {shard_id}."
-            )
+            valid_shards = ["w1", "w2", "w3", "w13", "gate_up"]
+            raise ValueError(f"shard_id must be in {valid_shards} but got {shard_id}.")
 
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
@@ -770,7 +774,8 @@ class RoutedExperts(PluggableLayer):
             and "bias" not in weight_name
             and not is_transposed
             and not getattr(self, "disable_host_staging", False)
-            and os.environ.get("VLLM_MOE_DISABLE_HOST_STAGING", "0") not in ("1", "true", "True")
+            and os.environ.get("VLLM_MOE_DISABLE_HOST_STAGING", "0")
+            not in ("1", "true", "True")
         )
         if can_stage_host:
             if not hasattr(self, "_host_staging_buffers"):
@@ -779,10 +784,12 @@ class RoutedExperts(PluggableLayer):
 
             buf_key = id(param)
             if buf_key not in self._host_staging_buffers:
-                is_cuda = (param.data.device.type == "cuda")
+                is_cuda = param.data.device.type == "cuda"
                 pool_key = (tuple(param.data.shape), param.data.dtype)
                 if is_cuda and RoutedExperts._HOST_STAGING_POOL[pool_key]:
-                    host_buffer, event = RoutedExperts._HOST_STAGING_POOL[pool_key].pop()
+                    host_buffer, event = RoutedExperts._HOST_STAGING_POOL[
+                        pool_key
+                    ].pop()
                     if event is not None:
                         event.synchronize()
                     host_buffer.zero_()
@@ -1125,7 +1132,10 @@ class RoutedExperts(PluggableLayer):
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)
                 if param is None:
-                    if param_name.endswith(("w13_bias", "w2_bias")) or "scale" in param_name:
+                    if (
+                        param_name.endswith(("w13_bias", "w2_bias"))
+                        or "scale" in param_name
+                    ):
                         continue
                     raise AttributeError(
                         f"Layer {self.layer_name} has no parameter {param_name!r} "
@@ -1164,7 +1174,8 @@ class RoutedExperts(PluggableLayer):
                     experts_shard = loaded_weight.unsqueeze(0)
                     start = expert_id
 
-                # Fast path 1: bulk 3D loading for fused checkpoints under TP / linear EP
+                # Fast path 1: bulk 3D loading for fused checkpoints
+                # under TP / linear EP
                 is_ep = (
                     getattr(self.moe_config, "enable_expert_parallel", False)
                     and getattr(self.moe_config.moe_parallel_config, "ep_size", 1) > 1
@@ -1198,7 +1209,10 @@ class RoutedExperts(PluggableLayer):
                 )
                 if can_bulk_load:
                     bulk_weight = experts_shard
-                    if is_ep and experts_shard.shape[0] == param.data.shape[0] * ep_size:
+                    if (
+                        is_ep
+                        and experts_shard.shape[0] == param.data.shape[0] * ep_size
+                    ):
                         ep_rank = getattr(
                             self.moe_config.moe_parallel_config, "ep_rank", 0
                         )
@@ -1383,45 +1397,171 @@ class RoutedExperts(PluggableLayer):
                     ckpt_up_proj_name,
                 )
             if gate_up is not None:
-                # 3D consolidated entries: place longer suffixes first to prevent substring collision in model loaders
-                # When routed_experts_prefix is non-empty (hand-rolled model loaders), anchor with a leading dot
-                # so that '.experts.' does not collide with 'shared_experts.' substrings.
+                # 3D consolidated entries: place longer suffixes first to
+                # prevent substring collision in model loaders.
+                # When routed_experts_prefix is non-empty, anchor with a
+                # leading dot so '.experts.' does not collide with
+                # 'shared_experts.' substrings.
                 prefix_sep = "." if routed_experts_prefix != "" else ""
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
                     # Quant scale variants with longer suffixes first
-                    (f"{prefix_sep}{w13}weight_scale_inv", f"{prefix_sep}experts.gate_up_proj.weight_scale_inv", 0, "w13"),
-                    (f"{prefix_sep}{w2}weight_scale_inv", f"{prefix_sep}experts.down_proj.weight_scale_inv", 0, "w2"),
-                    (f"{prefix_sep}{w13}weight_scale_2", f"{prefix_sep}experts.gate_up_proj.weight_scale_2", 0, "w13"),
-                    (f"{prefix_sep}{w2}weight_scale_2", f"{prefix_sep}experts.down_proj.weight_scale_2", 0, "w2"),
-                    (f"{prefix_sep}{w13}weight_scale", f"{prefix_sep}experts.gate_up_proj.weight_scale", 0, "w13"),
-                    (f"{prefix_sep}{w2}weight_scale", f"{prefix_sep}experts.down_proj.weight_scale", 0, "w2"),
-                    (f"{prefix_sep}{w13}input_scale", f"{prefix_sep}experts.gate_up_proj.input_scale", 0, "w13"),
-                    (f"{prefix_sep}{w2}input_scale", f"{prefix_sep}experts.down_proj.input_scale", 0, "w2"),
+                    (
+                        f"{prefix_sep}{w13}weight_scale_inv",
+                        f"{prefix_sep}experts.gate_up_proj.weight_scale_inv",
+                        0,
+                        "w13",
+                    ),
+                    (
+                        f"{prefix_sep}{w2}weight_scale_inv",
+                        f"{prefix_sep}experts.down_proj.weight_scale_inv",
+                        0,
+                        "w2",
+                    ),
+                    (
+                        f"{prefix_sep}{w13}weight_scale_2",
+                        f"{prefix_sep}experts.gate_up_proj.weight_scale_2",
+                        0,
+                        "w13",
+                    ),
+                    (
+                        f"{prefix_sep}{w2}weight_scale_2",
+                        f"{prefix_sep}experts.down_proj.weight_scale_2",
+                        0,
+                        "w2",
+                    ),
+                    (
+                        f"{prefix_sep}{w13}weight_scale",
+                        f"{prefix_sep}experts.gate_up_proj.weight_scale",
+                        0,
+                        "w13",
+                    ),
+                    (
+                        f"{prefix_sep}{w2}weight_scale",
+                        f"{prefix_sep}experts.down_proj.weight_scale",
+                        0,
+                        "w2",
+                    ),
+                    (
+                        f"{prefix_sep}{w13}input_scale",
+                        f"{prefix_sep}experts.gate_up_proj.input_scale",
+                        0,
+                        "w13",
+                    ),
+                    (
+                        f"{prefix_sep}{w2}input_scale",
+                        f"{prefix_sep}experts.down_proj.input_scale",
+                        0,
+                        "w2",
+                    ),
                     # Base weights
-                    (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.gate_up_proj.weight", 0, "w13"),
-                    (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.gate_up_proj", 0, "w13"),
-                    (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.down_proj.weight", 0, "w2"),
-                    (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.down_proj", 0, "w2"),
+                    (
+                        f"{prefix_sep}{w13}weight",
+                        f"{prefix_sep}experts.gate_up_proj.weight",
+                        0,
+                        "w13",
+                    ),
+                    (
+                        f"{prefix_sep}{w13}weight",
+                        f"{prefix_sep}experts.gate_up_proj",
+                        0,
+                        "w13",
+                    ),
+                    (
+                        f"{prefix_sep}{w2}weight",
+                        f"{prefix_sep}experts.down_proj.weight",
+                        0,
+                        "w2",
+                    ),
+                    (
+                        f"{prefix_sep}{w2}weight",
+                        f"{prefix_sep}experts.down_proj",
+                        0,
+                        "w2",
+                    ),
                 ]
                 if gate_up != "gate_up_proj":
-                    fused_mapping.extend([
-                        (f"{prefix_sep}{w13}weight_scale_inv", f"{prefix_sep}experts.{gate_up}.weight_scale_inv", 0, "w13"),
-                        (f"{prefix_sep}{w13}weight_scale_2", f"{prefix_sep}experts.{gate_up}.weight_scale_2", 0, "w13"),
-                        (f"{prefix_sep}{w13}weight_scale", f"{prefix_sep}experts.{gate_up}.weight_scale", 0, "w13"),
-                        (f"{prefix_sep}{w13}input_scale", f"{prefix_sep}experts.{gate_up}.input_scale", 0, "w13"),
-                        (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.{gate_up}.weight", 0, "w13"),
-                        (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.{gate_up}", 0, "w13"),
-                    ])
+                    fused_mapping.extend(
+                        [
+                            (
+                                f"{prefix_sep}{w13}weight_scale_inv",
+                                f"{prefix_sep}experts.{gate_up}.weight_scale_inv",
+                                0,
+                                "w13",
+                            ),
+                            (
+                                f"{prefix_sep}{w13}weight_scale_2",
+                                f"{prefix_sep}experts.{gate_up}.weight_scale_2",
+                                0,
+                                "w13",
+                            ),
+                            (
+                                f"{prefix_sep}{w13}weight_scale",
+                                f"{prefix_sep}experts.{gate_up}.weight_scale",
+                                0,
+                                "w13",
+                            ),
+                            (
+                                f"{prefix_sep}{w13}input_scale",
+                                f"{prefix_sep}experts.{gate_up}.input_scale",
+                                0,
+                                "w13",
+                            ),
+                            (
+                                f"{prefix_sep}{w13}weight",
+                                f"{prefix_sep}experts.{gate_up}.weight",
+                                0,
+                                "w13",
+                            ),
+                            (
+                                f"{prefix_sep}{w13}weight",
+                                f"{prefix_sep}experts.{gate_up}",
+                                0,
+                                "w13",
+                            ),
+                        ]
+                    )
                 if ckpt_down_proj_name != "down_proj":
-                    fused_mapping.extend([
-                        (f"{prefix_sep}{w2}weight_scale_inv", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_inv", 0, "w2"),
-                        (f"{prefix_sep}{w2}weight_scale_2", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_2", 0, "w2"),
-                        (f"{prefix_sep}{w2}weight_scale", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale", 0, "w2"),
-                        (f"{prefix_sep}{w2}input_scale", f"{prefix_sep}experts.{ckpt_down_proj_name}.input_scale", 0, "w2"),
-                        (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight", 0, "w2"),
-                        (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.{ckpt_down_proj_name}", 0, "w2"),
-                    ])
+                    fused_mapping.extend(
+                        [
+                            (
+                                f"{prefix_sep}{w2}weight_scale_inv",
+                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_inv",
+                                0,
+                                "w2",
+                            ),
+                            (
+                                f"{prefix_sep}{w2}weight_scale_2",
+                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_2",
+                                0,
+                                "w2",
+                            ),
+                            (
+                                f"{prefix_sep}{w2}weight_scale",
+                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale",
+                                0,
+                                "w2",
+                            ),
+                            (
+                                f"{prefix_sep}{w2}input_scale",
+                                f"{prefix_sep}experts.{ckpt_down_proj_name}.input_scale",
+                                0,
+                                "w2",
+                            ),
+                            (
+                                f"{prefix_sep}{w2}weight",
+                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight",
+                                0,
+                                "w2",
+                            ),
+                            (
+                                f"{prefix_sep}{w2}weight",
+                                f"{prefix_sep}experts.{ckpt_down_proj_name}",
+                                0,
+                                "w2",
+                            ),
+                        ]
+                    )
                 fused_mapping.extend(
                     (
                         w13,
