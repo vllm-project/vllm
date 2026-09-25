@@ -5,12 +5,12 @@
 # Generate Buildkite annotation for ROCm wheel release
 set -ex
 
-# Extract build configuration from Dockerfile.rocm_base (single source of truth)
-# Extract ROCm version dynamically from Dockerfile.rocm_base
+# Extract build configuration from Dockerfile.rocm_72_base (single source of truth)
+# Extract ROCm version dynamically from Dockerfile.rocm_72_base
 # BASE_IMAGE format: rocm/dev-ubuntu-22.04:7.0-complete -> extracts "7.0"
-ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_base | sed -E 's/.*:([0-9]+\.[0-9]+).*/\1/' || echo "unknown")
-PYTHON_VERSION=$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
-PYTORCH_ROCM_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_72_base | sed -E 's/.*:([0-9]+\.[0-9]+).*/\1/' || echo "unknown")
+PYTHON_VERSION=$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_72_base | sed 's/^ARG PYTHON_VERSION=//')
+PYTORCH_ROCM_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_72_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
 
 # Get release version, default to 1.0.0.dev for nightly/per-commit builds
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null || echo "")
@@ -98,16 +98,16 @@ docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-b
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
-docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:latest-base
-docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
-docker push vllm/vllm-openai-rocm:latest-base
-docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
+docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:latest-rocm72-base
+docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:v${RELEASE_VERSION}-rocm72-base
+docker push vllm/vllm-openai-rocm:latest-rocm72-base
+docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-rocm72-base
 
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}
-docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:latest
-docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:v${RELEASE_VERSION}
-docker push vllm/vllm-openai-rocm:latest
-docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}
+docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:latest-rocm72
+docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:v${RELEASE_VERSION}-rocm72
+docker push vllm/vllm-openai-rocm:latest-rocm72
+docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-rocm72
 \`\`\`
 
 EOF
