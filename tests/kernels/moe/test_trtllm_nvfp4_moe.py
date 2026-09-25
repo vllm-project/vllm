@@ -277,6 +277,60 @@ def test_trtllm_fp4_moe_no_graph(
         torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
 
 
+@torch.inference_mode()
+def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
+    """Weight reloads rerun post-processing on the same experts object; the
+    g1_alphas fold of clamp/beta must start from the unfolded values."""
+    e, n, k = 8, 256, 256
+    clamp, beta = 7.0, 1.0
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        _, _, quant_config = make_test_quant_config(
+            e,
+            n,
+            k,
+            in_dtype=torch.bfloat16,
+            quant_dtype="nvfp4",
+            block_shape=None,
+            per_act_token_quant=False,
+            is_scale_swizzled=False,
+        )
+        quant_config.gemm1_clamp_limit = clamp
+        quant_config.gemm1_beta = beta
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=2,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=16,
+        )
+        experts = TrtLlmNvFp4ExpertsModular(
+            moe_config=moe_config, quant_config=quant_config
+        )
+        g1_alphas = quant_config.g1_alphas
+        assert g1_alphas is not None
+        layer = torch.nn.Module()
+        layer.w13_weight_scale_2 = g1_alphas
+        layer.w2_weight_scale_2 = quant_config.g2_alphas
+        layer.w13_input_scale = torch.ones_like(g1_alphas)
+        layer.w2_input_scale = torch.ones_like(g1_alphas)
+
+        for new_alphas in (0.5, 0.25):
+            g1_alphas.fill_(new_alphas)
+            experts.process_weights_after_loading(layer)
+            expected = torch.full_like(g1_alphas, 1.0 / new_alphas)
+            torch.testing.assert_close(experts.gemm1_clamp_limit, clamp * expected)
+            torch.testing.assert_close(experts.gemm1_beta, beta * expected)
+
+
 if __name__ == "__main__":
     test_trtllm_fp4_moe_no_graph(
         64,
