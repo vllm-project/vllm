@@ -9,6 +9,8 @@ of that is dequantized to BF16 once at load and served by a plain linear
 instead, since ``can_implement`` does not filter on K.
 """
 
+import os
+
 import torch
 from torch.nn.parameter import Parameter
 
@@ -120,15 +122,24 @@ def _mxfp8_dot_scaled_linear(
     return out
 
 
-# Triton 3.8 enables TRITON_HIP_USE_ASYNC_COPY by default on gfx950; its extra LDS
-# buffer leaves no room for num_stages=3 at BLOCK_K=256.
-# TODO(rasmith)(Rohan138): Remove the 3.8 check once
+# TRITON_HIP_USE_ASYNC_COPY on gfx950 adds an LDS buffer that leaves no room for
+# num_stages=3 at BLOCK_K=256.
+#
+# Keying this on the Triton version string is wrong: AMD's ROCm Triton builds
+# carry the async-copy default on gfx950 while still reporting 3.7.0, so the
+# 3.8 test missed them and DeepSeek-V4.1-Flash (hidden_size 5120, fused
+# wq_a/wkv GEMM) died at startup with
+#   triton.runtime.errors.OutOfResources: out of resource: shared memory,
+#   Required: 204272, Hardware limit: 163840
+# Gate on the architecture instead, which is what actually determines the
+# async-copy default, and honour an explicit opt-out of async copy.
+# TODO(rasmith)(Rohan138): revisit once
 # https://github.com/vllm-project/vllm/pull/50605 merges.
 _BK256_STAGES = 3
-if triton.__version__.startswith("3.8") and current_platform.is_rocm():
+if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
 
-    if on_gfx950():
+    if on_gfx950() and os.environ.get("TRITON_HIP_USE_ASYNC_COPY", "1") != "0":
         _BK256_STAGES = 2
 
 
