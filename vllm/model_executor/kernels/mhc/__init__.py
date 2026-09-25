@@ -13,6 +13,7 @@ __all__ = [
     "hc_head_fused_kernel_cuda",
     "mhc_pre_aiter",
     "mhc_pre_delayed_aiter",
+    "mhc_fused_post_pre_delayed_rms_norm_aiter",
     "mhc_post_aiter",
     "mhc_fused_post_pre_aiter",
     "hc_head_fused_aiter",
