@@ -403,7 +403,7 @@ async def test_online_renderer_adjusts_harmony_tool_choice(
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
+async def test_online_renderer_rejects_oversized_protected_harmony_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ):
     renderer = _new_online_renderer()
@@ -422,10 +422,10 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
         truncation="auto",
     )
 
-    result = await renderer.render_responses(request)
+    from vllm.exceptions import VLLMValidationError
 
-    assert not isinstance(result, ErrorResponse)
-    assert result.engine_input["prompt_token_ids"] == [4, 5, 6]
+    with pytest.raises(VLLMValidationError, match="instructions and latest message"):
+        await renderer.render_responses(request)
 
 
 @pytest.mark.asyncio
@@ -747,7 +747,10 @@ class TestInitializeToolSessions:
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
-                self._messages = []
+                self._messages = [
+                    OpenAIHarmonyMessage.from_role_and_content(Role.USER, "old"),
+                    OpenAIHarmonyMessage.from_role_and_content(Role.USER, "latest"),
+                ]
                 self._needs_tool_call = True
 
             def append_output(self, output) -> None:
@@ -772,7 +775,7 @@ class TestInitializeToolSessions:
         )
         monkeypatch.setattr(
             "vllm.renderers.online_renderer.render_for_completion",
-            lambda messages: [1, 2, 3, 4],
+            lambda messages: [1, 2, 3, 4] if len(messages) == 2 else [3, 4],
         )
         online_renderer = serving_responses_instance.online_renderer
         online_renderer.renderer = SimpleNamespace(
@@ -1920,3 +1923,231 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_size", [0, 4, 100])
+async def test_responses_auto_preserves_instructions_and_whole_messages(history_size):
+    """Keep a recent suffix, reuse its render, and leave stored history intact."""
+    from copy import deepcopy
+    from math import ceil, log2
+
+    from vllm.exceptions import VLLMValidationError
+
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = None
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.model_config = SimpleNamespace(
+        max_model_len=60, multimodal_config=None, enable_prompt_embeds=False
+    )
+    history = [{"role": "user", "content": str(i)} for i in range(history_size)]
+    saved = deepcopy(history)
+    rendered = []
+
+    async def render_chat(batch, chat_params, params, **kwargs):
+        (messages,) = batch
+        assert params.truncate_prompt_tokens is None
+        assert messages[0] == {"role": "system", "content": "instructions"}
+        assert messages[-1] == {"role": "user", "content": "latest"}
+        # Each message has a 10-token framed encoding. No slicing is permitted.
+        ids = [int(m["content"]) if m["content"].isdigit() else -1 for m in messages]
+        if len(ids) * 10 > params.max_input_tokens:
+            raise VLLMValidationError("too long", parameter="input_tokens")
+        rendered.append((deepcopy(messages), ids))
+        return [messages], [tokens_input(ids)]
+
+    renderer.renderer = SimpleNamespace(
+        tokenizer=None, render_chat_async=AsyncMock(side_effect=render_chat)
+    )
+    request = ResponsesRequest(
+        input="latest",
+        instructions="instructions",
+        truncation="auto",
+        max_output_tokens=10,
+    )
+    result = await renderer.render_responses(request, previous_messages=history)
+    assert result.engine_input["prompt_token_ids"] is rendered[-1][1]
+    kept = min(history_size, 3)
+    assert rendered[-1][0][1:-1] == history[history_size - kept :]
+    if not history_size:
+        assert renderer.renderer.render_chat_async.await_count == 1
+    assert history == saved
+    assert len(result.messages) == history_size + 2
+    assert request.truncation == "auto"
+    assert renderer.renderer.render_chat_async.await_count <= 2 + ceil(
+        log2(history_size + 1)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameter", ["input_tokens", "input_text", "input"])
+async def test_responses_auto_overflow_does_not_hide_other_errors(parameter):
+    from vllm.exceptions import VLLMValidationError
+
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = None
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.model_config = SimpleNamespace(
+        max_model_len=10, multimodal_config=None, enable_prompt_embeds=False
+    )
+    renderer.renderer = SimpleNamespace(
+        tokenizer=None,
+        render_chat_async=AsyncMock(
+            side_effect=VLLMValidationError("original error", parameter=parameter)
+        ),
+    )
+    request = ResponsesRequest(
+        input="latest", instructions="instructions", truncation="auto"
+    )
+    expected = (
+        "original error" if parameter == "input" else "instructions and latest message"
+    )
+    with pytest.raises(VLLMValidationError, match=expected):
+        await renderer.render_responses(request)
+    assert renderer.renderer.render_chat_async.await_count == 1
+
+
+def test_responses_truncation_keeps_parallel_tool_results_with_calls():
+    from vllm.renderers.response_truncation import ResponseTruncationSearch
+
+    messages = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "first"},
+        {"role": "tool", "tool_call_id": "b", "content": "latest"},
+    ]
+    search = ResponseTruncationSearch(messages)
+    search.record(False)
+    assert search.candidate() == [messages[0], *messages[2:]]
+    search.record(True)
+    assert search.done
+
+
+@pytest.mark.parametrize("harmony", [False, True])
+def test_responses_truncation_preserves_developer_and_latest_tool_group(harmony):
+    from openai_harmony import Author
+
+    from vllm.renderers.response_truncation import ResponseTruncationSearch
+
+    if harmony:
+        messages = [
+            OpenAIHarmonyMessage.from_role_and_content(Role.SYSTEM, "instructions"),
+            OpenAIHarmonyMessage.from_role_and_content(Role.USER, "old"),
+            OpenAIHarmonyMessage.from_role_and_content(Role.DEVELOPER, "rules"),
+            OpenAIHarmonyMessage.from_role_and_content(
+                Role.ASSISTANT, "a"
+            ).with_recipient("functions.a"),
+            OpenAIHarmonyMessage.from_role_and_content(
+                Role.ASSISTANT, "b"
+            ).with_recipient("functions.b"),
+            OpenAIHarmonyMessage.from_author_and_content(
+                Author.new(Role.TOOL, "functions.a"), "first"
+            ),
+            OpenAIHarmonyMessage.from_author_and_content(
+                Author.new(Role.TOOL, "functions.b"), "latest"
+            ),
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "old"},
+            {"role": "developer", "content": "rules"},
+            {"role": "assistant", "tool_calls": [{"id": "a"}]},
+            {"role": "assistant", "tool_calls": [{"id": "b"}]},
+            {"role": "tool", "tool_call_id": "a", "content": "first"},
+            {"role": "tool", "tool_call_id": "b", "content": "latest"},
+        ]
+    search = ResponseTruncationSearch(messages)
+    search.record(False)
+    assert search.candidate() == [messages[0], *messages[2:]]
+
+
+@pytest.mark.parametrize("budget", [1, 7, 12, 19, 25, 35, 55])
+def test_responses_truncation_keeps_largest_fitting_suffix(budget):
+    from vllm.renderers.response_truncation import ResponseTruncationSearch
+
+    messages = [{"role": "user", "content": "x" * n} for n in range(10, 0, -1)]
+    search = ResponseTruncationSearch(messages)
+    best = None
+    while not search.done:
+        candidate = search.candidate()
+        fits = sum(len(m["content"]) for m in candidate) <= budget
+        if fits:
+            best = candidate
+        search.record(fits)
+    expected = next(
+        messages[i:]
+        for i in range(len(messages))
+        if sum(len(m["content"]) for m in messages[i:]) <= budget
+    )
+    assert best == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["auto", "disabled"])
+async def test_responses_truncation_adjusts_parser_once_and_preserves_render_options(
+    mode,
+):
+    from vllm.exceptions import VLLMValidationError
+
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = None
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.model_config = SimpleNamespace(
+        max_model_len=60, multimodal_config=None, enable_prompt_embeds=False
+    )
+    parser = MagicMock()
+    parser.tool_parser_cls = None
+    parser.reasoning_parser_cls = object
+    renderer.parser = parser
+
+    async def render_chat(batch, chat_params, params, **kwargs):
+        (messages,) = batch
+        assert kwargs["prompt_extras"] == {"cache_salt": "salt"}
+        assert kwargs["skip_mm_cache"] is True
+        if len(messages) > 3:
+            raise VLLMValidationError("too long", parameter="input_tokens")
+        return [messages], [tokens_input([1, 2], cache_salt="salt")]
+
+    renderer.renderer = SimpleNamespace(
+        tokenizer=None,
+        get_tokenizer=lambda: None,
+        render_chat_async=AsyncMock(side_effect=render_chat),
+    )
+    request = ResponsesRequest(
+        input=[{"role": "user", "content": str(i)} for i in range(8)],
+        truncation=mode,
+        cache_salt="salt",
+    )
+    if mode == "disabled":
+        with pytest.raises(VLLMValidationError, match="too long"):
+            await renderer.render_responses(request, skip_mm_cache=True)
+        assert renderer.renderer.render_chat_async.await_count == 1
+        parser.assert_not_called()
+    else:
+        result = await renderer.render_responses(request, skip_mm_cache=True)
+        parser.return_value.adjust_request.assert_called_once_with(request=request)
+        assert result.engine_input["cache_salt"] == "salt"
+        assert len(result.messages) == 8
+
+
+def test_responses_truncation_can_drop_an_entire_old_tool_exchange():
+    from vllm.renderers.response_truncation import ResponseTruncationSearch
+
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "a"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "old output"},
+        {"role": "user", "content": "latest"},
+    ]
+    search = ResponseTruncationSearch(messages)
+    search.record(False)
+    assert search.candidate() == [messages[-1]]
+    search.record(True)
+    assert search.done

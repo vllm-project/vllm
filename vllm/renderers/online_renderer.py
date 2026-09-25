@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -60,6 +60,10 @@ from vllm.renderers import BaseRenderer, ChatParams, TokenizeParams, merge_kwarg
 from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
+)
+from vllm.renderers.response_truncation import (
+    ResponseTruncationSearch,
+    is_context_overflow,
 )
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
@@ -341,7 +345,9 @@ class OnlineRenderer:
             tool_dicts=tool_dicts,
             parser=self.parser,
             skip_mm_cache=skip_mm_cache,
+            truncate_messages=request.truncation == "auto",
         )
+        # Store full history separately from the shortened model input.
         return self._responses_render_result(messages, engine_inputs)
 
     def _render_responses_with_harmony(
@@ -461,13 +467,38 @@ class OnlineRenderer:
         tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         arrival_time = time.time()
-        prompt = TokensPrompt(prompt_token_ids=render_for_completion(messages))
-        if tok_params is not None:
-            tok_params.apply_post_tokenization(
-                self.renderer.tokenizer,
-                prompt,
+        auto_truncate = (
+            tok_params is not None and tok_params.truncate_prompt_tokens == -1
+        )
+        if auto_truncate:
+            assert tok_params is not None
+            tok_params = replace(tok_params, truncate_prompt_tokens=None)
+        search = ResponseTruncationSearch(messages) if auto_truncate else None
+        best_prompt: TokensPrompt | None = None
+        while True:
+            prompt = TokensPrompt(
+                prompt_token_ids=render_for_completion(
+                    search.candidate() if search is not None else messages
+                )
             )
-        engine_input = tokens_input(prompt["prompt_token_ids"], cache_salt=cache_salt)
+            try:
+                if tok_params is not None:
+                    tok_params.apply_post_tokenization(self.renderer.tokenizer, prompt)
+            except VLLMValidationError as exc:
+                if search is None or not is_context_overflow(exc):
+                    raise
+                search.record(False)
+            else:
+                best_prompt = prompt
+                if search is None:
+                    break
+                search.record(True)
+            if search.done:
+                break
+        assert best_prompt is not None
+        engine_input = tokens_input(
+            best_prompt["prompt_token_ids"], cache_salt=cache_salt
+        )
         engine_input["arrival_time"] = arrival_time
         return engine_input
 
@@ -707,6 +738,7 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
+        truncate_messages: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -724,6 +756,8 @@ class OnlineRenderer:
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        if truncate_messages:
+            tok_params = replace(tok_params, truncate_prompt_tokens=None)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
         ).with_defaults(
@@ -743,17 +777,34 @@ class OnlineRenderer:
                 reuse_ids, cache_salt=getattr(request, "cache_salt", None)
             )
         else:
-            (conversation,), (engine_input,) = await renderer.render_chat_async(
-                [messages],
-                chat_params,
-                tok_params,
-                prompt_extras={
-                    k: v
-                    for k in ("mm_processor_kwargs", "cache_salt")
-                    if (v := getattr(request, k, None)) is not None
-                },
-                skip_mm_cache=skip_mm_cache,
-            )
+            search = ResponseTruncationSearch(messages) if truncate_messages else None
+            best_result = None
+            while True:
+                try:
+                    result = await renderer.render_chat_async(
+                        [search.candidate() if search is not None else messages],
+                        chat_params,
+                        tok_params,
+                        prompt_extras={
+                            k: v
+                            for k in ("mm_processor_kwargs", "cache_salt")
+                            if (v := getattr(request, k, None)) is not None
+                        },
+                        skip_mm_cache=skip_mm_cache,
+                    )
+                except VLLMValidationError as exc:
+                    if search is None or not is_context_overflow(exc):
+                        raise
+                    search.record(False)
+                else:
+                    best_result = result
+                    if search is None:
+                        break
+                    search.record(True)
+                if search.done:
+                    break
+            assert best_result is not None
+            (conversation,), (engine_input,) = best_result
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser

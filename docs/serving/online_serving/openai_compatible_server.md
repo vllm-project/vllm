@@ -199,6 +199,28 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../../../examples/tool_calling/openai_responses_client_with_tools.py)
 
+With `truncation="auto"`, requests that exceed the input token budget discard
+oldest complete messages and re-render the remaining conversation. System and
+developer instructions and the latest message are retained. Known tool calls
+and their results are kept together. If this protected content cannot fit, the
+request returns a validation error; shorten it or reduce `max_output_tokens`.
+The input budget reserves the requested output tokens within the model's context
+limit. `truncation="disabled"` continues to reject oversized requests.
+
+For example, if instructions, three older messages, and a latest question exceed
+the budget, auto truncation can remove the first older message while retaining
+the instructions, the other two messages, and the complete latest question.
+A latest tool result also retains its associated call, even if this means keeping
+more context or rejecting the request.
+
+Auto truncation uses binary search over whole-message cutoffs and reuses the
+selected render for inference. A fitting request needs only one render;
+oversized requests may need several. Custom chat templates can make token counts
+non-monotonic, so the selected suffix is validated but is not guaranteed to be
+the longest possible suffix. Template and input validation errors still propagate.
+Truncation does not rewrite stored history or the client's history, so subsequent
+requests may need to truncate again.
+
 To get prompt token IDs before generation, use
 [`/v1/responses/render`](renderer.md#get-responses-prompt-token-ids). It preprocesses
 a self-contained Responses request without inference and returns the prompt
