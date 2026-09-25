@@ -1555,9 +1555,7 @@ class ModelMetrics:
             num_spec_tokens = len(
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())
             )
-            is_prefill = (
-                num_spec_tokens == 0 or num_tokens - num_spec_tokens > 1
-            )
+            is_prefill = num_spec_tokens == 0 or num_tokens - num_spec_tokens > 1
             ctx.add(num_tokens, context_len, is_prefill)
 
         # Process cached requests (continuing requests)
