@@ -31,7 +31,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -316,7 +316,7 @@ class MiniCPMAttention(nn.Module):
 class MiniCPMDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -427,7 +427,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
     def _init_layers(
         self,
         prefix: str,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
     ):

@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
@@ -1169,7 +1169,6 @@ class Qwen3OmniMoeThinkerProcessingInfo(
     def get_hf_processor(self, **kwargs: object) -> Qwen3OmniMoeProcessor:
         processor = self.ctx.get_hf_processor(
             Qwen3OmniMoeProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
         if not hasattr(processor, "audio_token"):
@@ -1368,7 +1367,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
     def get_updates_use_audio_in_video(
         self,
-        thinker_config: PretrainedConfig,
+        thinker_config: PreTrainedConfig,
         audio_len: int,
         video_grid_thw: list[int] | torch.Tensor,
         video_second_per_grid_t: float,
