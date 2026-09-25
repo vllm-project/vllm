@@ -94,18 +94,64 @@ def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return fields
 
 
-def _collapsed_flag(value: object) -> bool | None:
-    """Collapse a batched per-item boolean flag into a single bool."""
+def _expand_flags(value: object, num_items: int) -> list[bool | None]:
+    """Broadcast a batched per-item flag to exactly one entry per item."""
     if value is None:
-        return None
+        return [None] * num_items
+
+    raw: list[object]
     if isinstance(value, torch.Tensor):
-        return bool(value.any().item())
-    if isinstance(value, list | tuple):
-        return any(
-            bool(t.any().item()) if isinstance(t, torch.Tensor) else bool(t)
-            for t in value
-        )
-    return bool(value)
+        raw = value.reshape(-1).tolist()
+    elif isinstance(value, list | tuple):
+        raw = []
+        for item in value:
+            if isinstance(item, torch.Tensor):
+                raw.extend(item.reshape(-1).tolist())
+            else:
+                raw.append(item)
+    else:
+        raw = [value]
+
+    if len(raw) == num_items:
+        return [bool(v) for v in raw]
+    if len(raw) == 1:
+        return [bool(raw[0])] * num_items
+    # Unexpected shape: keep one decision for the whole batch instead of
+    # failing the request.
+    return [any(bool(v) for v in raw)] * num_items
+
+
+def _vision_downsample_mode(flag: bool | None) -> str | None:
+    if flag is None:
+        return None
+    return "16x" if flag else "4x"
+
+
+def _select_vision_items(
+    image_input: Mapping[str, object],
+    item_indices: list[int],
+    num_slices: list[int],
+):
+    """Slice a vision input down to the given items, keeping their order."""
+    offsets = [0]
+    for n in num_slices:
+        offsets.append(offsets[-1] + n)
+
+    pixel_values: list[torch.Tensor] = []
+    tgt_sizes: list[torch.Tensor] = []
+    sizes: list[int] = []
+    for i in item_indices:
+        start, end = offsets[i], offsets[i + 1]
+        pixel_values.extend(image_input["pixel_values"][start:end])
+        tgt_sizes.append(image_input["tgt_sizes"][start:end])
+        sizes.append(end - start)
+
+    return MiniCPMVImagePixelInputs(
+        type="pixel_values",
+        pixel_values=pixel_values,
+        tgt_sizes=torch.cat(tgt_sizes, dim=0),
+        num_slices=torch.tensor(sizes),
+    )
 
 
 # HF-style modality-scoped keys inside `mm_processor_kwargs`. They scope a value
@@ -1301,27 +1347,35 @@ class MiniCPMV4_6ForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"]
 
-        downsample_mode = None
-        if use_vit_merger is not None:
-            downsample_mode = "16x" if use_vit_merger else "4x"
-        image_features = self.get_vision_hidden_states(
-            image_input,
-            downsample_mode=downsample_mode,
-        )
-        num_slices = image_input["num_slices"]
-        results = []
-        idx = 0
-        for n in num_slices.tolist():
-            group = image_features[idx : idx + n]
-            results.append(torch.cat(group, dim=0))
-            idx += n
-        return results
+        num_slices = image_input["num_slices"].tolist()
+        flags = _expand_flags(use_vit_merger, len(num_slices))
+
+        # The merger flag is per request, but the model runner may batch items
+        # from several concurrent requests. Encoding such a mixed batch would
+        # apply one request's downsample mode to another request's items, so
+        # group by flag and encode each group separately.
+        encoded: dict[int, torch.Tensor] = {}
+        for flag in dict.fromkeys(flags):
+            item_indices = [i for i, f in enumerate(flags) if f == flag]
+            group_input = _select_vision_items(image_input, item_indices, num_slices)
+            group_features = self.get_vision_hidden_states(
+                group_input,
+                downsample_mode=_vision_downsample_mode(flag),
+            )
+
+            idx = 0
+            for i in item_indices:
+                n = num_slices[i]
+                encoded[i] = torch.cat(group_features[idx : idx + n], dim=0)
+                idx += n
+
+        return [encoded[i] for i in range(len(num_slices))]
 
     # ----- Multimodal embedding interface -----
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        use_vit_merger = _collapsed_flag(kwargs.pop("use_vit_merger", None))
-        video_use_vit_merger = _collapsed_flag(kwargs.pop("video_use_vit_merger", None))
+        use_vit_merger = kwargs.pop("use_vit_merger", None)
+        video_use_vit_merger = kwargs.pop("video_use_vit_merger", None)
 
         image_kwargs = {
             k: v

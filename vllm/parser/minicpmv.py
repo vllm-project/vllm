@@ -248,6 +248,12 @@ class MiniCPMVOutputNormalizer:
             delta.content = content
         elif delta.content is not None:
             delta.content = None
+
+        # A chunk that normalizes to nothing must be dropped, not returned as an
+        # all-None DeltaMessage: the engine only skips on `None`, so anything
+        # else reaches the client as an empty delta.
+        if not delta.content and not delta.reasoning and not delta.tool_calls:
+            return None
         return delta
 
 

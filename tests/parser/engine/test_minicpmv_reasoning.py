@@ -368,3 +368,33 @@ class TestNewlineRecovery:
         assert chunk.content == "first"
         assert rest is not None
         assert rest.content == "\nsecond"
+
+    def test_buffered_delta_is_dropped_not_sent_empty(
+        self, mock_tokenizer, request_obj
+    ):
+        parser = MiniCPMVParser(
+            mock_tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        parser.parse_delta("hello", [], request_obj, finished=False)
+
+        # The lone backtick is held back for the next chunk. Reporting it as an
+        # all-None DeltaMessage would reach the client as an empty SSE chunk.
+        assert parser.parse_delta("`", [], request_obj, finished=False) is None
+
+    def test_normalizer_drops_empty_delta(self):
+        normalizer = MiniCPMVOutputNormalizer()
+
+        assert (
+            normalizer.normalize_delta(DeltaMessage(content="`"), finished=False)
+            is None
+        )
+
+    def test_normalizer_flushes_buffered_content_when_finished(self):
+        normalizer = MiniCPMVOutputNormalizer()
+        normalizer.normalize_delta(DeltaMessage(content="`"), finished=False)
+
+        final = normalizer.normalize_delta(DeltaMessage(), finished=True)
+
+        assert final is not None
+        assert final.content == "`"
