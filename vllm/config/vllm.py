@@ -40,6 +40,7 @@ from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
+from .logging import LoggingConfig
 from .lora import LoRAConfig
 from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
@@ -402,6 +403,8 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
+    logging_config: LoggingConfig = Field(default_factory=LoggingConfig)
+    """Logging configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
@@ -757,8 +760,8 @@ class VllmConfig:
 
         return True
 
-    def _is_dflash2_draft(self) -> bool:
-        """Whether the DFlash draft is a DFlash2 one, by the architecture the
+    def _is_dflash_candidate_draft(self) -> bool:
+        """Whether the DFlash draft has a candidate head, by the architecture the
         speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
         spec = self.speculative_config
         if spec is None or spec.method != "dflash":
@@ -766,7 +769,11 @@ class VllmConfig:
         draft_config = getattr(spec, "draft_model_config", None)
         if draft_config is None:
             return False
-        return "DFlash2DraftModel" in (draft_config.architectures or [])
+        return bool(
+            {"DFlash2DraftModel", "LiLiCorrDraftModel"}.intersection(
+                draft_config.architectures or []
+            )
+        )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
@@ -3094,11 +3101,11 @@ class VllmConfig:
         if self._dflash_needs_multi_kv_group():
             unsupported.append("mixed sliding/full dflash drafts")
 
-        # The DFlash2 candidate selector exists only in the V2 speculator. On
+        # DFlash candidate heads exist only in the V2 speculator. On
         # V1 the same checkpoint drafts through DFlashProposer, which never
         # calls it, so the draft would degrade to DFlash1 silently.
-        if self._is_dflash2_draft():
-            unsupported.append("dflash2 drafts")
+        if self._is_dflash_candidate_draft():
+            unsupported.append("DFlash candidate-head drafts")
 
         if self.model_config is not None and self.model_config.is_diffusion:
             unsupported.append("diffusion models")
