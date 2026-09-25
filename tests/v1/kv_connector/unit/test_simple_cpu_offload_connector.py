@@ -147,3 +147,19 @@ def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
     # Only the paged group takes part in CPU-side hit lookup.
     attention_groups = scheduler.cpu_coordinator.attention_groups
     assert [g.group_ids for g in attention_groups] == [[0]]
+
+
+def test_connector_get_offload_io_stats() -> None:
+    """SimpleCPUOffloadConnector exposes cumulative offload IO stats."""
+    connector = _make_connector()
+    stats = connector.get_offload_io_stats()
+    assert stats is not None
+    assert stats.total_stored_blocks == 0
+    assert stats.total_loaded_tokens == 0
+
+    worker_connector = SimpleCPUOffloadConnector(
+        vllm_config=connector._vllm_config,
+        role=KVConnectorRole.WORKER,
+        kv_cache_config=_make_kv_cache_config(16),
+    )
+    assert worker_connector.get_offload_io_stats() is None

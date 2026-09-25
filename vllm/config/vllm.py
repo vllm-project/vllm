@@ -1210,6 +1210,27 @@ class VllmConfig:
         ):
             return
 
+        # Reject explicit block-size on hybrid models with SimpleCPU offload
+        # (#58653): explicit block size misaligns mamba pages with attention
+        # blocks, making the offload connector silently write-only.
+        if (
+            self.model_config is not None
+            and getattr(self.model_config, "is_hybrid", False)
+            and self.kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
+            and self.cache_config is not None
+            and getattr(self.cache_config, "user_specified_block_size", False)
+        ):
+            arch = getattr(self.model_config, "architecture", "hybrid")
+            raise ValueError(
+                f"Explicit --block-size ({self.cache_config.block_size}) is "
+                f"incompatible with hybrid model '{arch}' when using "
+                "SimpleCPU KV offload (SimpleCPUOffloadConnector). "
+                "Incompatible block-size breaks mamba-page alignment and "
+                "causes offload reads to silently fail (write-only offload). "
+                "Please omit --block-size to allow vLLM to automatically "
+                "compute the aligned block size."
+            )
+
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can
         # remap a virtual address range to different physical pages over the
         # engine's lifetime. KV connectors that pin KV cache memory (e.g.

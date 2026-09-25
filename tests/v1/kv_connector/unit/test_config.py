@@ -103,6 +103,9 @@ def _build_config(
     kv_connector: str | None,
     enable_sleep_mode: bool = False,
     enable_cumem_allocator: bool = False,
+    is_hybrid: bool = False,
+    user_specified_block_size: bool = False,
+    block_size: int = 16,
 ) -> VllmConfig:
     """Build a VllmConfig that exercises _verify_kv_transfer_compat without
     requiring a real model (avoids HF downloads in CI)."""
@@ -118,6 +121,14 @@ def _build_config(
     cfg.model_config = SimpleNamespace(
         enable_sleep_mode=enable_sleep_mode,
         enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
+        is_hybrid=is_hybrid,
+        architecture=(
+            "Qwen3_5ForConditionalGeneration" if is_hybrid else "LlamaForCausalLM"
+        ),
+    )
+    cfg.cache_config = SimpleNamespace(
+        user_specified_block_size=user_specified_block_size,
+        block_size=block_size,
     )
     cfg._verify_kv_transfer_compat()
     return cfg
@@ -181,3 +192,37 @@ def test_kv_offloading_size_only_uses_native_default():
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+
+
+def test_hybrid_gdn_rejects_explicit_block_size_with_simple_kv_offload():
+    """Hybrid models with SimpleCPU KV offload cannot use explicit --block-size
+    because misalignment causes silent write-only offload (#58653)."""
+    with pytest.raises(ValueError, match="incompatible with hybrid model"):
+        _build_config(
+            kv_connector="SimpleCPUOffloadConnector",
+            is_hybrid=True,
+            user_specified_block_size=True,
+            block_size=128,
+        )
+
+
+def test_hybrid_gdn_allows_omitted_block_size_with_simple_kv_offload():
+    """Omitting --block-size allows auto-computing the aligned size."""
+    cfg = _build_config(
+        kv_connector="SimpleCPUOffloadConnector",
+        is_hybrid=True,
+        user_specified_block_size=False,
+        block_size=16,
+    )
+    assert cfg.kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
+
+
+def test_hybrid_gdn_allows_explicit_block_size_without_kv_offload():
+    """Without KV offload, explicit block size remains allowed."""
+    cfg = _build_config(
+        kv_connector=None,
+        is_hybrid=True,
+        user_specified_block_size=True,
+        block_size=128,
+    )
+    assert cfg.kv_transfer_config is None
