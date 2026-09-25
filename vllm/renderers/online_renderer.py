@@ -106,12 +106,16 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     Disaggregated serving carries the prefill stage's ids in
     ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
+
+    Returns None without checking the ids when ``echo`` is set, since echo
+    needs ``messages`` to be rendered. Otherwise raises VLLMValidationError if
+    the ids are malformed.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
         return None
     ids = kv.pop("prompt_token_ids", None)
-    if ids is None:
+    if ids is None or getattr(request, "echo", False):
         return None
     # bool is an int subclass, hence the exact type check.
     if (
@@ -123,11 +127,6 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
             "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
             "of non-negative integers.",
             parameter="kv_transfer_params",
-        )
-    if getattr(request, "echo", False):
-        raise VLLMValidationError(
-            "`echo` is not supported with `kv_transfer_params['prompt_token_ids']`.",
-            parameter="echo",
         )
     return ids
 
@@ -704,15 +703,13 @@ class OnlineRenderer:
 
         reuse_ids = _reused_prompt_token_ids(request)
         if reuse_ids:
-            # Decode-side token reuse: skip templating and tokenization, but
-            # keep the length checks and truncation of preprocess_cmpl.
-            # ``messages`` are not tokenized, so conversation is empty. The
-            # adjust_request tail below still runs.
+            # Decode-side token reuse: feed the forwarded ids straight to the
+            # engine, skipping templating and tokenization. ``messages`` are not
+            # tokenized, so conversation is empty. The adjust_request tail below
+            # still runs.
             conversation: list[ConversationMessage] = []
-            (engine_input,) = await self.preprocess_cmpl(
-                request,
-                [TokensPrompt(prompt_token_ids=reuse_ids)],
-                skip_mm_cache=skip_mm_cache,
+            engine_input = tokens_input(
+                reuse_ids, cache_salt=getattr(request, "cache_salt", None)
             )
         else:
             (conversation,), (engine_input,) = await renderer.render_chat_async(

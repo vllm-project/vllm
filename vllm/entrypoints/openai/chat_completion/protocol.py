@@ -63,7 +63,7 @@ _INT64_MAX = 2**63 - 1
 _TEXT_CONTENT_PART_TYPES = frozenset(
     {"text", "input_text", "output_text", "refusal", "thinking", "tool_reference"}
 )
-# Keys that identify a multimodal content part written without a ``type``.
+# Keys that mark a content part as multimodal, whatever its ``type``.
 _MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
@@ -1003,10 +1003,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_kv_transfer_prompt_token_ids(cls, data):
-        # The forwarded ids replace the rendered prompt, so media in `messages`
-        # would be dropped. Runs before validation, which loses the media keys
-        # of some parts.
+    def drop_prompt_token_ids_with_media(cls, data):
+        # The forwarded ids would drop media in ``messages``, so ignore them. Runs
+        # before validation, which can turn content into a one-shot iterator.
         if not isinstance(data, dict):
             return data
         kv_transfer_params = data.get("kv_transfer_params")
@@ -1024,13 +1023,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             for part in content:
                 if isinstance(part, dict) and (
                     any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
-                    or part.get("type", "text") not in _TEXT_CONTENT_PART_TYPES
+                    or not isinstance(part_type := part.get("type", "text"), str)
+                    or part_type not in _TEXT_CONTENT_PART_TYPES
                 ):
-                    raise VLLMValidationError(
-                        "`kv_transfer_params['prompt_token_ids']` is not supported "
-                        "together with non-text message content.",
-                        parameter="messages",
-                    )
+                    kv_transfer_params.pop("prompt_token_ids")
+                    return data
         return data
 
     @model_validator(mode="before")

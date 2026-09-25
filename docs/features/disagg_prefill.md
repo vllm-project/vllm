@@ -77,7 +77,7 @@ decode = client.chat.completions.create(
 )
 ```
 
-Non-text message content and `echo` are not supported when `prompt_token_ids` is set.
+If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
 ## Development
 
