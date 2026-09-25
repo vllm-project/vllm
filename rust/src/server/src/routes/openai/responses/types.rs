@@ -37,8 +37,9 @@ pub enum ResponsesInput {
 
 /// Responses API reasoning configuration.
 ///
-/// Mirrors the `Reasoning` shared type from the OpenAI SDK. `summary` is
-/// accepted but currently ignored; reasoning summaries are not generated.
+/// Mirrors the `Reasoning` shared type from the OpenAI SDK. This frontend
+/// supports `effort`. `summary` is accepted for compatibility but does not
+/// cause reasoning summaries to be generated.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResponsesReasoning {
@@ -71,7 +72,8 @@ pub enum ResponseTextFormat {
 
 /// Responses API `text` configuration.
 ///
-/// `verbosity` is accepted for compatibility but currently ignored.
+/// This frontend supports `format`. `verbosity` is accepted for compatibility
+/// but does not control generation separately from the model prompt.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResponseTextConfig {
@@ -108,8 +110,9 @@ pub enum ResponseToolChoice {
 /// TODO: `background`, `store=true` retention, `previous_response_id`, and
 /// `max_tool_calls` require a server-side response store, which the Rust
 /// frontend does not have yet; see `validate.rs` for the enforced behavior.
-/// TODO: `include=message.output_text.logprobs` is accepted but output
-/// logprobs are not emitted yet.
+/// Output presentation controls such as `include`, `reasoning.summary`, and
+/// `text.verbosity` are accepted for compatibility. They do not add output
+/// fields that this frontend cannot produce.
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct ResponsesRequest {
     /// The model ID served by this frontend. Optional; defaults to the
@@ -139,6 +142,11 @@ pub struct ResponsesRequest {
     pub metadata: Option<Value>,
     #[serde(default)]
     pub previous_response_id: Option<String>,
+    /// Harmony-only stateless replay history. The Rust frontend does not
+    /// implement Harmony rendering, so this is retained solely to reject the
+    /// field instead of silently dropping model-visible history.
+    #[serde(default)]
+    pub previous_input_messages: Option<Vec<Value>>,
     #[serde(default)]
     pub prompt: Option<Value>,
     #[serde(default)]
@@ -196,7 +204,7 @@ pub struct ResponsesRequest {
     pub stop_token_ids: Option<Vec<u32>>,
 
     // Extra request parameters shared with the other vLLM endpoints.
-    /// Caller-supplied request ID; also used as the response ID.
+    /// Caller-supplied request ID used to derive the response and engine IDs.
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
@@ -499,6 +507,8 @@ pub struct ResponsesResponse {
     pub object: ResponseObject,
     pub created_at: u64,
     pub status: ResponseItemStatus,
+    #[serde(default)]
+    pub error: Option<ResponseError>,
     pub background: bool,
     #[serde(default)]
     pub incomplete_details: Option<IncompleteDetails>,
@@ -544,6 +554,13 @@ pub struct ResponsesResponse {
     pub kv_transfer_params: Option<Value>,
     #[serde(default)]
     pub ec_transfer_params: Option<Value>,
+}
+
+/// The failure detail carried by a failed Responses API response.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResponseError {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -606,6 +623,7 @@ mod tests {
             object: ResponseObject,
             created_at: 1,
             status: ResponseItemStatus::Completed,
+            error: None,
             background: false,
             incomplete_details: None,
             instructions: Some("be terse".to_string()),

@@ -86,10 +86,7 @@ pub(crate) fn prepare_responses_request(
     validate::validate_request_compat(&request)?;
     validate_model(&request, lora_resolution)?;
 
-    let request_id = request
-        .request_id
-        .clone()
-        .unwrap_or_else(|| format!("resp_{}", Uuid::new_v4().simple()));
+    let request_id = format!("resp_{}", ctx.request_id);
 
     let ResponsesRequest {
         model: _,
@@ -102,6 +99,7 @@ pub(crate) fn prepare_responses_request(
         max_tool_calls,
         metadata,
         previous_response_id,
+        previous_input_messages: _,
         prompt: _,
         reasoning,
         include_reasoning,
@@ -351,8 +349,9 @@ fn convert_tools(tools: &[Value]) -> Result<Vec<ChatTool>, ApiError> {
 }
 
 /// Resolve the requested tool choice, mirroring the Python
-/// `check_tool_usage` validator: without tools, named function choices are
-/// errors; with tools, named choices must exist (enforced by
+/// `check_tool_usage` validator: without tools, `auto` is normalized to
+/// `none` and named function choices are errors; with tools, named choices
+/// must exist (enforced by
 /// [`ResolvedToolContext`]).
 fn normalize_tool_choice(
     tool_choice: Option<super::types::ResponseToolChoice>,
@@ -364,6 +363,7 @@ fn normalize_tool_choice(
         None => Ok(None),
         Some(Choice::Mode(mode)) => match mode.as_str() {
             "none" => Ok(Some(ChatToolChoice::None)),
+            "auto" if tools_empty => Ok(Some(ChatToolChoice::None)),
             "auto" => Ok(Some(ChatToolChoice::Auto)),
             "required" => Ok(Some(ChatToolChoice::Required)),
             // Unreachable: unknown modes are rejected by
@@ -834,6 +834,7 @@ pub(crate) fn build_response(
         object: ResponseObject,
         created_at,
         status,
+        error: None,
         background: false,
         incomplete_details,
         instructions: meta.instructions.clone(),
@@ -893,5 +894,22 @@ fn should_continue_final_message(items: &[Value]) -> bool {
         // Type-less items with a role are messages.
         None => last.get("role").and_then(Value::as_str) == Some("assistant"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn auto_tool_choice_without_tools_normalizes_to_none() {
+        let tool_choice = serde_json::from_value(json!("auto")).unwrap();
+
+        assert_eq!(
+            normalize_tool_choice(Some(tool_choice), true).unwrap(),
+            Some(ChatToolChoice::None)
+        );
     }
 }

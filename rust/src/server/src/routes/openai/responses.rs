@@ -35,7 +35,7 @@ use vllm_llm::TokenUsage;
 
 use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses_request};
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, response_lifecycle_event};
-use self::types::{ResponseItemStatus, ResponsesRequest, ResponsesResponse};
+use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest, ResponsesResponse};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, chat_submit_error, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -239,7 +239,14 @@ async fn responses_event_stream(
             }
             Err(error) => {
                 error!(error = %error.as_report(), "responses stream failed");
-                emit_failed(&mut y, &meta, &request_id, created_at).await;
+                emit_failed(
+                    &mut y,
+                    &meta,
+                    &request_id,
+                    created_at,
+                    "The response stream failed before generation completed.",
+                )
+                .await;
                 return Ok(());
             }
         }
@@ -251,7 +258,14 @@ async fn responses_event_stream(
 
     let Some(terminal) = terminal else {
         error!("responses stream ended before the terminal done event");
-        emit_failed(&mut y, &meta, &request_id, created_at).await;
+        emit_failed(
+            &mut y,
+            &meta,
+            &request_id,
+            created_at,
+            "The response stream ended before generation completed.",
+        )
+        .await;
         return Ok(());
     };
     let TerminalOutput {
@@ -263,7 +277,14 @@ async fn responses_event_stream(
     } = terminal;
 
     if matches!(finish_reason, FinishReason::Error) {
-        emit_failed(&mut y, &meta, &request_id, created_at).await;
+        emit_failed(
+            &mut y,
+            &meta,
+            &request_id,
+            created_at,
+            "The model failed to generate a response.",
+        )
+        .await;
         return Ok(());
     }
 
@@ -291,8 +312,9 @@ async fn emit_failed(
     meta: &ResponseMeta,
     request_id: &str,
     created_at: u64,
+    message: &str,
 ) {
-    let failed = build_response(
+    let mut failed = build_response(
         meta,
         request_id,
         created_at,
@@ -302,6 +324,10 @@ async fn emit_failed(
         None,
         None,
     );
+    failed.error = Some(ResponseError {
+        code: "server_error".to_string(),
+        message: message.to_string(),
+    });
     y.yield_ok(response_lifecycle_event("response.failed", &failed)).await;
 }
 
