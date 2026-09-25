@@ -35,7 +35,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s samplers
+      - pytest -v -s samplers -k "not test_beam_search_passes_multimodal_data"
 
 # Qwen2-Audio-7B leaves no room for KV cache on a 16 GiB slice.
 - label: ":nvidia: (H200 MIG 35GB) Samplers Multimodal Beam Search"
@@ -51,3 +51,24 @@ steps:
   commands:
     - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
+  mirror:
+    amd:
+      label: ":amd: (MI355) Samplers Multimodal Beam Search"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 45
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers
+      - vllm/sampling_metadata.py
+      - vllm/v1/sample/
+      - vllm/entrypoints/generate/beam_search/
+      - tests/samplers
+      - tests/conftest.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
