@@ -805,8 +805,9 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/fullgraph/_basic_correctness.py
-  - tests/compile/fullgraph/test_basic_correctness_granite.py
-  - tests/compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2.py
+  - tests/compile/fullgraph/test_basic_correctness_granite_inductor.py
+  - tests/compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2_inductor.py
+  - tests/compile/fullgraph/test_basic_correctness_eager.py
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
   - vllm/platforms/rocm.py
@@ -1096,14 +1097,16 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/_basic_correctness.py
-  - tests/compile/fullgraph/test_basic_correctness_granite.py
-  - tests/compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2.py
+  - tests/compile/fullgraph/test_basic_correctness_granite_inductor.py
+  - tests/compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2_inductor.py
+  - tests/compile/fullgraph/test_basic_correctness_eager.py
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_basic_correctness_granite.py
-  - pytest -v -s compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2.py
+  - pytest -v -s compile/fullgraph/test_basic_correctness_granite_inductor.py
+  - pytest -v -s compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2_inductor.py
+  - pytest -v -s compile/fullgraph/test_basic_correctness_eager.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py

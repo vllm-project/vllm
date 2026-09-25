@@ -50,6 +50,7 @@ BGE_MULTILINGUAL_GEMMA2_SETTING = TestSetting(
 
 def run_compile_correctness(
     test_setting: TestSetting,
+    backend: str,
 ):
     model = test_setting.model
     model_args = test_setting.model_args
@@ -70,35 +71,19 @@ def run_compile_correctness(
     all_args: list[list[str]] = []
     all_envs: list[dict[str, str] | None] = []
 
-    # Test all compilation modes with inductor backend
+    # Test all compilation modes with the given backend
     for mode in [
         CompilationMode.NONE,
         CompilationMode.STOCK_TORCH_COMPILE,
         CompilationMode.DYNAMO_TRACE_ONCE,
         CompilationMode.VLLM_COMPILE,
     ]:
-        all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"])
+        all_args.append(
+            final_args + [f"-cc.mode={mode.name}", f"-cc.backend={backend}"]
+        )
         all_envs.append({})
     # inductor will change the output, so we only compare if the output
     # is close, not exactly the same.
-    compare_all_settings(
-        model,
-        all_args,
-        all_envs,
-        method=method if method != "generate" else "generate_close",
-        force_v1_runner=True,
-    )
-
-    all_envs.clear()
-    all_args.clear()
-
-    # Test all compilation modes with eager backend
-    for mode in [
-        CompilationMode.NONE,
-        CompilationMode.STOCK_TORCH_COMPILE,
-        CompilationMode.DYNAMO_TRACE_ONCE,
-        CompilationMode.VLLM_COMPILE,
-    ]:
-        all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
-        all_envs.append({})
+    if backend == "inductor" and method == "generate":
+        method = "generate_close"
     compare_all_settings(model, all_args, all_envs, method=method, force_v1_runner=True)

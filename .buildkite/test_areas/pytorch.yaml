@@ -153,13 +153,14 @@ steps:
       - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 # test_full_cudagraph.py is heavy and covered by the CUDAGraph Compatibility
-# step below. Every other fullgraph test file is claimed by exactly one of the
-# following jobs, each run in its own pytest process to avoid
+# step below. The heavy files each get a named job; the Smoke job keeps the
+# discovery glob and excludes only those files, so new fullgraph tests run by
+# default. Each file runs in its own pytest process to avoid
 # https://github.com/vllm-project/vllm/issues/28965.
-- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness Granite"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness Granite Inductor"
   device: h200_35gb
-  key: pytorch-fullgraph-basic-correctness-granite
-  timeout_in_minutes: 40
+  key: pytorch-fullgraph-basic-correctness-granite-inductor
+  timeout_in_minutes: 30
   source_file_dependencies: &pytorch-fullgraph-deps
   - vllm/__init__.py
   - vllm/_aiter_ops.py
@@ -189,13 +190,13 @@ steps:
   - tests/compile
   - csrc/
   commands:
-  - pytest -s -v compile/fullgraph/test_basic_correctness_granite.py
+  - pytest -s -v compile/fullgraph/test_basic_correctness_granite_inductor.py
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness Granite"
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness Granite Inductor"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 30
+      timeout_in_minutes: 20
       # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
       # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
       env:
@@ -203,19 +204,39 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness BGE Multilingual Gemma2"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness BGE Multilingual Gemma2 Inductor"
   device: h200_35gb
-  key: pytorch-fullgraph-basic-correctness-bge-multilingual-gemma2
-  timeout_in_minutes: 40
+  key: pytorch-fullgraph-basic-correctness-bge-multilingual-gemma2-inductor
+  timeout_in_minutes: 30
   source_file_dependencies: *pytorch-fullgraph-deps
   commands:
-  - pytest -s -v compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2.py
+  - pytest -s -v compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2_inductor.py
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness BGE Multilingual Gemma2"
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness BGE Multilingual Gemma2 Inductor"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 30
+      timeout_in_minutes: 20
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness Eager"
+  device: h200_35gb
+  key: pytorch-fullgraph-basic-correctness-eager
+  timeout_in_minutes: 25
+  source_file_dependencies: *pytorch-fullgraph-deps
+  commands:
+  - pytest -s -v compile/fullgraph/test_basic_correctness_eager.py
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness Eager"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 20
       # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
       # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
       env:
@@ -249,10 +270,7 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies: *pytorch-fullgraph-deps
   commands:
-  - pytest -s -v compile/fullgraph/test_multimodal_compile.py
-  - pytest -s -v compile/fullgraph/test_multiple_graphs.py
-  - pytest -s -v compile/fullgraph/test_simple.py
-  - pytest -s -v compile/fullgraph/test_toy_llama.py
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -not -name 'test_full_graph.py' -not -name 'test_basic_correctness_granite_inductor.py' -not -name 'test_basic_correctness_bge_multilingual_gemma2_inductor.py' -not -name 'test_basic_correctness_eager.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) PyTorch Fullgraph Smoke"
