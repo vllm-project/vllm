@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import logging
 import weakref
 from collections import Counter
 from collections.abc import Callable
@@ -11,7 +12,6 @@ from unittest.mock import patch
 
 import torch
 
-import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -164,7 +164,7 @@ class CUDAGraphWrapper:
     assumption on the dynamic shape (batch size) of the runtime inputs, as a
     trade-off for staying orthogonal to compilation logic. Nevertheless,
     tracing and checking the input addresses to be consistent during replay is
-    guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
+    guaranteed when vLLM debug logging is enabled.
     """
 
     _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
@@ -188,7 +188,7 @@ class CUDAGraphWrapper:
         self.compilation_config = vllm_config.compilation_config
 
         self.first_run_finished = False
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
