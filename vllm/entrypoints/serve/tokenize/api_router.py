@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -32,6 +32,22 @@ def tokenization(request: Request) -> ServingTokenization:
 router = APIRouter()
 
 
+def _tokenize_not_implemented() -> JSONResponse:
+    """Some engines (e.g. diffusion-only serving) attach the tokenize router
+    without wiring a tokenization handler. Return a controlled 501 instead of
+    letting ``handler.create_tokenize`` raise ``AttributeError`` -> HTTP 500."""
+    return JSONResponse(
+        content=ErrorResponse(
+            error=ErrorInfo(
+                message="This engine does not support tokenization.",
+                type="invalid_request_error",
+                code=HTTPStatus.NOT_IMPLEMENTED.value,
+            )
+        ).model_dump(),
+        status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+    )
+
+
 @router.post(
     "/tokenize",
     dependencies=[Depends(validate_json_request)],
@@ -45,6 +61,8 @@ router = APIRouter()
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
+    if handler is None:
+        return _tokenize_not_implemented()
 
     generator = await handler.create_tokenize(request, raw_request)
 
@@ -70,6 +88,8 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
+    if handler is None:
+        return _tokenize_not_implemented()
 
     generator = await handler.create_detokenize(request, raw_request)
 
