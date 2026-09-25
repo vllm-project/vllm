@@ -26,6 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -40,9 +41,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    PUSH_FAIL_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    RemoteMeta,
+    ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
@@ -379,6 +383,10 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._handshake_lock = threading.RLock()
+
+        w._write_notifs_by_req = defaultdict(list)
+        w._invalid_block_ids = queue.Queue()
+        w.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
         w.region_group_ids = [0]
@@ -1077,6 +1085,7 @@ class TestPushWriterNotifs:
             remote_request_id="decode-request",
             local_xfer_side_handle=1,
             remote_xfer_side_handle=2,
+            unposted_ranks=set(),
         )
         assert handle == (101 if release_fails else None)
         w._sending_transfers[request_id] = [102]
@@ -1424,13 +1433,13 @@ class TestPushPipelineParallel:
         w._pending_completion_notifs.put(notif)
         assert w._get_new_notifs() == set()
         assert request_id not in w._recving_transfers
-        assert w.consumer_notification_counts_by_req[request_id] == 1
+        assert w._write_notifs_by_req[request_id] == [False]
 
         # Second (final) stage: now reported done.
         w._pending_completion_notifs.put(notif)
         assert w._get_new_notifs() == set()
         assert request_id in w._recving_transfers
-        assert request_id not in w.consumer_notification_counts_by_req
+        assert request_id not in w._write_notifs_by_req
 
     def test_req_meta_reads_pp_size_from_kv_transfer_params(self):
         """D learns the producer's pp_size from kv_transfer_params (forwarded
@@ -1502,7 +1511,7 @@ class TestPushWriterMlaReplication:
     leave the un-written ranks decoding against stale KV."""
 
     @staticmethod
-    def _mla_worker_writing_to(d_ranks):
+    def _mla_worker_writing_to(d_ranks, *, use_mla: bool = True):
         from types import SimpleNamespace
 
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -1511,7 +1520,7 @@ class TestPushWriterMlaReplication:
 
         engine_id = "decode-engine"
         w = _StubWriterWorker.fresh()
-        w.use_mla = True
+        w.use_mla = use_mla
         w.nixl_wrapper = MagicMock()
         w.transfer_topo = MagicMock()
         w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
@@ -1523,11 +1532,12 @@ class TestPushWriterMlaReplication:
         w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
         # The tp-mapping collapses MLA to a single source rank (correct for
         # the pull/read direction); the push path must fan it back out.
+        source_ranks = (0,) if use_mla else tuple(d_ranks)
         w.tp_mappings = {
             engine_id: TPMapping(
-                source_ranks_per_group=((0,),),
-                all_source_ranks=(0,),
-                rank_to_attention_slot={0: 0},
+                source_ranks_per_group=(source_ranks,),
+                all_source_ranks=source_ranks,
+                rank_to_attention_slot={r: i for i, r in enumerate(source_ranks)},
                 rank_offset_factor=0,
             )
         }
@@ -1535,6 +1545,10 @@ class TestPushWriterMlaReplication:
         w.dst_region_group_ids[engine_id] = [0]
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
+        # Non-MLA hetero TP chunks local memory per target rank.
+        w.src_xfer_handles_by_tp_ratio = {
+            (-len(d_ranks), 16): [3000 + i for i in range(len(d_ranks))]
+        }
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
@@ -2119,3 +2133,182 @@ def test_layer_handshake_rejects_unsupported_geometry(
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+class TestPushWriteFailureReporting:
+    """Report unposted WRITEs without finishing D before sibling WRITEs land."""
+
+    _producer = staticmethod(TestPushWriterMlaReplication._mla_worker_writing_to)
+
+    @staticmethod
+    def _consumer(*, pp_size: int = 1):
+        w = TestPushWriterNotifs._pollable_worker()
+        w._recving_metadata = {
+            "d-req": SimpleNamespace(pp_size=pp_size, local_block_ids=([100, 101],))
+        }
+        return w
+
+    @staticmethod
+    def _push_meta(engine_id: str) -> ReqMeta:
+        return ReqMeta(
+            local_block_ids=([100, 101],),
+            local_physical_block_ids=([100, 101],),
+            tp_size=1,
+            remote=RemoteMeta(
+                block_ids=([200, 201],),
+                host="",
+                port=0,
+                engine_id=engine_id,
+                request_id="d-req",
+            ),
+        )
+
+    @staticmethod
+    def _feed(w, producer_tp_size: int, *, failed: bool) -> None:
+        body = f"d-req:{producer_tp_size}".encode()
+        w._pending_completion_notifs.put(
+            PUSH_FAIL_NOTIF_PREFIX + body if failed else body
+        )
+        w._get_new_notifs()
+
+    @staticmethod
+    def _xfer_posting_all_but(*failing_ranks: int):
+        """Stand-in for ``_xfer_blocks`` that cannot post to *failing_ranks*."""
+
+        def xfer(*, read_spec, **_):
+            return None if read_spec.remote_rank in failing_ranks else 1000
+
+        return xfer
+
+    @staticmethod
+    def _reported_agents(w) -> list[str]:
+        return sorted(c.args[0] for c in w.nixl_wrapper.send_notif.call_args_list)
+
+    @pytest.mark.parametrize("use_mla", [True, False])
+    def test_only_the_unposted_rank_is_reported(self, use_mla):
+        """MLA replication and sharded KV resolve write ranks differently."""
+        w, engine_id = self._producer(d_ranks=(0, 1), use_mla=use_mla)
+        w._xfer_blocks = self._xfer_posting_all_but(1)
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=self._push_meta(engine_id))
+
+        assert self._reported_agents(w) == ["agent-1"]
+        assert w._sending_transfers["p-req"] == [1000]
+
+    def test_setup_error_before_any_write_reports_every_rank(self):
+        w, engine_id = self._producer(d_ranks=(0, 1))
+        w._logical_to_kernel_block_ids = MagicMock(side_effect=IndexError("no group"))
+        w._xfer_blocks = MagicMock()
+
+        with pytest.raises(IndexError):
+            w._xfer_blocks_for_req(req_id="p-req", meta=self._push_meta(engine_id))
+
+        assert self._reported_agents(w) == ["agent-0", "agent-1"]
+
+    def test_error_mid_loop_keeps_posted_writes_and_reports_the_rest(self):
+        w, engine_id = self._producer(d_ranks=(0, 1, 2), use_mla=False)
+        del w.dst_xfer_side_handles[engine_id][1]
+        w._xfer_blocks = self._xfer_posting_all_but()
+
+        with pytest.raises(KeyError):
+            w._xfer_blocks_for_req(req_id="p-req", meta=self._push_meta(engine_id))
+
+        assert self._reported_agents(w) == ["agent-1", "agent-2"]
+        assert w._sending_transfers["p-req"] == [1000]
+
+    def test_write_that_may_have_started_is_not_reported(self):
+        """Its completion notif can still arrive, so a report would count twice."""
+        w, engine_id = TestPushPrefixCaching._worker_driving_xfer()
+        w._remote_agents = {engine_id: {(0, 0): "agent-0"}}
+        w.nixl_wrapper.transfer.side_effect = RuntimeError("submission failed")
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=self._push_meta(engine_id))
+
+        w.nixl_wrapper.send_notif.assert_not_called()
+
+    @pytest.mark.parametrize("failure_first", [True, False])
+    @pytest.mark.parametrize("pp_size", [1, 2])
+    def test_failure_waits_for_sibling_writes(self, failure_first, pp_size):
+        """Neither notification order may free KV while another WRITE is pending."""
+        w = self._consumer(pp_size=pp_size)
+        outcomes = [True] + [False] * (2 * pp_size - 1)
+        if not failure_first:
+            outcomes.reverse()
+
+        for failed in outcomes[:-1]:
+            self._feed(w, 2, failed=failed)
+            results = w.get_transfer_results()
+            assert results.finished_recving == results.failed_recving == set()
+            assert w.get_block_ids_with_load_errors() == set()
+
+        self._feed(w, 2, failed=outcomes[-1])
+        results = w.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == {"d-req"}
+        assert w.get_block_ids_with_load_errors() == {100, 101}
+        w.xfer_stats.record_failed_transfer.assert_called_once()
+
+        results = w.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == set()
+
+    def test_unrelated_retirement_keeps_a_pending_failure(self):
+        w = self._consumer()
+        self._feed(w, 2, failed=True)
+        self._retire(w, {"other-req"})
+
+        self._feed(w, 2, failed=False)
+
+        assert w.get_transfer_results().failed_recving == {"d-req"}
+
+    def test_retired_request_leaves_no_pending_count(self):
+        w = self._consumer()
+        self._feed(w, 2, failed=True)
+
+        self._retire(w, {"d-req"})
+
+        assert "d-req" not in w._write_notifs_by_req
+
+    @staticmethod
+    def _retire(w, done_recving: set[str]) -> None:
+        """Simulate an independent receive failure reported by the base worker."""
+        with patch.object(
+            NixlBaseConnectorWorker,
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(finished_recving=done_recving),
+        ):
+            w.get_transfer_results()
+
+    @pytest.mark.parametrize("is_hma", [True, False])
+    def test_multi_group_models_fall_back_to_the_lease(self, is_hma):
+        w = self._consumer()
+        w._is_hma_required = is_hma
+        w.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+
+        self._feed(w, 1, failed=True)
+
+        results = w.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == set()
+        assert "d-req" in w._recving_metadata
+
+    def test_producer_reports_fail_the_consumer_request(self):
+        """Two P ranks fail to prepare their WRITE to the same D rank."""
+        sent = []
+        for rank in range(2):
+            p, engine_id = TestPushPrefixCaching._worker_driving_xfer()
+            p.world_size = 2
+            p.tp_rank = rank
+            p._remote_agents = {engine_id: {(0, 0): "agent-0"}}
+            p.nixl_wrapper.make_prepped_xfer.side_effect = RuntimeError("prep failed")
+            p._xfer_blocks_for_req(req_id="p-req", meta=self._push_meta(engine_id))
+            p.nixl_wrapper.send_notif.assert_called_once()
+            sent.append(p.nixl_wrapper.send_notif.call_args.kwargs["notif_msg"])
+
+        # An old D parses this into an unknown request id and ignores it.
+        assert sent[0].decode().rsplit(":", 1)[0] != "d-req"
+
+        d = self._consumer()
+        d._pending_completion_notifs.put(sent[0])
+        assert d.get_transfer_results().finished_recving == set()
+
+        d._pending_completion_notifs.put(sent[1])
+        results = d.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == {"d-req"}
