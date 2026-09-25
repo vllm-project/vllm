@@ -257,6 +257,12 @@ def _int8_quantize(
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
     if block_shape is None:
+        # Static quantization has no data-dependent reduction. Avoid launching
+        # scaled_int8_quant with a zero-sized grid while preserving the loaded
+        # scale for the expert kernel. Distributed prepare/finalize paths must
+        # still run so an empty local rank can receive tokens from its peers.
+        if A.numel() == 0 and A_scale is not None:
+            return torch.empty_like(A, dtype=torch.int8), A_scale
         if per_act_token:
             A, A_scale = per_token_quant_int8(A)
         elif A_scale is not None:

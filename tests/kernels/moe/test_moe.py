@@ -359,20 +359,25 @@ def _static_int8_moe_reference(
             w13_acc = torch.mv(layer.w13_weight[expert].float(), a1_q[token])
             w13_out = (
                 w13_acc * a1_scale * layer.w13_weight_scale[expert].reshape(-1).float()
-            ).to(x.dtype)
+            )
+            if layer.w13_bias is not None:
+                w13_out += layer.w13_bias[expert]
+            if layer.apply_router_weight_on_input:
+                w13_out *= topk_weights[token, slot]
+            w13_out = w13_out.to(x.dtype)
             activated = (F.silu(w13_out[:intermediate]) * w13_out[intermediate:]).to(
                 x.dtype
             )
             a2_q = quantize(activated, a2_scale)
             w2_acc = torch.mv(layer.w2_weight[expert].float(), a2_q)
-            slots.append(
-                (
-                    w2_acc
-                    * a2_scale
-                    * layer.w2_weight_scale[expert].reshape(-1).float()
-                    * topk_weights[token, slot]
-                ).to(x.dtype)
+            w2_out = (
+                w2_acc * a2_scale * layer.w2_weight_scale[expert].reshape(-1).float()
             )
+            if layer.w2_bias is not None:
+                w2_out += layer.w2_bias[expert]
+            if not layer.apply_router_weight_on_input:
+                w2_out *= topk_weights[token, slot]
+            slots.append(w2_out.to(x.dtype))
         outputs.append(torch.stack(slots).sum(dim=0))
     return torch.stack(outputs)
 
@@ -408,6 +413,7 @@ def test_quark_static_int8_moe_channel_scale_indexing(workspace_init):
     layer.activation = MoEActivation.SILU
     layer.expert_map = None
     layer.apply_router_weight_on_input = False
+    layer._expert_routing_tables = lambda: None
     with torch.device("cuda"):
         method.create_weights(layer, experts, hidden, intermediate, dtype)
 
@@ -420,7 +426,7 @@ def test_quark_static_int8_moe_channel_scale_indexing(workspace_init):
     layer.w2_input_scale.fill_(1.0 / 16)
     method.process_weights_after_loading(layer)
 
-    assert method.moe_kernel is None
+    assert method.moe_kernel is not None
     assert method.moe_quant_config is not None
     assert method.moe_quant_config.per_act_token_quant is False
     assert method.moe_quant_config.per_out_ch_quant is True
@@ -486,6 +492,7 @@ def test_quark_static_int8_moe_distinct_gemm_scales(workspace_init):
     layer.activation = MoEActivation.SILU
     layer.expert_map = None
     layer.apply_router_weight_on_input = False
+    layer._expert_routing_tables = lambda: None
     with torch.device("cuda"):
         method.create_weights(layer, experts, hidden, hidden, dtype)
 
@@ -540,6 +547,133 @@ def test_quark_static_int8_moe_distinct_gemm_scales(workspace_init):
     layer.w2_input_scale.copy_(saved_a2_scale)
     torch.cuda.synchronize()
     torch.testing.assert_close(wrong_actual, wrong_a2, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("weight_key", [kInt8StaticChannelSym, kInt8StaticTensorSym])
+@pytest.mark.parametrize("apply_router_weight_on_input", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_quark_static_int8_moe_modular_matches_legacy_order(
+    workspace_init,
+    dtype: torch.dtype,
+    weight_key,
+    apply_router_weight_on_input: bool,
+):
+    """The modular path preserves static Quark dtype, bias, and router order."""
+    experts, hidden, tokens, topk = 3, 128, 4, 1
+    moe_config = FusedMoEConfig(
+        num_experts=experts,
+        num_local_experts=experts,
+        num_logical_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=hidden,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=dtype,
+        has_bias=True,
+        moe_backend="triton",
+        max_num_tokens=tokens,
+    )
+    method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, kInt8StaticTensorSym)
+    layer = torch.nn.Module()
+    layer.intermediate_size_per_partition = hidden
+    layer.local_num_experts = experts
+    layer.global_num_experts = experts
+    layer.activation = MoEActivation.SILU
+    layer.expert_map = None
+    layer.apply_router_weight_on_input = apply_router_weight_on_input
+    layer._expert_routing_tables = lambda: None
+    with torch.device("cuda"):
+        method.create_weights(layer, experts, hidden, hidden, dtype)
+
+    generator = torch.Generator(device="cuda").manual_seed(7)
+    layer.w13_weight.copy_(
+        torch.randint(
+            -3,
+            4,
+            layer.w13_weight.shape,
+            dtype=torch.int8,
+            device="cuda",
+            generator=generator,
+        )
+    )
+    layer.w2_weight.copy_(
+        torch.randint(
+            -3,
+            4,
+            layer.w2_weight.shape,
+            dtype=torch.int8,
+            device="cuda",
+            generator=generator,
+        )
+    )
+    if weight_key == kInt8StaticChannelSym:
+        layer.w13_weight_scale.copy_(
+            torch.linspace(
+                0.002, 0.018, layer.w13_weight_scale.numel(), device="cuda"
+            ).reshape_as(layer.w13_weight_scale)
+        )
+        layer.w2_weight_scale.copy_(
+            torch.linspace(
+                0.003, 0.021, layer.w2_weight_scale.numel(), device="cuda"
+            ).reshape_as(layer.w2_weight_scale)
+        )
+    else:
+        layer.w13_weight_scale.copy_(
+            torch.tensor(
+                [[0.007, 0.011], [0.009, 0.013], [0.008, 0.015]],
+                device="cuda",
+            )
+        )
+        layer.w2_weight_scale.copy_(torch.tensor([0.012, 0.014, 0.016], device="cuda"))
+    layer.w13_input_scale.copy_(torch.tensor([0.025, 0.03, 0.035], device="cuda"))
+    layer.w2_input_scale.copy_(torch.tensor([0.0125, 0.0175, 0.02], device="cuda"))
+    layer.w13_bias.copy_(
+        torch.linspace(-0.25, 0.25, layer.w13_bias.numel(), device="cuda").reshape_as(
+            layer.w13_bias
+        )
+    )
+    layer.w2_bias.copy_(
+        torch.linspace(-0.125, 0.125, layer.w2_bias.numel(), device="cuda").reshape_as(
+            layer.w2_bias
+        )
+    )
+    method.process_weights_after_loading(layer)
+
+    x = torch.randn((tokens, hidden), dtype=dtype, device="cuda", generator=generator)
+    ids = torch.tensor([[0], [2], [1], [2]], dtype=torch.int32, device="cuda")
+    weights = torch.tensor([[0.0], [0.37], [0.9], [1.0]], device="cuda")
+    expected = _static_int8_moe_reference(layer, x, ids, weights)
+
+    with set_current_vllm_config(VllmConfig()):
+        actual = method.apply(layer, x, weights, ids, None, None)
+    torch.cuda.synchronize()
+
+    assert method.moe_kernel is not None
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+
+    if (
+        dtype == torch.bfloat16
+        and weight_key == kInt8StaticChannelSym
+        and apply_router_weight_on_input
+    ):
+        graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
+        with set_current_vllm_config(VllmConfig()), torch.cuda.graph(graph):
+            captured = method.apply(layer, x, weights, ids, None, None)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+    with set_current_vllm_config(VllmConfig()):
+        empty = method.apply(layer, x[:0], weights[:0], ids[:0], None, None)
+    torch.cuda.synchronize()
+    assert empty.shape == (0, hidden)
+    assert empty.dtype == dtype
 
 
 def iterative_moe(
