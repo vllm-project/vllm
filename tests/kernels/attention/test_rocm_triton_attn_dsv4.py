@@ -52,6 +52,65 @@ ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
+@pytest.fixture
+def enable_aiter_mqa(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    with monkeypatch.context() as context:
+        context.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        yield
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@requires_gfx950
+@pytest.mark.parametrize("column_scales", [False, True], ids=["vector", "column"])
+@torch.inference_mode()
+def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
+    column_scales, monkeypatch, enable_aiter_mqa
+) -> None:
+    """The vLLM AITER dispatch preserves ragged masking and per-token scales."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    assert rocm_aiter_ops.is_enabled(), "AITER is required on gfx950"
+    assert mod.mqa_logits_module() is not None, "AITER MQA logits are required"
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    dtype = current_platform.fp8_dtype()
+    q = torch.randn(7, 32, 128, device=device).to(dtype)
+    k = torch.randn(259, 128, device=device).to(dtype)
+    scales = torch.linspace(0.25, 1.25, k.shape[0], device=device)
+    if column_scales:
+        scales = scales[:, None]
+    weights = torch.rand(q.shape[:2], device=device) / q.shape[1]
+    starts = torch.tensor([0, 3, 128, 5, 0, 257, 259], device=device, dtype=torch.int32)
+    ends = torch.tensor(
+        [1, 129, 259, 5, 259, 259, 259], device=device, dtype=torch.int32
+    )
+
+    module = mod.mqa_logits_module()
+    implementation = module.fp8_mqa_logits
+    calls = 0
+
+    def traced_implementation(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return implementation(*args, **kwargs)
+
+    monkeypatch.setattr(module, "fp8_mqa_logits", traced_implementation)
+    actual = mod.rocm_fp8_mqa_logits(q, (k, scales), weights, starts, ends)
+    assert calls == 1
+    score = torch.einsum("mhd,nd->mhn", q.float(), k.float()) * scales.reshape(-1)
+    expected = (score.relu() * weights[..., None]).sum(dim=1)
+    positions = torch.arange(k.shape[0], device=device)
+    valid = (positions >= starts[:, None]) & (positions < ends[:, None])
+    assert actual.shape == expected.shape
+    assert actual.dtype == torch.float32
+    assert torch.equal(torch.isneginf(actual), ~valid)
+    torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
+
+
 def _ref_global_topk_ragged(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
