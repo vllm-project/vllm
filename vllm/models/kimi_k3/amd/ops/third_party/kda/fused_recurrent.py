@@ -144,20 +144,20 @@ def fused_recurrent_kda_fwd_kernel(
     state_indices,
     num_accepted_tokens,
     lower_bound,
-    scale: tl.constexpr,
     N: tl.int64,
     T: tl.int64,
+    stride_qkv_token,
+    stride_g_token,
+    stride_beta_token,
+    stride_out_token,
+    stride_state_token,
+    stride_indices_seq,
+    scale: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_qkv_token: tl.constexpr,
-    stride_g_token: tl.constexpr,
-    stride_beta_token: tl.constexpr,
-    stride_out_token: tl.constexpr,
-    stride_state_token: tl.constexpr,
-    stride_indices_seq: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
@@ -170,14 +170,27 @@ def fused_recurrent_kda_fwd_kernel(
     i_v = pid % tl.cdiv(V, BV)
     i_nh = pid // tl.cdiv(V, BV)
     i_n, i_h = i_nh // H, i_nh % H
+    tl.assume(i_n >= 0)
+    tl.assume(i_h >= 0)
+    tl.assume(i_v >= 0)
+    tl.assume(stride_qkv_token > 0)
+    tl.assume(stride_g_token > 0)
+    tl.assume(stride_beta_token > 0)
+    tl.assume(stride_out_token > 0)
+    tl.assume(stride_state_token > 0)
+    tl.assume(stride_indices_seq > 0)
+
     bos = tl.load(cu_seqlens + i_n).to(tl.int64)
     eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    tl.assume(bos >= 0)
+    tl.assume(eos >= bos)
     sequence_length = eos - bos
     if sequence_length == 0:
         return
+    tl.assume(sequence_length > 0)
 
-    o_k = tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
+    o_v = i_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
     m_k = o_k < K
     m_v = o_v < V
     m_state = m_v[:, None] & m_k[None, :]
@@ -193,6 +206,7 @@ def fused_recurrent_kda_fwd_kernel(
     if state_index <= 0:
         tl.store(p_out, tl.zeros([BV], dtype=tl.float32), mask=m_v)
         return
+    tl.assume(state_index > 0)
 
     p_state = (
         state
@@ -209,15 +223,10 @@ def fused_recurrent_kda_fwd_kernel(
     p_g = g + bos * stride_g_token + i_h * K + o_k
     p_beta = beta + bos * stride_beta_token + i_h
     for i_t in tl.range(0, sequence_length, num_stages=num_stages):
-        b_q = tl.load(p_q, mask=m_k, other=0.0, eviction_policy="evict_last").to(
-            tl.float32
-        )
-        b_k = tl.load(p_k, mask=m_k, other=0.0, eviction_policy="evict_last").to(
-            tl.float32
-        )
-        b_v = tl.load(p_v, mask=m_v, other=0.0, eviction_policy="evict_first").to(
-            tl.float32
-        )
+        tl.assume(i_t >= 0)
+        b_q = tl.load(p_q, mask=m_k, other=0.0).to(tl.float32)
+        b_k = tl.load(p_k, mask=m_k, other=0.0).to(tl.float32)
+        b_v = tl.load(p_v, mask=m_v, other=0.0).to(tl.float32)
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
@@ -227,7 +236,6 @@ def fused_recurrent_kda_fwd_kernel(
             p_g,
             mask=m_k,
             other=0.0,
-            eviction_policy="evict_last",
         ).to(tl.float32)
         if USE_GATE_IN_KERNEL:
             if HAS_DT_BIAS:
@@ -250,7 +258,7 @@ def fused_recurrent_kda_fwd_kernel(
 
         b_state *= exp(b_gate[None, :])
         b_v -= tl.sum(b_state * b_k[None, :], axis=1)
-        b_beta = tl.load(p_beta, eviction_policy="evict_last").to(tl.float32)
+        b_beta = tl.load(p_beta).to(tl.float32)
         if APPLY_BETA_SIGMOID:
             b_beta = tl.sigmoid(b_beta)
         b_v *= b_beta
@@ -260,13 +268,13 @@ def fused_recurrent_kda_fwd_kernel(
             p_out,
             b_out.to(p_out.dtype.element_ty),
             mask=m_v,
-            eviction_policy="evict_first",
         )
 
         final_state_index = tl.load(state_indices + i_n * stride_indices_seq + i_t).to(
             tl.int64
         )
         if final_state_index > 0:
+            tl.assume(final_state_index > 0)
             p_final_state = (
                 state
                 + final_state_index * stride_state_token
@@ -344,8 +352,20 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    BV = 32 if use_gate_in_kernel else 8
-    num_warps = 4 if use_gate_in_kernel else 1
+    if use_gate_in_kernel:
+        # Tuned on MI355X (gfx950). A single wave naturally vectorizes the
+        # contiguous K=128 loads as bf16x2/fp32x2. Increase BV as the number
+        # of sequence-heads grows to avoid redundant q/k/g traffic.
+        head_sequences = N * H
+        if head_sequences <= 24:
+            BV, num_stages = 4, 3
+        elif head_sequences <= 192:
+            BV, num_stages = 8, 2
+        else:
+            BV, num_stages = 16, 2
+        num_warps = 1
+    else:
+        BV, num_warps, num_stages = 8, 1, 2
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
@@ -380,7 +400,7 @@ def fused_recurrent_kda_fwd(
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     return out, initial_state
 
