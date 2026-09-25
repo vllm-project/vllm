@@ -144,7 +144,15 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
-        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        # If an explicit CLI --chat-template was passed, detect against it
+        # eagerly. Otherwise defer detection to the first request so we can
+        # probe the tokenizer's resolved template (online_renderer passes
+        # the CLI override, which is None for most deployments).
+        self._merge_inline_system: bool | None = (
+            self._detect_merge_inline_system(chat_template)
+            if chat_template is not None
+            else None
+        )
         # Resolved lazily from the renderer when "auto".
         self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
@@ -160,6 +168,41 @@ class AnthropicServingMessages(OpenAIServingChat):
                 self._disabled_thinking_effort,
             )
         return self._disabled_thinking_effort
+
+    async def _get_merge_inline_system(self) -> bool:
+        """Return whether inline system messages must be hoisted to the top.
+
+        When an explicit ``--chat-template`` CLI override was passed we
+        detected eagerly in ``__init__``. Otherwise resolve the tokenizer's
+        chat template via the renderer and run ``_detect_merge_inline_system``
+        against it on first use. If the tokenizer template is unavailable
+        (no tokenizer or empty string), fall back to the conservative
+        "merge" default.
+        """
+        if self._merge_inline_system is None:
+            resolved_template: str | None = None
+            try:
+                tokenizer = self.online_renderer.renderer.get_tokenizer()
+                if (
+                    tokenizer is not None
+                    and hasattr(tokenizer, "get_chat_template")
+                ):
+                    resolved_template = tokenizer.get_chat_template()
+            except Exception:
+                logger.debug(
+                    "Failed to resolve tokenizer chat template for "
+                    "inline-system detection; defaulting to merge.",
+                    exc_info=True,
+                )
+            self._merge_inline_system = self._detect_merge_inline_system(
+                resolved_template
+            )
+            logger.info(
+                "Anthropic inline-system detection against resolved template: "
+                "merge_inline_system=%s",
+                self._merge_inline_system,
+            )
+        return self._merge_inline_system
 
     async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
         """Use ``low`` if the renderer rejects or ignores ``none``.
@@ -686,9 +729,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
         if request.thinking is not None and request.thinking.type == "disabled":
             disabled_thinking_effort = await self._get_disabled_thinking_effort()
+        merge_inline_system = await self._get_merge_inline_system()
         chat_req = self.to_chat_completion_request(
             request,
-            merge_inline_system=self._merge_inline_system,
+            merge_inline_system=merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
         if logger.isEnabledFor(logging.DEBUG):
@@ -1110,9 +1154,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
+        merge_inline_system = await self._get_merge_inline_system()
         chat_req = self.to_chat_completion_request(
             request,
-            merge_inline_system=self._merge_inline_system,
+            merge_inline_system=merge_inline_system,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

@@ -56,10 +56,12 @@ class ServingRender(BaseServing):
         self.online_renderer = online_renderer
         self.tool_server = tool_server
 
-        self._merge_inline_system = (
+        self._merge_inline_system: bool | None = (
             AnthropicServingMessages._detect_merge_inline_system(
                 online_renderer.chat_template
             )
+            if online_renderer.chat_template is not None
+            else None
         )
 
         self._placeholder_metadata_parser: MultiModalDataParser | None = None
@@ -74,6 +76,29 @@ class ServingRender(BaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+    async def _get_merge_inline_system(self) -> bool:
+        if self._merge_inline_system is None:
+            resolved_template: str | None = None
+            try:
+                tokenizer = self.online_renderer.renderer.get_tokenizer()
+                if (
+                    tokenizer is not None
+                    and hasattr(tokenizer, "get_chat_template")
+                ):
+                    resolved_template = tokenizer.get_chat_template()
+            except Exception:
+                logger.debug(
+                    "Failed to resolve tokenizer chat template for "
+                    "inline-system detection; defaulting to merge.",
+                    exc_info=True,
+                )
+            self._merge_inline_system = (
+                AnthropicServingMessages._detect_merge_inline_system(
+                    resolved_template
+                )
+            )
+        return self._merge_inline_system
 
     async def render_chat_request(
         self,
@@ -151,8 +176,9 @@ class ServingRender(BaseServing):
         conversion as the /v1/messages server path, then delegates to
         render_chat_request so the rendered tokens match the server exactly.
         """
+        merge_inline_system = await self._get_merge_inline_system()
         chat_req = AnthropicServingMessages.to_chat_completion_request(
-            request, merge_inline_system=self._merge_inline_system
+            request, merge_inline_system=merge_inline_system
         )
         return await self.render_chat_request(chat_req)
 
