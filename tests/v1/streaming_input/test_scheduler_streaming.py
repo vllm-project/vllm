@@ -616,3 +616,22 @@ def test_session_resumes_after_stop_while_preempted(chunk_queued_before_stop):
     assert list(session.all_token_ids) == expected
     assert list(session.prompt_token_ids) == expected
     assert output.num_scheduled_tokens["session"] == len(expected)
+
+
+def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
+    """Only resumable requests continue after a stop; a request that finishes
+    while preempted must not be put back in a queue."""
+    scheduler = create_async_scheduler(async_scheduling=True)
+    request = DummyRequest("req", resumable=False, prompt_token_ids=list(range(10)))
+    scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("req", [10]))
+    in_flight = scheduler.schedule()
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, timestamp=0.0)
+    scheduler.update_from_output(in_flight, _model_output("req", [STOP_TOKEN]))
+
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request not in scheduler.waiting
+    assert request not in scheduler.skipped_waiting
+    assert "req" not in scheduler.schedule().num_scheduled_tokens
