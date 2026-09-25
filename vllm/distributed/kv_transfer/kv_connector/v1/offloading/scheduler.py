@@ -360,6 +360,17 @@ class RequestGroupState:
     num_hit_chunks: int = 0
 
 
+# Load cost order used when groups for the same tokens come from different
+# tiers. An unknown tier outranks every known one.
+_TIER_COST = {
+    CacheHitSource.DEVICE: 0,
+    CacheHitSource.HOST: 1,
+    CacheHitSource.P2P: 2,
+    CacheHitSource.DISK: 3,
+    CacheHitSource.EXTERNAL_UNSPECIFIED: 4,
+}
+
+
 @dataclass(slots=True)
 class RequestOffloadState:
     config: SchedulerOffloadConfig
@@ -383,8 +394,8 @@ class RequestOffloadState:
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
     # Keys selected for this load, for cache-hit attribution. Full-attention
-    # keys carry the token range they supply; sparse-group (SWA, recurrent)
-    # keys support the whole reused prefix.
+    # keys supply their own token range; sparse-group (SWA, recurrent) keys
+    # are needed to reuse the whole prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     sparse_load_keys: list[OffloadKey] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
@@ -1110,10 +1121,9 @@ class OffloadingConnectorScheduler:
     ) -> CachedTokensBySource:
         """Split the accepted external hit by the tier each loaded key came from.
 
-        Full-attention keys own disjoint token ranges and are attributed
-        directly. Without a full-attention group, the sparse keys support the
-        whole range: one tier if they agree, else ``external_unspecified``.
-        Tokens no selected key covers are ``external_unspecified``.
+        A token needs every group's KV, so when groups disagree the slowest
+        tier is reported. Tokens no loaded key covers are
+        ``external_unspecified``.
         """
         sources = CachedTokensBySource()
         if num_external_tokens == 0:
@@ -1121,30 +1131,26 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status[request.request_id]
         start = req_status.num_locally_computed_tokens
         end = start + num_external_tokens
-        req_context = req_status.req_context
 
-        covered = 0
-        for range_start, range_end, key in req_status.load_key_ranges:
-            num_tokens = min(end, range_end) - max(start, range_start)
-            if num_tokens <= 0:
-                continue
-            sources.add(self.manager.get_load_source(key, req_context), num_tokens)
-            covered += num_tokens
-
-        if covered == 0 and req_status.sparse_load_keys:
-            tiers = {
-                self.manager.get_load_source(key, req_context)
-                for key in req_status.sparse_load_keys
-            }
-            source = (
-                tiers.pop() if len(tiers) == 1 else CacheHitSource.EXTERNAL_UNSPECIFIED
+        def tier(key: OffloadKey) -> CacheHitSource:
+            return CacheHitSource(
+                self.manager.get_load_source(key, req_status.req_context)
             )
-            sources.add(source, num_external_tokens)
-            return sources
 
-        if covered < num_external_tokens:
+        sparse_tiers = [tier(key) for key in req_status.sparse_load_keys]
+        ranges = [
+            (max(start, lo), min(end, hi), tier(key))
+            for lo, hi, key in req_status.load_key_ranges
+            if max(start, lo) < min(end, hi)
+        ]
+        bounds = sorted({start, end, *(b for lo, hi, _ in ranges for b in (lo, hi))})
+        for lo, hi in zip(bounds, bounds[1:]):
+            tiers = sparse_tiers + [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
             sources.add(
-                CacheHitSource.EXTERNAL_UNSPECIFIED, num_external_tokens - covered
+                max(tiers, key=_TIER_COST.__getitem__)
+                if tiers
+                else CacheHitSource.EXTERNAL_UNSPECIFIED,
+                hi - lo,
             )
         return sources
 
@@ -1165,8 +1171,6 @@ class OffloadingConnectorScheduler:
         keys_to_load: list[OffloadKey] = []
         req_status.load_key_ranges.clear()
         req_status.sparse_load_keys.clear()
-        # Full-attention groups partition the same tokens; attribute via one.
-        full_ranges_recorded = False
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1232,8 +1236,7 @@ class OffloadingConnectorScheduler:
                 keys_to_load.extend(group_keys_to_load)
                 if group_config.sliding_window_size_in_chunks is not None:
                     req_status.sparse_load_keys.extend(group_keys_to_load)
-                elif not full_ranges_recorded:
-                    full_ranges_recorded = True
+                else:
                     for chunk_idx, key in enumerate(
                         group_keys_to_load, start_chunk_idx
                     ):
