@@ -36,6 +36,7 @@ class RadioConfig(PreTrainedConfig):
         norm_type: The normalization type to use.
         layer_norm_eps: The epsilon used by the layer normalization layers.
         initializer_factor: A factor for initializing all weight matrices.
+        layerscale_value: Initial value for the LayerScale ``lambda1`` parameters.
         hidden_act: The non-linear activation function in the encoder.
         cpe_max_size: Maximum image size for position embeddings.
         norm_mean: Mean values for image normalization (RGB channels).
@@ -74,6 +75,7 @@ class RadioConfig(PreTrainedConfig):
         norm_type: str = "layer_norm",
         layer_norm_eps: float = 1e-6,
         initializer_factor: float = 1.0,
+        layerscale_value: float = 1.0,
         hidden_act: str = "gelu",
         cpe_max_size: int = 2048,
         norm_mean: tuple[float, float, float] | list = OPENAI_CLIP_MEAN,
@@ -100,6 +102,7 @@ class RadioConfig(PreTrainedConfig):
         self.norm_type = norm_type
         self.layer_norm_eps = layer_norm_eps
         self.initializer_factor = initializer_factor
+        self.layerscale_value = layerscale_value
         self.hidden_act = hidden_act
         self.cpe_max_size = cpe_max_size
         self.norm_mean = (

@@ -10,17 +10,22 @@
 # --------------------------------------------------------
 """RADIO vision encoder, matching the ``RadioModel`` in the Transformers library.
 
-A RADIO-specific patch generator (:class:`RadioPatchEmbeddings`) feeds an encoder
-built from the shared InternViT blocks (:class:`InternVisionEncoder` /
-:class:`InternVisionEncoderLayer` / :class:`InternParallelAttention`); the RADIO
-subclasses extend ``forward`` for the dynamic-resolution and video features.
-``load_weights`` maps existing RADIO checkpoint keys onto this module tree via
-:data:`hf_to_vllm_mapper` so previously-saved checkpoints continue to load.
+The module tree mirrors the Transformers ``RadioModel`` (``embeddings`` and an
+``encoder.layer`` stack of ``norm1``/``attention``/``layer_scale1``/``norm2``/
+``mlp``/``layer_scale2`` blocks). The vLLM-specific deviations are the fused
+``attention.qkv`` (a :class:`~vllm.model_executor.layers.linear.QKVParallelLinear`
+for TP/quantization, vs the split ``query``/``key``/``value`` in HF) and running
+input normalization in the processor instead of an ``input_conditioner`` module;
+the attention backend and MLP reuse vLLM's :class:`MMEncoderAttention` and
+:class:`~vllm.model_executor.models.intern_vit.InternMLP`. ``load_weights`` maps
+both native Transformers and legacy remote-code checkpoint keys onto this tree
+via :data:`hf_to_vllm_mapper`.
 """
 
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import partial
 from itertools import accumulate, repeat
 from typing import TypeAlias
 
@@ -30,13 +35,23 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import PreTrainedConfig
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.intern_vit import (
-    InternParallelAttention,
-    InternVisionEncoder,
-    InternVisionEncoderLayer,
+from vllm.distributed import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_gather,
 )
+from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.intern_vit import InternMLP
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
+
+logger = init_logger(__name__)
 
 input_dim_t: TypeAlias = int | tuple[int, int]
 norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
@@ -333,11 +348,100 @@ class MaskMetadata:
     max_seqlen: torch.Tensor
 
 
-class RadioParallelAttention(InternParallelAttention):
+class RadioAttention(nn.Module):
+    """RADIO self-attention: a fused ``qkv`` projection feeding the vLLM
+    attention backend, with optional QK-normalization and dynamic-resolution
+    packed attention (via ``mask_meta``). The fused counterpart of the
+    Transformers ``RadioAttention`` (which keeps ``query``/``key``/``value`` and
+    ``output.dense`` split); ``load_weights`` bridges the two."""
+
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        *,
+        num_dummy_heads: int = 0,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        if self.head_dim * self.num_heads != self.embed_dim:
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got embed_dim="
+                f"{self.embed_dim} and num_heads={self.num_heads})."
+            )
+
+        use_data_parallel = is_vit_use_data_parallel()
+        # Disable attention TP when the head count is not divisible by tp_size.
+        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        use_data_parallel = (
+            use_data_parallel or (self.num_heads + num_dummy_heads) % tp_size != 0
+        )
+        self.tp_size = 1 if use_data_parallel else tp_size
+        self.tp_rank = 0 if use_data_parallel else get_tensor_model_parallel_rank()
+
+        # Dummy heads pad the head count so TP divides evenly on common GPU counts.
+        self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
+        self.num_heads_per_partition = divide(
+            num_dummy_heads + self.num_heads, self.tp_size
+        )
+        self.scale = self.head_dim**-0.5
+
+        self.qkv = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            num_dummy_heads + self.num_heads,
+            bias=config.qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
+            disable_tp=use_data_parallel,
+        )
+        self.qk_normalization = config.qk_normalization
+        if self.qk_normalization:
+            self.q_norm = RMSNorm(
+                self.dummy_dim,
+                eps=config.layer_norm_eps,
+                var_hidden_size=self.embed_dim,
+            )
+            self.k_norm = RMSNorm(
+                self.dummy_dim,
+                eps=config.layer_norm_eps,
+                var_hidden_size=self.embed_dim,
+            )
+        self.proj = RowParallelLinear(
+            self.dummy_dim,
+            self.embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            disable_tp=use_data_parallel,
+        )
+        self.attn = MMEncoderAttention(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
+
+    def _apply_qk_norm(
+        self, q: torch.Tensor, k: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.tp_size > 1:
+            q = tensor_model_parallel_all_gather(q.contiguous())
+            k = tensor_model_parallel_all_gather(k.contiguous())
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        if self.tp_size > 1:
+            splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+        return q, k
+
     def forward(
-        self, x: torch.Tensor, mask_meta: MaskMetadata | None = None
+        self, hidden_states: torch.Tensor, mask_meta: MaskMetadata | None = None
     ) -> torch.Tensor:
-        qkv, _ = self.qkv(x)
+        qkv, _ = self.qkv(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
 
         if self.qk_normalization:
@@ -352,28 +456,89 @@ class RadioParallelAttention(InternParallelAttention):
         return out
 
 
-class RadioVisionEncoderLayer(InternVisionEncoderLayer):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
+class RadioLayerScale(nn.Module):
+    """LayerScale matching the Transformers ``RadioLayerScale``: a ``lambda1``
+    parameter scaling the residual branch."""
+
+    def __init__(self, config: PreTrainedConfig) -> None:
+        super().__init__()
+        self.lambda1 = nn.Parameter(
+            config.layerscale_value * torch.ones(config.hidden_size)
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states * self.lambda1
+
+
+class RadioLayer(nn.Module):
+    """RADIO transformer block, mirroring the Transformers ``RadioLayer``
+    (``norm1`` / ``attention`` / ``layer_scale1`` / ``norm2`` / ``mlp`` /
+    ``layer_scale2``). ``drop_path`` is an inference-time ``Identity``; the MLP
+    reuses :class:`InternMLP` (``fc1``/``fc2``, matching ``RadioMLP``)."""
+
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        *,
+        num_dummy_heads: int = 0,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.attention = RadioAttention(
+            config,
+            quant_config=quant_config,
+            num_dummy_heads=num_dummy_heads,
+            prefix=f"{prefix}.attention",
+        )
+        self.layer_scale1 = RadioLayerScale(config)
+        self.drop_path = nn.Identity()
+        self.norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp = InternMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.layer_scale2 = RadioLayerScale(config)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         mask_meta: MaskMetadata | None = None,
-    ):
-        hidden_states = (
-            hidden_states
-            + self.attn(self.norm1(hidden_states), mask_meta=mask_meta) * self.ls1
-        )
-
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)) * self.ls2
-
+    ) -> torch.Tensor:
+        attn_out = self.attention(self.norm1(hidden_states), mask_meta=mask_meta)
+        hidden_states = self.drop_path(self.layer_scale1(attn_out)) + hidden_states
+        mlp_out = self.mlp(self.norm2(hidden_states))
+        hidden_states = self.drop_path(self.layer_scale2(mlp_out)) + hidden_states
         return hidden_states
 
 
-class RadioVisionEncoder(InternVisionEncoder):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, layer_cls=RadioVisionEncoderLayer, **kwargs)
+class RadioVisionEncoder(nn.Module):
+    """RADIO encoder stack, mirroring the Transformers ``RadioEncoder`` module
+    tree (a ``layer`` ModuleList of :class:`RadioLayer`)."""
+
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        *,
+        num_hidden_layers_override: int | None = None,
+        num_dummy_heads: int = 0,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+        self.layer = nn.ModuleList(
+            [
+                RadioLayer(
+                    config,
+                    quant_config=quant_config,
+                    num_dummy_heads=num_dummy_heads,
+                    prefix=f"{prefix}.layer.{layer_idx}",
+                )
+                for layer_idx in range(num_hidden_layers)
+            ]
+        )
 
     def forward(
         self,
@@ -381,7 +546,7 @@ class RadioVisionEncoder(InternVisionEncoder):
         mask_meta: MaskMetadata | None = None,
     ):
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers:
+        for encoder_layer in self.layer:
             hidden_states = encoder_layer(hidden_states, mask_meta=mask_meta)
         return hidden_states
 
@@ -391,14 +556,20 @@ class RadioModel(nn.Module):
         "qkv": ["qkv"],
     }
 
-    # Map existing RADIO checkpoint keys onto the current module tree so that
-    # checkpoints saved for the previous modeling code still load.
+    # Map both RADIO checkpoint layouts onto this module tree, which mirrors the
+    # Transformers ``RadioModel`` (``embeddings.*`` and ``encoder.layer.N.*``):
+    #   * native Transformers checkpoints load onto it directly; only the split
+    #     attention projections fuse into ``attention.qkv`` via
+    #     ``orig_to_new_stacked`` and the output projection is renamed;
+    #   * legacy remote-code checkpoints nest weights under
+    #     ``radio_model.model.{patch_generator,blocks}.*`` with a fused
+    #     ``attn.qkv`` (renamed to ``attention.qkv`` and loaded directly).
     # ``video_patch_projection`` must precede ``embedder`` (applied in order);
     # keys mapping to ``None`` are intentionally not loaded (input normalization
-    # runs in the processor, ``summary_idxs`` comes from the config, and
-    # LayerScale stays at its identity init).
+    # runs in the processor and ``summary_idxs`` comes from the config).
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
+            # legacy remote-code layout onto the native module tree
             "radio_model.model.patch_generator.video_embedder": (
                 "embeddings.video_patch_projection"
             ),
@@ -411,11 +582,34 @@ class RadioModel(nn.Module):
             "radio_model.model.patch_generator.cls_token.token": (
                 "embeddings.cls_register_token"
             ),
-            "radio_model.model.blocks": "encoder.layers",
-            "radio_model.input_conditioner": None,
-            "radio_model.summary_idxs": None,
-            ".ls1": None,
-            ".ls2": None,
+            "radio_model.model.blocks": "encoder.layer",
+            # legacy names onto the native tree: ``attn`` -> ``attention`` (its
+            # fused ``qkv``/``proj`` load directly) and bare ``ls1``/``ls2`` ->
+            # the ``layer_scale{1,2}`` LayerScale modules.
+            ".attn.": ".attention.",
+            ".ls1": ".layer_scale1.lambda1",
+            ".ls2": ".layer_scale2.lambda1",
+            # native attention output projection: ``attention.output.dense`` is
+            # current at transformers 5.x (Dinov2 naming); ``attention.o_proj``
+            # covers the post-refactor spelling on transformers main.
+            "attention.output.dense": "attention.proj",
+            "attention.o_proj": "attention.proj",
+            # dropped in both layouts: normalization runs in the processor and
+            # ``summary_idxs`` comes from the config.
+            "input_conditioner": None,
+            "summary_idxs": None,
+        },
+        orig_to_new_stacked={
+            # Native split q/k/v projections fuse into the ``qkv``
+            # QKVParallelLinear. ``attention.attention.{query,key,value}`` is
+            # current at transformers 5.x; ``attention.{q,k,v}_proj`` covers the
+            # post-refactor spelling on transformers main.
+            "attention.attention.query": ("attention.qkv", "q"),
+            "attention.attention.key": ("attention.qkv", "k"),
+            "attention.attention.value": ("attention.qkv", "v"),
+            "attention.q_proj": ("attention.qkv", "q"),
+            "attention.k_proj": ("attention.qkv", "k"),
+            "attention.v_proj": ("attention.qkv", "v"),
         },
     )
 
@@ -491,15 +685,32 @@ class RadioModel(nn.Module):
         return self._extract_final(encoder_outputs, imgs_sizes=imgs_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load RADIO checkpoint weights, remapping keys from the previous
-        modeling code via :data:`hf_to_vllm_mapper`."""
+        """Load RADIO checkpoint weights, remapping legacy remote-code and
+        native Transformers keys onto this module tree via
+        :data:`hf_to_vllm_mapper`."""
         if isinstance(weights, dict):
             weights = weights.items()
-        # Only radio_model.* tensors are ours; ignore any auxiliary keys a fuller
-        # checkpoint may carry (an unmapped radio_model.* key still errors).
-        weights = ((name, w) for name, w in weights if name.startswith("radio_model."))
+        # Keep only tensors belonging to the RADIO tower (legacy ``radio_model.*``
+        # or native top-level keys); ignore any auxiliary keys a fuller checkpoint
+        # may carry (an unmapped tower key still errors).
+        prefixes = (
+            "radio_model.",
+            "embeddings.",
+            "encoder.",
+            "input_conditioner.",
+            "summary_idxs",
+        )
+        weights = ((name, w) for name, w in weights if name.startswith(prefixes))
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if not loaded:
+            logger.warning(
+                "RadioModel.load_weights matched no checkpoint tensors; the "
+                "vision tower will keep its random initialization. Expected "
+                "legacy 'radio_model.*' or native 'embeddings.*'/'encoder.*' "
+                "keys."
+            )
+        return loaded
 
     def _extract_final(
         self, y: torch.Tensor, imgs_sizes: list[tuple[int, int]] | None = None

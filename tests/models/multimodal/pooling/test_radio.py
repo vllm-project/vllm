@@ -75,12 +75,12 @@ def run_radio_test(
     vllm_model = RadioModel(vllm_config)
     loaded = vllm_model.load_weights(hf_model.state_dict())
     # Guard the remote-code -> vLLM key remap: every parameter must be loaded
-    # from the checkpoint, except the identity LayerScale gains (ls1/ls2, which
-    # are intentionally not loaded for C-RADIO).
+    # from the checkpoint, except the LayerScale gains (layer_scale{1,2}.lambda1),
+    # which are identity-init and may be absent from the remote-code checkpoint.
     expected = {
         name
         for name, _ in vllm_model.named_parameters()
-        if not name.endswith((".ls1", ".ls2"))
+        if not name.endswith((".layer_scale1.lambda1", ".layer_scale2.lambda1"))
     }
     missing = expected - loaded
     assert not missing, f"parameters not loaded from checkpoint: {sorted(missing)}"
@@ -144,3 +144,63 @@ def test_summary_idxs_all_use_summary_false_is_empty():
         cls_token_per_teacher=True,
     )
     assert summary.shape[1] == 0
+
+
+def _native_state_dict_from_model(model: RadioModel) -> dict[str, torch.Tensor]:
+    """Reverse-map a model's parameters onto native Transformers checkpoint keys
+    (``encoder.layer.N.*`` with split ``attention.attention.{query,key,value}``
+    and ``attention.output.dense``), so loading it must round-trip back to the
+    original parameters."""
+    state_dict: dict[str, torch.Tensor] = {}
+    for name, param in model.named_parameters():
+        data = param.detach().clone()
+        # The module tree already mirrors the native ``encoder.layer.N.*`` names
+        # (including ``layer_scale{1,2}.lambda1``); only the fused attention
+        # projections differ from the native split ones.
+        if ".attention.qkv." in name:
+            base, suffix = name.split(".attention.qkv.")
+            query, key, value = data.chunk(3, dim=0)
+            for proj, shard in (("query", query), ("key", key), ("value", value)):
+                state_dict[f"{base}.attention.attention.{proj}.{suffix}"] = (
+                    shard.clone()
+                )
+        elif ".attention.proj." in name:
+            base, suffix = name.split(".attention.proj.")
+            state_dict[f"{base}.attention.output.dense.{suffix}"] = data
+        else:
+            state_dict[name] = data
+    return state_dict
+
+
+def test_native_format_weight_loading(default_vllm_config, dist_init):
+    # Native Transformers checkpoints nest the encoder under ``encoder.layer.N``
+    # with split attention projections; loading must fuse q/k/v into the packed
+    # ``qkv`` in the right order and land every other tensor in place, matching
+    # the legacy layout the integration test covers.
+    config = RadioConfig(model_name="vit_small_patch16_224")
+    model = RadioModel(config, num_hidden_layers_override=2)
+
+    # Every parameter (including layer_scale) must load from the native keys.
+    expected = {
+        name: param.detach().clone() for name, param in model.named_parameters()
+    }
+    native_weights = _native_state_dict_from_model(model)
+    # Keys both layouts intentionally drop must be skipped, not error.
+    native_weights["input_conditioner.norm_mean"] = torch.zeros(3)
+    native_weights["input_conditioner.norm_std"] = torch.ones(3)
+    native_weights["summary_idxs"] = torch.zeros(1, dtype=torch.long)
+
+    # Zero every parameter so a weight that fails to load is visible as zeros.
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
+
+    loaded = model.load_weights(native_weights)
+
+    missing = set(expected) - loaded
+    assert not missing, f"native weights not loaded: {sorted(missing)}"
+    params = dict(model.named_parameters())
+    for name, original in expected.items():
+        assert torch.equal(params[name], original), (
+            f"parameter mismatch after native load: {name}"
+        )
