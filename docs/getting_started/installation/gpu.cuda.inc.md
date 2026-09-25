@@ -48,30 +48,25 @@ uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_V
 
 #### Install FlashInfer precompiled kernels {#install-flashinfer-kernels}
 
-vLLM's CUDA installation includes `flashinfer-python`. We strongly recommend
-also installing `flashinfer-cubin` and `flashinfer-jit-cache`, particularly on
-Hopper and newer GPUs, **especially Blackwell**. These packages provide
-precompiled CUDA kernels that reduce downloads and compilation at startup.
-Install them from FlashInfer's wheel indexes using `flashinfer download-kernels`.
+We strongly recommend installing FlashInfer's precompiled kernels to reduce
+downloads and compilation at startup, particularly on Hopper and newer GPUs,
+**especially Blackwell**.
 
 After installing vLLM, run the following in the same Python environment:
 
 ```bash
 flashinfer download-kernels
-flashinfer show-config
 ```
 
-The command automatically selects kernel packages matching the installed
-`flashinfer-python` and PyTorch CUDA versions and supports uv environments.
-Let vLLM select its required `flashinfer-python` version instead of maintaining
-a separate FlashInfer version pin in your build script.
-Use `flashinfer download-kernels --dry-run` to inspect the installation commands.
+The CLI automatically selects compatible kernels for your installed FlashInfer
+and CUDA versions. Use `flashinfer show-config` to check the installation, or
+`flashinfer download-kernels --dry-run` to preview the installation commands.
 
-For custom container images, run this step after installing vLLM and PyTorch in
-the Python environment that will be included in the final image. These packages
-provide precompiled kernels, but some workloads may still require JIT compilation.
+For custom container images, run this step after installing vLLM in the Python
+environment included in the final image. Some workloads may still compile
+additional kernels at runtime.
 See the [FlashInfer CLI documentation](https://docs.flashinfer.ai/cli.html#download-kernels)
-for CUDA overrides and nightly kernel wheels.
+for CUDA overrides and nightly kernels.
 
 #### Install the latest code
 
