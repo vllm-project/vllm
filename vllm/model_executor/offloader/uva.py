@@ -52,6 +52,12 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+        # Opt-in: pin UVA weights through the CachingHostAllocator (the
+        # pre-exact-size behavior). Faster decode on some systems, but host
+        # memory is rounded up to a power of two per tensor.
+        self.uva_caching_pin = (
+            self.pin_memory and envs.VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN
+        )
 
     def wrap_modules(
         self,
@@ -125,6 +131,8 @@ class UVAOffloader(BaseOffloader):
                 # allocates exact-size mapped pinned memory (``cudaHostAlloc``)
                 # for an unpinned input, so the view is pinned either way and
                 # the host footprint matches the offloaded bytes.
+                if self.uva_caching_pin:
+                    cpu_data = cpu_data.pin_memory()
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 

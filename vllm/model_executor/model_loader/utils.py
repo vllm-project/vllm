@@ -234,14 +234,19 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
                 ).copy_(p.data)
 
             # parameter is UVA offloaded, but was replaced with a new device tensor
-            # re-offload it to CPU using UVA. Do not pin here: the CUDA view
-            # helper allocates exact-size pinned memory for an unpinned input,
-            # while ``pin_memory=True`` would round the allocation up to a
-            # power of two (see UVAOffloader.wrap_modules).
+            # re-offload it to CPU using UVA. By default do not pin here: the
+            # CUDA view helper allocates exact-size pinned memory for an
+            # unpinned input, while ``pin_memory=True`` would round the
+            # allocation up to a power of two (see UVAOffloader.wrap_modules).
             if name in uva_offloaded_parameters and not getattr(
                 p, "_vllm_is_uva_offloaded", False
             ):
-                cpu_data = torch.empty_like(p.data, device="cpu").copy_(p.data)
+                cpu_data = torch.empty_like(
+                    p.data,
+                    device="cpu",
+                    pin_memory=use_pin_memory
+                    and envs.VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN,
+                ).copy_(p.data)
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 

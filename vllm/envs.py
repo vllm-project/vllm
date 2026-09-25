@@ -306,6 +306,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -2090,13 +2091,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
-    # Disable using pytorch's pin memory for CPU offloading.
+    # Disable using pytorch's pin memory for CPU offloading. Applies to the
+    # non-UVA offload path (see VLLM_WEIGHT_OFFLOADING_DISABLE_UVA) and to
+    # VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN. The UVA path allocates
+    # exact-size pinned host memory by default, so this has no effect there.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
     ),
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
+    # On the UVA offload path, pin weights with Tensor.pin_memory() (PyTorch's
+    # CachingHostAllocator) instead of an exact-size cudaHostAlloc. The caching
+    # allocator rounds each allocation up to a power of two, so host memory
+    # use can exceed --cpu-offload-gb by up to ~2x; in exchange, decode was
+    # measured ~2-3% faster on one GB300 + Grace system. Opt-in.
+    "VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN", "0"))
     ),
     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
