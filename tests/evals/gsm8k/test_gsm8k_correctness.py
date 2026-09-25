@@ -113,13 +113,12 @@ def test_gsm8k_correctness(config_filename):
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
         or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
     ):
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
-        # Retain the legacy pool's infrastructure guard while MI355 runs these.
-        if not on_gfx950():
+        if get_cdna_version() < 4:
             pytest.skip(
-                "Skipping DeepSeek-V3.2 and DeepSeek-R1 on non-GFX950 ROCm "
-                "platforms due to agent pool disk space issues and pod evictions."
+                "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms below "
+                "CDNA 4 due to agent pool disk space issues and pod evictions."
             )
     if current_platform.is_rocm() and (
         "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
