@@ -81,6 +81,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
+    state._contains_gdn_groups = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
     # A verify decode, a padded prompt tail (128 of 129 prompt tokens already
