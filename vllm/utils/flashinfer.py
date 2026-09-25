@@ -122,30 +122,17 @@ def has_flashinfer() -> bool:
     if importlib.util.find_spec("flashinfer") is None:
         logger.debug_once("FlashInfer unavailable since package was not found")
         return False
-    # FlashInfer JIT-compiles modules missing from flashinfer-jit-cache with
-    # nvcc and `ninja` (from PATH).
+    # FlashInfer's JIT runs nvcc and `ninja` (from PATH).
     if not has_flashinfer_cubin() and (
-        _flashinfer_nvcc_path() is None
-        or (
-            shutil.which("ninja") is None
-            and importlib.util.find_spec("flashinfer_jit_cache") is None
-        )
+        _flashinfer_nvcc_path() is None or shutil.which("ninja") is None
     ):
-        if current_platform.is_cuda() and current_platform.has_device_capability(90):
-            logger.warning_once(
-                "FlashInfer cannot JIT-compile kernels: flashinfer-cubin is not "
-                "installed and nvcc (via CUDA_HOME, CUDA_PATH, PATH or "
-                "/usr/local/cuda) or ninja (via PATH) is missing. vLLM will not "
-                "use FlashInfer MoE, GEMM or fusion kernels and falls back to "
-                "slower ones (e.g. Triton MoE). Set CUDA_HOME to a CUDA toolkit "
-                "and put ninja on PATH, or install flashinfer-cubin and "
-                "flashinfer-jit-cache: https://docs.flashinfer.ai/installation.html"
-            )
-        else:
-            logger.debug_once(
-                "FlashInfer unavailable since nvcc or ninja was not found "
-                "and not using pre-downloaded cubins"
-            )
+        logger.warning_once(
+            "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
+            "and nvcc (via CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or "
+            "ninja (via PATH) is missing, so slower fallbacks such as Triton MoE "
+            "are used. Set CUDA_HOME to a CUDA toolkit, or install "
+            "flashinfer-cubin and flashinfer-jit-cache."
+        )
         return False
     return True
 
