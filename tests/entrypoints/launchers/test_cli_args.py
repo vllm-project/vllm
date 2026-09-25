@@ -8,6 +8,7 @@ import pytest
 
 import vllm.entrypoints.launchers.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -67,6 +68,24 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
         ]
     )
     assert args.port == 9000
+
+
+def test_logging_config_cli_args(serve_parser):
+    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
+        args = serve_parser.parse_args(
+            [
+                "--logging-config",
+                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
+                "--log-level",
+                "DEBUG",
+                "--log-config-file",
+                "/tmp/flat.json",
+            ]
+        )
+
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.log_level == "DEBUG"
+    assert config.pylogging_config_file == "/tmp/flat.json"
 
 
 ### Tests for LoRA module parsing

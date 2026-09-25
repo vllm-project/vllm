@@ -797,8 +797,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
             num_reqs = min(
-                num_reqs,
-                self.max_num_tokens // self.speculator.num_query_per_req,
+                num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
             )
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
@@ -1257,14 +1256,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks, max_query_len, batch_state.has_prefill
         )
 
-    def _prepare_padding_mask(
-        self, num_tokens: int, num_tokens_after_padding: int
-    ) -> torch.Tensor:
-        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
-        is_padding[:num_tokens].fill_(False)
-        is_padding[num_tokens:].fill_(True)
-        return is_padding
-
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -1277,9 +1268,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert num_tokens > 0
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
         if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding = self._prepare_padding_mask(
-                num_tokens, num_tokens_after_padding
-            )
+            is_padding[:num_tokens].fill_(False)
+            is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
