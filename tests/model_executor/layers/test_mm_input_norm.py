@@ -182,19 +182,9 @@ class TestFusedMMInputNormShapes:
 # ===========================================================================
 @requires_vllm_config
 class TestFusedMMInputNormInputHandling:
-    def test_hwc_image_is_not_supported(self):
-        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
-        image = torch.zeros((31, 47, 3), dtype=torch.uint8, device=_DEVICE)
-
-        with pytest.raises(ValueError, match="HWC"):
-            norm(image, visual_dtype=torch.float32)
-
-    def test_chw_image_rejects_wrong_channel_count(self):
-        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
-        image = torch.zeros((4, 31, 47), dtype=torch.uint8, device=_DEVICE)
-
-        with pytest.raises(AssertionError):
-            norm(image, visual_dtype=torch.float32)
+    def test_invalid_input_layout_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported input layout"):
+            FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, input_layout="hwc")
 
     def test_non_contiguous_input_matches_reference(self):
         set_random_seed(0)
@@ -207,14 +197,17 @@ class TestFusedMMInputNormInputHandling:
         _check_against_reference(non_contig, torch.float32)
 
     @pytest.mark.parametrize("non_contiguous", [False, True])
-    def test_chw_image_matches_reference(self, non_contiguous: bool):
+    @pytest.mark.parametrize("width", [3, 4, 47])
+    def test_chw_image_matches_reference(self, non_contiguous: bool, width: int):
         pixel_values = torch.randint(
-            0, 256, (3, 31, 47, 2), dtype=torch.uint8, device=_DEVICE
+            0, 256, (3, 31, width, 2), dtype=torch.uint8, device=_DEVICE
         )[..., 0]
         if not non_contiguous:
             pixel_values = pixel_values.contiguous()
 
-        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
+        norm = FusedMMInputNorm(
+            _RGB_MEAN, _RGB_STD, _RGB_RESCALE, input_layout="chw"
+        ).to(_DEVICE)
         output = norm(pixel_values, visual_dtype=torch.bfloat16)
 
         mean = torch.tensor(_RGB_MEAN, device=_DEVICE).view(3, 1, 1)
