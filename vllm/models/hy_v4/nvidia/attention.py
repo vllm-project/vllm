@@ -18,7 +18,7 @@ from typing import cast
 import regex as re
 import torch
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
+from transformers import DeepseekV2Config, DeepseekV3Config, PreTrainedConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -51,7 +51,7 @@ _SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention"
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
-def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
+def compute_skip_topk_layers(config: PreTrainedConfig) -> set[int]:
     """Return the backbone layers that reuse a previous layer's top-k indices.
 
     A "shared" indexer layer performs sparse attention with the indices computed
@@ -280,7 +280,7 @@ class HYV4MLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
