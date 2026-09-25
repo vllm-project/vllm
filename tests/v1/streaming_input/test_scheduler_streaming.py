@@ -4,8 +4,10 @@
 import unittest
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
+from tests.v1.core.utils import create_scheduler as create_async_scheduler
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -577,3 +579,40 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+
+def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=[request_id],
+        req_id_to_index={request_id: 0},
+        sampled_token_ids=[token_ids],
+        logprobs=None,
+        prompt_logprobs_dict={request_id: None},
+        pooler_output=[],
+    )
+
+
+@pytest.mark.parametrize("chunk_queued_before_stop", [False, True])
+def test_session_resumes_after_stop_while_preempted(chunk_queued_before_stop):
+    """A session preempted with a step in flight can stop when that step's
+    output is delivered. It must stay schedulable and keep its tokens."""
+    scheduler = create_async_scheduler(async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=list(range(10)))
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    in_flight = scheduler.schedule()
+    next_chunk = DummyRequest("session", prompt_token_ids=[20, 21])
+    if chunk_queued_before_stop:
+        scheduler.add_request(next_chunk)
+
+    scheduler.running.remove(session)
+    scheduler._preempt_request(session, timestamp=0.0)
+    scheduler.update_from_output(in_flight, _model_output("session", [STOP_TOKEN]))
+    if not chunk_queued_before_stop:
+        scheduler.add_request(next_chunk)
+    output = scheduler.schedule()
+
+    expected = list(range(10)) + [10, 20, 21]
+    assert list(session.all_token_ids) == expected
+    assert list(session.prompt_token_ids) == expected
+    assert output.num_scheduled_tokens["session"] == len(expected)
