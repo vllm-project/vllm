@@ -21,12 +21,13 @@ constexpr int kFp8QuantBlockSize = 256;
 template <typename T>
 using fp8_quant_vec_t = vec_n_t<T, kFp8QuantVecSize>;
 
-// Vectors per thread on the single-read per-token path. 16-bit rows longer
-// than one vector per thread (hidden > 4096) stay on the two-pass kernel: its
-// second read hits L2 and it already runs at HBM bandwidth there, while
-// holding more vectors measured 2-7% slower on H100. fp32 rows gain up to 4.
+// Vectors per thread on the single-read per-token path. Rows that need more
+// stay on the two-pass kernel: its second read hits L2 and it already runs
+// at HBM bandwidth there, while holding more vectors costs occupancy. 16-bit
+// rows above one vector per thread (hidden > 4096) measured 2-7% slower on
+// H100; fp32 rows above two (hidden > 8192) measured 9-35% slower on B300.
 template <typename T>
-constexpr int kFp8QuantMaxVecsPerThread = sizeof(T) == 4 ? 4 : 1;
+constexpr int kFp8QuantMaxVecsPerThread = sizeof(T) == 4 ? 2 : 1;
 
 // Picks the fewest vectors per thread whose thread count, rounded up to whole
 // warps, fits in one block, so every thread holds the same number of vectors.
@@ -642,13 +643,8 @@ void dynamic_per_token_scaled_fp8_quant(
                     out_ptr, scales_ptr, in_ptr, scale_ub_ptr, num_tokens,
                     num_vecs, single_read_threads, in_row_stride,
                     out_row_stride, stream);
-              } else if (vecs_per_thread == 2) {
-                vllm::launch_dynamic_per_token_single_read<scalar_t, fp8_t, 2>(
-                    out_ptr, scales_ptr, in_ptr, scale_ub_ptr, num_tokens,
-                    num_vecs, single_read_threads, in_row_stride,
-                    out_row_stride, stream);
               } else {
-                vllm::launch_dynamic_per_token_single_read<scalar_t, fp8_t, 4>(
+                vllm::launch_dynamic_per_token_single_read<scalar_t, fp8_t, 2>(
                     out_ptr, scales_ptr, in_ptr, scale_ub_ptr, num_tokens,
                     num_vecs, single_read_threads, in_row_stride,
                     out_row_stride, stream);

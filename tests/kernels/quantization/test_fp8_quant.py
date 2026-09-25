@@ -19,8 +19,8 @@ from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
 # 1024 and 4096 take the single-read per-token path at one vector per thread.
-# 8192 and 16384 take it at 2 and 4 vectors per thread for fp32 and fall back
-# to the two-pass kernel for 16-bit types; 32768 falls back for both.
+# 8192 takes it at two vectors per thread for fp32 and falls back to the
+# two-pass kernel for 16-bit types; 16384 and 32768 fall back for both.
 HIDDEN_SIZES = [17, 1024, 1025, 1026, 4096, 5137, 8192, 8193, 16384, 32768]
 NUM_TOKENS = [1, 7, 4096]
 SCALE_UBS = [True, False]
