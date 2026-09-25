@@ -11,7 +11,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
@@ -209,6 +209,7 @@ def test_model_config_generation_fallback_forwards_code_revision():
             model="org/model",
             trust_remote_code=True,
             revision="model-pin",
+            _hf_config_revision=None,
             code_revision="code-pin",
             config_format="auto",
             hf_token=None,
@@ -224,7 +225,7 @@ def test_model_config_generation_fallback_forwards_code_revision():
         patch.object(
             config_module,
             "get_config",
-            return_value=PretrainedConfig(),
+            return_value=PreTrainedConfig(),
         ) as get_config,
     ):
         ModelConfig.try_get_generation_config(model_config)
@@ -270,7 +271,7 @@ def test_safetensors_metadata_of_repo_without_safetensors():
     ],
 )
 def test_mrope_num_dims(section_key, mrope_section, expected_num_dims):
-    config = PretrainedConfig()
+    config = PreTrainedConfig()
     config.rope_parameters = {"rope_type": "default", section_key: mrope_section}
 
     assert uses_mrope(config)
@@ -281,7 +282,7 @@ def test_mrope_num_dims(section_key, mrope_section, expected_num_dims):
 def test_mrope_num_dims_from_config_attribute(section_name):
     """Some configs expose the section as an attribute rather than under
     `rope_parameters`."""
-    config = PretrainedConfig()
+    config = PreTrainedConfig()
     setattr(config, section_name, [16, 16, 16, 16])
 
     assert uses_mrope(config)
@@ -290,7 +291,7 @@ def test_mrope_num_dims_from_config_attribute(section_name):
 
 def test_mrope_num_dims_from_nested_rope_parameters():
     """Sections nested by layer type must be found, not silently defaulted."""
-    config = PretrainedConfig()
+    config = PreTrainedConfig()
     config.rope_parameters = {
         "full_attention": {"mrope_section": [16, 16, 16, 16]},
         "linear_attention": {"rope_type": "default"},
@@ -301,7 +302,7 @@ def test_mrope_num_dims_from_nested_rope_parameters():
 
 
 def test_mrope_num_dims_without_mrope():
-    assert mrope_num_dims(PretrainedConfig()) == 0
+    assert mrope_num_dims(PreTrainedConfig()) == 0
 
 
 @pytest.mark.parametrize(
@@ -316,7 +317,7 @@ def test_mrope_num_dims_without_mrope():
     ],
 )
 def test_uses_harmony(model_type, config_kwargs, expected):
-    config = PretrainedConfig(**config_kwargs)
+    config = PreTrainedConfig(**config_kwargs)
     config.model_type = model_type
 
     assert uses_harmony(config) is expected
