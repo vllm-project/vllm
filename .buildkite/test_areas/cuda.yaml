@@ -19,9 +19,9 @@ steps:
     - pytest -v -s cuda/test_cuda_compatibility_path.py
   mirror:
     amd:
-      label: ":amd: (MI355) CUDA Platform"
+      label: ":amd: (MI355 DPX) CUDA Platform"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 25
       depends_on:

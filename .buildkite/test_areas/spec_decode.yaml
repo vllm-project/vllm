@@ -44,9 +44,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Eagle 1: DeepSeek + Qwen"
+      label: ":amd: (MI355 DPX) Spec Decode Eagle 1: DeepSeek + Qwen"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -71,9 +71,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+      label: ":amd: (MI355 DPX) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -157,9 +157,9 @@ steps:
     - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode N-Gram + Suffix"
+      label: ":amd: (MI355 DPX) Spec Decode N-Gram + Suffix"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
@@ -185,9 +185,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Draft Model Shard %N"
+      label: ":amd: (MI355 DPX) Spec Decode Draft Model Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       parallelism: 2
       depends_on:
@@ -392,9 +392,9 @@ steps:
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   mirror:
     amd:
-      label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL MTP + Other Acceptance Nightly"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd

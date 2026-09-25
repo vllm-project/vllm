@@ -15,9 +15,9 @@ steps:
     - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Standard) 1: qwen2"
+      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 1: qwen2"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -36,9 +36,9 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Standard) 2: qwen3 + gemma"
+      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 2: qwen3 + gemma"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -78,9 +78,9 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Models (Standard) 4: other + whisper"
+      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 4: other + whisper"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -125,9 +125,9 @@ steps:
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Processor Shard %N"
+      label: ":amd: (MI355 DPX) Multimodal Processor Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       parallelism: 4
       timeout_in_minutes: 115
       depends_on:
@@ -146,9 +146,9 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Accuracy Eval (Small Models)"
+      label: ":amd: (MI355 DPX) Multimodal Accuracy Eval (Small Models)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
@@ -212,9 +212,9 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Models (Extended Generation 2) Shard %N"
+      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 2) Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 100
       depends_on:
       - image-build-amd
@@ -231,9 +231,9 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Models (Extended Generation 3)"
+      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd

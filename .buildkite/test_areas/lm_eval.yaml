@@ -68,9 +68,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
   mirror:
     amd:
-      label: ":amd: (MI355) LM Eval Watermarking"
+      label: ":amd: (MI355 DPX) LM Eval Watermarking"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests
@@ -146,6 +146,28 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) LM Eval Small Models"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 45
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - tests/evals/gsm8k/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/kernels/linear/
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-gfx950-small.txt
 
 - label: ":nvidia: (B200) LM Eval Small Models Distributed"
   key: lm-eval-small-models-distributed-2xb200
@@ -972,9 +994,9 @@ steps:
     - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
   mirror:
     amd:
-      label: ":amd: (MI355) MRCR Eval Small Models"
+      label: ":amd: (MI355 DPX) MRCR Eval Small Models"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd

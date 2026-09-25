@@ -39,9 +39,9 @@ steps:
   - pytest -v -s entrypoints/launchers
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Unit"
+      label: ":amd: (MI355 DPX) Entrypoints Unit"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -64,9 +64,9 @@ steps:
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (LLM)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (LLM)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
@@ -89,9 +89,9 @@ steps:
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (API Server) %N"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -111,9 +111,9 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (OpenAI API completion)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -132,9 +132,9 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (OpenAI API chat_completion)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -160,9 +160,9 @@ steps:
   - pytest -v -s entrypoints/cohere
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (API Server Generate)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server Generate)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -180,9 +180,9 @@ steps:
   - pytest -v -s entrypoints/openai/responses
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Integration (Responses API)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (Responses API)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -201,9 +201,9 @@ steps:
   - pytest -v -s entrypoints/speech_to_text
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Integration (Speech to Text)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (Speech to Text)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -223,9 +223,9 @@ steps:
   - pytest -v -s entrypoints/multimodal
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Integration (Multimodal)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (Multimodal)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -244,9 +244,9 @@ steps:
   - pytest -v -s entrypoints/pooling
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Integration (Pooling)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -263,9 +263,9 @@ steps:
   - pytest -s entrypoints/openai/correctness/
   mirror:
     amd:
-      label: ":amd: (MI300) OpenAI API Correctness"
+      label: ":amd: (MI355 DPX) OpenAI API Correctness"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd

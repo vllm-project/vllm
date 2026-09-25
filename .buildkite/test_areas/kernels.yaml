@@ -15,9 +15,9 @@ steps:
     - pytest -v -s tests/kernels/ir
   mirror:
     amd:
-      label: ":amd: (MI355) vLLM IR"
+      label: ":amd: (MI355 DPX) vLLM IR"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       working_dir: "/vllm-workspace/"
       depends_on:
@@ -44,9 +44,9 @@ steps:
   parallelism: 3
   mirror:
     amd:
-      label: ":amd: (MI355) Core Operation Kernels Shard %N"
+      label: ":amd: (MI300) Core Operation Kernels Shard %N"
       dind: false
-      device: mi355_1
+      device: mi300_1
       timeout_in_minutes: 40
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -113,9 +113,9 @@ steps:
     - pytest -v -s kernels/test_top_k_per_row.py
   mirror:
     amd:
-      label: ":amd: (MI355) DeepSeek V4 Fused Kernels"
+      label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
@@ -230,9 +230,9 @@ steps:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
   mirror:
     amd:
-      label: ":amd: (MI355) Attention DiffKV Kernels"
+      label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
@@ -270,9 +270,9 @@ steps:
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
   mirror:
     amd:
-      label: ":amd: (MI355) MLA Kernels"
+      label: ":amd: (MI355 DPX) MLA Kernels"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 40
       working_dir: /vllm-workspace/
@@ -768,10 +768,66 @@ steps:
       - amd-smi
       - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
 
-- label: ":amd: (MI355) FP8 MoE Kernels"
+- label: ":amd: (MI355 DPX) Native Quantization Kernels"
+  key: amd-native-quantization-kernels-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/rocm/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/kernels/linear/
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - tests/kernels/quantization/test_rocm_mxfp4.py
+  - tests/kernels/quantization/test_rocm_mxfp8_linear.py
+  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/quantization/reference_mxfp4.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
+  commands:
+  - pytest -v -s kernels/quantization/test_rocm_mxfp4.py
+  - pytest -v -s kernels/quantization/test_rocm_mxfp8_linear.py
+  - pytest -v -s kernels/quantization/test_rocm_skinny_gemms.py -k wvsplitkrc
+
+- label: ":amd: (MI355 DPX) FP4 and INT4 MoE Kernels"
+  key: amd-fp4-moe-kernels-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/moe/
+  - csrc/rocm/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - vllm/config/
+  - tests/kernels/moe/test_rocm_aiter_moe.py
+  - tests/kernels/moe/test_ocp_mx_moe.py
+  - tests/kernels/moe/test_flydsl_moe.py
+  - tests/kernels/moe/utils.py
+  - tests/kernels/utils.py
+  commands:
+  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k 'mi350_mxfp4 or quant_scheme_support_matches_gfx950'
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
+  - pytest -v -s kernels/moe/test_flydsl_moe.py
+
+- label: ":amd: (MI355 DPX) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
   dind: false
-  device: mi355_1
+  device: mi355_dpx
   num_devices: 1
   timeout_in_minutes: 40
   working_dir: /vllm-workspace/tests
@@ -798,10 +854,10 @@ steps:
   - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
   - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: ":amd: (MI355) Kernels"
+- label: ":amd: (MI355 DPX) Kernels"
   key: amd-kernels-mi355
   dind: false
-  device: mi355_1
+  device: mi355_dpx
   num_devices: 1
   timeout_in_minutes: 25
   working_dir: /vllm-workspace/

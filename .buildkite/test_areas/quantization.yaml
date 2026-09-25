@@ -22,9 +22,9 @@ steps:
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   mirror:
     amd:
-      label: ":amd: (MI355) Quantization Shard %N"
+      label: ":amd: (MI300) Quantization Shard %N"
       dind: false
-      device: mi355_1
+      device: mi300_1
       timeout_in_minutes: 115
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -116,9 +116,9 @@ steps:
     - pytest -v -s models/quantization
   mirror:
     amd:
-      label: ":amd: (MI355) Quantized Models"
+      label: ":amd: (MI355 DPX) Quantized Models"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 80
       working_dir: "/vllm-workspace/tests"
       depends_on:
