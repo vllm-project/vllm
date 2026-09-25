@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+import inspect
 from typing import Any
 
 import torch
@@ -287,35 +288,48 @@ def FusedMoEFactory(
         rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
     )
 
+    def _filter_supported_kwargs(target: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+        fn = (
+            target
+            if (inspect.isfunction(target) or inspect.ismethod(target))
+            else target.__init__
+        )
+        sig = inspect.signature(fn)
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return kwargs
+        return {k: v for k, v in kwargs.items() if k in sig.parameters}
+
     # TODO(bnell): we should not have to create a router if the kernel is
     # monolithic.
     if router is None:
-        router = create_fused_moe_router(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
+        router_kwargs = {
+            "top_k": top_k,
+            "global_num_experts": global_num_experts,
+            "eplb_state": eplb_state,
+            "renormalize": renormalize,
+            "use_grouped_topk": use_grouped_topk,
+            "num_expert_group": num_expert_group,
+            "topk_group": topk_group,
+            "custom_routing_function": custom_routing_function,
+            "scoring_func": scoring_func,
             # When apply_routed_scale_to_output is True, we set the scaling factor
             # to 1.0 so it ends up being a nop. Applying the scale will be handled
             # by the runner in this case.
             # The member variable must be set in the same way as the router since
             # some quantization methods can access it.
-            routed_scaling_factor=routed_scaling_factor
-            if not apply_routed_scale_to_output
-            else 1.0,
-            e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=num_fused_shared_experts,
-            skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
+            "routed_scaling_factor": (
+                routed_scaling_factor
+                if not apply_routed_scale_to_output
+                else 1.0
+            ),
+            "e_score_correction_bias": e_score_correction_bias,
+            "num_fused_shared_experts": num_fused_shared_experts,
+            "skip_padding": (skip_padding and moe_parallel_config.use_deepep_v2_kernels),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
             # contribution to be 1.0 (matching the un-scaled separate-MLP add).
-            shared_expert_weight=(
+            "shared_expert_weight": (
                 (1.0 / routed_scaling_factor)
                 if (
                     apply_routed_scale_to_output
@@ -324,11 +338,14 @@ def FusedMoEFactory(
                 )
                 else 1.0
             ),
-            zero_expert_type=zero_expert_type,
-            num_logical_experts=logical_num_experts,
-            hash_indices_table=hash_indices_table,
-            bias_vl=bias_vl,
-            image_sentinel_lo=image_sentinel_lo,
+            "zero_expert_type": zero_expert_type,
+            "num_logical_experts": logical_num_experts,
+            "hash_indices_table": hash_indices_table,
+            "bias_vl": bias_vl,
+            "image_sentinel_lo": image_sentinel_lo,
+        }
+        router = create_fused_moe_router(
+            **_filter_supported_kwargs(create_fused_moe_router, router_kwargs)
         )
 
     if params_dtype is None:
@@ -344,33 +361,36 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
+    moe_config_kwargs = {
+        "num_experts": global_num_experts,
+        "experts_per_token": top_k,
+        "hidden_dim": hidden_size,
+        "intermediate_size": intermediate_size,
+        "intermediate_pad": intermediate_pad,
+        "num_local_experts": expert_map_manager.local_num_experts,
+        "num_logical_experts": logical_num_experts,
+        "moe_parallel_config": moe_parallel_config,
+        "in_dtype": moe_in_dtype,
+        "moe_backend": vllm_config.kernel_config.moe_backend,
+        "router_logits_dtype": router_logits_dtype,
+        "max_num_tokens": max_num_batched_tokens,
+        "elastic_ep_max_dp_size": vllm_config.parallel_config.elastic_ep_max_dp_size,
+        "has_bias": has_bias,
+        "is_lora_enabled": vllm_config.lora_config is not None,
+        "activation": moe_activation,
+        "device": vllm_config.device_config.device,
+        "routing_method": router.routing_method_type,  # Not ideal
+        "has_hash_routing": hash_indices_table is not None,
+        "swiglu_limit": swiglu_limit,
+        "swiglu_alpha": swiglu_alpha,
+        "swiglu_beta": swiglu_beta,
+        "activation_situ_beta": activation_situ_beta,
+        "activation_situ_linear_beta": activation_situ_linear_beta,
+        "max_capture_size": vllm_config.compilation_config.max_cudagraph_capture_size,
+        "skip_final_all_reduce": skip_final_all_reduce,
+    }
     moe_config = FusedMoEConfig(
-        num_experts=global_num_experts,
-        experts_per_token=top_k,
-        hidden_dim=hidden_size,
-        intermediate_size=intermediate_size,
-        intermediate_pad=intermediate_pad,
-        num_local_experts=expert_map_manager.local_num_experts,
-        num_logical_experts=logical_num_experts,
-        moe_parallel_config=moe_parallel_config,
-        in_dtype=moe_in_dtype,
-        moe_backend=vllm_config.kernel_config.moe_backend,
-        router_logits_dtype=router_logits_dtype,
-        max_num_tokens=max_num_batched_tokens,
-        elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
-        has_bias=has_bias,
-        is_lora_enabled=vllm_config.lora_config is not None,
-        activation=moe_activation,
-        device=vllm_config.device_config.device,
-        routing_method=router.routing_method_type,  # Not ideal
-        has_hash_routing=hash_indices_table is not None,
-        swiglu_limit=swiglu_limit,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_beta=swiglu_beta,
-        activation_situ_beta=activation_situ_beta,
-        activation_situ_linear_beta=activation_situ_linear_beta,
-        max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
-        skip_final_all_reduce=skip_final_all_reduce,
+        **_filter_supported_kwargs(FusedMoEConfig, moe_config_kwargs)
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)
@@ -446,6 +466,7 @@ def fused_moe_make_expert_params_mapping(
     num_experts: int,
     num_redundant_experts: int = 0,
     routed_experts_prefix: str = "routed_experts",
+    include_fused: bool = True,
 ) -> list[tuple[str, str, int, str]]:
     """Delegate to EPLB manager."""
     return RoutedExperts.make_expert_params_mapping(
@@ -456,4 +477,5 @@ def fused_moe_make_expert_params_mapping(
         num_experts,
         num_redundant_experts,
         routed_experts_prefix,
+        include_fused=include_fused,
     )

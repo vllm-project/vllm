@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import re
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 
 import torch
 
@@ -35,6 +38,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_PER_EXPERT_PATTERN = re.compile(r"experts\.(\d+)\.([^.]+)\.")
+_QUAL_NAME_PATTERN = re.compile(r"experts\.(\d+)\.([^.]+)")
+
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -52,6 +58,10 @@ class RoutedExperts(PluggableLayer):
     - Loading checkpoint weights into parameters
     - Executing routed experts via quant_method.apply()
     """
+
+    _HOST_STAGING_POOL: ClassVar[
+        dict[tuple[tuple[int, ...], torch.dtype], list[tuple[torch.Tensor, Any]]]
+    ] = defaultdict(list)
 
     def __init__(
         self,
@@ -346,7 +356,7 @@ class RoutedExperts(PluggableLayer):
             is_scale: whether padding should use unit scales instead of zero weights.
 
         """
-        padded_tp = self.moe_config.tp_shard_with_padding
+        padded_tp = getattr(self.moe_config, "tp_shard_with_padding", False)
         if padded_tp:
             destination = expert_data
             if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
@@ -533,6 +543,8 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        if loaded_weight.device.type == "cpu" and not loaded_weight.is_contiguous():
+            loaded_weight = loaded_weight.contiguous()
         expert_data.copy_(loaded_weight)
 
     def _load_w2(
@@ -567,16 +579,17 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        if loaded_weight.device.type == "cpu" and not loaded_weight.is_contiguous():
+            loaded_weight = loaded_weight.contiguous()
         if (
             loaded_weight.device.type == "cpu"
             and expert_data.device.type == "cuda"
             and not expert_data.is_contiguous()
-            and expert_data.ndim == 2
+            and expert_data.ndim in (2, 3)
         ):
             # A strided CPU-to-CUDA copy can allocate a full-shard CUDA
-            # temporary. Make the TP slice contiguous on CPU and copy rows
-            # in chunks to limit the temporary used for the padded view.
-            loaded_weight = loaded_weight.contiguous()
+            # temporary. Copy rows in chunks to limit the temporary used
+            # for the padded view.
             num_chunks = max(cdiv(loaded_weight.nbytes, 1 << 20), 1)
             for dst, src in zip(
                 expert_data.chunk(num_chunks, dim=0),
@@ -618,6 +631,59 @@ class RoutedExperts(PluggableLayer):
         return_success: Literal[True],
     ) -> bool: ...
 
+    def _check_and_flush_staging(
+        self, buf_key: int, param: torch.nn.Parameter, shard_id: str
+    ) -> None:
+        if not hasattr(self, "_host_staging_buffers") or buf_key not in self._host_staging_buffers:
+            return
+        counts = self._host_staging_counts[buf_key]
+        num_local_experts = param.data.shape[0]
+        is_complete = False
+        if shard_id == "w2":
+            is_complete = (len(counts["w2"]) == num_local_experts)
+        elif shard_id in ("w1", "w3", "w13", "gate_up"):
+            is_act_and_mul = getattr(self.moe_config, "is_act_and_mul", True)
+            if is_act_and_mul:
+                is_complete = (
+                    len(counts["w1"]) == num_local_experts
+                    and len(counts["w3"]) == num_local_experts
+                )
+            else:
+                is_complete = (len(counts["w1"]) == num_local_experts)
+
+        if is_complete:
+            host_buffer = self._host_staging_buffers.pop(buf_key)
+            self._host_staging_counts.pop(buf_key, None)
+            is_cuda = (param.data.device.type == "cuda")
+            if is_cuda:
+                event = torch.cuda.Event()
+                param.data.copy_(host_buffer, non_blocking=True)
+                event.record()
+                pool_key = (tuple(param.data.shape), param.data.dtype)
+                RoutedExperts._HOST_STAGING_POOL[pool_key].append((host_buffer, event))
+            else:
+                param.data.copy_(host_buffer)
+
+    def flush_host_staging(self) -> None:
+        if not hasattr(self, "_host_staging_buffers"):
+            return
+        for buf_key, host_buffer in list(self._host_staging_buffers.items()):
+            for p in self.parameters():
+                if id(p) == buf_key:
+                    is_cuda = (p.data.device.type == "cuda")
+                    if is_cuda:
+                        event = torch.cuda.Event()
+                        p.data.copy_(host_buffer, non_blocking=True)
+                        event.record()
+                        pool_key = (tuple(p.data.shape), p.data.dtype)
+                        RoutedExperts._HOST_STAGING_POOL[pool_key].append((host_buffer, event))
+                    else:
+                        p.data.copy_(host_buffer)
+                    break
+        self._host_staging_buffers.clear()
+        if hasattr(self, "_host_staging_counts"):
+            self._host_staging_counts.clear()
+
     def weight_loader(
         self,
         param: torch.nn.Parameter,
@@ -640,18 +706,20 @@ class RoutedExperts(PluggableLayer):
             return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
-        global_expert_id = expert_id
-        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+        full_load = len(loaded_weight.shape) == 3
+        if not full_load:
+            global_expert_id = expert_id
+            expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        use_global_sf = (
-            getattr(self.quant_method, "use_global_sf", False)
-            and "input_scale" in weight_name
-        )
+            use_global_sf = (
+                getattr(self.quant_method, "use_global_sf", False)
+                and "input_scale" in weight_name
+            )
 
-        if expert_id == -1 and not use_global_sf:
-            # Failed to load this param since it's not local to this rank
-            return False if return_success else None
-        # Hereafter, `expert_id` is local physical id
+            if expert_id == -1 and not use_global_sf:
+                # Failed to load this param since it's not local to this rank
+                return False if return_success else None
+            # Hereafter, `expert_id` is local physical id
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors
@@ -671,13 +739,21 @@ class RoutedExperts(PluggableLayer):
         ):
             loaded_weight = loaded_weight.t().contiguous()
 
-        if shard_id not in ("w1", "w2", "w3"):
-            raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
+        if shard_id not in ("w1", "w2", "w3", "w13", "gate_up"):
+            raise ValueError(
+                f"shard_id must be in ['w1','w2','w3','w13','gate_up'] but got {shard_id}."
+            )
 
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
-        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
+        SHARD_ID_TO_SHARDED_DIM = {
+            "w1": 0,
+            "w2": 1,
+            "w3": 0,
+            "w13": 0,
+            "gate_up": 0,
+        }
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
             shard_dim = int(not shard_dim)
@@ -686,7 +762,115 @@ class RoutedExperts(PluggableLayer):
         if full_load:
             shard_dim += 1
 
-        expert_data = param.data if full_load else param.data[expert_id]
+        can_stage_host = (
+            not full_load
+            and loaded_weight.dim() == 2
+            and hasattr(param, "data")
+            and param.data.dim() == 3
+            and "bias" not in weight_name
+            and not is_transposed
+            and not getattr(self, "disable_host_staging", False)
+            and os.environ.get("VLLM_MOE_DISABLE_HOST_STAGING", "0") not in ("1", "true", "True")
+        )
+        if can_stage_host:
+            if not hasattr(self, "_host_staging_buffers"):
+                self._host_staging_buffers = {}
+                self._host_staging_counts = defaultdict(lambda: defaultdict(set))
+
+            buf_key = id(param)
+            if buf_key not in self._host_staging_buffers:
+                is_cuda = (param.data.device.type == "cuda")
+                pool_key = (tuple(param.data.shape), param.data.dtype)
+                if is_cuda and RoutedExperts._HOST_STAGING_POOL[pool_key]:
+                    host_buffer, event = RoutedExperts._HOST_STAGING_POOL[pool_key].pop()
+                    if event is not None:
+                        event.synchronize()
+                    host_buffer.zero_()
+                else:
+                    host_buffer = torch.zeros(
+                        param.data.shape,
+                        dtype=param.data.dtype,
+                        device="cpu",
+                        pin_memory=is_cuda,
+                    )
+                self._host_staging_buffers[buf_key] = host_buffer
+            host_buffer = self._host_staging_buffers[buf_key]
+            expert_data = host_buffer[expert_id]
+            if shard_id in ("w13", "gate_up"):
+                self._host_staging_counts[buf_key]["w1"].add(expert_id)
+                self._host_staging_counts[buf_key]["w3"].add(expert_id)
+            else:
+                self._host_staging_counts[buf_key][shard_id].add(expert_id)
+        else:
+            buf_key = 0
+            expert_data = param.data if full_load else param.data[expert_id]
+
+        try:
+            if shard_id in ("w13", "gate_up"):
+                gate_weight, up_weight = loaded_weight.chunk(2, dim=shard_dim)
+                success_w1 = self._weight_loader_impl(
+                    param=param,
+                    loaded_weight=gate_weight,
+                    weight_name=weight_name,
+                    shard_id="w1",
+                    expert_id=expert_id,
+                    shard_dim=shard_dim,
+                    expert_data=expert_data,
+                    full_load=full_load,
+                    global_expert_id=global_expert_id if not full_load else 0,
+                    use_global_sf=use_global_sf if not full_load else False,
+                    quant_method_name=quant_method_name,
+                    return_success=True,
+                )
+                success_w3 = self._weight_loader_impl(
+                    param=param,
+                    loaded_weight=up_weight,
+                    weight_name=weight_name,
+                    shard_id="w3",
+                    expert_id=expert_id,
+                    shard_dim=shard_dim,
+                    expert_data=expert_data,
+                    full_load=full_load,
+                    global_expert_id=global_expert_id if not full_load else 0,
+                    use_global_sf=use_global_sf if not full_load else False,
+                    quant_method_name=quant_method_name,
+                    return_success=True,
+                )
+                return (success_w1 and success_w3) if return_success else None
+
+            return self._weight_loader_impl(
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=weight_name,
+                shard_id=shard_id,
+                expert_id=expert_id,
+                shard_dim=shard_dim,
+                expert_data=expert_data,
+                full_load=full_load,
+                global_expert_id=global_expert_id if not full_load else 0,
+                use_global_sf=use_global_sf if not full_load else False,
+                quant_method_name=quant_method_name,
+                return_success=return_success,
+            )
+        finally:
+            if can_stage_host:
+                self._check_and_flush_staging(buf_key, param, shard_id)
+
+    def _weight_loader_impl(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        shard_dim: int,
+        expert_data: torch.Tensor,
+        full_load: bool,
+        global_expert_id: int,
+        use_global_sf: bool,
+        quant_method_name: str,
+        return_success: bool = False,
+    ) -> bool | None:
 
         if "bias" in weight_name:
             self._loaded_expert_biases.add(weight_name.rsplit(".", 1)[-1])
@@ -889,12 +1073,41 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
+
+        # Pre-index mapping into fast O(1) lookups to avoid O(N) string checks per key
+        per_expert_fast_map: dict[tuple[int, str], list[tuple[str, str, int, str]]] = (
+            defaultdict(list)
+        )
+        fused_fast_entries: list[tuple[str, str, int, str]] = []
+        for entry in expert_mapping:
+            m = _PER_EXPERT_PATTERN.search(entry[1])
+            if m:
+                per_expert_fast_map[(int(m.group(1)), m.group(2))].append(entry)
+            else:
+                fused_fast_entries.append(entry)
+        # Sort fused entries by weight_name length descending so longer suffixes
+        # (e.g. .weight_scale, .weight_scale_inv) match before shorter prefixes
+        fused_fast_entries.sort(key=lambda x: len(x[1]), reverse=True)
+
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
             # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
+
+            qm = _QUAL_NAME_PATTERN.search(qual_name) if not is_fused else None
+            if qm:
+                candidate_mapping = per_expert_fast_map.get(
+                    (int(qm.group(1)), qm.group(2))
+                )
+                if candidate_mapping is None:
+                    candidate_mapping = expert_mapping
+            elif is_fused:
+                candidate_mapping = fused_fast_entries
+            else:
+                candidate_mapping = expert_mapping
+
             matched = False
-            for param_name, weight_name, expert_id, shard_id in expert_mapping:
+            for param_name, weight_name, expert_id, shard_id in candidate_mapping:
                 if weight_name not in qual_name:
                     if matched and is_fused:
                         break
@@ -912,7 +1125,7 @@ class RoutedExperts(PluggableLayer):
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)
                 if param is None:
-                    if param_name.endswith(("w13_bias", "w2_bias")):
+                    if param_name.endswith(("w13_bias", "w2_bias")) or "scale" in param_name:
                         continue
                     raise AttributeError(
                         f"Layer {self.layer_name} has no parameter {param_name!r} "
@@ -951,7 +1164,68 @@ class RoutedExperts(PluggableLayer):
                     experts_shard = loaded_weight.unsqueeze(0)
                     start = expert_id
 
-                # Unified loading logic for fused and non-fused experts
+                # Fast path 1: bulk 3D loading for fused checkpoints under TP / linear EP
+                is_ep = (
+                    getattr(self.moe_config, "enable_expert_parallel", False)
+                    and getattr(self.moe_config.moe_parallel_config, "ep_size", 1) > 1
+                )
+                ep_size = (
+                    getattr(self.moe_config.moe_parallel_config, "ep_size", 1)
+                    if is_ep
+                    else 1
+                )
+                can_bulk_load = (
+                    is_fused
+                    and hasattr(param, "data")
+                    and param.data.dim() == 3
+                    and experts_shard.dim() == 3
+                    and not is_per_expert_fused_w13
+                    and "bias" not in weight_name
+                    and (
+                        (not is_ep and param.data.shape[0] == experts_shard.shape[0])
+                        or (
+                            is_ep
+                            and getattr(
+                                self.moe_config, "expert_placement_strategy", "linear"
+                            )
+                            == "linear"
+                            and (
+                                experts_shard.shape[0] == param.data.shape[0] * ep_size
+                                or experts_shard.shape[0] == param.data.shape[0]
+                            )
+                        )
+                    )
+                )
+                if can_bulk_load:
+                    bulk_weight = experts_shard
+                    if is_ep and experts_shard.shape[0] == param.data.shape[0] * ep_size:
+                        ep_rank = getattr(
+                            self.moe_config.moe_parallel_config, "ep_rank", 0
+                        )
+                        num_local_experts = param.data.shape[0]
+                        bulk_weight = bulk_weight.narrow(
+                            0, ep_rank * num_local_experts, num_local_experts
+                        )
+
+                    success = param.weight_loader(
+                        param=param,
+                        loaded_weight=bulk_weight,
+                        weight_name=weight_name,
+                        shard_id=shard_id,
+                        expert_id=0,
+                        return_success=True,
+                    )
+                    if success:
+                        logger.debug(
+                            "Loaded bulk 3D experts of shard %s into %s for layer %s",
+                            shard_id,
+                            param_name,
+                            self.layer_name,
+                        )
+                        yield param_name
+                        continue
+
+                # Unified loading logic for non-fused experts
                 loaded_experts = experts_shard.unbind()
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
                     success = param.weight_loader(
@@ -971,6 +1245,8 @@ class RoutedExperts(PluggableLayer):
                             self.layer_name,
                         )
                         yield param_name
+
+        self.flush_host_staging()
 
     def get_expert_mapping(
         self,
@@ -1002,6 +1278,7 @@ class RoutedExperts(PluggableLayer):
         num_experts: int,
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
+        include_fused: bool = True,
     ) -> list[tuple[str, str, int, str]]:
         """Build the expert mapping, detecting the LoRA `base_layer.` prefix by
         scanning `model`'s parameters.
@@ -1023,6 +1300,7 @@ class RoutedExperts(PluggableLayer):
             routed_experts_prefix,
             lora_base_layer_prefix=prefix,
             lora_base_layer_prefix_on_param_name=prefix,
+            include_fused=include_fused,
         )
 
     @staticmethod
@@ -1035,7 +1313,7 @@ class RoutedExperts(PluggableLayer):
         routed_experts_prefix: str = "routed_experts",
         lora_base_layer_prefix: str = "",
         lora_base_layer_prefix_on_param_name: str = "",
-        include_fused: bool = False,
+        include_fused: bool = True,
     ) -> list[tuple[str, str, int, str]]:
         """Create expert parameter mapping for weight loading with redundant experts.
 
@@ -1095,6 +1373,8 @@ class RoutedExperts(PluggableLayer):
                 gate_up = "gate_up_proj"
             elif ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
                 gate_up = "w13"
+            elif ckpt_gate_proj_name in ("gate_up_proj", "w13"):
+                gate_up = ckpt_gate_proj_name
             else:
                 logger.warning(
                     "Unexpected gate/up projection names: %s, %s. "
@@ -1103,12 +1383,45 @@ class RoutedExperts(PluggableLayer):
                     ckpt_up_proj_name,
                 )
             if gate_up is not None:
+                # 3D consolidated entries: place longer suffixes first to prevent substring collision in model loaders
+                # When routed_experts_prefix is non-empty (hand-rolled model loaders), anchor with a leading dot
+                # so that '.experts.' does not collide with 'shared_experts.' substrings.
+                prefix_sep = "." if routed_experts_prefix != "" else ""
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
-                    (f"{w13}weight", f"experts.{gate_up}", 0, "w1"),
-                    (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
-                    (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
+                    # Quant scale variants with longer suffixes first
+                    (f"{prefix_sep}{w13}weight_scale_inv", f"{prefix_sep}experts.gate_up_proj.weight_scale_inv", 0, "w13"),
+                    (f"{prefix_sep}{w2}weight_scale_inv", f"{prefix_sep}experts.down_proj.weight_scale_inv", 0, "w2"),
+                    (f"{prefix_sep}{w13}weight_scale_2", f"{prefix_sep}experts.gate_up_proj.weight_scale_2", 0, "w13"),
+                    (f"{prefix_sep}{w2}weight_scale_2", f"{prefix_sep}experts.down_proj.weight_scale_2", 0, "w2"),
+                    (f"{prefix_sep}{w13}weight_scale", f"{prefix_sep}experts.gate_up_proj.weight_scale", 0, "w13"),
+                    (f"{prefix_sep}{w2}weight_scale", f"{prefix_sep}experts.down_proj.weight_scale", 0, "w2"),
+                    (f"{prefix_sep}{w13}input_scale", f"{prefix_sep}experts.gate_up_proj.input_scale", 0, "w13"),
+                    (f"{prefix_sep}{w2}input_scale", f"{prefix_sep}experts.down_proj.input_scale", 0, "w2"),
+                    # Base weights
+                    (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.gate_up_proj.weight", 0, "w13"),
+                    (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.gate_up_proj", 0, "w13"),
+                    (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.down_proj.weight", 0, "w2"),
+                    (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.down_proj", 0, "w2"),
                 ]
+                if gate_up != "gate_up_proj":
+                    fused_mapping.extend([
+                        (f"{prefix_sep}{w13}weight_scale_inv", f"{prefix_sep}experts.{gate_up}.weight_scale_inv", 0, "w13"),
+                        (f"{prefix_sep}{w13}weight_scale_2", f"{prefix_sep}experts.{gate_up}.weight_scale_2", 0, "w13"),
+                        (f"{prefix_sep}{w13}weight_scale", f"{prefix_sep}experts.{gate_up}.weight_scale", 0, "w13"),
+                        (f"{prefix_sep}{w13}input_scale", f"{prefix_sep}experts.{gate_up}.input_scale", 0, "w13"),
+                        (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.{gate_up}.weight", 0, "w13"),
+                        (f"{prefix_sep}{w13}weight", f"{prefix_sep}experts.{gate_up}", 0, "w13"),
+                    ])
+                if ckpt_down_proj_name != "down_proj":
+                    fused_mapping.extend([
+                        (f"{prefix_sep}{w2}weight_scale_inv", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_inv", 0, "w2"),
+                        (f"{prefix_sep}{w2}weight_scale_2", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_2", 0, "w2"),
+                        (f"{prefix_sep}{w2}weight_scale", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale", 0, "w2"),
+                        (f"{prefix_sep}{w2}input_scale", f"{prefix_sep}experts.{ckpt_down_proj_name}.input_scale", 0, "w2"),
+                        (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.{ckpt_down_proj_name}.weight", 0, "w2"),
+                        (f"{prefix_sep}{w2}weight", f"{prefix_sep}experts.{ckpt_down_proj_name}", 0, "w2"),
+                    ])
                 fused_mapping.extend(
                     (
                         w13,
@@ -1243,6 +1556,10 @@ class RoutedExperts(PluggableLayer):
 
         """
         assert not self.quant_method.is_monolithic
+        if hasattr(self, "_host_staging_buffers") and self._host_staging_buffers:
+            self.flush_host_staging()
+        if RoutedExperts._HOST_STAGING_POOL:
+            RoutedExperts._HOST_STAGING_POOL.clear()
 
         # Modular kernels use pre-computed routing
         return self.quant_method.apply(
@@ -1276,6 +1593,10 @@ class RoutedExperts(PluggableLayer):
             Finalized routed states or a deferred-finalize output.
 
         """
+        if hasattr(self, "_host_staging_buffers") and self._host_staging_buffers:
+            self.flush_host_staging()
+        if RoutedExperts._HOST_STAGING_POOL:
+            RoutedExperts._HOST_STAGING_POOL.clear()
         assert self.quant_method.is_monolithic
 
         # Monolithic kernels handle routing internally
