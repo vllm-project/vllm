@@ -7,8 +7,10 @@ from pydantic import Field
 
 import vllm.envs as envs
 from vllm.config.utils import config
+from vllm.logger import log_color_from_env
 
 LogLevel = Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"]
+LogColor = Literal["auto", "always", "never"]
 
 
 @config
@@ -26,6 +28,17 @@ class LoggingConfig:
         default_factory=lambda: cast(LogLevel, envs.VLLM_LOGGING_LEVEL)
     )
     """Log level used when no custom logging configuration is provided."""
+
+    log_stream: str = Field(default_factory=lambda: envs.VLLM_LOGGING_STREAM)
+    """Stream used by the default handler, e.g. ``ext://sys.stdout`` or
+    ``ext://sys.stderr``. Ignored when a custom logging configuration is
+    provided."""
+
+    log_color: LogColor = Field(default_factory=log_color_from_env)
+    """Whether the default handler colors its output. ``auto`` colors only when
+    ``log_stream`` is a terminal. Defaults from ``NO_COLOR``,
+    ``VLLM_LOGGING_COLOR`` and ``FORCE_COLOR``. Ignored when a custom logging
+    configuration is provided."""
 
     configure_logging: bool = Field(default_factory=lambda: envs.VLLM_CONFIGURE_LOGGING)
     """Whether to apply a Python logging configuration.

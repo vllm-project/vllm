@@ -88,6 +88,21 @@ def test_logging_config_cli_args(serve_parser):
     assert config.pylogging_config_file == "/tmp/flat.json"
 
 
+def test_logging_config_color_and_stream_cli_args(serve_parser):
+    args = serve_parser.parse_args(
+        [
+            "--logging-config.log_color",
+            "never",
+            "--logging-config.log_stream",
+            "ext://sys.stderr",
+        ]
+    )
+
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.log_color == "never"
+    assert config.log_stream == "ext://sys.stderr"
+
+
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path

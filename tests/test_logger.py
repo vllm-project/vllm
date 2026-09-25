@@ -26,7 +26,7 @@ from vllm.logger import (
     enable_trace_function_call,
     init_logger,
 )
-from vllm.logging_utils import NewLineFormatter
+from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
 
 
@@ -110,25 +110,77 @@ def test_offline_llm_configures_logging_before_logging_args(monkeypatch):
         llm_module.LLM(model="facebook/opt-125m")
 
 
-def test_use_color_force_color(monkeypatch):
-    """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
-    explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
-    monkeypatch.setattr(sys, "stdout", io.StringIO())
-    monkeypatch.setattr(sys, "stderr", io.StringIO())
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, "auto"),
+        ({"FORCE_COLOR": "1"}, "always"),
+        ({"VLLM_LOGGING_COLOR": "1"}, "always"),
+        ({"FORCE_COLOR": "1", "VLLM_LOGGING_COLOR": "0"}, "never"),
+        ({"FORCE_COLOR": "1", "NO_COLOR": "1"}, "never"),
+    ],
+)
+def test_log_color_defaults_from_env(monkeypatch, env, expected):
+    """NO_COLOR and VLLM_LOGGING_COLOR=0 take precedence over FORCE_COLOR."""
     for var in ("NO_COLOR", "FORCE_COLOR", "VLLM_LOGGING_COLOR"):
         monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
 
-    assert not _use_color()
+    assert LoggingConfig().log_color == expected
 
-    monkeypatch.setenv("FORCE_COLOR", "1")
-    assert _use_color()
 
-    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
-    assert not _use_color()
-    monkeypatch.delenv("VLLM_LOGGING_COLOR")
+def test_log_stream_defaults_from_env(monkeypatch):
+    monkeypatch.setenv("VLLM_LOGGING_STREAM", "ext://sys.stderr")
 
+    assert LoggingConfig().log_stream == "ext://sys.stderr"
+
+
+@pytest.mark.parametrize(
+    ("log_color", "log_stream", "tty_stream", "expected"),
+    [
+        ("auto", "ext://sys.stdout", None, False),
+        ("auto", "ext://sys.stdout", "stdout", True),
+        ("auto", "ext://sys.stderr", "stdout", False),
+        ("auto", "ext://sys.stderr", "stderr", True),
+        ("always", "ext://sys.stdout", None, True),
+        ("never", "ext://sys.stdout", "stdout", False),
+    ],
+)
+def test_use_color(monkeypatch, log_color, log_stream, tty_stream, expected):
+    for name in ("stdout", "stderr"):
+        stream = io.StringIO()
+        monkeypatch.setattr(stream, "isatty", lambda tty=name == tty_stream: tty)
+        monkeypatch.setattr(sys, name, stream)
+
+    assert _use_color(log_color, log_stream) == expected
+
+
+def test_log_color_and_stream_config_override_env(monkeypatch):
+    """Explicit config wins over NO_COLOR, FORCE_COLOR and VLLM_LOGGING_STREAM."""
+    monkeypatch.setenv("VLLM_LOGGING_STREAM", "ext://sys.stdout")
     monkeypatch.setenv("NO_COLOR", "1")
-    assert not _use_color()
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("VLLM_LOGGING_COLOR", raising=False)
+    logger = logging.getLogger("vllm")
+
+    try:
+        configure_logging(
+            LoggingConfig(log_color="always", log_stream="ext://sys.stderr")
+        )
+        handler = logger.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        assert handler.stream is sys.stderr
+        assert isinstance(handler.formatter, ColoredFormatter)
+
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        configure_logging(LoggingConfig(log_color="never"))
+        handler = logger.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        assert handler.stream is sys.stdout
+        assert not isinstance(handler.formatter, ColoredFormatter)
+    finally:
+        _configure_vllm_root_logger()
 
 
 def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):
