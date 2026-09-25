@@ -491,9 +491,7 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     assert '"hf_token": "***"' in message
 
 
-def test_rust_frontend_uses_config_model_as_model_tag(
-    monkeypatch, caplog, tmp_path
-):
+def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_path):
     """Config-only model selection must be forwarded to the Rust frontend."""
     import subprocess as subprocess_mod
 
