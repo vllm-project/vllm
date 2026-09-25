@@ -7,11 +7,6 @@ import json
 import os
 
 import torch
-from aiter.fused_moe import moe_sorting as aiter_moe_sorting
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import (
-    flydsl_a16w4_gemm1,
-    flydsl_a16w4_gemm2,
-)
 
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import get_device_name_as_file_name
@@ -81,6 +76,10 @@ def moe_sorting(
     model_dim: int,
     block_m: int,
 ):
+    # Imported lazily so aiter's import-time sort-backend env vars are read
+    # when this is called, not whenever this module happens to be imported.
+    from aiter.fused_moe import moe_sorting as aiter_moe_sorting
+
     topk_ids_i32 = topk_ids.to(torch.int32)
     topk_w_f32 = topk_weights.to(torch.float32)
     sorted_ids, sorted_w, sorted_expert_ids, num_valid_ids, _moe_buf = (
@@ -185,6 +184,12 @@ def fused_flydsl_moe_impl(
     tile_n2: int | None = None,
     tile_k2: int | None = None,
 ) -> torch.Tensor:
+    # Imported lazily -- see the comment in moe_sorting() above.
+    from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import (
+        flydsl_a16w4_gemm1,
+        flydsl_a16w4_gemm2,
+    )
+
     device = hidden_states.device
     tokens = hidden_states.shape[0]
     model_dim = hidden_states.shape[1]
