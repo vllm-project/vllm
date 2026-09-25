@@ -1977,11 +1977,7 @@ class Qwen2_5_VLForConditionalGeneration(
             total_patches,
             flattened_patch_size,
             device=device,
-            dtype=(
-                dtype
-                if isinstance(self.visual.input_norm, IdentityInputNorm)
-                else torch.uint8
-            ),
+            dtype=self.visual.input_norm.input_dtype or dtype,
         )
 
         # Override max_seqlen with a safe upper bound for capture.

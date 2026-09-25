@@ -1623,11 +1623,7 @@ class Qwen2VLForConditionalGeneration(
             total_patches,
             flattened_patch_size,
             device=device,
-            dtype=(
-                dtype
-                if isinstance(self.visual.input_norm, IdentityInputNorm)
-                else torch.uint8
-            ),
+            dtype=self.visual.input_norm.input_dtype or dtype,
         )
 
         # max_seqlen.item() gets baked into the CUDA graph at capture time.
