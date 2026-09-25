@@ -8,7 +8,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit(do_not_specialize=["START", "END", "TOKEN_OFFSET"])
+@triton.jit
 def record_logical_expert_load(
     expert_ids,
     token_ids,
@@ -31,7 +31,8 @@ def record_logical_expert_load(
         & (expert_ids < NUM_EXPERTS)
     )
     # Aggregate within the CTA before atomics, especially for skewed decode.
-    # Older Triton versions wrap out-of-range histogram inputs into valid bins.
+    # Triton 3.7.1 can wrap out-of-range inputs into valid bins: exclude lanes
+    # with an explicit mask, not an out-of-range sentinel value.
     histogram = tl.histogram(expert_ids.to(tl.int32), NUM_BINS, mask=valid)
     bins = tl.arange(0, NUM_BINS)
     tl.atomic_add(

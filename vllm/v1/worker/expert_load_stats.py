@@ -98,7 +98,6 @@ class ExpertLoadReporter:
                     "max_mean_ratio": float(counts.max() / mean) if total else 0.0,
                     "unused_experts": int(np.count_nonzero(counts == 0)),
                     "dropped_trace_iterations": self.dropped,
-                    "export_errors": self.export_errors,
                 }
                 if self.config.detail == "per_expert":
                     record["counts"] = counts.tolist()
