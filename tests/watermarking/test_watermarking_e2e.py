@@ -5,6 +5,7 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.platforms import current_platform
+from vllm.v1.metrics.reader import Counter
 from vllm.v1.watermarking import GumbelWatermarkDetector
 
 
@@ -23,14 +24,23 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
         enforce_eager=True,
         max_model_len=512,
         gpu_memory_utilization=0.2,
+        disable_log_stats=False,
     )
     request = "Tell me a story about an explorer who discovers a mysterious island."
     params_use_wm = SamplingParams(temperature=1.0, max_tokens=256, watermarking=True)
     params_no_wm = SamplingParams(temperature=1.0, max_tokens=256, watermarking=False)
+    params_greedy = SamplingParams(temperature=0.0, max_tokens=16)
 
     with runner:
         output_use_wm = runner.llm.generate(request, params_use_wm)
         output_no_wm = runner.llm.generate(request, params_no_wm)
+        runner.llm.generate(request, params_greedy)
+        metrics = runner.llm.get_metrics()
+
+    # The greedy request is skipped; the opt-out one is in neither counter.
+    counters = {m.name: m for m in metrics if isinstance(m, Counter)}
+    assert counters["vllm:watermarked_requests"].value == 1
+    assert counters["vllm:watermark_skipped_requests"].value == 1
 
     result_use_wm = detector.detect(list(output_use_wm[0].outputs[0].token_ids))
     result_no_wm = detector.detect(list(output_no_wm[0].outputs[0].token_ids))

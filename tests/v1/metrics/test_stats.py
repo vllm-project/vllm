@@ -166,6 +166,28 @@ def test_prefill_kv_computed_edge_cases():
     assert finished_req2.request_id == "test-req-004"
 
 
+def test_watermarked_requests_counted_on_finish():
+    """Test that watermarked and watermark skipped requests are counted."""
+    iteration_stats = IterationStats()
+    for i, (is_watermarked, is_watermark_skipped) in enumerate(
+        [(True, False), (False, True), (False, False)]
+    ):
+        iteration_stats.update_from_finished_request(
+            finish_reason=FinishReason.STOP,
+            request_id=f"test-req-{i}",
+            num_prompt_tokens=10,
+            max_tokens_param=10,
+            req_stats=RequestStateStats(
+                is_watermarked=is_watermarked,
+                is_watermark_skipped=is_watermark_skipped,
+            ),
+        )
+
+    assert len(iteration_stats.finished_requests) == 3
+    assert iteration_stats.num_watermarked_reqs == 1
+    assert iteration_stats.num_watermark_skipped_reqs == 1
+
+
 def test_prompt_token_stats_all_computed():
     """Test all tokens computed locally, no caching."""
     stats = PromptTokenStats()

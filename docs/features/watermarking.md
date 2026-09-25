@@ -56,6 +56,17 @@ watermarking algorithm that does not support it natively, at the cost of
 weaker detectability. See
 [Speculative decoding](#speculative-decoding).
 
+## Monitoring
+
+When `watermark_config` is set, the Prometheus counter
+`vllm:watermarked_requests_total` counts finished requests that were sampled
+with the watermark. `vllm:watermark_skipped_requests_total` counts finished
+requests that requested the watermark but could not use it, such as
+`temperature=0` and trace replay requests. Opt-out and beam search requests are
+in neither counter. The counters do not exist without `watermark_config`. To get
+the watermarked share of finished requests, use
+`sum(rate(vllm:watermarked_requests_total[5m])) / sum(rate(vllm:request_success_total[5m]))`.
+
 ## Architecture
 
 `WatermarkConfig` selects an algorithm and PRF. Model Runner V2 constructs the
