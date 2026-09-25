@@ -221,3 +221,86 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def _build_non_spec(
+    batch: BatchSpec,
+    is_prefilling: list[bool] | None,
+    full_cuda_graph: bool = False,
+):
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(
+        is_prefilling=None
+        if is_prefilling is None
+        else torch.tensor(is_prefilling, dtype=torch.bool)
+    )
+    builder = _create_gdn_builder(full_cuda_graph=full_cuda_graph)
+    return builder, common_attn_metadata, builder.build(0, common_attn_metadata)
+
+
+@pytest.mark.parametrize(
+    ("seq_len", "query_len", "is_prefilling", "num_prefills"),
+    [
+        pytest.param(1, 1, True, 1, id="first-chunk"),
+        pytest.param(65, 1, True, 0, id="resumed-chunk"),
+        pytest.param(0, 0, True, 0, id="padding"),
+        pytest.param(1, 1, None, 0, id="missing-prefill-flag"),
+    ],
+)
+def test_one_token_chunk_classification(
+    seq_len: int,
+    query_len: int,
+    is_prefilling: bool | None,
+    num_prefills: int,
+):
+    """Only a real first chunk with a prefill flag needs state initialization."""
+    _, _, meta = _build_non_spec(
+        BatchSpec(seq_lens=[100, seq_len], query_lens=[1, query_len]),
+        is_prefilling=None if is_prefilling is None else [False, is_prefilling],
+    )
+
+    assert meta.num_prefills == num_prefills
+    assert meta.num_decodes == 2 - num_prefills
+    assert meta.num_prefill_tokens == num_prefills
+    assert meta.num_decode_tokens == 1 + query_len - num_prefills
+    if num_prefills:
+        assert meta.has_initial_state is not None
+        assert meta.has_initial_state.tolist() == [True, False]
+    else:
+        assert meta.has_initial_state is None
+
+
+def test_one_token_first_chunk_excludes_padding():
+    """Neither padding requests nor padding tokens count as prefill work."""
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, 1, 0, 0], query_lens=[1, 1, 0, 0]),
+        BLOCK_SIZE,
+        DEVICE,
+    ).replace(
+        is_prefilling=torch.tensor([False, True, False, False], dtype=torch.bool),
+        num_actual_tokens=4,
+    )
+    meta = _create_gdn_builder().build(0, common)
+
+    assert meta.num_decodes == 1
+    assert meta.num_prefills == 1
+    assert meta.num_decode_tokens == 1
+    assert meta.num_prefill_tokens == 1
+
+
+def test_cudagraph_capture_batch_stays_decode_only():
+    """Capture rows have no history, but must still select decode kernels."""
+    batch = BatchSpec(seq_lens=[1] * 4, query_lens=[1] * 4)
+    builder, common_attn_metadata, _ = _build_non_spec(
+        batch, [False] * 4, full_cuda_graph=True
+    )
+    meta = builder.build_for_cudagraph_capture(common_attn_metadata)
+
+    assert meta.num_prefills == 0
+    assert meta.num_decodes == 4
+    assert meta.has_initial_state is None
+    staged = meta.non_spec_state_indices_tensor
+    assert staged is not None
+    assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
+    torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])

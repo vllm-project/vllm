@@ -127,9 +127,7 @@ class StructuredOutputsParams:
             )
 
     def all_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -143,9 +141,7 @@ class StructuredOutputsParams:
         )
 
     def all_non_structural_tag_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -253,6 +249,8 @@ class SamplingParams(
     """Controls the randomness of the sampling. Lower values make the model
     more deterministic, while higher values make the model more random. Zero
     means greedy sampling."""
+    watermarking: bool = True
+    """Whether to apply the engine's configured watermark to this request."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""
@@ -385,6 +383,7 @@ class SamplingParams(
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
         temperature: float | None = 1.0,
+        watermarking: bool = True,
         top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
@@ -450,6 +449,7 @@ class SamplingParams(
             if repetition_penalty is None
             else repetition_penalty,
             temperature=1.0 if temperature is None else temperature,
+            watermarking=watermarking,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
@@ -526,6 +526,16 @@ class SamplingParams(
 
         self._verify_args()
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.temperature >= _SAMPLING_EPS
+            and self.seed is None
+        ):
+            logger.warning_once(
+                "Random sampling without an explicit seed may not be batch "
+                "invariant. Set seed in SamplingParams or use temperature=0."
+            )
+
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
@@ -544,6 +554,8 @@ class SamplingParams(
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
+        if self.extra_args:
+            self._verify_extra_args()
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -655,6 +667,26 @@ class SamplingParams(
                 f"Got bad_words={self.bad_words}"
             )
 
+    def _verify_extra_args(self) -> None:
+        # JSON accepts arbitrary integers, but the engine's MessagePack
+        # transport only supports signed/unsigned 64-bit integers.
+        pending: list[Any] = [self.extra_args]
+        visited: set[int] = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, int) and not -(2**63) <= value < 2**64:
+                raise VLLMValidationError(
+                    "extra_args integers must be between -2**63 and 2**64 - 1.",
+                    parameter="extra_args",
+                )
+            if isinstance(value, (dict, list, tuple)) and id(value) not in visited:
+                visited.add(id(value))
+                if isinstance(value, dict):
+                    pending.extend(value.keys())
+                    pending.extend(value.values())
+                else:
+                    pending.extend(value)
+
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
             raise VLLMValidationError(
@@ -666,7 +698,7 @@ class SamplingParams(
         generation_config: dict[str, Any],
         eos_token_id: int | None = None,
     ) -> None:
-        """Update if there are non-default values from generation_config"""
+        """Update if there are non-default values from generation_config."""
         if not self.ignore_eos:
             self._eos_token_id = eos_token_id
 
@@ -801,7 +833,6 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
@@ -971,13 +1002,6 @@ class SamplingParams(
                 value=invalid_token_ids,
             )
 
-    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
-        )
-
-        validate_logits_processors_parameters(model_config.logits_processors, self)
-
     def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
@@ -1130,6 +1154,18 @@ class SamplingParams(
             raise VLLMValidationError(
                 "structured_outputs.regex must not contain a NUL character ('\\x00')"
             )
+        # Note(arpera):
+        # We do NOT check here structured output regex on emptiness because
+        # empty regex is indeed compiles to a valid grammar as well as
+        # whitespace-only regexps, for instance, regex="\n" or regex=" "
+        # are valid patterns and we MUST process them.
+        if (
+            isinstance(self.structured_outputs.structural_tag, str)
+            and self.structured_outputs.structural_tag.strip() == ""
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.structural_tag cannot be an empty string"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -1142,6 +1178,7 @@ class SamplingParams(
             validate_structured_output_request_outlines,
         )
         from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+        from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -1174,6 +1211,22 @@ class SamplingParams(
                     "backends or tokenizer_mode='hf' instead."
                 )
             validate_structured_output_request_lm_format_enforcer(self)
+        elif (
+            backend == "auto"
+            and is_mistral_tokenizer(tokenizer)
+            and tokenizer.is_tekken
+            and self.structured_outputs.grammar
+            and grammar_is_likely_lark(self.structured_outputs.grammar)
+        ):
+            # Lark grammars for Tekken Mistral tokenizers, including the ones
+            # the Mistral tool parser generates, go to guidance. llguidance
+            # takes the tokenizer from mistral-common and never lets a regex
+            # match a special token. The xgrammar backend declares no special
+            # tokens for Mistral tokenizers, so a regex like `.` can match
+            # `[TOOL_CALLS]` or `[INST]` as plain text.
+            validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
+            self.structured_outputs._backend = "guidance"
+            self.structured_outputs._backend_was_auto = True
         else:
             # NOTE: backend must be "auto" here, because we have
             # checked supported_backends above.
@@ -1231,6 +1284,7 @@ class SamplingParams(
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
             f"temperature={self.temperature}, "
+            f"watermarking={self.watermarking}, "
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
@@ -1286,6 +1340,7 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+    skip_special_tokens: bool = True
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")

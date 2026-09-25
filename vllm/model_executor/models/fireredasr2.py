@@ -12,7 +12,7 @@ from transformers import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
@@ -38,6 +38,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.fireredasr2 import (
     FireRedASR2FeatureExtractor,
@@ -63,11 +64,10 @@ logger = init_logger(__name__)
 
 
 class FireRedASR2AudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames (M)
     """
 
     input_features: Annotated[
@@ -207,20 +207,18 @@ class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2Processing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         ret = {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
         return ret
@@ -229,36 +227,23 @@ class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2Processing
 class FireRedASR2MultiModalProcessor(
     BaseMultiModalProcessor[FireRedASR2ProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        mm_data = dict(mm_data)
-        mm_data["audio"] = mm_data.pop("audios")
-
-        hf_processor_mm_kwargs = dict(
-            **hf_processor_mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
         )
-
-        return mm_data, hf_processor_mm_kwargs
-
-    def _postprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
-    ) -> BatchFeature:
-        if "labels" in processed_data:
-            processed_data["input_ids"] = processed_data.pop("labels")
-
-        return processed_data
 
     def _get_mm_fields_config(
         self,

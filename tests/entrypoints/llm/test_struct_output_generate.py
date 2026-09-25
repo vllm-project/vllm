@@ -455,7 +455,7 @@ def test_structured_output(
                 structured_outputs=StructuredOutputsParams(grammar="not a grammar"),
             )
             with pytest.raises(
-                VLLMValidationError, match="Failed to convert the grammar "
+                VLLMValidationError, match="Invalid grammar specification"
             ):
                 runner.llm.generate(
                     (
@@ -948,7 +948,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
         prompts = [structured_outputs_prompt, non_structured_outputs_prompt]
         sampling_params = [
             SamplingParams(
-                temperature=1.0,
+                temperature=0,
                 max_tokens=400,
                 structured_outputs=StructuredOutputsParams(json=sample_json_schema),
             ),
