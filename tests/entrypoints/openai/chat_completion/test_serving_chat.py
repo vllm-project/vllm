@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
+from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import HarmonyParser
@@ -843,6 +844,71 @@ async def test_streaming_reasoning_usage_counts_across_deltas():
     assert usage_chunks[-1]["usage"]["completion_tokens_details"] == {
         "reasoning_tokens": 1
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_reasoning", "expected_tokens"),
+    [(True, ["<tool_call>", "answer"]), (False, [])],
+)
+async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
+    include_reasoning: bool, expected_tokens: list[str]
+):
+    """Logprobs of tokens the parser swallows (e.g. <tool_call>) must still
+    be streamed, unless per-token metadata is hidden with the reasoning."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving.return_tokens_as_token_ids = False
+
+    parser = MagicMock()
+    parser.parse_delta.side_effect = [None, DeltaMessage(content="answer")]
+    parser.count_reasoning_tokens.return_value = 0
+    serving.parser_cls = MagicMock(return_value=parser)
+
+    def make_output(token_id: int, text: str, finish_reason: str | None):
+        request_output = _make_metrics_request_output(
+            metrics=None, token_ids=(token_id,)
+        )
+        completion = request_output.outputs[0]
+        completion.text = text
+        completion.finish_reason = finish_reason
+        completion.logprobs = [
+            {token_id: Logprob(logprob=-0.5, rank=1, decoded_token=text)}
+        ]
+        return request_output
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        logprobs=True,
+        include_reasoning=include_reasoning,
+    )
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(
+            make_output(10, "<tool_call>", None), make_output(11, "answer", "stop")
+        ),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    streamed_tokens = [
+        entry["token"]
+        for chunk in chunks
+        for choice in chunk["choices"]
+        if choice.get("logprobs")
+        for entry in choice["logprobs"]["content"]
+    ]
+    assert streamed_tokens == expected_tokens
 
 
 @dataclass
@@ -2239,7 +2305,13 @@ async def test_tool_choice_validation_without_parser():
 
 
 @pytest.mark.asyncio
-async def test_streaming_n_gt1_independent_tool_parsers():
+@pytest.mark.parametrize(
+    ("engine_finish_reason", "expected_finish_reason"),
+    [("stop", "tool_calls"), ("length", "length")],
+)
+async def test_streaming_n_gt1_independent_tool_parsers(
+    engine_finish_reason: str, expected_finish_reason: str
+):
     """n>1 streaming must use independent parser instances
     and token-id histories per choice.
     """
@@ -2344,7 +2416,7 @@ async def test_streaming_n_gt1_independent_tool_parsers():
                     token_ids=[],
                     cumulative_logprob=0.0,
                     logprobs=None,
-                    finish_reason="stop",
+                    finish_reason=engine_finish_reason,
                 )
                 for choice_idx in range(num_choices)
             ],
@@ -2408,8 +2480,8 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         assert len(reasons) == 1, (
             f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
         )
-        assert reasons[0] == "tool_calls", (
-            f"Choice {choice_idx}: expected finish_reason='tool_calls', "
+        assert reasons[0] == expected_finish_reason, (
+            f"Choice {choice_idx}: expected finish_reason={expected_finish_reason!r}, "
             f"got '{reasons[0]}'"
         )
 

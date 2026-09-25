@@ -1326,7 +1326,9 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return cutlass_group_gemm_supported()
+        return (
+            current_platform.is_device_capability(90) and cutlass_group_gemm_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
