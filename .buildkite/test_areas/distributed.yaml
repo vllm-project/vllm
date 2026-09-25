@@ -470,14 +470,15 @@ steps:
   - tests/distributed/
   - examples/features/data_parallel/data_parallel_offline.py
   commands:
-    - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
+    - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/pipeline_parallel/" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
 
-- label: ":nvidia: (L4) Pipeline + Context Parallelism"
-  key: pipeline-context-parallelism-4-gpus
-  timeout_in_minutes: 55
+- label: ":nvidia: (L4) Pipeline Parallelism Models Shard %N"
+  key: pipeline-parallelism-models-4-gpus
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 4
+  parallelism: 3
   source_file_dependencies:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
@@ -487,17 +488,17 @@ steps:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
-  - tests/v1/distributed/test_pp_dp_v2.py
   commands:
-  - pytest -v -s distributed/test_pp_cudagraph.py
-  - pytest -v -s distributed/test_pipeline_parallel.py
-  - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  - pytest -v -s distributed/pipeline_parallel/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI250) Pipeline + Context Parallelism"
+      label: ":amd: (MI250) Pipeline Parallelism Models Shard %N"
       dind: false
       device: mi250_4
-      timeout_in_minutes: 90
+      timeout_in_minutes: 35
+      # Set explicitly: this mirror's own case timings need one more shard
+      # than the NVIDIA job to stay under the per-shard target.
+      parallelism: 4
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -513,6 +514,78 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (L4) Pipeline Parallelism CUDAGraph"
+  key: pipeline-parallelism-cudagraph-4-gpus
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/test_pp_cudagraph.py
+  commands:
+  - pytest -v -s distributed/test_pp_cudagraph.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) Pipeline Parallelism CUDAGraph"
+      dind: false
+      device: mi250_4
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/distributed/test_pp_cudagraph.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (L4) Pipeline Parallelism DP V2"
+  key: pipeline-parallelism-dp-v2-4-gpus
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/v1/
+  - tests/v1/distributed/test_pp_dp_v2.py
+  commands:
+  - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) Pipeline Parallelism DP V2"
+      dind: false
+      device: mi250_4
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/v1/distributed/test_pp_dp_v2.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus
   timeout_in_minutes: 45
@@ -525,12 +598,12 @@ steps:
   - vllm/v1/executor/multiproc_executor.py
   - tests/distributed/test_ray_v2_executor.py
   - tests/distributed/test_ray_v2_executor_e2e.py
-  - tests/distributed/test_pipeline_parallel.py
+  - tests/distributed/pipeline_parallel/
   - tests/basic_correctness/models/test_basic_correctness.py
   commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
-  - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+  - pytest -v -s distributed/pipeline_parallel/test_llama_ray.py
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"

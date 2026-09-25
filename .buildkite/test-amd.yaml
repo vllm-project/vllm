@@ -312,7 +312,7 @@ steps:
   optional: true
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
-  - pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s distributed/pipeline_parallel/
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 #----------------------------------------------------------  mi250 · kernels  ----------------------------------------------------------#
@@ -1029,14 +1029,14 @@ steps:
   - vllm/v1/executor/multiproc_executor.py
   - tests/distributed/test_ray_v2_executor.py
   - tests/distributed/test_ray_v2_executor_e2e.py
-  - tests/distributed/test_pipeline_parallel.py
+  - tests/distributed/pipeline_parallel/
   - tests/basic_correctness/models/test_basic_correctness.py
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
-  - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+  - pytest -v -s distributed/pipeline_parallel/test_llama_ray.py
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
 
 - label: ":amd: (MI300) Distributed DP + EP" # TBD
