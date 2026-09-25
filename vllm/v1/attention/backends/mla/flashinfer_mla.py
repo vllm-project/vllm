@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -15,6 +16,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
+    MLACommonDecodeMetadata,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
@@ -115,9 +117,28 @@ def _get_multi_ctas_kv_counter_buffer(
     return _fi_multi_ctas_kv_counter
 
 
-class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+@dataclass
+class FlashInferMLADecodeMetadata(MLACommonDecodeMetadata):
+    flattened_block_table: torch.Tensor | None = None
+    flattened_seq_lens: torch.Tensor | None = None
+    flattened_row_req: torch.Tensor | None = None
+    # Row count the flattened tensors were built for (0 = not built), not a query len.
+    query_len: int = 0
+    query_start_loc: torch.Tensor | None = None
+    max_query_len: int = 1
+
+
+@dataclass
+class FlashInferMLAMetadata(MLACommonMetadata[FlashInferMLADecodeMetadata]):
+    pass
+
+
+class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadata]):
+    # Adaptive verification requires ALWAYS from every builder, matching upstream's
+    # DeepseekV4FlashMLAMetadataBuilder. The kernels tile ragged queries from the device
+    # query offsets (flashinfer #3238), so one k+1 graph replays any 1..k+1 mix.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
     supports_non_causal_multi_token_dcp: ClassVar[bool] = True
@@ -143,8 +164,29 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
             layer_names,
             vllm_config,
             device,
-            MLACommonMetadata,
+            FlashInferMLAMetadata,
             supports_dcp_with_varlen=True,
+        )
+
+    def _build_decode(
+        self,
+        block_table_tensor: torch.Tensor,
+        seq_lens_device: torch.Tensor,
+        max_seq_len: int,
+        query_start_loc_cpu: torch.Tensor,
+        query_start_loc_device: torch.Tensor,
+        num_decode_tokens: int,
+        max_query_len: int,
+        dcp_tot_seq_lens_device: torch.Tensor | None,
+    ) -> FlashInferMLADecodeMetadata:
+        # Promised bound, not measured: a capture dummy puts one token/req, so
+        # measuring would bake an undersized graph. Ragged only when max_query_len>1.
+        return FlashInferMLADecodeMetadata(
+            block_table=block_table_tensor,
+            seq_lens=seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            query_start_loc=query_start_loc_device,
+            max_query_len=max_query_len,
         )
 
 
@@ -159,7 +201,7 @@ class FlashInferMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
@@ -208,7 +250,7 @@ class FlashInferMLABackend(MLACommonBackend):
         return None
 
 
-class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     # DCP is the only path that consumes LSE. It uses monolithic CuTeDSL,
@@ -276,7 +318,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: FlashInferMLAMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
@@ -289,14 +331,32 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
 
+        # Led by the promised bound (baked into the graph), not
+        # num_decode_tokens // num_decodes -- that average is a per-request length
+        # only for uniform batches.
+        multi_token_decode = (
+            attn_metadata.decode.max_query_len > 1
+            or attn_metadata.num_decode_tokens > attn_metadata.num_decodes
+        )
+        cum_seq_lens_q: torch.Tensor | None = None
+        max_q_len: int | None = None
+        row_req: torch.Tensor | None = None
+
         if not attn_metadata.causal:
             # FlashInfer decode has no causal flag. Flatten each non-causal
             # query block into independent single-token rows.
-            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             q = q.unsqueeze(1)
-            if query_len > 1:
-                block_table = block_table.repeat_interleave(query_len, dim=0)
-                seq_lens = seq_lens.repeat_interleave(query_len)
+            if multi_token_decode:
+                block_table, seq_lens, row_req = self._flattened_decode_metadata(
+                    attn_metadata, q.shape[0]
+                )
+        elif attn_metadata.decode.max_query_len > 1 and self.dcp_world_size == 1:
+            # Causal spec decode: keep q compact and let the kernel tile each
+            # request's length (uniform 1+k and adaptive ragged). Mirrors vllm #52157.
+            # DCP keeps the uniform reshape below: it needs LSE, which the kernels
+            # do not return on the ragged path (flashinfer #3238).
+            cum_seq_lens_q = attn_metadata.decode.query_start_loc
+            max_q_len = attn_metadata.decode.max_query_len
         # trtllm API requires extra dimension q_len_per_request for MTP
         elif attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
             logger.warning_once(
@@ -327,10 +387,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self.dcp_world_size > 1:
             causal_seqlens_kv_global = attn_metadata.decode.dcp_tot_seq_lens
             assert causal_seqlens_kv_global is not None
-            if not attn_metadata.causal and query_len > 1:
-                causal_seqlens_kv_global = causal_seqlens_kv_global.repeat_interleave(
-                    query_len
-                )
+            if row_req is not None:
+                causal_seqlens_kv_global = causal_seqlens_kv_global[row_req]
             extra_kwargs.update(
                 enable_dcp=True,
                 cp_world=self.dcp_world_size,
@@ -342,6 +400,16 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
             # fall back to cute-dsl for those.
             decode_backend = _select_mla_decode_backend(runtime_num_heads)
+        if cum_seq_lens_q is not None:
+            # Neither decode backend returns LSE on the ragged path
+            # (flashinfer #3238); DCP, the only LSE consumer, took the uniform
+            # branch above, so this only guards a future caller wiring the two.
+            assert not return_lse, (
+                "FlashInferMLA ragged decode cannot return LSE; DCP and adaptive "
+                "variable-length decode are mutually exclusive."
+            )
+            extra_kwargs["cum_seq_lens_q"] = cum_seq_lens_q
+            extra_kwargs["max_q_len"] = max_q_len
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
         elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):
@@ -386,3 +454,37 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         o = o.view(-1, o.shape[-2], o.shape[-1])
 
         return o, lse
+
+    def _flattened_decode_metadata(
+        self,
+        attn_metadata: FlashInferMLAMetadata,
+        num_rows: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Expand per-request decode tensors to one row per query token.
+
+        Cached across the layers of a group, which all see the same batch.
+        """
+        decode = attn_metadata.decode
+        assert decode is not None
+        if decode.query_len != num_rows:
+            cu = decode.query_start_loc
+            assert cu is not None
+            # searchsorted on the device offsets, not repeat_interleave(uniform_len):
+            # the latter only lines up for uniform batches and hands ragged rows
+            # another request's KV (silent garbage).
+            rows = torch.arange(num_rows, device=cu.device, dtype=cu.dtype)
+            row_req = torch.searchsorted(cu[1:], rows, right=True).clamp_(
+                max=decode.block_table.shape[0] - 1
+            )
+            decode.flattened_row_req = row_req
+            decode.flattened_block_table = decode.block_table[row_req]
+            decode.flattened_seq_lens = decode.seq_lens[row_req]
+            decode.query_len = num_rows
+        assert decode.flattened_block_table is not None
+        assert decode.flattened_seq_lens is not None
+        assert decode.flattened_row_req is not None
+        return (
+            decode.flattened_block_table,
+            decode.flattened_seq_lens,
+            decode.flattened_row_req,
+        )

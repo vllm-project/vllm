@@ -775,6 +775,17 @@ def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
         assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
+def test_transfer_disabled_hybrid_group_is_ignored():
+    config = _make_hybrid_kv_cache_config()
+    config.kv_cache_groups[1].enable_kv_transfer = False
+    scheduler = _read_scheduler(config)
+
+    assert scheduler._is_hma_required is False
+    assert scheduler.get_exchange_clipped_blocks([[1, 2, 3], [20, 21, 22]]) == [
+        [1, 2, 3]
+    ]
+
+
 def test_non_sliding_window_hybrid_is_rejected():
     """A hybrid group that is not sliding-window (e.g. chunked-local
     attention) must fail closed rather than be silently mistransferred."""
