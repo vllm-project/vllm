@@ -1646,7 +1646,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
-        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
@@ -1657,6 +1656,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     batch_req_state.num_scheduled_tokens,
                     batch_req_state.is_prefilling_np,
                 )
+
+        max_query_len: int | None = None
+        if batch_req_state is None or not batch_req_state.has_prefill:
+            # Varlen decode graphs match on max_query_len alone, so a batch with
+            # prefills must not offer one.
+            max_query_len = max(scheduler_output.num_scheduled_tokens.values())
 
         num_active_loras = 0
         if self.lora_config:
