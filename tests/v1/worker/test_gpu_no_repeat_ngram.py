@@ -33,6 +33,19 @@ def _reference_banned_tokens(
     return banned - (whitelist or set())
 
 
+def _mineru_banned_tokens(output_ids: list[int], ngram_size: int) -> set[int]:
+    """Match mineru-vl-utils' incremental cached-ngram algorithm."""
+    cached_ngrams: dict[tuple[int, ...], list[int]] = {}
+    banned: set[int] = set()
+    for output_len in range(ngram_size, len(output_ids) + 1):
+        history = output_ids[:output_len]
+        previous_prefix = tuple(history[-ngram_size:-1])
+        cached_ngrams.setdefault(previous_prefix, []).append(history[-1])
+        current_prefix = tuple(history[-ngram_size + 1 :])
+        banned = set(cached_ngrams.get(current_prefix, []))
+    return banned
+
+
 @pytest.mark.parametrize("ngram_sizes", [[1, 2, 3, 0], [5, 7, 11, 17]])
 def test_no_repeat_ngram_matches_reference(ngram_sizes: list[int]):
     torch.manual_seed(17)
@@ -210,6 +223,33 @@ def test_no_repeat_ngram_matches_legacy_ocr_processor(
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(actual[0], expected)
+
+
+@pytest.mark.parametrize("ngram_size", [2, 3, 5, 17, 100])
+def test_no_repeat_ngram_matches_mineru_processor(ngram_size: int):
+    device = "cuda"
+    vocab_size = 257
+    prefix = list(range(1, ngram_size))
+    output_ids = prefix + [211, 212] + prefix
+    expected = _mineru_banned_tokens(output_ids, ngram_size)
+
+    all_token_ids = torch.tensor([output_ids], dtype=torch.int32, device=device)
+    logits = torch.zeros((1, vocab_size), device=device)
+    apply_no_repeat_ngram(
+        logits,
+        torch.zeros(1, dtype=torch.int32, device=device),
+        all_token_ids,
+        torch.zeros(1, dtype=torch.int32, device=device),
+        torch.tensor([len(output_ids)], dtype=torch.int32, device=device),
+        torch.tensor([ngram_size], dtype=torch.int32, device=device),
+        torch.tensor([len(output_ids)], dtype=torch.int32, device=device),
+        torch.zeros((1, 1), dtype=torch.int32, device=device),
+        torch.zeros(1, dtype=torch.int32, device=device),
+    )
+    torch.accelerator.synchronize()
+
+    actual = set(torch.isneginf(logits[0]).nonzero().flatten().cpu().tolist())
+    assert actual == expected
 
 
 def test_no_repeat_ngram_validates_ocr_arguments():
