@@ -19,6 +19,33 @@ SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
+
+
+def _stream_collect(parser, text, chunk=2):
+    """Feed *text* through the streaming entry point, return what a client
+    would accumulate as (reasoning, content)."""
+    prev = ""
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    for i in range(0, len(text), chunk):
+        cur = text[: i + chunk]
+        delta = parser.extract_reasoning_content_streaming(
+            previous_text=prev,
+            current_text=cur,
+            delta_text=text[i : i + chunk],
+            previous_token_ids=[ord(c) for c in prev],
+            current_token_ids=[ord(c) for c in cur],
+            delta_token_ids=[ord(c) for c in text[i : i + chunk]],
+        )
+        if delta is not None:
+            if delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+            if delta.content:
+                content_parts.append(delta.content)
+        prev = cur
+    return "".join(reasoning_parts) or None, "".join(content_parts) or None
 
 
 class DummyTokenizer:
@@ -179,6 +206,46 @@ def test_streaming_split_close_marker_hands_content_downstream():
     assert closed.reasoning is None
     assert closed.content == f"{RESPONSE_OPEN}answer"
     assert parser.extract_content_ids([2, 3, 10]) == [10]
+
+
+def test_streaming_response_only_completion_is_content():
+    # The model skipped the think channel entirely: the stream opens with
+    # the response marker. Must split the same way the non-streaming path
+    # does (all content) instead of falling through to reasoning.
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    text = f"{RESPONSE_OPEN}answer{RESPONSE_CLOSE}{MESSAGE_CLOSE}"
+
+    reasoning, content = _stream_collect(parser, text)
+
+    assert reasoning is None
+    assert content == "answer"
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    assert parser.extract_reasoning(text, request) == (None, "answer")
+
+
+def test_streaming_response_only_marker_split_is_not_emitted_as_reasoning():
+    # 1-char deltas: the partial opener must be held back until it
+    # completes, never leaked as reasoning.
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    text = f"{RESPONSE_OPEN}answer{RESPONSE_CLOSE}"
+
+    reasoning, content = _stream_collect(parser, text, chunk=1)
+
+    assert reasoning is None
+    assert content == "answer"
+
+
+def test_streaming_unclosed_reasoning_hands_off_to_response_channel():
+    # Generation prefix consumed the think-open and the model opened the
+    # response channel without closing think first. Reasoning already
+    # streamed stays reasoning; the response body switches to content.
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    text = f"step{RESPONSE_OPEN}answer{RESPONSE_CLOSE}"
+
+    reasoning, content = _stream_collect(parser, text)
+
+    assert reasoning == "step"
+    assert content == "answer"
 
 
 def test_thinking_disabled_streams_content():
