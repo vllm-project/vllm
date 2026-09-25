@@ -45,7 +45,7 @@ from vllm.utils import random_uuid
 if TYPE_CHECKING:
     from mcp.client import ClientSession
 
-    from vllm.v1.metrics.stats import RequestStateStats
+    from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +109,24 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+    # Spec-decode acceptance summed over all generation turns, taken from each
+    # turn's finished output.
+    spec_decode_metrics: "RequestSpecDecodeMetrics | None" = None
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
         pass
+
+    def _accumulate_spec_decode_metrics(self, output: RequestOutput) -> None:
+        if not output.finished or not output.outputs:
+            return
+        metrics = output.outputs[0].spec_decode_metrics
+        if metrics is None:
+            return
+        if self.spec_decode_metrics is None:
+            self.spec_decode_metrics = copy.deepcopy(metrics)
+        else:
+            self.spec_decode_metrics.merge(metrics)
 
     @abstractmethod
     def append_tool_output(self, output) -> None:
@@ -210,6 +224,7 @@ class SimpleContext(ConversationContext):
         self.last_output = output
         if not isinstance(output, RequestOutput):
             raise ValueError("SimpleContext only supports RequestOutput.")
+        self._accumulate_spec_decode_metrics(output)
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         if output.num_cache_creation_tokens is not None:
@@ -340,6 +355,7 @@ class ParsableContext(ConversationContext):
         self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
+        self._accumulate_spec_decode_metrics(output)
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
@@ -654,6 +670,7 @@ class HarmonyContext(ConversationContext):
         self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
+        self._accumulate_spec_decode_metrics(output)
         if self.first_tok_of_message:
             self.finish_reason = None
             self._update_prefill_token_usage(output)

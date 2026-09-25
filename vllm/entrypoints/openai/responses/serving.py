@@ -28,7 +28,9 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
+    PerRequestMetrics,
     RequestResponseMetadata,
+    SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -872,6 +874,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         ):
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics, num_generated_tokens
+            )
+        # Spec-decode acceptance is additive, so unlike timing it is reported
+        # for multi-turn responses too, summed across generation turns.
+        if context.spec_decode_metrics is not None:
+            if per_request_metrics is None:
+                per_request_metrics = PerRequestMetrics()
+            per_request_metrics.speculative_decoding = SpeculativeDecodingMetrics(
+                **context.spec_decode_metrics.to_dict()
             )
         response = ResponsesResponse.from_request(
             request,
