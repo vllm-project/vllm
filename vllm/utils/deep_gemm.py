@@ -386,6 +386,9 @@ def get_theoretical_mk_alignment_for_contiguous_layout(
         return _get_theoretical_mk_alignment_for_contiguous_layout_impl(expected_m)
     if num_groups <= 0:
         raise ValueError(f"num_groups must be positive, got {num_groups}")
+    if current_platform.is_device_capability_family(120):
+        per_group_m = None if expected_m is None else cdiv(expected_m, num_groups)
+        return 64 if per_group_m is not None and per_group_m <= 64 else 128
     try:
         return _get_theoretical_mk_alignment_for_contiguous_layout_impl(
             expected_m, num_groups
