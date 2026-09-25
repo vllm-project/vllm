@@ -29,6 +29,13 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         ));
     }
 
+    if request.previous_input_messages.is_some() {
+        bail_invalid_request!(
+            param = "previous_input_messages",
+            "previous_input_messages requires Harmony rendering, which is not supported by this frontend."
+        );
+    }
+
     if request.prompt.is_some() {
         bail_invalid_request!(param = "prompt", "prompt template is not supported");
     }
@@ -44,13 +51,25 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
     }
 
     if let Some(truncation) = &request.truncation {
-        // TODO: implement context-length truncation for `truncation="auto"`.
-        if !matches!(truncation.as_str(), "auto" | "disabled") {
+        if truncation == "auto" {
             bail_invalid_request!(
                 param = "truncation",
-                "truncation must be one of 'auto' or 'disabled'; got '{truncation}'."
+                "truncation='auto' is not supported by this frontend."
             );
         }
+        if truncation != "disabled" {
+            bail_invalid_request!(
+                param = "truncation",
+                "truncation must be 'disabled'; got '{truncation}'."
+            );
+        }
+    }
+
+    if request.max_tool_calls.is_some() {
+        bail_invalid_request!(
+            param = "max_tool_calls",
+            "max_tool_calls is not supported by this frontend."
+        );
     }
 
     Ok(())
@@ -61,7 +80,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
     fn base_request() -> ResponsesRequest {
         serde_json::from_value(json!({
             "model": "test-model",
@@ -116,5 +134,44 @@ mod tests {
         request.truncation = Some("maybe".to_string());
         let error = validate_request_compat(&request).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn auto_truncation_is_rejected_until_it_is_implemented() {
+        let mut request = base_request();
+        request.truncation = Some("auto".to_string());
+        let error = validate_request_compat(&request).unwrap_err();
+        assert!(matches!(error, ApiError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn unsupported_history_and_tool_controls_are_rejected() {
+        let mut request = base_request();
+        request.previous_input_messages = Some(vec![json!({"role": "user", "content": "hi"})]);
+        assert!(matches!(
+            validate_request_compat(&request),
+            Err(ApiError::InvalidRequest { .. })
+        ));
+
+        let mut request = base_request();
+        request.max_tool_calls = Some(1);
+        assert!(matches!(
+            validate_request_compat(&request),
+            Err(ApiError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn output_presentation_controls_are_accepted_for_compatibility() {
+        let request = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello",
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"summary": "concise"},
+            "text": {"verbosity": "low"},
+        }))
+        .unwrap();
+
+        assert!(validate_request_compat(&request).is_ok());
     }
 }
