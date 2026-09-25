@@ -330,8 +330,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         hf_config = vllm_config.model_config.hf_text_config
         assert hf_config.index_topk is not None
         self._index_topk = int(hf_config.index_topk)
-        # This builder serves the MLA group, whose spec keeps tokens_per_state
-        # at 1. Only the indexer's cache spec carries the pool size.
+        # kpool must come from the model config
         self._index_kpool = int(getattr(hf_config, "index_kpool", 1) or 1)
 
     def _kv_lens_host(self, cam: CommonAttentionMetadata) -> tuple[int, torch.Tensor]:

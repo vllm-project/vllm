@@ -324,10 +324,11 @@ _NO_KPOOL = object()
         (None, [2048] * 4),
         (_NO_KPOOL, [2048] * 4),
     ],
+    ids=["kpool4", "kpool_none", "no_kpool_attr"],
 )
 def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens):
-    """The builder serves the MLA group, whose spec has tokens_per_state == 1,
-    so kpool must come from the model config or the tail pool is never read."""
+    """kpool must come from the model config or the tail pool is never
+    read."""
     monkeypatch.setattr(
         sm90_mod.FlashInferMLASparseMetadataBuilder,
         "__init__",
