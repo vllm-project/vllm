@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
-import pytest
 import torch
 
 import vllm._custom_ops as ops
@@ -722,26 +721,27 @@ def check_deferred_moe_finalize(
     """Check a kernel that defers its finalize against the finalize it skips.
 
     ``run`` calls the kernel on fixed inputs, first as built and then with
-    ``moe_config`` deferring on every call. ``finalize_moe_output`` on the
-    deferred output must give the kernel's own finalized output bit for bit, and
-    modular experts must hand the router's weights back as-is. Each launch
-    permutes into its own buffer, so deferring refuses a run it would chunk.
+    ``moe_config`` asking to defer, which ``should_defer_moe_finalize`` must
+    report truthfully. A deferred output reduced by ``finalize_moe_output`` must
+    give the kernel's own finalized output bit for bit, and modular experts hand
+    the router's weights back as-is. A call the experts split across kernel
+    launches finalizes instead.
     """
     finalized = run()
     assert isinstance(finalized, torch.Tensor)
     moe_config.defer_moe_finalize = True
+    output = run()
+    assert moe_config.should_defer_moe_finalize(finalized.shape[0]) != chunked
     if chunked:
-        with pytest.raises(ValueError, match="one kernel launch"):
-            run()
+        torch.testing.assert_close(output, finalized, atol=0, rtol=0)
         return
 
-    deferred = run()
-    assert isinstance(deferred, UnfinalizedMoEOutput)
+    assert isinstance(output, UnfinalizedMoEOutput)
     if router_weights is not None:
         torch.testing.assert_close(
-            deferred.expert_weights, router_weights, atol=0, rtol=0
+            output.expert_weights, router_weights, atol=0, rtol=0
         )
-    torch.testing.assert_close(finalize_moe_output(deferred), finalized, atol=0, rtol=0)
+    torch.testing.assert_close(finalize_moe_output(output), finalized, atol=0, rtol=0)
 
 
 def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):

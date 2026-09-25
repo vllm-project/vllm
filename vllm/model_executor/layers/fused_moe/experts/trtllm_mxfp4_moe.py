@@ -289,6 +289,18 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     Moved from trtllm_moe.py.
     """
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        **kwargs,
+    ):
+        super().__init__(moe_config, quant_config, **kwargs)
+        # Each launch permutes into its own buffer, so a chunked call finalizes.
+        moe_config.limit_deferred_moe_finalize(
+            self._max_supported_tokens(self.topk, moe_config.num_experts)
+        )
+
     @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
@@ -439,16 +451,12 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        # Chunk tokens so the batched-GEMM grid stays within CUDA limits.
+        # Chunk tokens so the batched-GEMM grid stays within CUDA limits. Each
+        # launch permutes into its own buffer, so only a run that fits in one
+        # launch can leave the top-k reduction to a deferring consumer.
         M = x_quant.size(0)
         chunk_size = self._max_supported_tokens(topk, global_num_experts)
-        defer = self.moe_config.should_defer_moe_finalize(M)
-        if defer and chunk_size < M:
-            # Each launch permutes into its own buffer.
-            raise ValueError(
-                f"Deferring the MoE finalize needs one kernel launch, but {M} "
-                f"tokens take {-(-M // chunk_size)}."
-            )
+        defer = chunk_size >= M and self.moe_config.should_defer_moe_finalize(M)
         unfinalized: UnfinalizedMoEOutput | None = None
         for start in range(0, M, chunk_size):
             end = min(start + chunk_size, M)

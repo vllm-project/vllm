@@ -302,6 +302,16 @@ class TrtLlmNvFp4ExpertsBase:
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
     """Modular version of the implementation (just the experts)."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        per_token_activation: bool = False,
+    ):
+        super().__init__(moe_config, quant_config, per_token_activation)
+        # Each launch permutes into its own buffer, so a chunked call finalizes.
+        moe_config.limit_deferred_moe_finalize(self._get_chunk_size())
+
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """The modular implementation supports all parallel configs."""
@@ -434,9 +444,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         M = hidden_states.shape[0]
         chunk_size = self._get_chunk_size()
-        defer = self.moe_config.should_defer_moe_finalize(M)
 
         if chunk_size >= M:
+            # Each launch permutes into its own buffer, so only a run that fits
+            # in one launch can leave the top-k reduction to a deferring
+            # consumer.
+            defer = self.moe_config.should_defer_moe_finalize(M)
             return self._invoke_kernel(
                 None if defer else output,
                 hidden_states,
@@ -447,12 +460,6 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 activation,
                 global_num_experts,
                 a1q_scale,
-            )
-        elif defer:
-            # Each launch permutes into its own buffer.
-            raise ValueError(
-                f"Deferring the MoE finalize needs one kernel launch, but {M} "
-                f"tokens take {-(-M // chunk_size)}."
             )
         else:
             for start in range(0, M, chunk_size):

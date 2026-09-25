@@ -1296,7 +1296,8 @@ class FusedMoEConfig:
     # consumer; read through `use_deferred_moe_finalize`, which applies the
     # guards. Kernels without the capability ignore it. Default False.
     defer_moe_finalize: bool = False
-    # Optional consumer capacity for deferred finalize. Negative means unbounded.
+    # Optional consumer capacity for deferred finalize, lowered by experts that
+    # would split a larger call across kernel launches. Negative means unbounded.
     defer_moe_finalize_max_num_tokens: int = -1
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
@@ -1445,6 +1446,12 @@ class FusedMoEConfig:
             and num_tokens > 0
             and (max_num_tokens < 0 or num_tokens <= max_num_tokens)
         )
+
+    def limit_deferred_moe_finalize(self, max_num_tokens: int) -> None:
+        """Finalize calls above ``max_num_tokens`` even when deferring."""
+        current = self.defer_moe_finalize_max_num_tokens
+        if current < 0 or max_num_tokens < current:
+            self.defer_moe_finalize_max_num_tokens = max_num_tokens
 
     @property
     def use_deepep_ht_kernels(self):
