@@ -109,6 +109,7 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
+        self.is_dsv41_encoder_only_prefill = vllm_config.is_dsv41_encoder_only_prefill
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -2101,7 +2102,12 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
-            if new_token_ids:
+            if self.is_dsv41_encoder_only_prefill:
+                assert not new_token_ids
+                if request.num_computed_tokens >= request.num_prompt_tokens:
+                    request.status = RequestStatus.FINISHED_STOPPED
+                    stopped = True
+            elif new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )

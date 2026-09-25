@@ -2647,6 +2647,62 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _apply_dsv41_encoder_only_transfer_profile(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_source_layer_ids: Sequence[int],
+    index_source_layer_ids: Sequence[int],
+) -> None:
+    """Select the model's explicit Main-KV and Indexer-K producer groups.
+
+    DeepSeek-V4.1's bounded-replay SWA and compressor continuation groups are
+    reconstructed on D. Draft groups are also D-local. A mixed target/local
+    group would advertise uninitialized bytes, so it must fail rather than
+    inheriting the prefix-cacheability of its aggregate spec.
+    """
+    source_ids = set(kv_source_layer_ids)
+    if not source_ids or not source_ids <= set(index_source_layer_ids):
+        raise ValueError(
+            "dsv41_encoder_only_prefill requires an Indexer-K producer for "
+            "every Main-KV source."
+        )
+    expected_suffixes = {
+        suffix
+        for layer_id in source_ids
+        for suffix in (
+            f".layers.{layer_id}.attn",
+            f".layers.{layer_id}.attn.indexer.k_cache",
+        )
+    }
+    seen_suffixes: set[str] = set()
+    for group in kv_cache_groups:
+        selected = {
+            suffix
+            for name in group.layer_names
+            for suffix in expected_suffixes
+            if name.endswith(suffix)
+        }
+        if selected and (
+            len(selected) != len(group.layer_names)
+            or not group.kv_cache_spec.prefix_cacheable
+        ):
+            raise ValueError(
+                "dsv41_encoder_only_prefill requires global Main-KV/Indexer-K "
+                "groups that do not mix with local state."
+            )
+        if selected & seen_suffixes:
+            raise ValueError(
+                "dsv41_encoder_only_prefill found duplicate global cache groups."
+            )
+        group.enable_kv_transfer = bool(selected)
+        seen_suffixes.update(selected)
+
+    if seen_suffixes != expected_suffixes:
+        raise ValueError(
+            "dsv41_encoder_only_prefill is missing required global cache "
+            f"groups: {sorted(expected_suffixes - seen_suffixes)}."
+        )
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2720,6 +2776,14 @@ def get_kv_cache_configs(
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in kv_cache_specs
     ]
+    if vllm_config.uses_dsv41_encoder_only_handoff:
+        hf_config = vllm_config.model_config.hf_text_config
+        for groups in projected_groups_per_worker:
+            _apply_dsv41_encoder_only_transfer_profile(
+                groups,
+                hf_config.kv_source_layer_ids,
+                hf_config.index_source_layer_ids,
+            )
 
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`:

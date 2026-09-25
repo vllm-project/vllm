@@ -3,12 +3,118 @@
 
 """Tests for KV cache offloading configuration."""
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _dsv41_handoff_config(**overrides) -> VllmConfig:
+    values = {
+        "connector": "NixlConnector",
+        "role": "kv_producer",
+        "architecture": "DeepseekV41ForCausalLM",
+        "use_v2": True,
+        "pp": 1,
+        "pcp": 1,
+        "ubatching": False,
+        "async_scheduling": False,
+        "bounded_replay": True,
+        "num_layers": 40,
+        "kv_sources": (2, 8, 14, 20),
+        "index_sources": (2, 8, 14, 20, 24, 28, 32, 36),
+        "engram_layers": (1, 14),
+        "speculative_config": None,
+    }
+    values.update(overrides)
+    return cast(
+        VllmConfig,
+        SimpleNamespace(
+            uses_dsv41_encoder_only_handoff=True,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector=values["connector"],
+                kv_role=values["role"],
+                dsv41_encoder_only_prefill=True,
+            ),
+            model_config=SimpleNamespace(
+                architecture=values["architecture"],
+                hf_text_config=SimpleNamespace(
+                    sliding_window=128,
+                    num_hidden_layers=values["num_layers"],
+                    kv_source_layer_ids=values["kv_sources"],
+                    index_source_layer_ids=values["index_sources"],
+                    engram_layer_ids=values["engram_layers"],
+                ),
+            ),
+            use_v2_model_runner=values["use_v2"],
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=values["pp"],
+                prefill_context_parallel_size=values["pcp"],
+                use_ubatching=values["ubatching"],
+            ),
+            cache_config=SimpleNamespace(swa_bounded_replay=values["bounded_replay"]),
+            scheduler_config=SimpleNamespace(
+                async_scheduling=values["async_scheduling"]
+            ),
+            speculative_config=values["speculative_config"],
+        ),
+    )
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_handoff_accepts_initial_boundary(role):
+    VllmConfig._verify_dsv41_encoder_only_handoff(_dsv41_handoff_config(role=role))
+
+
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_handoff_separates_producer_compile_hash():
+    producer = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_producer",
+        dsv41_encoder_only_prefill=True,
+    )
+    consumer = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_consumer",
+        dsv41_encoder_only_prefill=True,
+    )
+
+    assert producer.compute_hash() != consumer.compute_hash()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"connector": "ExampleConnector"}, "direct NixlConnector P/D"),
+        ({"role": "kv_both"}, "dedicated kv_producer or kv_consumer"),
+        ({"architecture": "LlamaForCausalLM"}, "DeepseekV41ForCausalLM only"),
+        ({"use_v2": False}, "requires model runner V2"),
+        ({"pp": 2}, "requires PP=1"),
+        ({"pcp": 2}, "does not support prefill context parallelism"),
+        ({"ubatching": True}, "does not support DBO or microbatching"),
+        ({"async_scheduling": True}, "requires --no-async-scheduling"),
+        ({"bounded_replay": False}, "requires SWA bounded replay"),
+        ({"num_layers": 39}, "requires the 40-layer"),
+        ({"index_sources": (2, 8, 14)}, "complete Main-KV/Indexer-K sources"),
+        ({"engram_layers": (20,)}, "boundary cannot be an Engram layer"),
+        (
+            {"role": "kv_consumer", "speculative_config": SimpleNamespace()},
+            "does not yet support speculative decoding",
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_handoff_rejects_unsupported_config(overrides, error):
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._verify_dsv41_encoder_only_handoff(
+            _dsv41_handoff_config(**overrides)
+        )
 
 
 class _StubLMCacheMPConnector:

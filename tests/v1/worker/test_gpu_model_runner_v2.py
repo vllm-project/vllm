@@ -3,6 +3,7 @@
 
 import contextlib
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -17,8 +18,60 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import AsyncModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import AsyncCacheOnlyOutput
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_cache_only_runner_waits_for_kv_writes_before_output(monkeypatch):
+    events = []
+    main_stream = object()
+
+    class FakeEvent:
+        def __init__(self, blocking=False):
+            assert blocking
+
+        def record(self, stream):
+            events.append(("record", stream))
+
+        def synchronize(self):
+            events.append(("synchronize", None))
+
+    monkeypatch.setattr(torch, "Event", FakeEvent)
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    input_batch = SimpleNamespace(
+        req_ids=["req"], idx_mapping=torch.tensor([0], dtype=torch.int32)
+    )
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=torch.ones(1, 1),
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+        cudagraph_stats=None,
+    )
+    runner.is_last_pp_rank = True
+    runner.is_dsv41_encoder_only_prefill = True
+    runner.postprocess_num_computed_tokens = MagicMock()
+    runner.model_state = SimpleNamespace(postprocess_state=MagicMock())
+    runner.kv_connector = SimpleNamespace(post_forward=MagicMock(return_value=None))
+    runner.main_stream = main_stream
+    runner.eplb = SimpleNamespace(step=MagicMock())
+
+    output = runner.sample_tokens(None)
+
+    assert isinstance(output, AsyncModelRunnerOutput)
+    assert isinstance(output, AsyncCacheOnlyOutput)
+    assert events == [("record", main_stream)]
+    assert output.get_output().sampled_token_ids == [[]]
+    assert events == [("record", main_stream), ("synchronize", None)]
 
 
 def test_prepare_padding_mask_marks_sequence_parallel_padding():

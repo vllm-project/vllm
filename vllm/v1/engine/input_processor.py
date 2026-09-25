@@ -33,6 +33,7 @@ from vllm.utils.async_utils import make_async
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.cache_only import validate_dsv41_cache_only_request
 from vllm.v1.kv_hints import KvHintsEnvelope
 
 logger = init_logger(__name__)
@@ -472,6 +473,11 @@ class InputProcessor:
                         mm_hash=base_mm_hash,
                     )
                 )
+
+        if self.vllm_config.is_dsv41_encoder_only_prefill:
+            validate_dsv41_cache_only_request(
+                sampling_params, pooling_params, bool(mm_features)
+            )
 
         return EngineCoreRequest(
             request_id=request_id,

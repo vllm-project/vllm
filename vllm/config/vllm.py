@@ -38,7 +38,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig
+from .kv_transfer import KVTransferConfig, dsv41_encoder_only_boundary_layer
 from .load import LoadConfig
 from .lora import LoRAConfig
 from .mamba import MambaBackendEnum, MambaConfig
@@ -584,6 +584,20 @@ class VllmConfig:
             else None
         )
         return bool(mm_config and mm_config.mm_encoder_only)
+
+    @property
+    def uses_dsv41_encoder_only_handoff(self) -> bool:
+        kv_config = self.kv_transfer_config
+        return bool(kv_config and kv_config.dsv41_encoder_only_prefill)
+
+    @property
+    def is_dsv41_encoder_only_prefill(self) -> bool:
+        kv_config = self.kv_transfer_config
+        return bool(
+            kv_config
+            and kv_config.dsv41_encoder_only_prefill
+            and kv_config.kv_role == "kv_producer"
+        )
 
     @property
     def max_concurrent_batches(self) -> int:
@@ -2171,6 +2185,7 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
+        self._verify_dsv41_encoder_only_handoff()
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
@@ -2883,6 +2898,69 @@ class VllmConfig:
                 "An EC producer-only instance requires a multimodal model."
             )
         mm_config.mm_encoder_only = True
+
+    def _verify_dsv41_encoder_only_handoff(self) -> None:
+        """Fail closed outside RFC #57738's initial validation boundary."""
+        if not self.uses_dsv41_encoder_only_handoff:
+            return
+
+        kv_config = self.kv_transfer_config
+        model_config = self.model_config
+        assert kv_config is not None
+        if kv_config.kv_connector != "NixlConnector":
+            raise ValueError(
+                "dsv41_encoder_only_prefill currently supports direct "
+                "NixlConnector P/D transfer only."
+            )
+        if kv_config.kv_role not in ("kv_producer", "kv_consumer"):
+            raise ValueError(
+                "dsv41_encoder_only_prefill requires a dedicated kv_producer or "
+                "kv_consumer instance."
+            )
+        if (
+            model_config is None
+            or model_config.architecture != "DeepseekV41ForCausalLM"
+        ):
+            raise ValueError(
+                "dsv41_encoder_only_prefill currently supports "
+                "DeepseekV41ForCausalLM only."
+            )
+        if not self.use_v2_model_runner:
+            raise ValueError("dsv41_encoder_only_prefill requires model runner V2.")
+        if self.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("dsv41_encoder_only_prefill requires PP=1.")
+        if self.parallel_config.prefill_context_parallel_size != 1:
+            raise ValueError(
+                "dsv41_encoder_only_prefill does not support prefill context "
+                "parallelism."
+            )
+        if self.parallel_config.use_ubatching:
+            raise ValueError(
+                "dsv41_encoder_only_prefill does not support DBO or microbatching."
+            )
+        if (
+            kv_config.kv_role == "kv_producer"
+            and self.scheduler_config.async_scheduling
+        ):
+            raise ValueError(
+                "The dsv41_encoder_only_prefill producer requires "
+                "--no-async-scheduling while cache-only completion does not "
+                "consume output placeholders."
+            )
+        if not self.cache_config.swa_bounded_replay:
+            raise ValueError("dsv41_encoder_only_prefill requires SWA bounded replay.")
+        target_window = getattr(model_config.hf_text_config, "sliding_window", None)
+        if target_window != 128:
+            raise ValueError(
+                "dsv41_encoder_only_prefill currently requires the validated "
+                "128-token target window."
+            )
+        dsv41_encoder_only_boundary_layer(model_config.hf_text_config)
+        if self.speculative_config is not None:
+            raise ValueError(
+                "dsv41_encoder_only_prefill does not yet support speculative "
+                "decoding with NixlConnector."
+            )
 
     def _resolve_mm_processor_device(self) -> None:
         """Settle `--mm-processor-device=auto` now that the EC role is known.
