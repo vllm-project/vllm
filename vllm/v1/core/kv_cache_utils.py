@@ -1551,6 +1551,15 @@ def _get_kv_cache_groups_uniform_page_size(
         max(spec.max_memory_usage_bytes(vllm_config) for spec in specs)
         for specs in spec_buckets
     ]
+    if vllm_config.kv_transfer_config is not None:
+        # KV transfer peers (e.g. P/D) may use different TP sizes, which change
+        # per-rank bytes; plan by full attention vs. bounded padding instead.
+        padding_layer_bytes = [
+            vllm_config.model_config.max_model_len
+            if isinstance(specs[0], FullAttentionSpec)
+            else 1
+            for specs in spec_buckets
+        ]
     group_size = min(
         range(
             min(min_group_layers, max(bucket_sizes)),

@@ -3112,6 +3112,7 @@ def _grouping_config():
     cache_config.kv_cache_layout = "LBNHC"
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        kv_transfer_config=None,
         speculative_config=None,
         cache_config=cache_config,
         model_config=SimpleNamespace(max_model_len=32768),
@@ -3149,6 +3150,32 @@ def test_hybrid_group_size_selection(
     config.cache_config.min_kv_cache_group_layers = min_group_layers
     groups = get_kv_cache_groups(config, specs)
     assert max(len(group.layer_names) for group in groups) == expected_group_size
+
+
+@pytest.mark.parametrize("kv_connector", [False, True])
+def test_kv_transfer_group_planning_is_tp_invariant(kv_connector):
+    # 13 target + 4 drafter full attention layers. At TP8 the target's 8 KV
+    # heads shard to 1 while the drafter's 2 are replicated to 1, which changes
+    # their relative bytes and, with byte-based planning, the group size.
+    def group_size(target_heads, drafter_heads):
+        specs = {
+            **{
+                f"t.{i}": new_kv_cache_spec(num_kv_heads=target_heads, head_size=128)
+                for i in range(13)
+            },
+            **{
+                f"d.{i}": new_kv_cache_spec(num_kv_heads=drafter_heads, head_size=64)
+                for i in range(4)
+            },
+        }
+        config = _grouping_config()
+        config.kv_transfer_config = object() if kv_connector else None
+        groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
+            kv_cache_utils.unify_kv_cache_spec_page_size(specs), config
+        )
+        return max(len(group.layer_names) for group in groups)
+
+    assert (group_size(8, 2) == group_size(1, 1)) == kv_connector
 
 
 def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
@@ -4213,6 +4240,7 @@ def _spec_decode_grouping_config(method="dspark", model_type=None):
     """Grouping config with an EAGLE-family speculative method enabled."""
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: SimpleNamespace(
                 is_block_outermost=True
