@@ -11,6 +11,10 @@ from prometheus_client import Counter, Gauge, Histogram
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphLogging
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed.ec_transfer.ec_connector.metrics import (
+    ECConnectorLogging,
+    ECConnectorProm,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorProm,
@@ -101,6 +105,8 @@ class LoggingStatLogger(StatLoggerBase):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
         self.vllm_config = vllm_config
+        device_type = vllm_config.device_config.device_type
+        self.kv_cache_device = "GPU" if device_type == "cuda" else device_type.upper()
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
@@ -116,6 +122,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging = SpecDecodingLogging(is_diffusion=is_diffusion)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
+        ec_transfer_config = self.vllm_config.ec_transfer_config
+        self.ec_connector_logging = ECConnectorLogging(ec_transfer_config)
         self.cudagraph_logging = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             self.cudagraph_logging = CUDAGraphLogging(
@@ -184,7 +192,7 @@ class LoggingStatLogger(StatLoggerBase):
             "%sIteration(%d): %d context requests, %d context tokens, "
             "%d generation requests, %d generation tokens, "
             "iteration elapsed time: %.2f ms%s, "
-            "GPU KV cache usage: %.1f%%%s",
+            "%s KV cache usage: %.1f%%%s",
             self._log_prefix_for_engine(engine_idx),
             details.iteration_index,
             details.num_ctx_requests,
@@ -193,6 +201,7 @@ class LoggingStatLogger(StatLoggerBase):
             details.num_generation_tokens,
             details.elapsed_ms,
             " (dummy)" if details.is_dummy else "",
+            self.kv_cache_device,
             scheduler_stats.kv_cache_usage * 100,
             encoder_msg,
         )
@@ -221,6 +230,8 @@ class LoggingStatLogger(StatLoggerBase):
                 self.spec_decoding_logging.observe(scheduler_stats.spec_decoding_stats)
             if kv_connector_stats := scheduler_stats.kv_connector_stats:
                 self.kv_connector_logging.observe(kv_connector_stats)
+            if ec_connector_stats := scheduler_stats.ec_connector_stats:
+                self.ec_connector_logging.observe(ec_connector_stats)
             if (
                 self.cudagraph_logging is not None
                 and scheduler_stats.cudagraph_stats is not None
@@ -285,18 +296,16 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
 
-        log_parts.extend(
-            [
-                "GPU KV cache usage: %.1f%%",
-                "Prefix cache hit rate: %.1f%%",
-            ]
-        )
+        log_parts.append("%s KV cache usage: %.1f%%")
         log_args.extend(
             [
+                self.kv_cache_device,
                 self.last_scheduler_stats.kv_cache_usage * 100,
-                self.prefix_caching_metrics.hit_rate * 100,
             ]
         )
+        if not self.prefix_caching_metrics.empty:
+            log_parts.append("Prefix cache hit rate: %.1f%%")
+            log_args.append(self.prefix_caching_metrics.hit_rate * 100)
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
@@ -315,6 +324,7 @@ class LoggingStatLogger(StatLoggerBase):
 
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_connector_logging.log(log_fn=log_fn)
+        self.ec_connector_logging.log(log_fn=log_fn)
         if self.cudagraph_logging is not None:
             self.cudagraph_logging.log(log_fn=log_fn)
         if self._enable_perf_stats():
@@ -447,6 +457,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
     _kv_connector_cls = KVConnectorProm
+    _ec_connector_cls = ECConnectorProm
     _perf_metrics_cls = PerfMetricsProm
 
     def __init__(
@@ -482,6 +493,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             is_diffusion=vllm_config.model_config.is_diffusion,
         )
         self.kv_connector_prom = self._kv_connector_cls(
+            vllm_config, labelnames, per_engine_labelvalues
+        )
+        self.ec_connector_prom = self._ec_connector_cls(
             vllm_config, labelnames, per_engine_labelvalues
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
@@ -1060,6 +1074,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
 
+            if scheduler_stats.ec_connector_stats is not None:
+                self.ec_connector_prom.observe(
+                    scheduler_stats.ec_connector_stats, engine_idx
+                )
+
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
 
@@ -1198,16 +1217,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
 
 class StatLoggerManager:
-    """
-    StatLoggerManager:
-        Logging happens at the level of the EngineCore (per scheduler).
-         * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
-         * With Local Logger, just make N copies for N EngineCores.
-         * With Prometheus, we need a single logger with N "labels"
+    """StatLoggerManager:
+    Logging happens at the level of the EngineCore (per scheduler).
+     * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
+     * With Local Logger, just make N copies for N EngineCores.
+     * With Prometheus, we need a single logger with N "labels"
 
-        This class abstracts away this implementation detail from
-        the AsyncLLM, allowing the AsyncLLM to just call .record()
-        and .log() to a simple interface.
+    This class abstracts away this implementation detail from
+    the AsyncLLM, allowing the AsyncLLM to just call .record()
+    and .log() to a simple interface.
     """
 
     def __init__(

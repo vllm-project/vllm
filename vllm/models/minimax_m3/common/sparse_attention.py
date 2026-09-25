@@ -159,7 +159,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Page size == sparse block size (one sparse block per KV page).
         return [128]
 
@@ -314,7 +314,10 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             prefill_cu_seqlens_k = torch.empty(
                 num_prefills + 1, dtype=torch.int32, device=seq_lens.device
             )
-            prefill_cu_seqlens_k[0] = 0
+            if current_platform.is_rocm():
+                prefill_cu_seqlens_k[:1].zero_()
+            else:
+                prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
             prefill_cu_seqlens_q = (
                 query_start_loc[num_decodes:] - num_decode_tokens

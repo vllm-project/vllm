@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, ove
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -263,6 +264,7 @@ class FreeKVCacheBlockQueue:
 
     Args:
         blocks: A list of KVCacheBlock objects.
+
     """
 
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
@@ -300,6 +302,7 @@ class FreeKVCacheBlockQueue:
 
         Returns:
             The first free block.
+
         """
         if (
             self.fake_free_list_head.next_free_block is self.fake_free_list_tail
@@ -340,6 +343,7 @@ class FreeKVCacheBlockQueue:
 
         Returns:
             A list of n free blocks.
+
         """
         if n == 0:
             return []
@@ -370,6 +374,7 @@ class FreeKVCacheBlockQueue:
 
         Args:
             block: The block to remove.
+
         """
         if block.prev_free_block is None or block.next_free_block is None:
             # This should not happen if the block is from the free list.
@@ -391,6 +396,7 @@ class FreeKVCacheBlockQueue:
 
         Args:
             block: The block to append.
+
         """
         if self.fake_free_list_tail.prev_free_block is None:
             raise RuntimeError(
@@ -434,6 +440,7 @@ class FreeKVCacheBlockQueue:
 
         Args:
             blocks: The blocks to append.
+
         """
         if len(blocks) == 0:
             return
@@ -459,6 +466,7 @@ class FreeKVCacheBlockQueue:
 
         Returns:
             A list of free blocks.
+
         """
         ret = []
         if self.fake_free_list_head.next_free_block is None:
@@ -505,6 +513,7 @@ def _gen_mm_extra_hash_keys(
 
     Returns:
         A tuple of extra keys and the next multi-modal index.
+
     """
     extra_keys: list[Any] = []
 
@@ -565,6 +574,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     Returns:
         Return LoRA name of the request if it is a LoRA request. Return empty
         list otherwise.
+
     """
     if not request.lora_request:
         return []
@@ -584,6 +594,7 @@ def _gen_prompt_embeds_extra_hash_keys(
     Returns:
         Return a stable hash of the block prompt embeddings if prompt embeds
         are present. Return empty list otherwise.
+
     """
     if request.prompt_embeds is None:
         return []
@@ -612,6 +623,7 @@ def generate_block_hash_extra_keys(
 
     Returns:
         A tuple of extra keys and the next multi-modal index.
+
     """
     mm_extra_keys: list[Any]
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
@@ -645,6 +657,7 @@ def hash_block_tokens(
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
     hash values for the same block contents.
+
     Args:
         hash_function: The hash function used to compute block hash.
         parent_block_hash: The hash of the parent block. None
@@ -652,9 +665,11 @@ def hash_block_tokens(
         curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
         extra_keys: Extra keys for the block.
+
     Returns:
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
+
     """
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
@@ -813,8 +828,7 @@ def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
 ) -> Callable[[Request], list[BlockHash]]:
-    """
-    Returns a function which computes the list of un-computed block hashes
+    """Returns a function which computes the list of un-computed block hashes
     of a request.
 
     Hashes are computed at ``hash_block_size`` granularity and chained over the
@@ -832,12 +846,15 @@ def get_request_block_hasher(
             return []
 
         curr_mm_idx = 0
-        if start_token_idx > 0:
-            # Set curr_mm_idx = -1 to indicate the last mm input.
-            # Note that since we reach to this branch only when the block is
-            # completed with generated tokens, we only need to consider the
-            # last mm input.
-            curr_mm_idx = -1
+        mm_features = request.mm_features
+        if start_token_idx > 0 and mm_features:
+            last_mm_pos = mm_features[-1].mm_position
+            if last_mm_pos.offset + last_mm_pos.length > start_token_idx:
+                curr_mm_idx, _ = get_mm_features_in_window(
+                    mm_features,
+                    start_token_idx,
+                    start_token_idx + hash_block_size,
+                )
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None
@@ -912,9 +929,7 @@ def _check_enough_kv_cache_memory(
 def max_memory_usage_bytes(
     vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
 ) -> int:
-    """
-    Get the maximum memory usage in bytes for the given KV cache specs.
-    """
+    """Get the maximum memory usage in bytes for the given KV cache specs."""
     return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
 
 
@@ -923,8 +938,7 @@ def estimate_max_model_len(
     kv_cache_spec: dict[str, KVCacheSpec],
     available_memory: int,
 ) -> int:
-    """
-    Estimates the maximum model length that can fit in the available memory
+    """Estimates the maximum model length that can fit in the available memory
     using binary search.
 
     This function temporarily modifies max_model_len during estimation but
@@ -937,6 +951,7 @@ def estimate_max_model_len(
 
     Returns:
         The estimated maximum model length that can fit in the available memory.
+
     """
     # Save the original max_model_len to restore after estimation
     original_max_model_len = vllm_config.model_config.max_model_len
@@ -977,8 +992,7 @@ def check_enough_kv_cache_memory(
     kv_cache_spec: dict[str, KVCacheSpec],
     available_memory: int,
 ):
-    """
-    Checks whether `available_memory` is enough for the KV cache to hold at
+    """Checks whether `available_memory` is enough for the KV cache to hold at
     least one request with the model's max_model_len.
 
     Args:
@@ -988,8 +1002,8 @@ def check_enough_kv_cache_memory(
 
     Raises:
         ValueError: If there is not enough memory available for the KV cache.
-    """
 
+    """
     # No need to check for available memory if the kv_cache_spec is empty
     if kv_cache_spec:
         # Reserve the null block BlockPool permanently holds back, so the check
@@ -1012,8 +1026,7 @@ def check_enough_kv_cache_memory(
 def create_kv_cache_group_specs(
     kv_cache_spec: dict[str, KVCacheSpec], grouped_layer_names: list[list[str]]
 ) -> list[KVCacheGroupSpec]:
-    """
-    Create KVCacheGroupSpec object for each kv cache group layer.
+    """Create KVCacheGroupSpec object for each kv cache group layer.
     The layers in the same group should share the same
     KVCacheSpec.
 
@@ -1024,8 +1037,10 @@ def create_kv_cache_group_specs(
             A list of kv cache groups, where each element is a list of layer
             names that belong to the same group and should share the same
             KVCacheSpec.
+
     Returns:
         A list of KVCacheGroupSpec objects, one for each group.
+
     """
     kv_cache_groups = []
     for layer_names_one_group in grouped_layer_names:
@@ -1040,8 +1055,7 @@ def create_kv_cache_group_specs(
 
 
 def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
-    """
-    Whether all layers in the given KVCacheSpec have the same KV cache spec.
+    """Whether all layers in the given KVCacheSpec have the same KV cache spec.
     Note that we regard FullAttentionSpec with and without sliding window as
     the same type.
 
@@ -1050,8 +1064,8 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 
     Returns:
         True if all layers have the same type, False otherwise.
-    """
 
+    """
     if not kv_cache_spec:
         # Encoder-only models do not have KV cache, kv_cache_type can be
         # regarded as uniform.
@@ -1067,8 +1081,7 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
-    """
-    Get the maximum concurrency for the given KV cache configuration.
+    """Get the maximum concurrency for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
     table — cdiv(per-request bytes, page bytes) of the group's spec — and all
@@ -1101,8 +1114,7 @@ def get_max_concurrency_for_kv_cache_config(
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
-    """
-    Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
+    """Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
     The override is logged once, at the call site in `get_kv_cache_configs`.
     """
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
@@ -1111,8 +1123,7 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
 
 
 def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
-    """
-    Bytes consumed by one block in the worker's shared KV cache pool, mirroring
+    """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
@@ -1121,9 +1132,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
-    """
-    Get the page size of the KV cache.
-    """
+    """Get the page size of the KV cache."""
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) == 1
     return page_sizes.pop()
@@ -1132,8 +1141,7 @@ def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
 def _get_kv_cache_groups_uniform_spec(
     kv_cache_specs: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    """
-    Generates the KV cache configuration for a model with the same KV cache
+    """Generates the KV cache configuration for a model with the same KV cache
     spec for all layers.
 
     Args:
@@ -1141,16 +1149,15 @@ def _get_kv_cache_groups_uniform_spec(
 
     Returns:
         The generated KVCacheGroupSpecs
-    """
 
+    """
     return create_kv_cache_group_specs(kv_cache_specs, [list(kv_cache_specs.keys())])
 
 
 def _get_kv_cache_groups_uniform_type(
     spec: UniformTypeKVCacheSpecs,
 ) -> list[KVCacheGroupSpec]:
-    """
-    Generates the KV cache configuration for a model with one type of KV cache
+    """Generates the KV cache configuration for a model with one type of KV cache
     but different hidden sizes. All layers are merged into one group.
 
     Args:
@@ -1158,8 +1165,8 @@ def _get_kv_cache_groups_uniform_type(
 
     Returns:
         The generated KVCacheGroupSpecs
-    """
 
+    """
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
 
 
@@ -1365,8 +1372,7 @@ def _glm5_next_tensor_layout(
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
-    """
-    Unify the page size of the given KVCacheSpec. If the page size of all layers
+    """Unify the page size of the given KVCacheSpec. If the page size of all layers
     are the same, return the original KVCacheSpec. If not same, unify the page
     size by increasing the block size of layers with smaller page size. Two
     cases cannot be unified by block size alone and pad their physical page to
@@ -1385,6 +1391,7 @@ def unify_kv_cache_spec_page_size(
 
     Returns:
         The updated KVCacheSpec with the same page_size_bytes.
+
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     if len(page_sizes) <= 1:
@@ -1435,8 +1442,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    """
-    Generates the KV cache groups for hybrid models with multiple
+    """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
     block per layer) for all layers.
 
@@ -1496,6 +1502,7 @@ def _get_kv_cache_groups_uniform_page_size(
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
     Returns:
         The generated KVCacheGroupSpecs
+
     """
     # Group all layers by kv_cache_spec.
     # E.g., 2 full attention layers and 3 sliding window attention layers,
@@ -1608,6 +1615,15 @@ def _get_kv_cache_bytes_per_block(
     ]
     if hot_page_sizes:
         bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
+    stride_alignments = [
+        spec.block_stride_alignment
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+        if isinstance(spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec)
+        and spec.block_stride_alignment
+    ]
+    if stride_alignments:
+        bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
     return bytes_per_block
 
 
@@ -1650,8 +1666,7 @@ def get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """
-    Generate the KV cache configuration from the KV cache groups and spec
+    """Generate the KV cache configuration from the KV cache groups and spec
     of each layer.
 
     Args:
@@ -1660,6 +1675,7 @@ def get_kv_cache_config_from_groups(
         available_memory: Memory available for KV cache in bytes
     Returns:
         The generated KVCacheConfig
+
     """
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
@@ -1917,15 +1933,14 @@ def _try_get_full_allocation_fallback_groups(
 
 
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
-    """
-    This function tries to convert the KV cache specs to one type if the model
+    """This function tries to convert the KV cache specs to one type if the model
     is a hybrid model with multiple type of KV cache. It will convert all
     SlidingWindowSpec to FullAttentionSpec if both types are present.
 
     Args:
         kv_cache_spec: The kv cache spec of each attention layer in the model
-    """
 
+    """
     if is_kv_cache_spec_uniform(
         kv_cache_spec
     ) or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
@@ -2106,16 +2121,24 @@ def _get_packed_kv_cache_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=_is_deepseek_v4_eagle(vllm_config),
+        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
-def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
+def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
+    """Whether the drafter's KV layers can be located positionally.
+
+    MTP drafters register their KV layers after the target layers, without a
+    distinguishing spec marker. DeepseekV4/V4.1 do this with ``dspark`` too.
+    The annotator separately checks that the groups partition the layers exactly.
+    """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle():
         return False
+    if spec_config.method == "mtp":
+        return True
     model_config = vllm_config.model_config
     return model_config is not None and model_config.hf_config.model_type in (
         "deepseek_v4",
@@ -2123,11 +2146,24 @@ def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _groups_partition_layers_exactly(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    """Whether the groups cover every layer of ``kv_cache_spec`` exactly once.
+
+    The trailing-layer draft fallback is only meaningful when the last
+    registered layer is guaranteed to appear in exactly one group.
+    """
+    names = [name for group in kv_cache_groups for name in group.layer_names]
+    return len(names) == len(kv_cache_spec) and set(names) == set(kv_cache_spec)
+
+
 def _annotate_eagle_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     kv_cache_groups: list[KVCacheGroupSpec],
-    use_deepseek_v4_fallback: bool = False,
+    use_trailing_layer_fallback: bool = False,
 ) -> None:
     """Flag the KV cache groups that hold drafter attention layers.
 
@@ -2140,14 +2176,14 @@ def _annotate_eagle_groups(
        spec merging, wherever grouping happens to land. It is sufficient but
        not necessary: a drafter whose spec is indistinguishable from the
        target's cannot be found this way.
-    2. Model-scoped positional fallback for DeepseekV4/V4.1, whose MTP block
-       reuses the target's own decoder layer and so carries no spec marker. Its
-       draft attention layer is always the last registered layer, so flag whichever
-       group holds it. This rule is only valid where the groups partition
-       exactly the layers of ``kv_cache_spec``, which is true on the packed
-       grouping path and not in general; other callers must leave
-       ``use_deepseek_v4_fallback`` False. The caller gates this fallback on
-       the configured model type.
+    2. Positional fallback for MTP drafters (including DeepseekV4/V4.1 DSpark), whose
+       MTP block reuses the target's own decoder layer and so carries no spec
+       marker. Their draft attention layers always register after every
+       target layer, so flag whichever group holds the last registered layer.
+       This rule is only valid where the groups partition exactly the layers
+       of ``kv_cache_spec``, which is re-checked here before applying it.
+       When a drafter's trailing caches span several groups, this rule flags
+       only the group holding the very last layer and must be generalized.
        FIXME(yifan): avoid/generalize this hacky check.
 
     Args:
@@ -2155,8 +2191,9 @@ def _annotate_eagle_groups(
         kv_cache_spec: The kv cache spec of each attention layer, in layer
             registration order. Only read by rule 2.
         kv_cache_groups: Groups to annotate in place.
-        use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4/V4.1 packed
-            group.
+        use_trailing_layer_fallback: Enable rule 2. Callers gate this on
+            ``_uses_trailing_mtp_layers``.
+
     """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle_block_drop():
@@ -2169,7 +2206,9 @@ def _annotate_eagle_groups(
         ):
             group.is_eagle_group = True
 
-    if not use_deepseek_v4_fallback:
+    if not use_trailing_layer_fallback:
+        return
+    if not _groups_partition_layers_exactly(kv_cache_spec, kv_cache_groups):
         return
     last_layer = next(reversed(kv_cache_spec))
     for group in kv_cache_groups:
@@ -2182,16 +2221,12 @@ def _warn_if_unannotated_eagle_mamba(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
-    """Warn when the flag-all eagle fallback will silently disable reuse.
-
-    With no group annotated, consumers flag every group as a draft group. That
-    widens a Mamba group's required lookup window to two consecutive chunks,
-    which align-mode checkpointing never produces, so reuse drops to zero with
-    no error and no metric to show it.
+    """Warn when no KV cache group could be identified as the draft model's.
 
     Args:
         vllm_config: Config supplying the speculative method, if any.
         kv_cache_groups: Groups as they will be handed to consumers.
+
     """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle():
@@ -2210,13 +2245,8 @@ def _warn_if_unannotated_eagle_mamba(
         return
     logger.warning(
         "Speculative decoding (method=%s) is enabled but no KV cache group "
-        "could be identified as the draft model's, so every group -- "
-        "including Mamba groups %s -- will be treated as a draft group. A "
-        "Mamba group cannot satisfy the widened lookup window that implies, "
-        "so prefix-cache reuse across requests will be disabled and any "
-        "external KV offload tier will store without ever serving a hit.",
+        "could be identified as the draft model's.",
         spec_config.method,
-        mamba_groups,
     )
 
 
@@ -2227,12 +2257,43 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
     return 1
 
 
+def _ensure_min_page_size(
+    groups: list[KVCacheGroupSpec],
+    common_page: int,
+    hidden_specs: dict[str, HiddenStateCacheSpec],
+) -> tuple[list[KVCacheGroupSpec], int]:
+    """Scale up group block sizes so the common page is at least as large as
+    the biggest hidden-state per-token cost.
+
+    This protects the hidden state extraction feature, where we store hidden states in
+    the KV cache, and return them to clients using a custom hidden state connector.
+
+    Returns the (possibly scaled) groups and updated common page size.
+    """
+    max_per_token = max(
+        spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        for spec in hidden_specs.values()
+    )
+    if max_per_token <= common_page:
+        return groups, common_page
+
+    scale = cdiv(max_per_token, common_page)
+    common_page *= scale
+    scaled: list[KVCacheGroupSpec] = []
+    for g in groups:
+        s = g.kv_cache_spec
+        kw: dict[str, int] = {"block_size": s.block_size * scale}
+        if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
+            kw["page_size_padded"] = s.page_size_padded * scale
+        scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
+    return scaled, common_page
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    """
-    Split the layers in the model into groups with the same KV cache spec.
+    """Split the layers in the model into groups with the same KV cache spec.
 
     Args:
         vllm_config: The global VllmConfig
@@ -2240,6 +2301,7 @@ def get_kv_cache_groups(
 
     Returns:
         The generated KVCacheGroups
+
     """
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
@@ -2298,6 +2360,8 @@ def get_kv_cache_groups(
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
         common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        # TP may shrink the common page below hidden-state per-token cost.
+        groups, common_page = _ensure_min_page_size(groups, common_page, hidden_specs)
         group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
@@ -2315,7 +2379,12 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
-    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
+    _annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
+    )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
@@ -2323,9 +2392,7 @@ def get_kv_cache_groups(
 def generate_scheduler_kv_cache_config(
     kv_cache_configs: list[KVCacheConfig],
 ) -> KVCacheConfig:
-    """
-    Generate the KV cache configuration for the scheduler.
-    """
+    """Generate the KV cache configuration for the scheduler."""
     assert all(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
@@ -2349,9 +2416,7 @@ def generate_scheduler_kv_cache_config(
 def get_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> tuple[int, float]:
-    """
-    Get the group-aware KV cache token capacity and max concurrency.
-    """
+    """Get the group-aware KV cache token capacity and max concurrency."""
     max_model_len = vllm_config.model_config.max_model_len
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
@@ -2367,9 +2432,11 @@ def update_kv_cache_capacity(
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
+    device_type = vllm_config.device_config.device_type
     logger.info_once(
-        "GPU KV cache size: %s tokens, "
+        "%s KV cache size: %s tokens, "
         "Maximum concurrency for %s tokens per request: %.2fx",
+        "GPU" if device_type == "cuda" else device_type.upper(),
         f"{num_tokens:,}",
         f"{max_model_len:,}",
         max_concurrency,
@@ -2380,8 +2447,7 @@ def _max_memory_usage_bytes_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    """
-    Calculate maximum memory usage in bytes from KV cache groups.
+    """Calculate maximum memory usage in bytes from KV cache groups.
 
     This correctly accounts for padding in hybrid models. For example, if a
     model has 8 full attention layers and 9 sliding window layers, they will
@@ -2440,8 +2506,7 @@ def _estimate_max_model_len_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> int:
-    """
-    Binary search for the maximum model length that fits in available memory.
+    """Binary search for the maximum model length that fits in available memory.
     Returns 0 if even 1 token doesn't fit.
     """
     original_max = vllm_config.model_config.max_model_len
@@ -2487,8 +2552,7 @@ def _auto_fit_max_model_len(
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
     available_memory: list[int],
 ) -> None:
-    """
-    When max_model_len is set to -1, this function estimates the largest
+    """When max_model_len is set to -1, this function estimates the largest
     context length that can be supported with the available GPU memory.
     It uses binary search to find the maximum length that fits across all
     workers.
@@ -2498,6 +2562,7 @@ def _auto_fit_max_model_len(
         projected_groups_per_worker: KV cache groups projected to each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
+
     """
     original_max = vllm_config.model_config.max_model_len
 
@@ -2550,8 +2615,7 @@ def _project_kv_cache_groups_to_worker(
     global_kv_cache_groups: list[KVCacheGroupSpec],
     worker_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    """
-    Projects global KV cache groups onto a single worker's assigned layers.
+    """Projects global KV cache groups onto a single worker's assigned layers.
 
     In pipeline parallelism, each worker only owns a subset of layers. This
     function filters the global groups to include only layers present on the
@@ -2563,6 +2627,7 @@ def _project_kv_cache_groups_to_worker(
 
     Returns:
         The projected KV cache groups containing only this worker's layers.
+
     """
     projected_groups: list[KVCacheGroupSpec] = []
     for group in global_kv_cache_groups:
@@ -2593,8 +2658,7 @@ def get_kv_cache_configs(
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
 ) -> list[KVCacheConfig]:
-    """
-    Generates the KV cache configurations for a model.
+    """Generates the KV cache configurations for a model.
     Since we use a shared centralized controller for all workers, we need the
     `kv_cache_config` to be consistent across all workers to make sure
     the KV cache allocation can be applied to all workers. However, different
@@ -2621,8 +2685,8 @@ def get_kv_cache_configs(
 
     Returns:
         The generated KVCacheConfigs for each worker.
-    """
 
+    """
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
     # have the same KV cache spec.
@@ -2643,12 +2707,7 @@ def get_kv_cache_configs(
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
-    extra_retained_tokens = (
-        vllm_config.speculative_config.num_speculative_tokens - 1
-        if vllm_config.speculative_config is not None
-        and vllm_config.speculative_config.use_multi_module_mtp()
-        else 0
-    )
+    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
     for layer_name, layer_spec in merged_kv_cache_specs.items():
         if isinstance(layer_spec, SlidingWindowSpec):
             merged_kv_cache_specs[layer_name] = replace(
@@ -2748,8 +2807,7 @@ def get_kv_cache_configs(
 
 
 class BlockHashListWithBlockSize:
-    """
-    Convert block-hash granularity from `hash_block_size` to `target_block_size`.
+    """Convert block-hash granularity from `hash_block_size` to `target_block_size`.
     Used when KV cache groups have different block sizes: `hash_block_size`
     is the size used to compute the original `block_hashes`; `target_block_size`
     is the group's actual block size.
@@ -2779,6 +2837,7 @@ class BlockHashListWithBlockSize:
         block_hashes: Block hashes to convert, computed at `hash_block_size`.
         hash_block_size: Block size at which `block_hashes` were computed.
         target_block_size: Desired block size; must be a multiple of `hash_block_size`.
+
     """
 
     def __init__(

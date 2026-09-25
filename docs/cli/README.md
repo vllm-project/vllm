@@ -214,13 +214,13 @@ See [vllm run-batch](./run-batch.md) for the full reference of all available arg
 
 ## preload
 
-Launch weight cache daemons (one per TP rank) that hold the post-quantized,
+Launch weight cache daemons (one per GPU) that hold the post-quantized,
 TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
 over a Unix domain socket. Restarting engines then map the weights via
 zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
 
 ```bash
-# Launch one daemon per TP rank
+# Launch one daemon per GPU
 vllm preload --model meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4
 
 # Engines then load from the daemons
@@ -230,8 +230,10 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
 
 The daemon accepts the standard engine arguments (model, dtype, quantization,
 tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
-directory holding the per-GPU Unix sockets. Only tensor and expert parallelism
-are supported; pipeline and data parallelism are rejected at launch.
+directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
+`--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
+multi-node and speculative-decoding setups. Tensor, expert and data
+parallelism are supported; pipeline parallelism is rejected at launch.
 
 See [Preload](../features/preload.md) for how it works, cache modes, and
 limitations, and [vllm preload](./preload.md) for the full reference of all

@@ -23,13 +23,13 @@ Key benefits:
   disk.
 
 !!! note
-    Weight preloading is only supported on CUDA and ROCm platforms, and only
-    with tensor/expert parallelism. Pipeline and data parallelism are rejected
-    when launching the daemon.
+    Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
+    expert and data parallelism are supported, including across nodes;
+    pipeline parallelism is rejected when launching the daemon.
 
 ## Quick start
 
-Launch one weight cache daemon per TP rank with a single command:
+Launch one weight cache daemon per GPU with a single command:
 
 ```bash
 vllm preload --model meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 4
@@ -52,7 +52,7 @@ The daemon itself must load from disk; passing `--load-format ipc_cache` to
 
 ## How it works
 
-1. `vllm preload` spawns one daemon process per TP rank. Each daemon loads its
+1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
    shard from disk using the configured loader, runs quantization
    post-processing, and exports every parameter/buffer as a CUDA IPC handle.
 2. An engine started with `--load-format ipc_cache` builds its model on the
@@ -61,7 +61,7 @@ The daemon itself must load from disk; passing `--load-format ipc_cache` to
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
-   architecture, TP size/rank, dtype, quantization method and config, model
+   architecture, TP/DP size/rank, dtype, quantization method and config, model
    revision, and vLLM version. On any mismatch the engine falls back to disk
    loading (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
@@ -70,6 +70,54 @@ The daemon itself must load from disk; passing `--load-format ipc_cache` to
 Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
+
+## Multi-node and data parallelism
+
+CUDA IPC handles are node-local, so each node serves only its local GPUs'
+shards. For multi-node tensor parallelism, run one `vllm preload` launcher per
+node with a shared rendezvous: reuse the `--nnodes` / `--node-rank` /
+`--master-addr` flags you pass the engine, plus a `--weight-cache-master-port`
+distinct from the engine's `--master-port`:
+
+```bash
+# node 0 (8 local GPUs)
+vllm preload --model /path/to/model --tensor-parallel-size 16 \
+    --nnodes 2 --node-rank 0 --master-addr 10.0.0.1 \
+    --weight-cache-master-port 29600
+# node 1 (8 local GPUs)
+vllm preload --model /path/to/model --tensor-parallel-size 16 \
+    --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \
+    --weight-cache-master-port 29600
+```
+
+For data parallelism (e.g. a TP1 x DP16 x EP decode fleet), run one launcher
+per node with the engine's DP placement flags. Local GPU `i` serves DP rank
+`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
+`dp_size * tp_size` daemons form one world group on `--data-parallel-address`
+/ `--weight-cache-master-port` so the expert shards are laid out exactly as in
+the engine:
+
+```bash
+# node r (4 local GPUs)
+vllm preload --model /path/to/model --tensor-parallel-size 1 \
+    --enable-expert-parallel \
+    --data-parallel-size 16 --data-parallel-size-local 4 \
+    --data-parallel-start-rank 4r --data-parallel-address 10.0.0.1 \
+    --weight-cache-master-port 29600
+```
+
+Data parallelism also combines with multi-node tensor parallelism: pass both
+flag sets. Each node then serves a contiguous block of the
+`dp_size * tp_size` global ranks.
+
+## Speculative decoding
+
+With MTP, EAGLE or EAGLE3 speculative decoding, `vllm preload` additionally
+starts a draft daemon group that caches the draft model. It uses its own cache
+key, Unix sockets (`*_draft.sock`) and rendezvous port
+(`--weight-cache-draft-master-port`, default `--weight-cache-master-port + 1`),
+so each daemon process serves exactly one model role. Other draft types are
+not cached and keep loading from disk in the engine.
 
 ## Cache modes
 
@@ -99,7 +147,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `socket_path` | per-GPU path derived from the physical GPU id | Explicit daemon socket path. |
+| `socket_path` | per-GPU path derived from the GPU UUID | Explicit daemon socket path. |
 | `socket_dir` | per-user private dir under the temp dir | Directory containing the daemon sockets. |
 | `mode` | `zero_copy` | `zero_copy` or `copy` (see above). |
 | `fallback` | `true` | Fall back to disk loading when the daemon is unavailable or the fingerprints mismatch. |
@@ -108,25 +156,22 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
 `socket_path` must agree when the default per-user directory is not used.
-
-!!! note
-    When `CUDA_VISIBLE_DEVICES` contains GPU UUIDs instead of integer indices,
-    the engine cannot infer the physical GPU id; pass `socket_path` (or
-    `socket_dir`) explicitly via `--model-loader-extra-config`.
+Socket paths are derived from the GPU UUID, so they are stable regardless of
+`CUDA_VISIBLE_DEVICES` index remapping.
 
 ## Limitations
 
 - **Platform**: CUDA and ROCm only; other platforms raise
   `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
   is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor and expert parallelism only; launching the daemon
-  with pipeline or data parallelism is rejected.
+- **Parallelism**: tensor, expert and data parallelism are supported;
+  launching the daemon with pipeline parallelism is rejected.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
 - **Consistency**: the daemon and engine must run the same vLLM version and
-  agree on model, dtype, quantization, and TP layout, otherwise the
+  agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
 - **Localhost only**: the daemon serves over a Unix domain socket; both the
   daemon and the engines must run on the same node as the same user.
