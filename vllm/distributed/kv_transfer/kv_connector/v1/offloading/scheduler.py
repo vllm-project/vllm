@@ -1110,7 +1110,7 @@ class OffloadingConnectorScheduler:
     ) -> CachedTokensBySource:
         """Split the accepted external hit by the tier each loaded key came from.
 
-        A token needs every group's KV, so when groups disagree the slowest
+        A token needs every group's KV, so when groups disagree the outermost
         tier is reported. Tokens no loaded key covers are
         ``external_unspecified``.
         """
@@ -1136,7 +1136,7 @@ class OffloadingConnectorScheduler:
         for lo, hi in zip(bounds, bounds[1:]):
             tiers = sparse_tiers + [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
             sources.add(
-                CacheHitSource.slowest(tiers)
+                CacheHitSource.outermost(tiers)
                 if tiers
                 else CacheHitSource.EXTERNAL_UNSPECIFIED,
                 hi - lo,

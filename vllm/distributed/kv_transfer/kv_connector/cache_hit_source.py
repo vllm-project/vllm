@@ -24,8 +24,8 @@ class CacheHitSource(str, Enum):
     EXTERNAL_UNSPECIFIED = "external_unspecified"
 
     @classmethod
-    def slowest(cls, sources: Iterable[CacheHitSource]) -> CacheHitSource:
-        """The slowest of ``sources``."""
+    def outermost(cls, sources: Iterable[CacheHitSource]) -> CacheHitSource:
+        """The tier in ``sources`` farthest from the accelerator."""
         order = list(cls)
         return max(sources, key=order.index)
 
