@@ -235,12 +235,6 @@ class Parser:
         """Return the number of reasoning tokens in generated token IDs."""
         return 0
 
-    def count_reasoning_tokens_incremental(
-        self, token_ids: Sequence[int], *, finished: bool = False
-    ) -> int | None:
-        """Count reasoning tokens incrementally, if supported."""
-        return None
-
 
 class DelegatingParser(Parser):
     """A Parser implementation that delegates to separate ReasoningParser and
@@ -826,16 +820,6 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return 0
         return self._reasoning_parser.count_reasoning_tokens(token_ids)
-
-    def count_reasoning_tokens_incremental(
-        self, token_ids: Sequence[int], *, finished: bool = False
-    ) -> int | None:
-        """Count reasoning tokens incrementally, if supported."""
-        if self._reasoning_parser is None:
-            return 0
-        return self._reasoning_parser.count_reasoning_tokens_incremental(
-            token_ids, finished=finished
-        )
 
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None

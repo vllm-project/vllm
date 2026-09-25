@@ -149,13 +149,6 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         )
         return self._counting_parser_engine.count_reasoning_tokens(token_ids)
 
-    def count_reasoning_tokens_incremental(
-        self, token_ids: Sequence[int], *, finished: bool = False
-    ) -> int | None:
-        if not self._streaming_count_valid:
-            return None
-        return self._parser_engine.count_reasoning_tokens(token_ids)
-
 
 class ParserEngineToolAdapter(ToolParser):
     """Adapts a :class:`ParserEngine` to the :class:`ToolParser` interface.

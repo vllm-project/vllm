@@ -21,6 +21,7 @@ THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
 OPEN_IDS = [1, 2, 3]
 CLOSE_IDS = [4, 2, 3]
+RESPONSE_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
 
 
 class DummyTokenizer:
@@ -121,44 +122,38 @@ def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
     assert not parser.is_reasoning_end([*new_open])
 
 
-def test_count_reasoning_tokens_with_xtml_markers():
+@pytest.mark.parametrize(
+    ("token_ids", "expected"),
+    [
+        pytest.param(
+            [*OPEN_IDS, 9, 10, *CLOSE_IDS, *RESPONSE_OPEN_IDS, 11],
+            2,
+            id="open_and_close_markers",
+        ),
+        pytest.param(
+            [9, 10, *CLOSE_IDS, *RESPONSE_OPEN_IDS, 11],
+            2,
+            id="open_marker_consumed_as_generation_prefix",
+        ),
+        pytest.param([*RESPONSE_OPEN_IDS, 11, 12], 0, id="response_only"),
+        pytest.param([*OPEN_IDS, 9, 10], 2, id="unterminated_after_open"),
+        pytest.param([9, 10, 11], 3, id="unterminated_without_markers"),
+        pytest.param([], 0, id="empty"),
+        pytest.param([9, 4, 2, 10], 4, id="partial_close_marker_is_reasoning"),
+        pytest.param(
+            [*OPEN_IDS, 9, *RESPONSE_OPEN_IDS, 11],
+            2 + len(RESPONSE_OPEN_IDS),
+            id="response_open_inside_open_think_is_reasoning",
+        ),
+    ],
+)
+def test_count_reasoning_tokens_matches_think_channel(token_ids, expected):
+    """reasoning_tokens must cover exactly what extract_reasoning labels as
+    reasoning: marker tokens are excluded and a consumed generation prefix
+    means the output starts inside the think channel."""
     parser = KimiK3ReasoningParser(DummyTokenizer())
 
-    token_ids = [
-        *OPEN_IDS,
-        9,
-        10,
-        *CLOSE_IDS,
-        *[ord(ch) for ch in RESPONSE_OPEN],
-        11,
-        12,
-    ]
-
-    assert parser.count_reasoning_tokens(token_ids) == 2
-
-
-def test_count_reasoning_tokens_with_generation_prefix_consumed():
-    parser = KimiK3ReasoningParser(DummyTokenizer())
-
-    token_ids = [9, 10, *CLOSE_IDS, *[ord(ch) for ch in RESPONSE_OPEN], 11]
-
-    assert parser.count_reasoning_tokens(token_ids) == 2
-
-
-def test_count_reasoning_tokens_does_not_count_response_only_output():
-    parser = KimiK3ReasoningParser(DummyTokenizer())
-
-    token_ids = [*[ord(ch) for ch in RESPONSE_OPEN], 11, 12]
-
-    assert parser.count_reasoning_tokens(token_ids) == 0
-
-
-def test_count_reasoning_tokens_counts_unterminated_reasoning():
-    parser = KimiK3ReasoningParser(DummyTokenizer())
-
-    token_ids = [*OPEN_IDS, 9, 10]
-
-    assert parser.count_reasoning_tokens(token_ids) == 2
+    assert parser.count_reasoning_tokens(token_ids) == expected
 
 
 def test_count_reasoning_tokens_is_zero_when_thinking_disabled():
@@ -166,21 +161,13 @@ def test_count_reasoning_tokens_is_zero_when_thinking_disabled():
         DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
 
-    assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS]) == 0
+    assert parser.count_reasoning_tokens([*OPEN_IDS, 9, 10, *CLOSE_IDS]) == 0
 
 
-def test_count_reasoning_tokens_incremental_handles_split_markers():
-    parser = KimiK3ReasoningParser(DummyTokenizer())
+def test_count_reasoning_tokens_through_delegating_parser():
+    parser = ReasoningOnlyParser(DummyTokenizer())
 
-    assert parser.count_reasoning_tokens_incremental([*OPEN_IDS[:2]]) == 0
-    assert (
-        parser.count_reasoning_tokens_incremental([OPEN_IDS[2], 9, CLOSE_IDS[0]]) == 1
-    )
-    count = parser.count_reasoning_tokens_incremental(
-        [*CLOSE_IDS[1:], *[ord(ch) for ch in RESPONSE_OPEN], 11], finished=True
-    )
-
-    assert count == 1
+    assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS, 11]) == 1
 
 
 def test_streaming_split_open_marker_is_held_back():
