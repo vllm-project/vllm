@@ -46,6 +46,7 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
@@ -3462,7 +3463,7 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
     assert "Context deduplication is not supported" in caplog_vllm.text
@@ -3483,7 +3484,7 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "Context deduplication is not supported" not in caplog_vllm.text
 
@@ -3501,7 +3502,7 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
     )
 
     with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
@@ -3519,7 +3520,7 @@ def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "The configured alpha=0.25 is not used" in caplog_vllm.text
 
@@ -3545,7 +3546,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
         )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "is not used" not in caplog_vllm.text
 
@@ -3561,7 +3562,7 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
     )
 
     with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
@@ -3575,7 +3576,7 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
         parallel_drafting=False,
     )
 
-    config._check_watermarking_unsupported()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_supports_dspark():
@@ -3588,7 +3589,7 @@ def test_dual_key_gumbel_supports_dspark():
         parallel_drafting=True,
     )
 
-    config._check_watermarking_unsupported()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
@@ -3602,7 +3603,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
     )
 
     with pytest.raises(ValueError, match="autoregressive model-based"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 @pytest.mark.parametrize(
@@ -3626,17 +3627,40 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
     config.speculative_config = SimpleNamespace(**values)
 
     with pytest.raises(ValueError, match=match):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
-def test_gumbel_watermark_rejects_beam_search():
-    with pytest.raises(ValueError, match="Beam search is not supported"):
-        _watermarked_vllm_config()._check_watermarking_unsupported(beam_search=True)
+def test_gumbel_watermark_disables_beam_search_watermarking(caplog_vllm):
+    enabled = _watermarked_vllm_config()._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1)
+    )
+
+    assert not enabled
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+
+
+def test_gumbel_watermark_allows_unwatermarked_beam_search():
+    _watermarked_vllm_config()._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
+    )
+
+
+def test_unwatermarked_beam_does_not_bypass_engine_incompatibilities():
+    config = _watermarked_vllm_config()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="Speculative decoding with watermarking"):
+        config._check_supports_watermarking(
+            BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
+        )
 
 
 def test_gumbel_watermark_rejects_custom_sampler():
     with pytest.raises(ValueError, match="custom samplers are not supported"):
-        _watermarked_vllm_config()._check_watermarking_unsupported(custom_sampler=True)
+        _watermarked_vllm_config()._check_supports_watermarking(custom_sampler=True)
 
 
 def test_watermark_key_must_fit_in_64_bits():

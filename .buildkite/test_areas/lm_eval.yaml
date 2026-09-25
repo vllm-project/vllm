@@ -234,6 +234,9 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_compatibility.py
+  - tests/watermarking/test_engine_compatibility.py
+  - tests/watermarking/test_parallel_compatibility.py
   - vllm/config/speculative.py
   - vllm/config/vllm.py
   - vllm/config/watermarking.py
@@ -246,6 +249,7 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
+  - pytest -s -v watermarking/test_compatibility.py watermarking/test_engine_compatibility.py watermarking/test_parallel_compatibility.py
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Watermark Feature Combination"

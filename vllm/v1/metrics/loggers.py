@@ -596,6 +596,32 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 counter_corrupted_requests, per_engine_labelvalues
             )
 
+        if vllm_config.watermark_config is not None:
+            counter_watermarked_requests = self._counter_cls(
+                name="vllm:watermarked_requests",
+                documentation=(
+                    "Watermarked requests, in terms of total number of finished "
+                    "requests sampled with the engine watermark."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_watermarked_requests = create_metric_per_engine(
+                counter_watermarked_requests, per_engine_labelvalues
+            )
+
+            counter_watermark_skipped_requests = self._counter_cls(
+                name="vllm:watermark_skipped_requests",
+                documentation=(
+                    "Watermark skipped requests, in terms of total number of "
+                    "finished requests that requested the engine watermark but "
+                    "could not use it."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_watermark_skipped_requests = create_metric_per_engine(
+                counter_watermark_skipped_requests, per_engine_labelvalues
+            )
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -1119,6 +1145,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
+            )
+        if self.vllm_config.watermark_config is not None:
+            self.counter_watermarked_requests[engine_idx].inc(
+                iteration_stats.num_watermarked_reqs
+            )
+            self.counter_watermark_skipped_requests[engine_idx].inc(
+                iteration_stats.num_watermark_skipped_reqs
             )
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs

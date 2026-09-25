@@ -214,7 +214,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
-    watermarking: bool = True
+    watermarking: bool | None = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(

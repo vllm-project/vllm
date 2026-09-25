@@ -153,6 +153,8 @@ class RequestState:
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
+        watermarked: bool = False,
+        watermark_skipped: bool = False,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
     ):
@@ -184,7 +186,15 @@ class RequestState:
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.stats = (
+            RequestStateStats(
+                arrival_time=arrival_time,
+                is_watermarked=watermarked,
+                is_watermark_skipped=watermark_skipped,
+            )
+            if log_stats
+            else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -261,6 +271,8 @@ class RequestState:
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
+            watermarked = bool(sampling_params.watermarking)
+            watermark_skipped = sampling_params._watermarking_skipped
         else:
             logprobs_processor = None
             detokenizer = None
@@ -268,6 +280,8 @@ class RequestState:
             top_p = None
             n = None
             temperature = None
+            watermarked = False
+            watermark_skipped = False
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
@@ -288,6 +302,8 @@ class RequestState:
             top_p=top_p,
             n=n,
             temperature=temperature,
+            watermarked=watermarked,
+            watermark_skipped=watermark_skipped,
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
