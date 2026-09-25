@@ -367,29 +367,41 @@ def _run_layers(monkeypatch, case, rows, metadata):
             mask[block * CAND_BLOCK : (block + 1) * CAND_BLOCK] = True
         allowed.append(torch.where(mask, scores, float("-inf")))
 
+    pa = ops._aiter()
+    build = pa.build_candidate_gather
+    builds = []
+    monkeypatch.setattr(
+        pa, "build_candidate_gather", lambda *a, **k: builds.append(1) or build(*a, **k)
+    )
     for gather in (True, False):
         consumer = metadata(1, gather)
         consumer.decode_use_gather = gather
         _forward_context(monkeypatch, consumer)
-        out = topk_buffer()
-        ops.rocm_mxfp4_sparse_mqa_indexer(
-            hidden,
-            "indexer",
-            case.cache[1],
-            q,
-            q_scale,
-            weights,
-            TOPK,
-            HEAD_DIM,
-            MAX_LEN,
-            out,
-            1,
-            pool,
-            CAND_BLOCK,
-            POOL_BLOCKS * CAND_BLOCK,
-        )
-        for i in range(num_rows):
-            _assert_topk(out[i], allowed[i], TOPK)
+        builds.clear()
+        # Two consumer layers of one step: the second reuses the first's pools.
+        for _ in range(2):
+            out = topk_buffer()
+            ops.rocm_mxfp4_sparse_mqa_indexer(
+                hidden,
+                "indexer",
+                case.cache[1],
+                q,
+                q_scale,
+                weights,
+                TOPK,
+                HEAD_DIM,
+                MAX_LEN,
+                out,
+                1,
+                pool,
+                CAND_BLOCK,
+                POOL_BLOCKS * CAND_BLOCK,
+            )
+            for i in range(num_rows):
+                _assert_topk(out[i], allowed[i], TOPK)
+        if gather:
+            launches = len(consumer.gather_launches) + (consumer.decode is not None)
+            assert len(builds) == launches
 
 
 @BLOCKS

@@ -86,6 +86,9 @@ class RocmMxfp4GatherLaunch:
     """[1] int32 compressed context of the request."""
     row_ends: torch.Tensor
     """[rows] int32 exclusive compressed key bound of each row."""
+    pool: tuple[dict, torch.Tensor] | None = None
+    """The resolved candidate lists, built by the first consumer layer and
+    reused by the rest."""
 
 
 @dataclass

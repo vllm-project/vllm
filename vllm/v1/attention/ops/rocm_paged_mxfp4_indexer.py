@@ -289,6 +289,7 @@ def reserve_rocm_mxfp4_indexer_workspace(
     logits_width: int,
     candidate_block_size: int = 0,
     gather_block_size: int = 0,
+    num_candidate_cols: int = 0,
 ) -> None:
     """Profiling run: claim the decode logits workspace and the peak prefill
     logits, block scores included when the layer writes them, candidate lists
@@ -301,10 +302,12 @@ def reserve_rocm_mxfp4_indexer_workspace(
         specs.append(((rows, nblocks), torch.float32))
         budget += budget // candidate_block_size
     if gather_block_size:
-        # aiter allocates a launch's candidate lists itself: 24 B per candidate
-        # block (int64 value and scale offsets, int64 position) against the
-        # compact logits' 4 B per pool column.
-        budget += budget * 6 // gather_block_size
+        # aiter allocates the candidate lists, and every consumer layer of the
+        # step reuses them: each gathered row, 24 B per candidate block (int64
+        # value and scale offsets and position).
+        budget += (
+            hidden_states.shape[0] * (num_candidate_cols // gather_block_size) * 24
+        )
     current_workspace_manager().get_simultaneous(*specs)
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
@@ -589,16 +592,17 @@ def _gather_prefill(
     pa = _aiter()
     assert layer.candidates is not None
     t0, t1 = launch.token_start, launch.token_end
-    # Each consumer resolves its launch's pool, so none outlives the launch.
-    gather, slot_ends = pa.build_candidate_gather(
-        layer.candidates[t0:t1],
-        launch.row_ends,
-        launch.block_table.expand(t1 - t0, -1),
-        layer.kv,
-        layer.num_heads,
-        layer.head_dim,
-        layer.block,
-    )
+    if launch.pool is None:
+        launch.pool = pa.build_candidate_gather(
+            layer.candidates[t0:t1],
+            launch.row_ends,
+            launch.block_table.expand(t1 - t0, -1),
+            layer.kv,
+            layer.num_heads,
+            layer.head_dim,
+            layer.block,
+        )
+    gather, slot_ends = launch.pool
     compact = layer.q.new_empty((t1 - t0, num_cols), dtype=torch.float32)
     q, q_scale, weights = layer.rows(t0, t1)
     pa.paged_mxfp4_mqa_logits(
@@ -737,6 +741,7 @@ def rocm_mxfp4_sparse_mqa_indexer(
             hidden_states,
             max(max_model_len, num_candidate_cols),
             gather_block_size=candidate_block_size,
+            num_candidate_cols=num_candidate_cols,
         )
         return topk_indices_buffer
     layer = _layer(
