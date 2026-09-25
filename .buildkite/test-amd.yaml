@@ -4461,7 +4461,7 @@ steps:
   - tests/models/multimodal
   commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
-  - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+  - pytest -v -s models/multimodal/generation/omni/test_ultravox.py -m core_model
 
 - label: ":amd: (MI355 DPX) Multimodal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 55
