@@ -11,7 +11,7 @@ import pytest
 import vllm.v1.engine.async_llm as async_llm_module
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.config import VllmConfig
+from vllm.config import LoggingConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -89,6 +89,7 @@ def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
 
 def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config.profiler = "cuda"
@@ -111,6 +112,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     monkeypatch: pytest.MonkeyPatch,
 ):
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config.profiler = "torch"
