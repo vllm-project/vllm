@@ -43,12 +43,18 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         hidden_dim = LATENT_SIZE
         hidden_dim_unpadded = LATENT_SIZE
         experts_per_token = 16
-        defer_moe_finalize = False
+        deferred = False
         defer_moe_finalize_max_num_tokens = -1
+
+        def defer_moe_finalize(self) -> None:
+            self.deferred = True
+
+        def limit_deferred_moe_finalize(self, max_num_tokens: int) -> None:
+            self.defer_moe_finalize_max_num_tokens = max_num_tokens
 
         @property
         def use_deferred_moe_finalize(self) -> bool:
-            return self.defer_moe_finalize
+            return self.deferred
 
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
@@ -99,7 +105,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.defer_moe_finalize
+    assert moe_config.use_deferred_moe_finalize
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 

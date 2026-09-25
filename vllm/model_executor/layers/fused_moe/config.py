@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Union
 
@@ -1290,14 +1290,12 @@ class FusedMoEConfig:
     # Only honored on the non-reduced (late-AR) TP path. Default False.
     skip_final_all_reduce: bool = False
 
-    # When True, experts that can stop after GEMM2 are allowed to hand back an
-    # UnfinalizedMoEOutput instead of finalized states, leaving the top-k
-    # reduction to fuse into the consumer. Set by layers that have such a
-    # consumer; read through `use_deferred_moe_finalize`, which applies the
-    # guards. Kernels without the capability ignore it. Default False.
-    defer_moe_finalize: bool = False
-    # Optional consumer capacity for deferred finalize, lowered by experts that
-    # would split a larger call across kernel launches. Negative means unbounded.
+    # Requested through `defer_moe_finalize()`, read through
+    # `should_defer_moe_finalize()`.
+    _defer_moe_finalize: bool = field(default=False, init=False)
+    # Most tokens a deferred call covers: the consumer's capacity, lowered by
+    # experts that would split a larger call across kernel launches. Negative
+    # means unbounded.
     defer_moe_finalize_max_num_tokens: int = -1
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
@@ -1423,20 +1421,52 @@ class FusedMoEConfig:
     def use_deferred_moe_finalize(self) -> bool:
         """Whether experts may return an unfinalized output on this deployment.
 
-        Evaluated on read rather than in ``__post_init__`` because
-        ``defer_moe_finalize`` is set after construction, like
-        ``skip_final_all_reduce``.
+        Evaluated on read rather than in ``__post_init__`` because deferral is
+        requested after construction, like ``skip_final_all_reduce``.
         """
         # The consumer fuses a TP all-reduce. Other parallel modes require a
         # combine or reduce-scatter after the experts and cannot defer it.
         return (
-            self.defer_moe_finalize
+            self._defer_moe_finalize
             and self.tp_size > 1
             and self.dp_size == 1
             and self.ep_size == 1
             and self.pcp_size == 1
             and not self.is_sequence_parallel
         )
+
+    def defer_moe_finalize(self, max_num_tokens: int = -1) -> None:
+        """Ask the experts to leave the top-k reduction to the layer's consumer.
+
+        A layer whose consumer can fuse the top-k reduction (e.g. into its TP
+        all-reduce) calls this once while the model is built. From then on:
+
+        - Experts that can stop after GEMM2 (the TRTLLM-Gen ``do_finalize=False``
+          path) return an ``UnfinalizedMoEOutput`` instead of finalized states
+          for every call ``should_defer_moe_finalize`` accepts. Experts without
+          the capability ignore the request and always finalize.
+        - ``should_defer_moe_finalize(num_tokens)`` is the answer for a call:
+          it requires a TP-only deployment (``use_deferred_moe_finalize``), a
+          non-empty call and at most ``defer_moe_finalize_max_num_tokens``
+          tokens. The cap starts at ``max_num_tokens`` and only ever goes down:
+          experts that would split a larger call across kernel launches lower it
+          to their single-launch size when they are built, since each launch
+          permutes into its own buffer.
+        - The model asks ``should_defer_moe_finalize`` before each call and takes
+          the matching path. A deferred call runs the runner's ``_forward_impl``
+          directly, since the MoE custom op returns tensors only, and the
+          consumer then owns the top-k reduction, the shared-expert add and the
+          all-reduce. ``finalize_moe_output`` runs the reduction on its own for
+          deferred outputs the consumer's fused kernel can't take.
+
+        Args:
+            max_num_tokens: Most tokens per call the consumer can take in
+                deferred form. Negative means no limit of its own.
+
+        """
+        self._defer_moe_finalize = True
+        if max_num_tokens >= 0:
+            self.limit_deferred_moe_finalize(max_num_tokens)
 
     def should_defer_moe_finalize(self, num_tokens: int) -> bool:
         """Return whether this invocation may defer the top-k reduction."""

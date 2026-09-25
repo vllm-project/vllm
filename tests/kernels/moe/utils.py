@@ -729,7 +729,7 @@ def check_deferred_moe_finalize(
     """
     finalized = run()
     assert isinstance(finalized, torch.Tensor)
-    moe_config.defer_moe_finalize = True
+    moe_config.defer_moe_finalize()
     output = run()
     assert moe_config.should_defer_moe_finalize(finalized.shape[0]) != chunked
     if chunked:
