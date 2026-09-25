@@ -11,12 +11,11 @@ import signal
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import TextIO
 
 import psutil
 
 import vllm.envs as envs
-from vllm.logger import init_logger
+from vllm.logger import init_logger, set_vllm_process_name
 from vllm.platforms import current_platform
 from vllm.platforms.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
@@ -24,10 +23,6 @@ from vllm.ray.lazy_utils import is_in_ray_actor
 from .platform_utils import cuda_is_initialized, xpu_is_initialized
 
 logger = init_logger(__name__)
-
-CYAN = "\033[0;36m"
-RESET = "\033[0;0m"
-
 
 # Environment variable utilities
 
@@ -198,59 +193,14 @@ def set_process_title(
     setproctitle.setproctitle(f"{prefix}::{name}")
 
 
-def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
-    """Add colored prefix to file output for log decoration."""
-    is_tty = hasattr(file, "isatty") and file.isatty()
-    if (
-        envs.NO_COLOR
-        or envs.VLLM_LOGGING_COLOR == "0"
-        or (envs.VLLM_LOGGING_COLOR != "1" and not is_tty)
-    ):
-        prefix = f"({worker_name} pid={pid}) "
-    else:
-        prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
-    # Use the original write to avoid nesting prefixes on repeated calls.
-    file_write = getattr(file, "_original_write", file.write)
-
-    def write_with_prefix(s: str):
-        if not s:
-            return
-        if file.start_new_line:  # type: ignore[attr-defined]
-            file_write(prefix)
-        idx = 0
-        while (next_idx := s.find("\n", idx)) != -1:
-            next_idx += 1
-            file_write(s[idx:next_idx])
-            if next_idx == len(s):
-                file.start_new_line = True  # type: ignore[attr-defined]
-                return
-            file_write(prefix)
-            idx = next_idx
-        file_write(s[idx:])
-        file.start_new_line = False  # type: ignore[attr-defined]
-
-    file.start_new_line = True  # type: ignore[attr-defined]
-    file._original_write = file_write  # type: ignore[attr-defined]
-    file.write = write_with_prefix  # type: ignore[method-assign]
-
-
 def decorate_logs(
     process_name: str | None = None, *, skip_if_decorated: bool = False
 ) -> None:
-    """Decorate stdout/stderr with process name and PID prefix."""
-    # Respect VLLM_CONFIGURE_LOGGING environment variable
-    if not envs.VLLM_CONFIGURE_LOGGING:
-        return
-
-    if skip_if_decorated and hasattr(sys.stdout, "_original_write"):
-        return
-
+    """Add vLLM process metadata to subsequent log records."""
     if process_name is None:
         process_name = get_mp_context().current_process().name
 
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
+    set_vllm_process_name(process_name, skip_if_set=skip_if_decorated)
 
 
 def kill_process_tree(pid: int):
