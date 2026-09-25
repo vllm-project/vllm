@@ -23,6 +23,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.platforms import current_platform
 
 from ..utils import (
@@ -51,6 +52,11 @@ def _supports_multimem():
     return (
         current_platform.is_cuda() and capability is not None and capability.major >= 9
     )
+
+
+def _supports_sm100_or_sm103():
+    capability = current_platform.get_device_capability()
+    return current_platform.is_cuda() and capability in ((10, 0), (10, 3))
 
 
 def _payload(value, device):
@@ -324,3 +330,65 @@ def test_mnnvl_lamport_stage_cleanup(monkeypatch: pytest.MonkeyPatch):
     if torch.accelerator.device_count() < 2:
         pytest.skip("Need at least two GPUs to run the test.")
     multi_process_parallel(monkeypatch, 2, 1, _run_stage_cleanup_test)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _run_multimem_reduce_scatter_test(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+
+        fa = get_tp_group().device_communicator.ca_comm
+        assert fa is not None and not fa.disabled
+        assert fa.mnnvl_multimem_rs_supported
+        assert not fa.mnnvl_multimem_rs_initialized
+        assert not fa.mnnvl_multimem_rs_multicast_ptr
+
+        message_bytes = {
+            "mnnvl_lamport": 1 * 1024 * 1024,
+            "mnnvl_multimem": 20 * 1024 * 1024,
+            "nccl": 64 * 1024 * 1024 + 128,
+        }
+        for _ in range(2):
+            for backend, size_bytes in message_bytes.items():
+                shard_elements = size_bytes // torch.bfloat16.itemsize // tp_size
+                inp = torch.full(
+                    (tp_size, shard_elements),
+                    rank + 1,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                selected = fa._select_reduce_scatter_backend(inp)
+                if backend == "nccl":
+                    assert selected is None
+                    out = sp_reduce_scatter(inp)
+                else:
+                    assert selected == backend
+                    out = fa.custom_reduce_scatter(inp)
+                    assert out is not None
+                    if backend == "mnnvl_multimem":
+                        assert fa.mnnvl_multimem_rs_initialized
+                        assert fa.mnnvl_multimem_rs_multicast_ptr
+                expected = tp_size * (tp_size + 1) // 2
+                torch.testing.assert_close(out, torch.full_like(out, expected))
+
+
+@pytest.mark.skipif(
+    not _supports_sm100_or_sm103(),
+    reason="The low-SM MNNVL reduce-scatter path requires SM100 or SM103.",
+)
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+def test_mnnvl_multimem_reduce_scatter(monkeypatch: pytest.MonkeyPatch, tp_size: int):
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Need at least {tp_size} GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, _run_multimem_reduce_scatter_test)
