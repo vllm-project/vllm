@@ -434,9 +434,10 @@ steps:
   source_file_dependencies:
   - vllm/v1/
   - tests/v1/e2e/general/
+  - tests/v1/e2e/_mamba_prefix_cache.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  - pytest -v -s v1/e2e/general
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -447,10 +448,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/
-  - tests/v1/e2e/general/
+  - tests/v1/e2e/test_async_scheduling.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general/test_async_scheduling.py
+  - pytest -v -s v1/e2e/test_async_scheduling.py
 
 - label: ":amd: (MI250) V1 Engine" # TBD
   timeout_in_minutes: 45
@@ -2675,10 +2676,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/
-  - tests/v1/e2e/general/
+  - tests/v1/e2e/test_async_scheduling.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general/test_async_scheduling.py
+  - pytest -v -s v1/e2e/test_async_scheduling.py
 
 - label: ":amd: (MI300) V1 Engine" # TBD
   timeout_in_minutes: 45
@@ -5007,11 +5008,13 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/
-  - tests/v1/e2e/general/
+  - tests/v1/e2e/test_kv_sharing_fast_prefill.py
+  - tests/v1/e2e/test_mamba_prefix_cache_mrv2.py
+  - tests/v1/e2e/_mamba_prefix_cache.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+  - pytest -v -s v1/e2e/test_kv_sharing_fast_prefill.py
+  - pytest -v -s v1/e2e/test_mamba_prefix_cache_mrv2.py
 
 - label: ":amd: (MI355) Extract Hidden States Integration Single GPU"
   timeout_in_minutes: 45

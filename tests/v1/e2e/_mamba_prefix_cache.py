@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Shared body of the mamba prefix-cache tests.
+
+The MRV1 cases run in general/ with the rest of E2E Core; the MRV2 cases need a
+larger GPU slice and run from test_mamba_prefix_cache_mrv2.py.
+"""
+
 import multiprocessing as mp
 import os
 import traceback
@@ -12,7 +18,6 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -937,16 +942,6 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test("spawn")
-def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
-    _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
-
-
-@create_new_process_for_each_test("spawn")
-def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
-    _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
-
-
 def _run_mamba_prefix_cache_mrv2(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
@@ -1215,13 +1210,3 @@ def _run_mamba_prefix_cache_mrv2(
         del engine
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
-
-
-@create_new_process_for_each_test()
-def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
-    _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=False)
-
-
-@create_new_process_for_each_test()
-def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
-    _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)

@@ -66,9 +66,9 @@ steps:
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/
-    - tests/v1/e2e/general/
+    - tests/v1/e2e/test_async_scheduling.py
   commands:
-    - pytest -v -s v1/e2e/general/test_async_scheduling.py
+    - pytest -v -s v1/e2e/test_async_scheduling.py
   mirror:
     amd:
       label: ":amd: (MI250) E2E Scheduling"
@@ -87,14 +87,15 @@ steps:
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/
+    - tests/v1/e2e/_mamba_prefix_cache.py
   commands:
-    - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+    - pytest -v -s v1/e2e/general
   mirror:
     amd:
       label: ":amd: (MI250) E2E Core"
       dind: false
       commands:
-      - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+      - pytest -v -s v1/e2e/general
       device: mi250_1
       timeout_in_minutes: 50
       depends_on:
@@ -102,6 +103,7 @@ steps:
       source_file_dependencies:
       - vllm/v1/
       - tests/v1/e2e/general/
+      - tests/v1/e2e/_mamba_prefix_cache.py
       - vllm/platforms/rocm.py
 
 # Keep the large Gemma-3n and Mamba MRV2 warmup allocations on 35GB slices.
@@ -111,10 +113,12 @@ steps:
   timeout_in_minutes: 50
   source_file_dependencies:
     - vllm/v1/
-    - tests/v1/e2e/general/
+    - tests/v1/e2e/test_kv_sharing_fast_prefill.py
+    - tests/v1/e2e/test_mamba_prefix_cache_mrv2.py
+    - tests/v1/e2e/_mamba_prefix_cache.py
   commands:
-    - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+    - pytest -v -s v1/e2e/test_kv_sharing_fast_prefill.py
+    - pytest -v -s v1/e2e/test_mamba_prefix_cache_mrv2.py
   mirror:
     amd:
       label: ":amd: (MI355) E2E Core Large Memory"
@@ -127,11 +131,13 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/v1/
-      - tests/v1/e2e/general/
+      - tests/v1/e2e/test_kv_sharing_fast_prefill.py
+      - tests/v1/e2e/test_mamba_prefix_cache_mrv2.py
+      - tests/v1/e2e/_mamba_prefix_cache.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-      - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+      - pytest -v -s v1/e2e/test_kv_sharing_fast_prefill.py
+      - pytest -v -s v1/e2e/test_mamba_prefix_cache_mrv2.py
 
 - label: ":nvidia: (L4) V1 E2E"
   key: v1-e2e-2-gpus
