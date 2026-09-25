@@ -242,14 +242,18 @@ def test_packed_qk_rope_correctness(
     )
 
     num_heads, head_dim = 12, 128
-    torch.manual_seed(0)
+    rng = torch.Generator(device="cuda").manual_seed(0)
 
-    angles = torch.rand(num_tokens, head_dim // 2, device="cuda") * torch.pi
+    angles = (
+        torch.rand(num_tokens, head_dim // 2, device="cuda", generator=rng) * torch.pi
+    )
     freqs_cis = torch.polar(torch.ones_like(angles), angles)
     cos = freqs_cis.real.contiguous()
     sin = freqs_cis.imag.contiguous()
 
-    xqkv = torch.randn(num_tokens, 3, num_heads, head_dim, dtype=dtype, device="cuda")
+    xqkv = torch.randn(
+        num_tokens, 3, num_heads, head_dim, dtype=dtype, device="cuda", generator=rng
+    )
     xqkv_ref = xqkv.clone()
     xq, xk, xv = torch.unbind(xqkv_ref, dim=-3)
 
