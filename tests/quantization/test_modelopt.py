@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -792,7 +793,20 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is kNvfp4Dynamic
 
 
-def test_modelopt_nvfp4_moe_per_token_activation_from_hf_config():
+@pytest.mark.parametrize(
+    "config_state,expected_per_token",
+    [
+        ("no_vllm_config", False),
+        ("no_model_config", False),
+        ("no_override", False),
+        ("disabled", False),
+        ("enabled", True),
+    ],
+)
+def test_modelopt_nvfp4_moe_per_token_activation_from_hf_config(
+    config_state, expected_per_token
+):
+    """Layer-only construction defaults to static activation scales."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -807,8 +821,14 @@ def test_modelopt_nvfp4_moe_per_token_activation_from_hf_config():
         exclude_modules=[],
         group_size=16,
     )
-    vllm_config = MagicMock()
-    vllm_config.model_config.hf_config.nvfp4_per_token_activation = True
+    vllm_config = None
+    if config_state != "no_vllm_config":
+        vllm_config = VllmConfig()
+        if config_state != "no_model_config":
+            hf_config = SimpleNamespace()
+            if config_state != "no_override":
+                hf_config.nvfp4_per_token_activation = expected_per_token
+            vllm_config.model_config = Mock(spec=ModelConfig, hf_config=hf_config)
     moe_config = MagicMock()
     moe_config.is_act_and_mul = False
 
@@ -831,7 +851,7 @@ def test_modelopt_nvfp4_moe_per_token_activation_from_hf_config():
     ):
         method = ModelOptNvFp4FusedMoE(config, moe_config)
 
-    assert method.per_token_activation
+    assert method.per_token_activation is expected_per_token
     assert method.experts_cls is experts_cls
 
 
