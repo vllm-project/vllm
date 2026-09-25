@@ -568,6 +568,7 @@ steps:
   - tests/device_allocator
   device: cpu-small
   commands:
+  - pip install cmake # test_cmake_utils.py shells out to cmake; the CPU image has none
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s device_allocator
   - pytest -v -s test_access_log_filter.py
