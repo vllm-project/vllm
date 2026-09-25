@@ -976,7 +976,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
@@ -1935,7 +1935,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
@@ -2182,7 +2182,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

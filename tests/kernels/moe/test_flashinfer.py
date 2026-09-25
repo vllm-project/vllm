@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.moe.utils import (
+    check_deferred_moe_finalize,
+    make_dummy_moe_config,
+    make_test_weights,
+)
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -32,11 +37,20 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    convert_to_fp8_moe_kernel_format,
+    make_fp8_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -767,3 +781,109 @@ def test_trtllm_fp8_swiglu_clamp_support(
     assert supported == expected, reason
     if not expected:
         assert "SwiGLU" in reason
+
+
+def _make_mxfp8_moe_weights(
+    e: int, n: int, k: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def quantize(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q, s = zip(
+            *(mxfp8_e4m3_quantize(w[i], is_sf_swizzled_layout=False) for i in range(e))
+        )
+        return torch.stack(q), torch.stack(s)
+
+    w1, w1_scale = quantize(
+        torch.randn(e, 2 * n, k, device="cuda", dtype=torch.bfloat16) / 10
+    )
+    w2, w2_scale = quantize(
+        torch.randn(e, k, n, device="cuda", dtype=torch.bfloat16) / 10
+    )
+    return w1, w2, w1_scale, w2_scale
+
+
+@pytest.mark.parametrize("block_shape", [[128, 128], [1, 32]], ids=["block", "mxfp8"])
+@pytest.mark.parametrize("m", [1, 16])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_fp8_block_moe_deferred_finalize(
+    m: int, block_shape: list[int], workspace_init
+):
+    """TRTLLM-Gen block-FP8 and MXFP8 modular experts can leave the top-k
+    finalize to the caller."""
+    e, topk, n, k = 32, 4, 1024, 1024
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        if block_shape == [1, 32]:
+            w1, w2, w1_scale, w2_scale = _make_mxfp8_moe_weights(e, n, k)
+        else:
+            (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+                e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+            )
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            w1_scale,
+            w2_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        # One rank of a TP group, which deferral needs.
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=2 * n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+            ),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config, quant_config=quant_config, allow_new_interface=True
+            ),
+            TrtLlmFp8ExpertsModular(moe_config=moe_config, quant_config=quant_config),
+        )
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+        check_deferred_moe_finalize(
+            moe_config,
+            lambda: kernel.apply(
+                hidden_states=a,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ),
+            router_weights=topk_weights,
+        )
