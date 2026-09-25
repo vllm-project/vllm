@@ -382,7 +382,6 @@ def get_json_schema_from_tools(
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
         return None
-
     # tool_choice: Forced Function (Responses)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ToolChoiceFunction
@@ -412,26 +411,9 @@ def get_json_schema_from_tools(
         if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
         return chat_tool_map[tool_name].function.parameters
-
     # tool_choice: "required"
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools)
-
-    # Note(arpera):
-    # We cannot create a json schema for the case
-    # when tool_choice="auto" because
-    # auto means that model can decide what to generate:
-    # either tool call or just text response
-    # There is no such a problem in case of tool_choice="required"
-    # since model is forced to generate a tool call,
-    # so model's output would be in json format
-    # and we CAN use json schema to set this constraint
-    # In case of auto there is NO simple way to build
-    # such a constraint in json schema format
-    # That is why we return None here
-    # and in this case this request with tool calling
-    # will NOT have constrained decoding at all!
-
     # tool_choice: "auto"
     return None
 
