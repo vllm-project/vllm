@@ -28,11 +28,11 @@ def vcs_identity(
 def main() -> None:
     assert version("mamba_ssm") == "2.3.0"
     assert version("causal_conv1d") == "1.6.0"
-    mamba_commit = vcs_identity(
-        "mamba_ssm",
-        "https://github.com/state-spaces/mamba",
-        "v2.3.0",
-    )
+    # docker/Dockerfile builds mamba from a C++20-patched v2.3.0 checkout, so it
+    # has no VCS identity; check it came from that checkout instead.
+    mamba_url_text = distribution("mamba_ssm").read_text("direct_url.json")
+    assert mamba_url_text is not None
+    assert json.loads(mamba_url_text)["url"].endswith("/tmp/mamba-src")
     causal_conv_commit = vcs_identity(
         "causal_conv1d",
         "https://github.com/Dao-AILab/causal-conv1d",
@@ -40,7 +40,7 @@ def main() -> None:
     )
     print(
         "Verified hybrid test dependencies:",
-        f"mamba_ssm==2.3.0@{mamba_commit} ({mamba_ssm.__file__})",
+        f"mamba_ssm==2.3.0@v2.3.0-c++20 ({mamba_ssm.__file__})",
         f"causal_conv1d==1.6.0@{causal_conv_commit} ({causal_conv1d.__file__})",
     )
 
