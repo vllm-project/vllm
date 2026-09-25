@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -18,7 +20,7 @@ class CacheHitSource(str, Enum):
     EXTERNAL_UNSPECIFIED = "external_unspecified"
 
     @classmethod
-    def slowest(cls, sources: "Iterable[CacheHitSource]") -> "CacheHitSource":
+    def slowest(cls, sources: Iterable[CacheHitSource]) -> CacheHitSource:
         """The slowest of ``sources``; a token needs KV from all of them."""
         order = list(cls)
         return max(sources, key=order.index)
@@ -42,7 +44,7 @@ class CachedTokensBySource:
         name = CacheHitSource(source).value
         setattr(self, name, getattr(self, name) + num_tokens)
 
-    def merge(self, other: "CachedTokensBySource") -> None:
+    def merge(self, other: CachedTokensBySource) -> None:
         for source in CacheHitSource:
             self.add(source, getattr(other, source.value))
 
