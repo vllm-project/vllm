@@ -1124,13 +1124,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # to the original _copy_page_indices_kernel).
             # When kernel_block_size=K>1, block_table entry b covering K tokens
             # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-            _expand_page_indices_kernel[(num_reqs,)](
+            # One program per 1024-token block, so the expansion is spread
+            # over the context instead of serialised in a single workgroup.
+            # Capped so that a million-token context does not launch a grid far
+            # wider than the GPU can use; the kernel strides, so this value only
+            # sets how much runs in parallel.
+            expand_block_size = 1024
+            num_token_blocks = max(1, min(cdiv(max_seq_len, expand_block_size), 512))
+            _expand_page_indices_kernel[(num_reqs, num_token_blocks)](
                 self.paged_kv_indices,
                 block_table_tensor,
                 block_table_tensor.stride(0),
                 paged_kv_indptr,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
-                BLOCK_SIZE=1024,
+                BLOCK_SIZE=expand_block_size,
             )
             paged_kv_indices = self.paged_kv_indices
 
@@ -1344,12 +1351,21 @@ def _expand_page_indices_kernel(
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
     """
     req_idx = tl.program_id(0)
+    blk_idx = tl.program_id(1)
+    num_blks = tl.num_programs(1)
     row_ptr = block_table + req_idx * block_table_stride
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
     offset = tl.arange(0, BLOCK_SIZE)
-    for i in tl.range(0, num_tokens, BLOCK_SIZE):
+    # Grid-stride over the token span. The loop bound is the request's context
+    # length, so with a single program per request one workgroup walked the
+    # whole context: 375 iterations at 384k tokens, 1024 at 1M. Every iteration
+    # is independent -- each writes its own disjoint slice of page_indices --
+    # so they spread across the second grid dimension. Striding rather than
+    # partitioning keeps the kernel correct for any grid width, which makes the
+    # launch side a pure performance knob.
+    for i in tl.range(blk_idx * BLOCK_SIZE, num_tokens, BLOCK_SIZE * num_blks):
         token_offsets = i + offset
         mask = token_offsets < num_tokens
 
