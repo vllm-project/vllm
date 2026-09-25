@@ -226,6 +226,12 @@ class Worker(WorkerBase):
         validate_worker_profiler_config(self.profiler_config)
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Random dummy input_ids spread tokens across experts during DP dummy
+        # runs instead of routing them all to the same experts.
+        self.randomize_dummy_inputs = (
+            envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+            and vllm_config.parallel_config.data_parallel_size > 1
+        )
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -582,7 +588,7 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            self._profile_run()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -609,7 +615,7 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run()
+            self._profile_run()
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -835,7 +841,12 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(
+                size,
+                skip_eplb=True,
+                remove_lora=False,
+                randomize_inputs=self.randomize_dummy_inputs,
+            )
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -1337,9 +1348,21 @@ class Worker(WorkerBase):
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
 
+    def _profile_run(self) -> None:
+        if self.use_v2_model_runner:
+            self.model_runner.profile_run(  # type: ignore[call-arg]
+                randomize_inputs=self.randomize_dummy_inputs
+            )
+        else:
+            self.model_runner.profile_run()
+
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(
+            num_tokens,
+            uniform_decode=True,
+            randomize_inputs=self.randomize_dummy_inputs,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
