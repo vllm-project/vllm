@@ -338,6 +338,25 @@ RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
+# The wheel index also serves a torch repacked to require our triton instead of
+# the one TheRock built it with, and amdsmi, which TheRock ships only as sources
+# inside rocm-sdk-core.
+ARG TORCH_VERSION
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
+COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
+RUN pip download --no-deps --dest /tmp/torch-dl \
+        --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+        --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+        "torch==${TORCH_VERSION}" \
+    && TRITON_VER=$(basename /app/debs/triton-*.whl | cut -d- -f2) \
+    && python3 /tmp/therock_wheels.py repack-torch /tmp/torch-dl/torch-*.whl \
+        --triton-version "${TRITON_VER}" --out-dir /app/debs \
+    && python3 /tmp/therock_wheels.py patch-amdsmi "${SDK_CORE}/share/amd_smi" \
+        --out-dir /tmp/amd_smi \
+    && pip wheel --no-deps --wheel-dir /app/debs /tmp/amd_smi \
+    && rm -rf /tmp/torch-dl /tmp/amd_smi /tmp/therock_wheels.py \
+    && ls -l /app/debs
 
 FROM base AS debs
 RUN mkdir /app/debs
