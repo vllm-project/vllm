@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING, cast
+
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -16,6 +18,9 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
@@ -275,7 +280,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 k_pe_out,
                 self.kv_cache,
                 mla_slot,
-                attn_metadata,
+                cast("MLACommonMetadata", attn_metadata),
                 self.kv_cache_dtype,
                 self._k_scale,
             )
