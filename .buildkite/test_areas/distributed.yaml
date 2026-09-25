@@ -478,7 +478,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 4
-  parallelism: 3
+  parallelism: 4
   source_file_dependencies:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
@@ -496,9 +496,6 @@ steps:
       dind: false
       device: mi250_4
       timeout_in_minutes: 35
-      # Set explicitly: this mirror's own case timings need one more shard
-      # than the NVIDIA job to stay under the per-shard target.
-      parallelism: 4
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -561,7 +558,9 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
-  - vllm/v1/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/executor/
   - tests/v1/distributed/test_pp_dp_v2.py
   commands:
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
