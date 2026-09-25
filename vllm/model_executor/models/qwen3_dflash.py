@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import io
 from collections.abc import Iterable
 
@@ -128,10 +129,24 @@ def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     config = spec_config.draft_model_config.hf_config
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
     num_features_to_use = len(aux_layers) if aux_layers else config.num_hidden_layers
-    target_hidden_size = (
-        getattr(config, "target_hidden_size", None) or config.hidden_size
-    )
+    target_hidden_size = getattr(
+        config, "target_hidden_size", None
+    ) or config.hidden_size * getattr(config, "hc_mult", 1)
     return target_hidden_size * num_features_to_use
+
+
+def get_dflash_cache_config(vllm_config: VllmConfig) -> CacheConfig:
+    spec_config = vllm_config.speculative_config
+    assert spec_config is not None
+    cache_config = vllm_config.cache_config
+    cache_dtype = spec_config.kv_cache_dtype
+    if cache_dtype is None and cache_config.cache_dtype == "fp8_ds_mla":
+        # DFlash uses ordinary attention, not the target's packed MLA layout.
+        cache_dtype = "auto"
+    if cache_dtype is not None:
+        cache_config = copy.copy(cache_config)
+        cache_config.cache_dtype = cache_dtype
+    return cache_config
 
 
 def _resolve_layer_attention(

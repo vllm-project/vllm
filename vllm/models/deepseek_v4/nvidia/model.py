@@ -913,6 +913,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             requires_grad=False,
         )
         spec_config = vllm_config.speculative_config
+        self.aux_hidden_size = config.hidden_size
+        if spec_config is not None and spec_config.method == "dflash":
+            draft_config = spec_config.draft_model_config.hf_config
+            self.aux_hidden_size = getattr(
+                draft_config, "target_hidden_size", None
+            ) or (draft_config.hidden_size * getattr(draft_config, "hc_mult", 1))
+            if self.aux_hidden_size not in (config.hidden_size, self.hc_dim):
+                raise ValueError(
+                    "DeepSeek V4 DFlash target_hidden_size must match either the "
+                    "mean-pooled or full HC residual width, got "
+                    f"{self.aux_hidden_size}."
+                )
         if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1018,7 +1030,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_recon = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
                 )
-                aux_hidden_state = aux_recon.mean(dim=1)
+                # Multistream DFlash checkpoints retain stream-major HC features.
+                aux_hidden_state = (
+                    aux_recon.flatten(1)
+                    if self.aux_hidden_size == self.hc_dim
+                    else aux_recon.mean(dim=1)
+                )
                 if self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
