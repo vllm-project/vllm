@@ -438,6 +438,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
             spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
+            uniform_sequence_length = m.uniform_spec_sequence_length
+            # Token padding can make the packed tensor larger than the
+            # request-local metadata represented by this length.
+            if (
+                uniform_sequence_length is not None
+                and q_spec.shape[1] != m.num_spec_decodes * uniform_sequence_length
+            ):
+                uniform_sequence_length = None
             # Spec-only batches write directly into core_attn_out.
             spec_out = (
                 core_attn_out[:, : q_spec.shape[1]]
@@ -457,6 +465,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 cu_seqlens=spec_cu_seqlens,
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
+                uniform_sequence_length=uniform_sequence_length,
                 out=spec_out,
             )
 
