@@ -121,14 +121,45 @@ PY
 # from idling for hours, but it is only a hint, and this loop is what actually
 # guarantees the snapshot is complete.
 POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-60}"
-# Under the step's own timeout, so a stuck build still gets a partial report
-# rather than the job being killed with nothing sent.
-WAIT_DEADLINE=$(( $(date +%s) + ${CRCR_MAX_WAIT_S:-46800} ))
+
+# The deadline is measured from when the *build* started, not from when this
+# script did, so "report no later than N hours into the build" holds however
+# late this step is scheduled. Anchoring it to script start made the bound
+# meaningless whenever the step was itself delayed.
+#
+# Resolved after the first fetch, from the build's own created_at.
+MAX_BUILD_AGE_S="${CRCR_MAX_BUILD_AGE_S:-25200}"
+WAIT_DEADLINE=""
+
+build_deadline() {
+    python3 - "${BUILD_JSON}" "${MAX_BUILD_AGE_S}" <<'PY'
+import datetime, json, sys
+build = json.load(open(sys.argv[1]))
+created = build.get("created_at")
+if not created:
+    raise SystemExit(1)
+started = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
+print(int(started.timestamp()) + int(sys.argv[2]))
+PY
+}
+
 while :; do
     http_code="$(fetch_build)"
     if [[ "${http_code}" != "200" ]]; then
         echo "buildkite API returned ${http_code} -- skipping report"
         exit 0
+    fi
+    if [[ -z "${WAIT_DEADLINE}" ]]; then
+        WAIT_DEADLINE="$(build_deadline)" || WAIT_DEADLINE=""
+        if [[ -z "${WAIT_DEADLINE}" ]]; then
+            # No created_at to anchor to; fall back to script start so the loop
+            # still has a bound rather than running until the step times out.
+            WAIT_DEADLINE=$(( $(date +%s) + MAX_BUILD_AGE_S ))
+            echo "build created_at unavailable -- deadline measured from now"
+        fi
+        echo "reporting deadline: $(date -u -d "@${WAIT_DEADLINE}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || date -u -r "${WAIT_DEADLINE}" '+%Y-%m-%dT%H:%M:%SZ')" \
+            "(build age limit ${MAX_BUILD_AGE_S}s)"
     fi
     remaining="$(outstanding_jobs)" || remaining=""
     if [[ -z "${remaining}" ]]; then
@@ -140,7 +171,7 @@ while :; do
         break
     fi
     if (( $(date +%s) >= WAIT_DEADLINE )); then
-        echo "still ${remaining} job(s) running at the wait deadline --" \
+        echo "still ${remaining} job(s) running at the build-age deadline --" \
             "reporting a partial view"
         break
     fi
