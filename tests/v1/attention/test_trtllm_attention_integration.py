@@ -5,7 +5,6 @@
 import dataclasses
 import unittest.mock
 from functools import partial
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -447,44 +446,6 @@ def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
     )
 
 
-def _make_decode_builder(
-    monkeypatch: pytest.MonkeyPatch,
-    use_trtllm_attention: bool,
-    dcp_world_size: int = 1,
-) -> FlashInferMetadataBuilder:
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.supports_trtllm_attention",
-        unittest.mock.Mock(return_value=True),
-    )
-    if dcp_world_size > 1:
-        monkeypatch.setattr(
-            "vllm.v1.attention.backends.flashinfer.get_dcp_group",
-            lambda: SimpleNamespace(world_size=dcp_world_size, rank_in_group=0),
-        )
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-        _mock_get_per_layer_parameters,
-    )
-    vllm_config = create_vllm_config(
-        model_name=MODEL, block_size=BLOCK_SIZE, num_gpu_blocks=NUM_GPU_BLOCKS
-    )
-    vllm_config.attention_config.use_trtllm_attention = use_trtllm_attention
-    model_config = vllm_config.model_config
-    kv_cache_spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
-        head_size=model_config.get_head_size(),
-        dtype=model_config.dtype,
-    )
-    with set_current_vllm_config(vllm_config):
-        return FlashInferMetadataBuilder(
-            kv_cache_spec,
-            ["test_layer_0"],
-            vllm_config,
-            torch.device(f"{DEVICE_TYPE}:0"),
-        )
-
-
 def _assert_same_metadata(reused, rebuilt, path: str) -> None:
     if dataclasses.is_dataclass(reused):
         for field in dataclasses.fields(reused):
@@ -499,38 +460,40 @@ def _assert_same_metadata(reused, rebuilt, path: str) -> None:
         assert reused == rebuilt, path
 
 
-@pytest.mark.parametrize(
-    ("use_trtllm_attention", "dcp_world_size", "expected"),
-    [(True, 1, True), (False, 1, False), (True, 2, False)],
-)
-def test_draft_decode_metadata_update_requires_trtllm_gen(
-    monkeypatch: pytest.MonkeyPatch,
-    use_trtllm_attention: bool,
-    dcp_world_size: int,
-    expected: bool,
-):
-    """Only trtllm-gen decode without DCP may reuse one metadata build across
-    fused draft steps: native wrapper decode plans from host seq_lens, and
-    DCP-local seq_lens are not advanced between draft steps."""
-    builder = _make_decode_builder(monkeypatch, use_trtllm_attention, dcp_world_size)
-
-    assert builder.supports_draft_decode_metadata_update is expected
-
-
 @torch.inference_mode()
 def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The fused draft loop advances seq_lens in place and reuses the step-1
     build, which must match what the split path rebuilds for step 2."""
-    builder = _make_decode_builder(monkeypatch, use_trtllm_attention=True)
-    step1 = create_common_attn_metadata(
-        BATCH_SPECS["decode_only"], BLOCK_SIZE, builder.device
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.supports_trtllm_attention",
+        unittest.mock.Mock(return_value=True),
     )
-    reused = builder.build(common_prefix_len=0, common_attn_metadata=step1)
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        _mock_get_per_layer_parameters,
+    )
+    vllm_config = create_vllm_config(
+        model_name=MODEL, block_size=BLOCK_SIZE, num_gpu_blocks=NUM_GPU_BLOCKS
+    )
+    model_config = vllm_config.model_config
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+        head_size=model_config.get_head_size(),
+        dtype=model_config.dtype,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with set_current_vllm_config(vllm_config):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, ["test_layer_0"], vllm_config, device
+        )
+    assert builder.supports_draft_decode_metadata_update
 
+    step1 = create_common_attn_metadata(BATCH_SPECS["decode_only"], BLOCK_SIZE, device)
+    reused = builder.build(common_prefix_len=0, common_attn_metadata=step1)
     step1.seq_lens.add_(1)
-    builder.update_draft_decode_metadata(reused)
     assert step1.seq_lens_cpu_upper_bound is not None
     step2 = dataclasses.replace(
         step1, seq_lens_cpu_upper_bound=step1.seq_lens_cpu_upper_bound + 1

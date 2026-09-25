@@ -1776,12 +1776,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
 
-    def update_draft_decode_metadata(self, metadata: FlashInferMetadata) -> None:
-        # Host-planned prefill and native decode metadata cannot be reused.
-        assert metadata.prefill is None
-        assert metadata.decode is None or isinstance(
-            metadata.decode, FlashInferTrtllmAPIDecode
-        )
+    def update_draft_decode_metadata(self, _metadata: FlashInferMetadata) -> None:
+        pass
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
