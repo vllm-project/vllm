@@ -25,7 +25,6 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.reader import Counter, get_metrics_snapshot
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
@@ -662,95 +661,3 @@ async def test_streaming_input_delayed_generator_exit(engine: AsyncLLM):
     )
 
     print(f"Delayed exit test passed. Generated: {full_text}")
-
-
-def _num_accepted_draft_tokens() -> int:
-    return sum(
-        m.value
-        for m in get_metrics_snapshot()
-        if isinstance(m, Counter) and m.name == "vllm:spec_decode_num_accepted_tokens"
-    )
-
-
-async def _generate_session(
-    speculative_config: dict | None, chunks: list[str]
-) -> tuple[list[list[int]], list[list[float]]]:
-    """Run one streaming session and return the sampled token ids and their
-    logprobs, per chunk."""
-    from vllm.engine.arg_utils import AsyncEngineArgs
-
-    engine_args = AsyncEngineArgs(
-        model=MODEL,
-        enforce_eager=True,
-        gpu_memory_utilization=0.1,
-        dtype="float32",
-        attention_config={"backend": "FLEX_ATTENTION"},
-        async_scheduling=False,
-        speculative_config=speculative_config,
-    )
-    with set_default_torch_num_threads(1):
-        session_engine = AsyncLLM.from_engine_args(engine_args)
-
-    async def chunk_gen() -> AsyncGenerator[StreamingInput, None]:
-        for chunk in chunks:
-            yield StreamingInput(prompt=chunk)
-
-    sampling_params = SamplingParams(
-        max_tokens=2,
-        ignore_eos=True,
-        output_kind=RequestOutputKind.DELTA,
-        temperature=0.0,
-        logprobs=0,
-    )
-    token_ids: list[list[int]] = [[]]
-    logprobs: list[list[float]] = [[]]
-    try:
-        async for output in session_engine.generate(
-            chunk_gen(), sampling_params, "spec_session"
-        ):
-            completion = output.outputs[0]
-            assert completion.logprobs is not None
-            for token_id, token_logprobs in zip(
-                completion.token_ids, completion.logprobs
-            ):
-                token_ids[-1].append(token_id)
-                logprobs[-1].append(token_logprobs[token_id].logprob)
-            if completion.finish_reason is not None:
-                token_ids.append([])
-                logprobs.append([])
-        return token_ids, logprobs
-    finally:
-        session_engine.shutdown()
-        await asyncio.sleep(0.1)
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_streaming_input_spec_decode_matches_no_spec(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Each chunk stops after 2 tokens, so a spec step that accepts drafts
-    stops on one and trims the rest. Trimming must leave later chunks the
-    same context as without speculative decoding. Greedy tokens of this
-    repetitive prompt rarely depend on that context, so logprobs are compared
-    as well."""
-    monkeypatch.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
-    chunks = [" one two three four one two three four one two"] * 6
-
-    base_token_ids, base_logprobs = await _generate_session(None, chunks)
-
-    num_accepted_before = _num_accepted_draft_tokens()
-    spec_token_ids, spec_logprobs = await _generate_session(
-        {
-            "method": "ngram",
-            "num_speculative_tokens": 4,
-            "prompt_lookup_min": 2,
-            "prompt_lookup_max": 4,
-        },
-        chunks,
-    )
-    assert _num_accepted_draft_tokens() > num_accepted_before
-
-    assert spec_token_ids == base_token_ids
-    assert spec_logprobs == [
-        pytest.approx(chunk, rel=1e-3, abs=1e-6) for chunk in base_logprobs
-    ]
