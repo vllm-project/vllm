@@ -1129,6 +1129,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.multimodal_config = vllm_config.model_config.multimodal_config
         assert self.multimodal_config is not None
         self.use_data_parallel = self.multimodal_config.mm_encoder_tp_mode == "data"
+        self._encoder_cg_pad_totals: dict[int, int] = {}
 
         text_hidden_size = getattr(config.text_config, "hidden_size", None)
         assert text_hidden_size is not None, "text_config.hidden_size is required"
