@@ -96,4 +96,4 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
 
     connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
-    assert events == ["handle", "bind", "start", "clear"]
+    assert events == ["handle", "bind", "start", "wait", "clear"]
