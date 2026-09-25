@@ -2220,7 +2220,7 @@ def _sparse_attn_prefill_ragged_kernel(
 
 
 @triton.jit
-def _sparse_attn_prefill_ragged_partial_kernel(
+def _sparse_attn_decode_ragged_bf16_partial_kernel(
     q_ptr,
     kv_ptr,
     kv_indices_ptr,
@@ -3883,7 +3883,9 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         device=q.device,
     )
 
-    _sparse_attn_prefill_ragged_partial_kernel[(num_queries, num_splits, heads_blocks)](
+    _sparse_attn_decode_ragged_bf16_partial_kernel[
+        (num_queries, num_splits, heads_blocks)
+    ](
         q,
         kv,
         indices,
