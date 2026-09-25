@@ -346,12 +346,14 @@ def rocm_unquantized_gemm_impl(
     if use_skinny:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
-        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        # Note: Only build that view inside the branches that consume it.
         if (m == 1 or m > 8) and 0 < n <= 5:
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
         elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
             out = ops.LLMM1(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
