@@ -698,7 +698,13 @@ class OutputProcessor:
                         engine_core_output.prefill_stats.num_cache_creation_tokens
                     )
                 if req_state.remote_prefill_cached_tokens is not None:
-                    req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
+                    # kv_transfer_params is client-reachable via the OpenAI
+                    # API, so the router-supplied count must respect the same
+                    # bounds as the local one (see PrefillStats.finalize).
+                    req_state.num_cached_tokens = min(
+                        max(req_state.remote_prefill_cached_tokens, 0),
+                        req_state.prompt_len,
+                    )
                 req_state.is_prefilling = False
 
             if engine_core_output.spec_decode_metrics is not None:
