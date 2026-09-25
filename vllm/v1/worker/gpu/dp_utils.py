@@ -40,7 +40,7 @@ class DPSyncState:
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
     # Whether every rank has armed synchronized profiler stepping. None when
-    # profiler readiness was not included in this agreement.
+    # synchronized profiler stepping was not requested.
     profiler_ready: bool | None = None
 
 
@@ -70,8 +70,8 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    num_fields = 7 if profiler_ready is not None else 6
-    tensor = torch.zeros(num_fields, dp_size, dtype=torch.int32, device="cpu")
+    # Keep the collective shape independent of local profiler configuration.
+    tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)

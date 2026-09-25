@@ -250,11 +250,15 @@ vllm serve mistralai/Mixtral-8x7B-Instruct-v0.1 \
 Arm profiling on every participating rank before sending traffic. The profiler
 starts after all ranks report ready through vLLM's existing DP coordination.
 `delay_iterations` and `max_iterations` then count those shared execution
-boundaries, including dummy model forwards on locally idle ranks. This adds one
-readiness field to the existing coordination only while the option is enabled;
-it does not add a profiling-only collective. Leave this option disabled for
+boundaries, including dummy model forwards on locally idle ranks. The existing
+coordination reserves one readiness field, including when the option is disabled,
+so the collective shape does not depend on local profiler settings. This does not
+add a profiling-only collective. Leave this option disabled for
 independent replicas without a shared forward cadence. All participating ranks
 must use the same profiler configuration.
+
+With data-parallel size one, profiling keeps its rank-local behavior and logs
+that this option has no effect when profiling is started.
 
 Coordinated model-runner dummy forwards that occur while the session is armed
 count as execution boundaries, not only dummy work caused by an idle DP rank.
