@@ -101,29 +101,44 @@ def test_snapshot_references_match_full_history(seed):
     assert counts(wire(snap.export())) == expected
 
 
-def test_orphan_metadata_is_retained_within_budget(monkeypatch):
+def test_dead_records_are_retained_for_recent_batches():
     snap = KVCacheSnapshot()
+    for h in range(1, 101):
+        snap.apply([stored([h]), BlockRemoved(block_hashes=[h], medium="GPU")])
+    window = range(101 - KVCacheSnapshot.RING_BATCHES, 101)
+    assert set(snap._records) == set(window)
+    snap.apply([stored([window[0]], medium="CPU")])
+    assert counts(wire(snap.export())) == Counter({("CPU", None, window[0]): 1})
+
+
+def test_dead_records_are_retained_within_ring(monkeypatch):
+    snap = KVCacheSnapshot()
+    monkeypatch.setattr(snap, "RING_BATCHES", 10**9)
     for h in range(1, 1001):
         snap.apply([stored([h])])
         snap.apply([BlockRemoved(block_hashes=[h], medium="GPU")])
-    assert snap._sources and snap._known and snap._orphan_metadata_bytes
-    monkeypatch.setattr(snap, "MAX_ORPHAN_METADATA_BYTES", 0)
+    assert len(snap._records) == 1000 and snap._ring_size == 1000
+    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 10)
     snap.apply([])
-    assert not snap._sources and not snap._known
-    assert snap._metadata_bytes == 0
+    assert len(snap._records) == 10 and set(snap._records) == set(range(991, 1001))
+    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 0)
+    snap.apply([])
+    assert not snap._records and not snap._ring_size
 
 
-def test_dependencies_released_iteratively(monkeypatch):
+def test_ancestors_of_live_blocks_are_retained(monkeypatch):
     snap = KVCacheSnapshot()
-    monkeypatch.setattr(snap, "MAX_ORPHAN_METADATA_BYTES", 0)
+    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 0)
     for h in range(1, 1501):
         snap.apply([stored([h], parent=h - 1 if h > 1 else None)])
         if h > 1:
             snap.apply([BlockRemoved(block_hashes=[h - 1], medium="GPU")])
     assert len(snap) == 1
-    assert len(snap._sources) == 1500
+    assert len(snap._records) == 1500
+    exported = wire(snap.export())
+    assert counts(exported) == Counter({("GPU", None, 1500): 1})
     snap.apply([BlockRemoved(block_hashes=[1500], medium="GPU")])
-    assert not snap._sources and not snap._known
+    assert not snap._records
 
 
 def test_delayed_transfer_preserves_metadata():
@@ -141,40 +156,22 @@ def test_unknown_parent_without_known_block_fails_closed():
         KVCacheSnapshot().apply([stored([2], parent=1)])
 
 
-def test_budget_collection_preserves_selected_dependency(monkeypatch):
+def test_store_after_ring_overflow_fails_closed(monkeypatch):
     snap = KVCacheSnapshot()
-    parent = stored([1])
-    unrelated = stored([9])
-    child = stored([2], parent=1)
-    snap.apply([parent])
-    snap.apply([BlockRemoved(block_hashes=[1], medium="GPU")])
-    snap.apply([unrelated])
-    snap.apply([BlockRemoved(block_hashes=[9], medium="GPU")])
-    parent_cost = snap._sources[0].cost
-    child_cost = 512 + 64 * len(child.block_hashes)
-    child_cost += len(msgspec.msgpack.encode(child))
-    monkeypatch.setattr(snap, "MAX_METADATA_BYTES", parent_cost + child_cost)
-    snap.apply([child])
-    assert 1 in snap._known
-    assert 2 in snap._known
-    assert 9 not in snap._known
-    assert counts(wire(snap.export())) == Counter({("GPU", None, 2): 1})
+    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 1)
+    snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
+    snap.apply([stored([9]), BlockRemoved(block_hashes=[9], medium="GPU")])
+    assert set(snap._records) == {9}
+    with pytest.raises(ValueError, match="Missing reconstruction"):
+        snap.apply([stored([1], medium="CPU")])
 
 
-def test_offloaded_history_fits_metadata_budget(monkeypatch):
-    """A full CPU tier pins the evicted GPU stores that carry its tokens.
-
-    A GLM-5.3 prefill rank holds 29,093 CPU blocks of 64 tokens and retains
-    3.6M tokens of source metadata for them. This replays twice that CPU tier
-    at 1.8 retained tokens per CPU-tier token, scaled by 1/64 with the budget.
-    """
-    scale = 64
-    budget = KVCacheSnapshot.MAX_METADATA_BYTES // scale
-    monkeypatch.setattr(KVCacheSnapshot, "MAX_METADATA_BYTES", budget)
+def test_offloaded_history_exports_live_state():
+    """A full CPU tier keeps records for evicted GPU stores, not the events."""
     rng = random.Random(0)
     snap = KVCacheSnapshot()
     expected: Counter = Counter()
-    for prompt in range(2 * 29_093 // scale // 20 + 1):
+    for prompt in range(2 * 29_093 // 64 // 20 + 1):
         hashes = list(range(1 + 36 * prompt, 1 + 36 * (prompt + 1)))
         tokens = [rng.randrange(151_552) for _ in range(64 * len(hashes))]
         offloaded = [stored([h], medium="CPU") for h in hashes[-20:]]
@@ -194,6 +191,192 @@ def test_offloaded_history_fits_metadata_budget(monkeypatch):
         snap.apply(history)
         counts(history, expected)
     assert counts(wire(snap.export())) == expected
+
+
+class ConsumerFailure(Exception):
+    pass
+
+
+class RouterModel:
+    """The llm-d router's snapshot consumer, reduced to its key semantics.
+
+    Request keys chain over (parent request key, tokens, extra key). A strict
+    consumer fails on any engine hash it cannot resolve, as a snapshot pool
+    does for its whole life; stores and removes are reference counted per
+    (tier, group, hash) and only the last remove evicts.
+    """
+
+    def __init__(self, strict: bool = True):
+        self.strict = strict
+        self.keys: dict = {}
+        self.entries: set = set()
+        self.refs: Counter = Counter()
+
+    def resolve(self, h):
+        if h not in self.keys:
+            raise ConsumerFailure(f"engine key not found: {h!r}")
+        return self.keys[h]
+
+    def apply(self, events):
+        for e in events:
+            if isinstance(e, BlockStored):
+                scope = ((e.medium or "GPU").lower(), e.group_idx)
+                if e.token_ids:
+                    key = (
+                        ()
+                        if e.parent_block_hash is None
+                        else self.resolve(e.parent_block_hash)
+                    )
+                    size = e.block_size
+                    for i, h in enumerate(e.block_hashes):
+                        extra = e.extra_keys[i] if e.extra_keys else None
+                        key = hash(
+                            (key, tuple(e.token_ids[i * size : (i + 1) * size]), extra)
+                        )
+                        self.keys[h] = key
+                        self.entries.add((scope, key))
+                else:
+                    for h in e.block_hashes:
+                        self.entries.add((scope, self.resolve(h)))
+                for h in e.block_hashes:
+                    self.refs[(scope, h)] += 1
+            elif isinstance(e, BlockRemoved):
+                scope = ((e.medium or "GPU").lower(), e.group_idx)
+                for h in e.block_hashes:
+                    if self.refs[(scope, h)] > 1:
+                        self.refs[(scope, h)] -= 1
+                        continue
+                    self.refs.pop((scope, h), None)
+                    self.entries.discard((scope, self.resolve(h)))
+            else:
+                for scope, h in [k for k in self.refs if k[0][0] == "gpu"]:
+                    self.entries.discard((scope, self.resolve(h)))
+                    del self.refs[(scope, h)]
+
+    def state(self):
+        return self.entries, +self.refs
+
+
+def cache_history(seed, steps=300, lag=3):
+    """Prefix-sharing requests over a small GPU pool and an LRU CPU tier.
+
+    GPU blocks are evicted tail first, CPU blocks head first, offload stores
+    complete up to `lag` steps late (after their GPU copy may be gone), and a
+    step's block-pool events precede its connector events, as in vLLM.
+    """
+    rng = random.Random(seed)
+    prefixes = [
+        [rng.randrange(1000) for _ in range(4 * rng.randrange(1, 6))] for _ in range(8)
+    ]
+    gpu: dict = {}  # hash -> (refs, order)
+    cpu: dict = {}  # hash -> order
+    pending: list = []  # (due step, hash)
+    tick = 0
+    for step in range(steps):
+        pool_events, connector_events = [], []
+        prompt = list(rng.choice(prefixes)) + [
+            rng.randrange(1000) for _ in range(4 * rng.randrange(0, 8))
+        ]
+        parent: int | None = None
+        new: list[tuple[int, int | None, tuple[int, ...]]] = []
+        for i in range(0, len(prompt), 4):
+            block = tuple(prompt[i : i + 4])
+            h = hash((parent, block)) & ((1 << 63) - 1)
+            tick += 1
+            if new or h not in gpu:
+                # The prefix hit ends at the first miss; every later block is
+                # computed and cached again, a second copy if still resident.
+                new.append((h, parent, block))
+                gpu[h] = (gpu.get(h, (0, 0))[0] + 1, tick)
+            else:
+                gpu[h] = (gpu[h][0], tick)
+            parent = h
+        # store new blocks in chunks, each chunk chained to the previous block
+        while new:
+            n = rng.randrange(1, len(new) + 1)
+            chunk, new = new[:n], new[n:]
+            pool_events.append(
+                BlockStored(
+                    block_hashes=[h for h, _, _ in chunk],
+                    parent_block_hash=chunk[0][1],
+                    token_ids=[t for _, _, b in chunk for t in b],
+                    block_size=4,
+                    lora_id=None,
+                    lora_name=None,
+                    medium="GPU",
+                    extra_keys=[None] * len(chunk),
+                    group_idx=0,
+                    kv_cache_spec_kind="full_attention",
+                )
+            )
+            for h, _, _ in chunk:
+                if h not in cpu and rng.random() < 0.8:
+                    pending.append((step + rng.randrange(0, lag + 1), h))
+        # evict GPU down to 40 blocks, youngest first within the oldest request
+        while len(gpu) > 40:
+            victim = min(gpu, key=lambda h: (gpu[h][1] // 64, -gpu[h][1]))
+            refs = gpu.pop(victim)[0]
+            pool_events.append(
+                BlockRemoved(block_hashes=[victim] * refs, medium="GPU", group_idx=0)
+            )
+        # offload completions, then CPU LRU eviction oldest first
+        due = [h for s, h in pending if s <= step]
+        pending = [(s, h) for s, h in pending if s > step]
+        for h in due:
+            if h not in cpu:
+                tick += 1
+                cpu[h] = tick
+                connector_events.append(
+                    BlockStored(
+                        block_hashes=[h],
+                        parent_block_hash=None,
+                        token_ids=[],
+                        block_size=0,
+                        lora_id=None,
+                        lora_name=None,
+                        medium="CPU",
+                        group_idx=0,
+                    )
+                )
+        while len(cpu) > 120:
+            victim = min(cpu, key=lambda h: cpu[h])
+            del cpu[victim]
+            connector_events.append(
+                BlockRemoved(block_hashes=[victim], medium="CPU", group_idx=0)
+            )
+        if rng.random() < 0.01:
+            pool_events.append(AllBlocksCleared())
+            gpu.clear()
+        yield pool_events + connector_events
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_strict_consumer_follows_any_cut(seed, monkeypatch):
+    monkeypatch.setattr(KVCacheSnapshot, "MAX_RING_BLOCKS", 512)
+    history = list(cache_history(seed))
+    reference = RouterModel()
+    for events in history:
+        reference.apply(events)
+    snap = KVCacheSnapshot()
+    for cut, events in enumerate(history):
+        snap.apply(events)
+        if cut % 7:
+            continue
+        consumer = RouterModel()
+        consumer.apply(wire(snap.export(max_blocks_per_event=5)))
+        for later in history[cut + 1 :]:
+            consumer.apply(later)
+        assert consumer.state() == reference.state()
+
+
+def test_ring_too_small_fails_recorder_before_consumer(monkeypatch):
+    """With a ring that cannot cover the offload lag, the recorder fails
+    closed on the same event a strict consumer would reject."""
+    monkeypatch.setattr(KVCacheSnapshot, "MAX_RING_BLOCKS", 0)
+    snap = KVCacheSnapshot()
+    with pytest.raises(ValueError, match="Missing reconstruction"):
+        for events in cache_history(0, lag=5):
+            snap.apply(events)
 
 
 @pytest.fixture
@@ -340,12 +523,12 @@ def test_dequeue_releases_pending_bytes_before_capacity_check():
     assert recorder._inbox.qsize() == 1
 
 
-@pytest.mark.parametrize("budget", ["metadata", "reply"])
+@pytest.mark.parametrize("budget", ["records", "reply"])
 def test_resource_budget_fails_closed(publisher, monkeypatch, budget):
     pub, port, _ = publisher
     recorder = pub._snapshot_recorder
-    if budget == "metadata":
-        monkeypatch.setattr(recorder._snapshot, "MAX_METADATA_BYTES", 1)
+    if budget == "records":
+        monkeypatch.setattr(recorder._snapshot, "MAX_RECORDS", 0)
     else:
         monkeypatch.setattr(recorder, "MAX_REPLY_BYTES", 1)
     publish(pub, [stored([1])])

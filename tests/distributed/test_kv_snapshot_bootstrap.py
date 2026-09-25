@@ -87,14 +87,12 @@ def test_duplicate_references_survive_one_remove():
     assert consume(wire(snap.export())) == consume(history)
 
 
-def test_sparse_source_event_is_not_split():
+def test_sparse_store_fails_closed():
+    # Block records need one token span per hash; consumers cannot index
+    # sparse spans either, so the recorder reports itself unavailable.
     snap = KVCacheSnapshot()
-    original = store([1, 3], tokens=list(range(12)))
-    history = [original, remove([1])]
-    snap.apply(history)
-    exported = wire(snap.export())
-    assert exported[0] == original
-    assert consume(exported) == consume(history)
+    with pytest.raises(ValueError, match="dense block stores"):
+        snap.apply([store([1, 3], tokens=list(range(12)))])
 
 
 def test_reset_keeps_cpu_dependencies():
@@ -111,7 +109,8 @@ def test_offload_bytes_resolve_integer_gpu_hash(monkeypatch):
     cpu = store([(1).to_bytes(32, "big")], medium="CPU", tokens=[])
     snap.apply([gpu, cpu, remove([1])])
     exported = wire(snap.export())
-    assert exported[:2] == [gpu, cpu]
+    assert exported[0].block_hashes == [1] and exported[0].token_ids == gpu.token_ids
+    assert consume(exported) == Counter({("CPU", None, 1): 1})
 
 
 @pytest.mark.parametrize(
