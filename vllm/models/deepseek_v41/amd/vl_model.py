@@ -314,7 +314,7 @@ class DeepseekV41ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Stream language_model weights as a contiguous block without sorting/materializing
         # the entire 48-shard generator into a Python list. Materializing all 48 shards
-        # invalidates circular shared-memory buffers (Mode 3 Direct-I/O) and exhausts host
+        # prematurely retains all checkpoint tensors simultaneously and exhausts host
         # memory. Non-language_model tensors (vision tower, aligner, image tokens, ~266 tensors /
         # ~400 MB total in Shards 1-2) are buffered in host memory and yielded after language_model.
         def _stream_reordered():
