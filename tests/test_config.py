@@ -160,7 +160,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
     VllmConfig.validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
     if current_platform.is_rocm():
-        # ATOM ReplaySSM on ROCm; RecoverSSM stays off.
+        # ROCm Kimi-K3 ReplaySSM; RecoverSSM stays off.
         assert not config.cache_config.use_kda_recoverssm
         return
     assert config.cache_config.use_kda_recoverssm
@@ -187,8 +187,8 @@ def test_kda_recoverssm_derivation_is_revalidated():
 
 
 def test_rocm_v2_runner_skip_is_limited_to_kimi_kda(monkeypatch):
-    """ATOM ReplaySSM may use MRV2 on ROCm Kimi-K3 only; other ROCm
-    ReplaySSM backends still require Model Runner V1."""
+    """ROCm Kimi-K3 ReplaySSM may use MRV2; other ROCm ReplaySSM backends
+    still require Model Runner V1."""
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
@@ -618,7 +618,7 @@ def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
         speculative_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v2_model_runner_unsupported_features = lambda: []
     # The real predicate, so the test also pins where dspark lands in it.
     config._get_v1_model_runner_unsupported_features = lambda: (
@@ -849,7 +849,8 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-def test_dflash2_draft_forces_v2_model_runner():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
 
@@ -861,11 +862,15 @@ def test_dflash2_draft_forces_v2_model_runner():
             )
         )
 
-    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
-    assert not VllmConfig._is_dflash2_draft(
+    assert VllmConfig._is_dflash_candidate_draft(config("dflash", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        config("dflash", ["DFlashDraftModel"])
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(config("eagle", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        SimpleNamespace(speculative_config=None)
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(
         SimpleNamespace(
             speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
         )
@@ -1279,7 +1284,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v1_model_runner_unsupported_features = lambda: (
         VllmConfig._get_v1_model_runner_unsupported_features(config)
     )
@@ -1466,7 +1471,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
 
     assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 

@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Ported from ATOM atom/model_ops/fla_ops/replayssm.py for vLLM Kimi-K3 KDA.
+# ReplaySSM helpers for vLLM Kimi-K3 KDA on ROCm.
 #
-# Replay algebra, record layout and tile sizes track ROCm/ATOM#1883. The fold
-# kernel is vLLM's own: ATOM's prefill rebuilds the checkpoint wholesale, while
-# vLLM's chunked-prefill path reads the checkpoint as an initial state and so
-# needs any pending records materialised into it first.
+# The fold kernel is vLLM-specific: the vLLM chunked-prefill path reads the
+# checkpoint as an initial state and so needs any pending records materialised
+# into it first.
 
 from __future__ import annotations
 

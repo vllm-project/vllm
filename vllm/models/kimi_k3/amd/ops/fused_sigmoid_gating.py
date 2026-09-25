@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
 #
-# ROCm Kimi-K3 KDA sigmoid-gating kernel (ported from ATOM). Kept under
-# models/kimi_k3/amd so CUDA Qwen GDN continues to use the unmodified
+# ROCm Kimi-K3 KDA sigmoid-gating kernel. Kept under models/kimi_k3/amd so
+# CUDA Qwen GDN continues to use the unmodified
 # vllm/third_party/flash_linear_attention/ops/fused_sigmoid_gating.py.
 
 import torch

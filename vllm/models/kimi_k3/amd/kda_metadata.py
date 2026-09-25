@@ -7,7 +7,7 @@ The request classification and cudagraph staging intentionally mirror
 differently on device rather than on the host.
 
 When ``--use-replayssm`` is enabled on ROCm, KDA speculative decode uses the
-ATOM-style ReplaySSM path (one checkpoint + ring record buffers) instead of
+ReplaySSM path (one checkpoint + ring record buffers) instead of
 materializing one recurrent state per draft token.
 """
 
