@@ -1565,9 +1565,10 @@ class ModelMetrics:
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             context_len = num_computed_tokens + num_tokens
 
-            # Cached requests are typically in decode phase (num_tokens == 1)
-            # unless they're doing chunked prefill (num_tokens > 1)
-            is_prefill = num_tokens > 1
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())
+            )
+            is_prefill = num_tokens - num_spec_tokens > 1
             ctx.add(num_tokens, context_len, is_prefill)
 
         num_flops_breakdown = self.get_num_flops_breakdown(ctx, True)
