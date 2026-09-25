@@ -747,17 +747,20 @@ def test_trtllm_mxfp4_deferred_finalize(
         w2_scale,
         _cache_permute_indices={},
     )
+    # One rank of a TP group, which deferral needs.
     moe_config = FusedMoEConfig(
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=hidden_size,
-        intermediate_size=intermediate_size,
+        intermediate_size=2 * intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.Renormalize,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        moe_parallel_config=replace(
+            FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+        ),
         in_dtype=torch.bfloat16,
     )
     kernel = make_mxfp4_moe_kernel(
@@ -773,7 +776,7 @@ def test_trtllm_mxfp4_deferred_finalize(
     if monolithic:
         router_logits = torch.randn(num_tokens, num_experts, device=device)
         check_deferred_moe_finalize(
-            kernel,
+            moe_config,
             lambda: kernel.apply_monolithic(
                 hidden_states,
                 w13,
@@ -791,7 +794,7 @@ def test_trtllm_mxfp4_deferred_finalize(
     topk_ids = topk_ids[:, :topk].to(torch.int32)
     topk_weights = torch.rand(num_tokens, topk, device=device).softmax(dim=-1)
     check_deferred_moe_finalize(
-        kernel,
+        moe_config,
         lambda: kernel.apply(
             hidden_states=hidden_states,
             w1=w13,

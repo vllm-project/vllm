@@ -714,22 +714,22 @@ def check_accuracy(a, b, atol, rtol, percent):
 
 
 def check_deferred_moe_finalize(
-    kernel: FusedMoEKernel,
+    moe_config: FusedMoEConfig,
     run: Callable[[], torch.Tensor | UnfinalizedMoEOutput],
     router_weights: torch.Tensor | None = None,
     chunked: bool = False,
 ) -> None:
     """Check a kernel that defers its finalize against the finalize it skips.
 
-    ``run`` calls ``kernel`` on fixed inputs, first as built and then with the
-    finalize deferred. ``finalize_moe_output`` on the deferred output must give
-    the kernel's own finalized output bit for bit, and modular experts must hand
-    the router's weights back as-is. Each launch permutes into its own buffer,
-    so a deferring kernel refuses a run it would have to chunk.
+    ``run`` calls the kernel on fixed inputs, first as built and then with
+    ``moe_config`` deferring on every call. ``finalize_moe_output`` on the
+    deferred output must give the kernel's own finalized output bit for bit, and
+    modular experts must hand the router's weights back as-is. Each launch
+    permutes into its own buffer, so deferring refuses a run it would chunk.
     """
     finalized = run()
     assert isinstance(finalized, torch.Tensor)
-    kernel.enable_deferred_moe_finalize()
+    moe_config.defer_moe_finalize = True
     if chunked:
         with pytest.raises(ValueError, match="one kernel launch"):
             run()

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -813,16 +813,19 @@ def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
         quant_config = fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape
         )
+        # One rank of a TP group, which deferral needs.
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size=n,
+            intermediate_size=2 * n,
             num_local_experts=e,
             num_logical_experts=e,
             activation=MoEActivation.SILU,
             device="cuda",
-            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+            ),
             in_dtype=torch.bfloat16,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
@@ -838,7 +841,7 @@ def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
         check_deferred_moe_finalize(
-            kernel,
+            moe_config,
             lambda: kernel.apply(
                 hidden_states=a,
                 w1=w1,

@@ -160,9 +160,10 @@ class MoEOutput:
     unfinalized, the top-k reduction is open too and can fold into the same
     kernel.
 
-    A layer that defers its finalize leaves the routed output unfinalized on
-    every call. Calls its fused consumer can't take go through
-    ``finalize_moe_output`` first.
+    Producers only leave the routed output unfinalized when the layer asked for
+    it -- the token ceiling and topology support are its to check. Without a
+    ceiling that is every call, and ``finalize_moe_output`` covers the calls a
+    fused consumer can't take.
     """
 
     # Un-reduced routed output, either finalized or not.

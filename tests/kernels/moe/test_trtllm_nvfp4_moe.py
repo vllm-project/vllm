@@ -8,6 +8,8 @@ and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
 intermediate_size 704) that exercises the non-256-aligned padding path.
 """
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -366,16 +368,19 @@ def test_trtllm_fp4_moe_deferred_finalize(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
+        # One rank of a TP group, which deferral needs.
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size=n,
+            intermediate_size=2 * n,
             num_local_experts=e,
             num_logical_experts=e,
             activation=MoEActivation.SILU,
             device="cuda",
-            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+            ),
             in_dtype=dtype,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
@@ -383,7 +388,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
         kernel = _make_trtllm_fp4_moe_kernel(moe_config, quant_config)
 
         check_deferred_moe_finalize(
-            kernel,
+            moe_config,
             lambda: kernel.apply(
                 hidden_states=a,
                 w1=w1_q,

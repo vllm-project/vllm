@@ -200,10 +200,6 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
     """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface."""
 
     @staticmethod
-    def supports_deferred_moe_finalize() -> bool:
-        return True
-
-    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return (
             not moe_parallel_config.use_all2all_kernels
@@ -306,7 +302,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             hidden_states_scale = prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale)
 
         num_tokens = hidden_states.shape[0]
-        defer = self.defer_moe_finalize
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
         flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,

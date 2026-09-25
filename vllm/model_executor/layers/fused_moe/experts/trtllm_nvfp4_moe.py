@@ -219,10 +219,6 @@ class TrtLlmNvFp4ExpertsBase:
         return True
 
     @staticmethod
-    def supports_deferred_moe_finalize() -> bool:
-        return True
-
-    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -438,10 +434,11 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         M = hidden_states.shape[0]
         chunk_size = self._get_chunk_size()
+        defer = self.moe_config.should_defer_moe_finalize(M)
 
         if chunk_size >= M:
             return self._invoke_kernel(
-                None if self.defer_moe_finalize else output,
+                None if defer else output,
                 hidden_states,
                 w1,
                 w2,
@@ -451,7 +448,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 global_num_experts,
                 a1q_scale,
             )
-        elif self.defer_moe_finalize:
+        elif defer:
             # Each launch permutes into its own buffer.
             raise ValueError(
                 f"Deferring the MoE finalize needs one kernel launch, but {M} "
@@ -559,9 +556,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         num_tokens = hidden_states.shape[0]
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.defer_moe_finalize or self.moe_config.should_defer_moe_finalize(
-            num_tokens
-        )
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=num_tokens,

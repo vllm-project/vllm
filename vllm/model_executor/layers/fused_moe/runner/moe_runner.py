@@ -28,10 +28,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.moe_output import (
-    MoEOutput,
-    UnfinalizedMoEOutput,
-)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -250,9 +247,6 @@ class MoERunner(MoERunnerInterface):
     for different configurations (e.g., with/without shared experts, gates, etc.).
     """
 
-    # Set once by the model, through enable_deferred_moe_finalize.
-    defer_moe_finalize: bool = False
-
     def __init__(
         self,
         layer_name: str,
@@ -427,75 +421,6 @@ class MoERunner(MoERunnerInterface):
         return (
             self._quant_method.moe_kernel is not None
             and self._quant_method.moe_kernel.output_is_reduced()
-        )
-
-    def supports_deferred_moe_finalize(self) -> bool:
-        """Whether this layer can hand back its routed output unfinalized.
-
-        That takes experts that can stop after GEMM2, and nothing between them
-        and the caller: no combine or reduce-scatter, no sequence parallelism,
-        no hidden-dim padding to strip and no zero expert to add.
-        """
-        experts_cls = getattr(self._quant_method, "experts_cls", None)
-        moe_config = self.moe_config
-        return (
-            experts_cls is not None
-            and experts_cls.supports_deferred_moe_finalize()
-            and moe_config.dp_size == 1
-            and moe_config.ep_size == 1
-            and moe_config.pcp_size == 1
-            and not moe_config.is_sequence_parallel
-            and moe_config.hidden_dim == moe_config.hidden_dim_unpadded
-            and not isinstance(self.router, ZeroExpertRouter)
-        )
-
-    def enable_deferred_moe_finalize(self) -> None:
-        """Hand back the routed output unfinalized on every call.
-
-        Called once while the model is built. The caller then runs this layer
-        through ``forward_unfinalized`` and owns everything after the experts.
-        """
-        if not self.supports_deferred_moe_finalize():
-            raise ValueError(f"MoE layer {self.layer_name} cannot defer its finalize.")
-        assert self._quant_method.moe_kernel is None, (
-            "the MoE finalize is deferred while the model is built"
-        )
-        self.defer_moe_finalize = True
-
-    def forward_unfinalized(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-        shared_experts_input: torch.Tensor | None = None,
-    ) -> MoEOutput:
-        """``forward`` for a layer that defers its finalize.
-
-        Runs outside the custom op, which returns tensors only. The top-k
-        reduction, the routed scale and output transform, the shared-expert add
-        and any all-reduce are the caller's; ``finalize_moe_output`` runs the
-        reduction when the caller's fused consumer can't.
-        """
-        assert self.defer_moe_finalize
-        kernel = self._quant_method.moe_kernel
-        assert kernel is not None
-        if not kernel.fused_experts.defer_moe_finalize:
-            # The kernel is built after weight loading, long after the layer.
-            kernel.enable_deferred_moe_finalize()
-        if shared_experts_input is None:
-            hidden_states, shared_experts_input = self.apply_routed_input_transform(
-                hidden_states
-            )
-        shared_output, routed = _unpack(
-            self._forward_impl(
-                hidden_states, router_logits, shared_experts_input, input_ids
-            )
-        )
-        assert isinstance(routed, UnfinalizedMoEOutput)
-        return MoEOutput(
-            routed=routed,
-            shared_output=shared_output,
-            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _maybe_reduce_shared_expert_output(
@@ -783,11 +708,6 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
-        if self.defer_moe_finalize:
-            raise RuntimeError(
-                f"MoE layer {self.layer_name} defers its finalize; call "
-                "forward_unfinalized."
-            )
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
