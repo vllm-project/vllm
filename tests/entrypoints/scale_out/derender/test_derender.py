@@ -52,6 +52,7 @@ def _make_generate_response(
     logprobs: dict | None = None,
     prompt_logprobs: list | None = None,
     kv_transfer_params: dict | None = None,
+    metrics: dict | None = None,
 ) -> dict:
     choice: dict = {
         "index": 0,
@@ -64,6 +65,7 @@ def _make_generate_response(
         "choices": [choice],
         "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
+        "metrics": metrics,
     }
 
 
@@ -264,6 +266,49 @@ async def test_derender_chat_kv_transfer_params_passthrough(client):
     )
     assert response.status_code == 200
     assert response.json()["kv_transfer_params"] == kv
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_metrics_passthrough(client):
+    gen_req = await _render_chat(client)
+    metrics = {
+        "speculative_decoding": {
+            "mean_acceptance_length": 2.0,
+            "draft_acceptance_rate": 0.5,
+            "acceptance_histogram": [0, 1],
+            "num_spec_steps": 1,
+            "num_accepted_draft_tokens": 1,
+            "num_draft_tokens": 2,
+            "num_spec_tokens": 1,
+        }
+    }
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                gen_req["token_ids"][:3], metrics=metrics
+            ),
+        },
+    )
+    assert response.status_code == 200
+    actual = response.json()["metrics"]
+    assert set(actual) == {
+        "time_to_first_token_ms",
+        "generation_time_ms",
+        "queue_time_ms",
+        "mean_itl_ms",
+        "tokens_per_second",
+        "speculative_decoding",
+    }
+    assert all(
+        actual[name] is None for name in actual if name != "speculative_decoding"
+    )
+    assert actual["speculative_decoding"] == {
+        **metrics["speculative_decoding"],
+        "per_step_accepted": None,
+        "per_step_drafted": None,
+    }
 
 
 @pytest.mark.asyncio

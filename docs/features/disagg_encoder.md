@@ -32,14 +32,47 @@ Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-Cpn
 
 ## 2  Usage Example
 
-The current reference pathway is **ExampleConnector**.  
-Below ready-to-run scripts shows the workflow:
+### ExampleConnector
+
+The following scripts demonstrate the workflow with **ExampleConnector**:
 
 1 Encoder instance + 1 PD instance:
 `examples/disaggregated/disaggregated_encoder/disagg_1e1pd_example.sh`
 
 1 Encoder instance + 1 Prefill instance + 1 Decode instance:
 `examples/disaggregated/disaggregated_encoder/disagg_1e1p1d_example.sh`
+
+### ECMooncakeConnector
+
+**ECMooncakeConnector** transfers encoder outputs using the Mooncake TransferEngine.
+See the [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
+for a complete 1 Encoder instance + 1 PD instance setup, including the producer and
+consumer `--ec-transfer-config` settings and proxy configuration.
+
+With vLLM and Mooncake installed, run the example from the repository root:
+
+```bash
+GPU_E=0 GPU_PD=1 MOONCAKE_EC_PROTOCOL=tcp \
+    bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
+```
+
+The script uses `Qwen/Qwen2.5-VL-3B-Instruct` by default, runs a single-GPU baseline,
+and compares the disaggregated outputs against it. Set `MODEL` to use another model
+or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
+additional configuration options.
+
+### Audio inputs
+
+The Python EPD proxy also rewrites audio in `/v1/chat/completions` into
+metadata-only references for Qwen2-Audio, AudioFlamingo3, Ultravox,
+Qwen2.5-Omni, and Qwen3-Omni. The encoder publishes `audio_num_tokens`
+(the placeholder token count of each audio) together with any feature
+lengths the model needs; the consumer uses them to reconstruct the audio
+placeholders and receives the embeddings through its EC connector without
+repeating audio preprocessing.
+
+This covers pure audio inputs, not video with an embedded audio track. It does
+not add `/v1/audio/transcriptions` or realtime routes to the example proxy.
 
 ---
 
