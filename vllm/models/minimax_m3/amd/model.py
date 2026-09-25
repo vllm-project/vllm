@@ -21,7 +21,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -134,7 +134,7 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
-def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
+def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
     cfg = getattr(config, "sparse_attention_config", None)
     if not cfg:
@@ -145,7 +145,7 @@ def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     return {i for i, f in enumerate(freq) if f != 0}
 
 
-def _sparse_attention_layer_ordinals(config: PretrainedConfig) -> dict[int, int]:
+def _sparse_attention_layer_ordinals(config: PreTrainedConfig) -> dict[int, int]:
     """Map each sparse-attention layer id to its ordinal among sparse layers."""
     return {
         lid: ordinal
@@ -153,7 +153,7 @@ def _sparse_attention_layer_ordinals(config: PretrainedConfig) -> dict[int, int]
     }
 
 
-def _should_skip_index_topk(config: PretrainedConfig, layer_id: int) -> bool:
+def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
     """ATOM ``index_topk_freq`` (cross-layer index sharing).
 
     Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
@@ -176,7 +176,7 @@ def _should_skip_index_topk(config: PretrainedConfig, layer_id: int) -> bool:
     return max(ordinal - offset, 0) % freq != 0
 
 
-def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
+def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
     moe_layer_freq = getattr(config, "moe_layer_freq", None)
     if moe_layer_freq is None:
@@ -184,7 +184,7 @@ def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
     return moe_layer_freq[layer_id] != 0
 
 
-def _build_rotary_emb(config: PretrainedConfig, head_dim: int):
+def _build_rotary_emb(config: PreTrainedConfig, head_dim: int):
     """Build the (partial NeoX) RoPE, honoring an optional ``rope_scaling`` config.
 
     Without scaling the cos/sin cache is sized to ``max_position_embeddings``
@@ -262,7 +262,7 @@ class MiniMaxM3MLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
@@ -338,7 +338,7 @@ class MiniMaxM3MoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -488,7 +488,7 @@ class MiniMaxM3Attention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -623,7 +623,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -1264,7 +1264,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 class MiniMaxM3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -1738,7 +1738,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             vision_config = config.vision_config
             self.vision_tower = MiniMaxVLVisionModel(
-                config=PretrainedConfig.from_dict(vision_config),
+                config=PreTrainedConfig.from_dict(vision_config),
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,
