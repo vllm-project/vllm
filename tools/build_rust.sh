@@ -1,13 +1,13 @@
 #!/bin/bash
 # Build vLLM Rust artifacts and install them into the vllm package.
-# Usage: ./build_rust.sh [--debug]
+# Usage: ./tools/build_rust.sh [--debug]
 #
 # By default builds in release mode. Pass --debug for faster compile times
 # during development.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Read the required toolchain from rust-toolchain.toml.
 TOOLCHAIN=$(grep '^channel' "$REPO_ROOT/rust-toolchain.toml" | sed 's/.*= *"\(.*\)"/\1/')
