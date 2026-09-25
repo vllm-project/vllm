@@ -662,65 +662,43 @@ class Platform:
             + ")."
         )
 
-    @classmethod
-    def _find_non_ssm_backend_source(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> tuple["list[type[AttentionBackend]]", Any | None, int | None]:
-        """Find the PP rank that owns the first non-SSM backend."""
-        backend_classes = cls._find_non_ssm_backends(vllm_config)
-
+    @staticmethod
+    def _sync_block_size_config_across_pp(
+        vllm_config: "VllmConfig", has_backend: bool
+    ) -> None:
+        """Share aligned cache sizes with attention-less pipeline stages."""
         from vllm.distributed.parallel_state import (
             get_pp_group,
             model_parallel_is_initialized,
         )
 
         if not model_parallel_is_initialized():
-            return backend_classes, None, 0 if backend_classes else None
-
+            return
         pp_group = get_pp_group()
         if pp_group.world_size == 1:
-            return backend_classes, None, 0 if backend_classes else None
+            return
 
-        backend_presence = [False] * pp_group.world_size
-        torch.distributed.all_gather_object(
-            backend_presence,
-            bool(backend_classes),
-            group=pp_group.cpu_group,
-        )
-
-        backend_rank = next(
-            (rank for rank, is_present in enumerate(backend_presence) if is_present),
-            None,
-        )
-        if backend_rank != pp_group.rank_in_group:
-            backend_classes = []
-        return backend_classes, pp_group, backend_rank
-
-    @staticmethod
-    def _sync_block_size_config_across_pp(
-        vllm_config: "VllmConfig", pp_group: Any, backend_rank: int
-    ) -> None:
         cache_config = vllm_config.cache_config
-        block_size_config = None
-        if pp_group.rank_in_group == backend_rank:
-            block_size_config = (
-                cache_config.block_size,
-                cache_config.mamba_block_size,
-                cache_config.mamba_page_size_padded,
-                cache_config.skip_page_size_padded,
-            )
-
-        block_size_config = pp_group.broadcast_object(
-            block_size_config, src=backend_rank
+        fields = (
+            "block_size",
+            "mamba_block_size",
+            "mamba_page_size_padded",
+            "skip_page_size_padded",
         )
-        assert block_size_config is not None
-        (
-            cache_config.block_size,
-            cache_config.mamba_block_size,
-            cache_config.mamba_page_size_padded,
-            cache_config.skip_page_size_padded,
-        ) = block_size_config
+        local_config = (
+            {name: getattr(cache_config, name) for name in fields}
+            if has_backend
+            else None
+        )
+        configs: list[dict[str, Any] | None] = [None] * pp_group.world_size
+        torch.distributed.all_gather_object(
+            configs, local_config, group=pp_group.cpu_group
+        )
+        for config in configs:
+            if config is not None:
+                for name, value in config.items():
+                    setattr(cache_config, name, value)
+                return
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -736,42 +714,39 @@ class Platform:
         if not model_config:
             return
 
-        backend_classes, pp_group, backend_rank = cls._find_non_ssm_backend_source(
-            vllm_config
-        )
-        if backend_rank is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
+            cls._sync_block_size_config_across_pp(vllm_config, has_backend=False)
             return
 
-        if backend_classes:
-            # Phase 1: Pick a block size every attention backend supports (skip if
-            # user set --block-size). Models can mix backends with disjoint
-            # preferences, and a size from the first alone later fails
-            # select_common_block_size().
-            if not cache_config.user_specified_block_size:
-                preferred = cls._preferred_block_size_for_backends(
-                    backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+        # Phase 1: Pick a block size every attention backend supports (skip if
+        # user set --block-size). Models can mix backends with disjoint
+        # preferences, and a size from the first alone later fails
+        # select_common_block_size().
+        if not cache_config.user_specified_block_size:
+            preferred = cls._preferred_block_size_for_backends(
+                backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+            )
+            if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+                logger.info(
+                    "Setting kv cache block size to %d for %s backend(s).",
+                    preferred,
+                    "/".join(b.get_name() for b in backend_classes),
                 )
-                if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
-                    logger.info(
-                        "Setting kv cache block size to %d for %s backend(s).",
-                        preferred,
-                        "/".join(b.get_name() for b in backend_classes),
-                    )
-                cache_config.block_size = preferred
+            cache_config.block_size = preferred
 
-            # Phase 2: Align block/mamba sizes for hybrid models
-            # (may override user settings).
-            if model_config.is_hybrid:
-                cls._align_hybrid_block_size(vllm_config, backend_classes[0])
+        # Phase 2: Align block/mamba sizes for hybrid models
+        # (may override user settings).
+        if model_config.is_hybrid:
+            cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
-            # Phase 3: Align block/page sizes when multiple KV dtypes share the
-            # block pool (e.g. nvfp4 primary + unquantized skip layers).
-            # May override the user's --block-size.
-            if cache_config.kv_cache_dtype_skip_layers:
-                cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+        # Phase 3: Align block/page sizes when multiple KV dtypes share the
+        # block pool (e.g. nvfp4 primary + unquantized skip layers).
+        # May override the user's --block-size.
+        if cache_config.kv_cache_dtype_skip_layers:
+            cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
 
-        if pp_group is not None:
-            cls._sync_block_size_config_across_pp(vllm_config, pp_group, backend_rank)
+        cls._sync_block_size_config_across_pp(vllm_config, has_backend=True)
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
