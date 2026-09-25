@@ -595,7 +595,7 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
 def test_external_cache_hit_sources_preserve_partial_tail_origin(
     recurrent_source, expected
 ):
-    """Recurrent state covers the whole prefix; the slowest tier wins."""
+    """Recurrent state covers the whole prefix; the outermost tier wins."""
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
@@ -644,7 +644,7 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     second_source,
     expected,
 ):
-    """Groups with different chunk sizes overlap; the slowest tier wins."""
+    """Groups with different chunk sizes overlap; the outermost tier wins."""
     block_size = 4
     groups = [
         KVCacheGroupSpec(
@@ -738,7 +738,7 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     sparse_source,
 ):
     """Skipped keys do not participate. Sparse state covers the whole prefix,
-    so each token range reports the slowest of its sources."""
+    so each token range reports the outermost of its sources."""
     block_size = 4
     chunk_size = block_size * blocks_per_chunk
     spec_kwargs = dict(
@@ -806,15 +806,15 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     )
     sparse_tiers = ["host", "disk"] if sparse_source == "mixed" else [sparse_source]
 
-    def slowest(*tiers):
-        return CacheHitSource.slowest(map(CacheHitSource, tiers))
+    def outermost(*tiers):
+        return CacheHitSource.outermost(map(CacheHitSource, tiers))
 
     expected = CachedTokensBySource()
     if full_attention:
-        expected.add(slowest("host", *sparse_tiers), 2 * chunk_size - local_tokens)
-        expected.add(slowest("disk", *sparse_tiers), 2 * chunk_size)
+        expected.add(outermost("host", *sparse_tiers), 2 * chunk_size - local_tokens)
+        expected.add(outermost("disk", *sparse_tiers), 2 * chunk_size)
     else:
-        expected.add(slowest(*sparse_tiers), count)
+        expected.add(outermost(*sparse_tiers), count)
     result = scheduler.get_external_cache_hit_sources(request, count)
     assert result == expected
     assert result.total == count
