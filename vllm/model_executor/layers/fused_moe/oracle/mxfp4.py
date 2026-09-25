@@ -199,6 +199,18 @@ TRITON_BACKENDS = (
     Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
 )
 
+
+def _gfx1250_mx_scale_kwidth(
+    mxfp4_backend: Mxfp4MoeBackend, activation: MoEActivation | None
+) -> int:
+    """Scale swizzle kwidth for gfx1250; must match the consuming aiter kernel."""
+    if (
+        mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
+        and activation != MoEActivation.SILU
+    ):
+        return 8
+    return 4
+
 B12X_BACKENDS = (
     Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
     Mxfp4MoeBackend.B12X_MXFP4_BF16,
@@ -958,6 +970,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    activation: MoEActivation | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1520,13 +1533,16 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
+        gfx1250_scale_kwidth = _gfx1250_mx_scale_kwidth(mxfp4_backend, activation)
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
+            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
+            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
         )
 
         w13_precision_config = PrecisionConfig(
@@ -1983,13 +1999,16 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
+        gfx1250_scale_kwidth = _gfx1250_mx_scale_kwidth(mxfp4_backend, activation)
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
+            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
+            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
         )
 
         w13_precision_config = PrecisionConfig(
@@ -2099,6 +2118,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias=w13_bias,
             w2_bias=w2_bias,
             _cache_permute_indices=_cache_permute_indices,
+            activation=activation,
         )
     elif mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
         from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (

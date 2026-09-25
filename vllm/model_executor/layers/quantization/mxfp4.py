@@ -356,6 +356,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
+                activation=self.moe.activation,
             )
         )
 
