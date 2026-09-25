@@ -3776,25 +3776,15 @@ def _decode_gfx950_num_splits(
     return num_splits
 
 
+# Empirically single-pass bf16 decode is faster than split-K below this number of
+# selected slots per query, so we do not split.
 _SPARSE_DECODE_BF16_MIN_SPLIT_LEN = 512
 
 
 def _sparse_decode_bf16_num_splits(
     num_queries: int, heads_blocks: int, sparse_len: int, block_k: int
 ) -> int:
-    """Pick a split count for bf16 sparse decode, or 1 to skip splitting.
-
-    Splitting costs a second launch plus the reduce, measured at ~12us on
-    gfx950. Below ``_SPARSE_DECODE_BF16_MIN_SPLIT_LEN`` selected slots per query
-    the single-pass kernel finishes inside that overhead, so splitting is a
-    regression however the splits are chosen. Above it, the split count is
-    capped at the number of ``block_k`` tiles available, since splits past that
-    walk no tokens and only add partials for the reduce to scan.
-
-    This picks between two different kernels, so under a full cudagraph the
-    choice is recorded at capture and replayed unchanged. ``sparse_len`` must
-    therefore come from a quantity the capture inflates to its runtime maximum,
-    not from per-step lengths, which are 1 for a captured decode batch.
+    """Number or kv splits in splitK for the sparse bf16 decode, or 1 for single-pass.
 
     Args:
         num_queries: Decode rows in the batch.
@@ -3810,6 +3800,7 @@ def _sparse_decode_bf16_num_splits(
         return 1
     select = _decode_gfx950_num_splits if _ON_GFX950 else _decode_num_splits
     num_splits = select(num_queries, heads_blocks, sparse_len, 0.0, block_k)
+    # Number of splits cannot exceed the available k tiles
     return max(1, min(num_splits, math.ceil(sparse_len / block_k)))
 
 
@@ -3825,11 +3816,10 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     num_splits: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Split-K decode over an unquantized ragged KV cache.
+    """Split-K decode over an bf16 ragged KV cache.
 
-    Partitions each query's selected-token range across ``num_splits``
-    workgroups and combines the partials with the shared decode reduce, which
-    applies the attention sink and the softmax normalization exactly once.
+    Partitions each query's selected tokens across different workgroups and combines
+    the partials through reduction.
 
     Args:
         q: Queries laid out as ``[sq, h, d]``.
@@ -4448,10 +4438,10 @@ def rocm_sparse_attn_decode_bf16(
     ragged_indptr: torch.Tensor,
     sparse_len: int,
 ) -> None:
-    """Run decode rows through the split-K path over an unquantized KV cache.
+    """Run sparse attention over decode rows using an unquantized KV cache.
 
-    Falls back to :func:`rocm_sparse_attn_prefill` when the batch already fills
-    the device, since splitting then only adds reduce overhead.
+    Dispatches to either splitK or single-pass kernel depending on maximum selected
+    kv len.
 
     Args:
         q: Decode queries laid out as ``[sq, h, d]``.
@@ -4464,9 +4454,8 @@ def rocm_sparse_attn_decode_bf16(
         output: Destination, written in place.
         ragged_indices: Flattened per-query KV slots.
         ragged_indptr: Segment offsets into ``ragged_indices``, ``[sq + 1]``.
-        sparse_len: Longest selected KV run any decode row can walk, used to
-            pick the split count. ``ragged_indices`` is a preallocated
-            worst-case buffer, so its size is not a usable stand-in.
+        sparse_len: Longest selected KV of any decode row, used to
+            pick the split count.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
