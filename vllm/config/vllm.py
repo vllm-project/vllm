@@ -718,6 +718,14 @@ class VllmConfig:
 
         from vllm.platforms import current_platform
 
+        if not current_platform.supports_v2_model_runner():
+            logger.info_once(
+                "%s does not support the V2 model runner; using the V1 "
+                "model runner instead.",
+                current_platform.device_name,
+            )
+            return False
+
         model_config = self.model_config
         if model_config is not None and current_platform.is_rocm():
             architectures = getattr(model_config, "architectures", ())
@@ -3274,6 +3282,14 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
+        from vllm.platforms import current_platform
+
+        if not current_platform.supports_v2_model_runner():
+            raise ValueError(
+                f"The {current_platform.device_name} platform does not support "
+                "the V2 model runner."
+            )
+
         if not HAS_TRITON:
             raise ValueError("Model Runner V2 requires Triton.")
 
