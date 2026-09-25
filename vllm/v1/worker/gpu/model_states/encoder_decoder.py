@@ -137,6 +137,7 @@ class EncoderDecoderModelState(ModelState):
         else:
             max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
         attn_metadata = build_attn_metadata(
+            is_dummy_batch=input_batch.is_dummy,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

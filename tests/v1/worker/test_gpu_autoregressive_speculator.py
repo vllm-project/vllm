@@ -408,6 +408,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     getattr(speculator, method_name)(
         num_reqs=2,
         skip_attn=True,
+        is_dummy=False,
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,

@@ -53,6 +53,7 @@ def _prepare_dflash_inputs_to_capture(
                 num_reqs_padded=input_batch.num_reqs_after_padding,
             )
         attn_metadata = build_attn_metadata(
+            is_dummy_batch=input_batch.is_dummy,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

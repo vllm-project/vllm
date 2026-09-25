@@ -375,10 +375,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         decode_fn(
             num_reqs,
-            dummy_run and skip_attn_for_dummy_run,
-            decode_batch_desc,
-            num_tokens_across_dp,
-            input_batch.seq_lens_cpu_upper_bound,
+            skip_attn=dummy_run and skip_attn_for_dummy_run,
+            is_dummy=input_batch.is_dummy,
+            batch_desc=decode_batch_desc,
+            num_tokens_across_dp=num_tokens_across_dp,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
         )
         self.on_multi_step_decode_end(num_reqs)
 
@@ -502,6 +503,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self,
         num_reqs: int,
         skip_attn: bool,
+        is_dummy: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
@@ -531,6 +533,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_query_per_req=1,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                     step=step,
+                    is_dummy=is_dummy,
                 )
 
             self.current_draft_step.fill_(step)
@@ -552,6 +555,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self,
         num_reqs: int,
         skip_attn: bool,
+        is_dummy: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
@@ -579,6 +583,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_query_per_req=1,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=1,
+                is_dummy=is_dummy,
             )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:

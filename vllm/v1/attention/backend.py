@@ -412,6 +412,14 @@ class CommonAttentionMetadata:
 
     causal: bool | torch.Tensor = True
 
+    is_dummy_batch: bool = False
+    """True for a profile or cudagraph-capture batch, whose slot mappings are
+    filled with PAD so nothing is written to any cache.
+
+    A cache that must not infer this from the slot mapping needs it stated. PAD
+    also means "another rank owns this position" under context parallelism, and
+    a replicated cache has to write those."""
+
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
     num_logits_indices: int | None = None
@@ -533,6 +541,7 @@ class CommonAttentionMetadata:
             max_seq_len=self.max_seq_len,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
+            is_dummy_batch=self.is_dummy_batch,
             causal=self.causal[:num_actual_reqs]
             if isinstance(self.causal, torch.Tensor)
             else self.causal,

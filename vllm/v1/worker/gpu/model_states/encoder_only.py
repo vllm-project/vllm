@@ -204,6 +204,7 @@ class EncoderOnlyModelState(DefaultModelState):
 
         # The encoder builder forces ``causal=False`` regardless of this value.
         common_attn_metadata = CommonAttentionMetadata(
+            is_dummy_batch=input_batch.is_dummy,
             query_start_loc=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             seq_lens=input_batch.seq_lens[:num_reqs],

@@ -211,6 +211,7 @@ class DefaultModelState(ModelState):
                 sliding_window=self.model_config.get_sliding_window(),
             )
         attn_metadata = build_attn_metadata(
+            is_dummy_batch=input_batch.is_dummy,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

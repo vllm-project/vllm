@@ -41,6 +41,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         dcp_local_seq_lens=None,
         positions=positions,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
+        is_dummy=False,
     )
     expected_metadata = {"layer": object()}
     build_attn_metadata = Mock(return_value=expected_metadata)

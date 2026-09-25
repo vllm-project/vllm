@@ -113,6 +113,9 @@ class InputBatch:
     # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
+    # True only for make_dummy batches.
+    is_dummy: bool = False
+
     @classmethod
     def make_dummy(
         cls,
@@ -174,6 +177,7 @@ class InputBatch:
         # num_scheduled_tokens.
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
+            is_dummy=True,
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs,

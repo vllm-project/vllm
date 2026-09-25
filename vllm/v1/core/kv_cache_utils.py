@@ -682,12 +682,7 @@ def hash_block_tokens(
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the token span of a cache block under DCP."""
-    layer_specs = iter_layer_specs(spec)
-    if len(layer_specs) > 0 and all(
-        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
-    ):
-        return spec.block_size * dcp_world_size
-    return spec.block_size
+    return spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
 
 
 def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
@@ -708,25 +703,8 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
 
 
 def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the DCP size that owns this group's block geometry.
-
-    Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
-    hashing and manager ``block_size`` use the process DCP size. Other specs
-    keep replicated per-rank state (Mamba, sliding window, chunked-local) and
-    must keep ``dcp_world_size=1`` even when the process runs with DCP > 1.
-
-    Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
-    ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
-    draft group would need a different spec, not this helper.
-    """
-    if dcp_world_size <= 1:
-        return 1
-    inner = spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        inner = next(iter(spec.kv_cache_specs.values()))
-    if isinstance(inner, FullAttentionSpec):
-        return dcp_world_size
-    return 1
+    """Return the DCP size that owns this group's block geometry."""
+    return dcp_world_size if spec.dcp_sharded else 1
 
 
 def resolve_kv_cache_block_sizes(
@@ -752,6 +730,8 @@ def resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
+        if groups and not groups[0].kv_cache_spec.dcp_sharded:
+            dcp = 1
         bs = cache_config.block_size * dcp
         return bs, bs
 
@@ -2010,11 +1990,12 @@ def _get_packed_kv_cache_groups(
     if not layout.is_block_outermost or len(page_sizes) <= 1:
         return None
 
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
     buckets: list[dict[str, KVCacheSpec]] = []
     for name, spec in kv_cache_spec.items():
         for bucket in buckets:
             candidate = {**bucket, name: spec}
-            if UniformTypeKVCacheSpecs.is_uniform_type(candidate):
+            if UniformTypeKVCacheSpecs.is_uniform_type(candidate, dcp):
                 bucket[name] = spec
                 break
         else:
@@ -2022,7 +2003,7 @@ def _get_packed_kv_cache_groups(
 
     bucketed = []
     for bucket in buckets:
-        uniform_spec = UniformTypeKVCacheSpecs.from_specs(bucket)
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(bucket, dcp)
         assert uniform_spec is not None
         page_size_layers: dict[int, list[str]] = defaultdict(list)
         for layer_name, layer_spec in bucket.items():
@@ -2113,7 +2094,7 @@ def _get_packed_kv_cache_groups(
             group_layer_specs = {
                 name: spec.kv_cache_specs[name] for name in group_layer_names
             }
-            group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
+            group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs, dcp)
             assert group_spec is not None
             groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
 
@@ -2282,10 +2263,15 @@ def _ensure_min_page_size(
     scaled: list[KVCacheGroupSpec] = []
     for g in groups:
         s = g.kv_cache_spec
-        kw: dict[str, int] = {"block_size": s.block_size * scale}
         if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
-            kw["page_size_padded"] = s.page_size_padded * scale
-        scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
+            s = replace(
+                s,
+                block_size=s.block_size * scale,
+                page_size_padded=s.page_size_padded * scale,
+            )
+        else:
+            s = replace(s, block_size=s.block_size * scale)
+        scaled.append(KVCacheGroupSpec(g.layer_names, s))
     return scaled, common_page
 
 
