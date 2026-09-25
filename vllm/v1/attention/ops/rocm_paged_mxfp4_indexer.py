@@ -10,9 +10,8 @@ the whole context: the pool is resolved once per step and shared by all four.
 """
 
 import functools
-import importlib
 import inspect
-import types
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -49,25 +48,26 @@ MXFP4_BLOCK_SIZE = 32
 # A logits tensor stays under 2 GiB: Triton's AMD backend specializes pointers
 # to storage below that, and buffer loads and stores take 32-bit offsets.
 MAX_LOGITS_BYTES = 2**31 - 1
-_AITER_MODULE = "aiter.ops.triton.attention.pa_mqa_logits_mxfp4"
-# The key writer and the query quantizer.
-_AITER_K_CACHE_MODULE = "aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache"
-_AITER_Q_QUANT_MODULE = "aiter.ops.triton.rope.q_rope_mxfp4_quant"
 
 
 @functools.cache
 def _aiter():
-    return importlib.import_module(_AITER_MODULE)
+    """The aiter module with the paged MXFP4 MQA-logits launcher, its schedule
+    and cache_format."""
+    from aiter.ops.triton.attention import pa_mqa_logits_mxfp4
+
+    return pa_mqa_logits_mxfp4
 
 
 @functools.cache
-def _aiter_cache():
-    k_cache = importlib.import_module(_AITER_K_CACHE_MODULE)
-    q_quant = importlib.import_module(_AITER_Q_QUANT_MODULE)
-    return types.SimpleNamespace(
-        k_norm_rope_mxfp4_cache=getattr(k_cache, "k_norm_rope_mxfp4_cache", None),
-        q_rope_mxfp4_quant=getattr(q_quant, "q_rope_mxfp4_quant", None),
+def _aiter_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
+    """The aiter indexer key writer and query quantizer."""
+    from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
+        k_norm_rope_mxfp4_cache,
     )
+    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
+
+    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
 
 
 @functools.cache
@@ -79,9 +79,13 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
         return "the ROCm MXFP4 indexer kernels are gfx950 only"
     try:
         pa = _aiter()
+        _aiter_cache_ops()
     except ImportError as e:
-        return f"aiter's paged MXFP4 MQA-logits kernel is unavailable ({e})"
-    params = inspect.signature(pa.paged_mxfp4_mqa_logits).parameters
+        return f"aiter's paged MXFP4 indexer ops are unavailable ({e})"
+    try:
+        params = inspect.signature(pa.paged_mxfp4_mqa_logits).parameters
+    except (AttributeError, TypeError, ValueError):
+        return "aiter's paged MXFP4 MQA-logits kernel has no signature to check"
     if "row_ends" not in params or "query_start_loc" not in params:
         return (
             "aiter's paged MXFP4 MQA-logits kernel predates its row_ends / "
@@ -92,18 +96,6 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
             "aiter's paged MXFP4 module has no cache_format(), which vLLM reads "
             "the indexer K page layout from"
         )
-    try:
-        cache_ops = _aiter_cache()
-    except ImportError as e:
-        return f"aiter's paged MXFP4 cache-prep ops are unavailable ({e})"
-    if not all(
-        callable(getattr(cache_ops, name, None))
-        for name in ("k_norm_rope_mxfp4_cache", "q_rope_mxfp4_quant")
-    ):
-        return (
-            "aiter's paged MXFP4 cache-prep ops are missing from "
-            f"{_AITER_K_CACHE_MODULE} / {_AITER_Q_QUANT_MODULE}"
-        )
     return None
 
 
@@ -111,8 +103,10 @@ class RocmPagedMxfp4CacheLayout(NamedTuple):
     """The byte order of an indexer K page, as the kernel reads it, and the
     shuffle pattern aiter's K cache op writes it with.
 
-    Each run of ``n_per_tile`` tokens stores its values as ``[K chunk of
-    d_per_tile bytes, token, byte]`` and its e8m0 scales as
+    A page is cut into runs of ``n_per_tile`` tokens. Inside a run, each token's
+    packed values are split into ``d_per_tile``-byte chunks along the head
+    dimension, and the run stores chunk 0 of every token, then chunk 1, and so
+    on: ``[chunk, token, byte]``. Its e8m0 scales are stored as
     ``[scale % scale_lanes, token, scale // scale_lanes]``.
     """
 
@@ -180,7 +174,8 @@ def rocm_mxfp4_indexer_k_store(
     query heads."""
     assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
     layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
-    _aiter_cache().k_norm_rope_mxfp4_cache(
+    k_norm_rope_mxfp4_cache, _ = _aiter_cache_ops()
+    k_norm_rope_mxfp4_cache(
         k_pre,
         positions,
         cos_sin_cache,
@@ -209,7 +204,8 @@ def rocm_mxfp4_indexer_q_quant(
     assert use_fp4 and weights_out_dtype == torch.float32, (
         "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
     )
-    q_packed, q_scale, weights_out = _aiter_cache().q_rope_mxfp4_quant(
+    _, q_rope_mxfp4_quant = _aiter_cache_ops()
+    q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
         index_q,
         positions,
         index_q_cos_sin_cache,

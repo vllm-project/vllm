@@ -230,6 +230,10 @@ def test_unsupported_without_aiter_cache_ops(monkeypatch):
             paged_mxfp4_mqa_logits=logits, cache_format=lambda *a: {}
         ),
     )
-    monkeypatch.setattr(ops, "_aiter_cache", lambda: types.SimpleNamespace())
+
+    def no_cache_ops():
+        raise ImportError("cannot import name 'k_norm_rope_mxfp4_cache'")
+
+    monkeypatch.setattr(ops, "_aiter_cache_ops", no_cache_ops)
     reason = ops.rocm_mxfp4_indexer_unsupported_reason.__wrapped__()
-    assert reason is not None and "cache-prep" in reason
+    assert reason is not None and "k_norm_rope_mxfp4_cache" in reason

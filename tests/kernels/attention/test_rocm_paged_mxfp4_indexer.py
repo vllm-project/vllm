@@ -139,7 +139,8 @@ class _Case:
                     True,
                     num_heads=HEADS,
                 )
-                ops._aiter_cache().k_norm_rope_mxfp4_cache(
+                k_norm_rope_mxfp4_cache, _ = ops._aiter_cache_ops()
+                k_norm_rope_mxfp4_cache(
                     k_pre, pos, cos_sin, norm, 1e-6, self.natural[ratio], nat, ratio
                 )
 
@@ -348,9 +349,12 @@ def _run_layers(monkeypatch, case, rows, metadata):
     pa = ops._aiter()
     build = pa.build_candidate_gather
     builds = []
-    monkeypatch.setattr(
-        pa, "build_candidate_gather", lambda *a, **k: builds.append(1) or build(*a, **k)
-    )
+
+    def counting_build(*args, **kwargs):
+        builds.append(1)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(pa, "build_candidate_gather", counting_build)
     for gather in (True, False):
         consumer = metadata(1, gather)
         consumer.decode_use_gather = gather
