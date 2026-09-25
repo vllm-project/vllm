@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for Fp8Config dynamic block-size auto-discovery from Quark schemas."""
 
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
