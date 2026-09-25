@@ -442,17 +442,18 @@ class TestAttributionHeaderStripping:
         assert system_msg["content"] == "You are a helpful assistant."
 
     def test_system_without_billing_header_unchanged(self):
-        """Normal system blocks should pass through unchanged."""
+        """Normal system blocks should pass through, joined with a
+        separator between blocks."""
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
             system=[
                 {"type": "text", "text": "You are a helpful assistant."},
-                {"type": "text", "text": " Be concise."},
+                {"type": "text", "text": "Be concise."},
             ],
         )
         result = _convert(request)
         system_msg = result.messages[0]
-        assert system_msg["content"] == "You are a helpful assistant. Be concise."
+        assert system_msg["content"] == "You are a helpful assistant.\n\nBe concise."
 
     def test_system_string_unchanged(self):
         """String system prompts should pass through unchanged."""
@@ -842,12 +843,13 @@ class TestInlineSystemMessageInMessagesArray:
 
         result = _convert(request)
 
-        # First message: top-level system prompt (billing header stripped).
+        # First message: top-level system prompt (billing header stripped,
+        # remaining blocks joined with a separator).
         assert result.messages[0]["role"] == "system"
         assert (
             result.messages[0]["content"]
             == "You are Claude Code, Anthropic's official CLI for Claude."
-            "...."
+            "\n\n...."
         )
 
         # Second message: user message, content preserved at original position.
@@ -1366,6 +1368,53 @@ class TestStreamingCacheUsageSemantics:
         assert "cache_creation_input_tokens" not in start_usage
         assert "cache_read_input_tokens" not in delta_usage
         assert "cache_creation_input_tokens" not in delta_usage
+
+
+# ======================================================================
+# System block joining
+# ======================================================================
+
+
+class TestSystemBlockJoining:
+    """Verify that separate system text blocks are joined with a
+    separator instead of being concatenated directly, which previously
+    ran unrelated sentences together (e.g. "...for Claude.You are...").
+    """
+
+    def test_multiple_top_level_system_blocks_are_separated(self):
+        """Multiple top-level system text blocks get a separator."""
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            system=[
+                {"type": "text", "text": "...for Claude."},
+                {"type": "text", "text": "You are a helpful assistant."},
+            ],
+        )
+        result = _convert(request)
+
+        assert result.messages[0]["role"] == "system"
+        assert (
+            result.messages[0]["content"]
+            == "...for Claude.\n\nYou are a helpful assistant."
+        )
+
+    def test_merged_inline_system_is_separated_from_top_level(self):
+        """Inline system merged into the top-level block (system-first
+        templates) is joined with a separator, not concatenated raw."""
+        request = _make_request(
+            [
+                {"role": "system", "content": "...for Claude."},
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "content": "You are a helpful assistant."},
+            ],
+        )
+        result = _convert(request, merge_inline_system=True)
+
+        assert result.messages[0]["role"] == "system"
+        assert (
+            result.messages[0]["content"]
+            == "...for Claude.\n\nYou are a helpful assistant."
+        )
 
 
 # ======================================================================
