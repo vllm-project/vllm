@@ -7,6 +7,7 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
+    collect_content,
     collect_function_name,
     collect_tool_arguments,
     simulate_tool_streaming,
@@ -216,6 +217,31 @@ class TestStreaming:
             "city": "Seattle",
         }
 
+    def test_streaming_closing_think_end_in_content_is_preserved(
+        self, parser, mock_request
+    ):
+        """The closing delimiter must survive streaming as well.
+
+        Same shape as the non-streaming case: `<think>` opens reasoning,
+        `</think>` closes it, and the second `</think>` sits in content, where it
+        is data rather than a boundary.
+        """
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<think>thoughts</think>",
+                "answer</think>",
+                "<minimax:tool_call>",
+                '<invoke name="add">',
+                '<parameter name="a">3</parameter>',
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        assert collect_function_name(results) == "add"
+        assert collect_content(results) == "answer</think>"
+
     def test_streaming_invalid_tool_name_is_rejected(
         self, mock_tokenizer, mock_request
     ):
@@ -263,16 +289,16 @@ class TestReasoning:
     def test_extract_content_ids_after_end_token(self, parser):
         assert parser.extract_content_ids([1, 99, 2, 3]) == [2, 3]
 
+
 class TestThinkEndInContent:
     def test_closing_think_end_in_content_is_preserved(self, parser, mock_request):
         result = parser.extract_tool_calls(
-            '<think>thoughts</think>answer</think>'
+            "<think>thoughts</think>answer</think>"
             '<minimax:tool_call><invoke name="add">'
             '<parameter name="a">3</parameter>'
-            '</invoke></minimax:tool_call>',
+            "</invoke></minimax:tool_call>",
             mock_request,
         )
         assert result.tools_called is True
         assert result.tool_calls[0].function.name == "add"
         assert result.content == "answer</think>"
-
