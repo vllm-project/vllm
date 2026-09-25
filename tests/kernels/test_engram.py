@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
 import inspect
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -552,6 +553,41 @@ def _reference_lookup(weight, scale_inv, ids, start, end, block=32):
     return values.masked_fill(mask.unsqueeze(-1), 0)
 
 
+def _reference_mxfp8(weight, scale_inv, ids, start, end):
+    """The table bytes an MXFP8 lookup keeps: [T, heads * dim] values and
+    [T, heads * dim // 32] scales, zero for rows another rank owns."""
+    mask = ((ids < start) | (ids >= end)).unsqueeze(-1)
+    local = (ids - start).masked_fill(mask.squeeze(-1), 0).long()
+    values = torch.nn.functional.embedding(local, weight.view(torch.uint8))
+    scales = torch.nn.functional.embedding(local, scale_inv)
+    return values.masked_fill(mask, 0).flatten(1), scales.masked_fill(mask, 0).flatten(
+        1
+    )
+
+
+def _assert_mxfp8_input(activation, values, scales):
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        swizzle_mxfp8_scale,
+    )
+
+    assert activation.data.dtype == torch.float8_e4m3fn
+    assert torch.equal(activation.data.view(torch.uint8), values)
+    # Includes the zeroed rows padding the last 128-token scale tile.
+    expected = swizzle_mxfp8_scale(scales, M=values.shape[0], K=values.shape[1])
+    assert torch.equal(activation.scale, expected)
+
+
+def _mxfp8_engram(layer, num_tokens, use_sequence_parallel=False):
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.embed_tokens = layer
+    module.use_sequence_parallel = use_sequence_parallel
+    module.mxfp8_rows = True
+    with torch.device("cuda"):
+        CommonEngram._init_staging(module, num_tokens, layer.dim)
+    return module
+
+
 def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(layer)
@@ -729,6 +765,160 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 7, 130])
+def test_engram_lookup_keeps_mxfp8_bytes(cpu_offload, num_tokens):
+    """MXFP8 lookups copy the table's bytes: values plus swizzled scales for
+    the GEMM, or values packed with their scales per row for gathers."""
+    layer = _make_embedding(cpu_offload)
+    cols, dim = layer.n_hash_cols, layer.dim
+    ids = torch.randint(
+        0, layer.part_num_embeddings, (num_tokens, cols), device="cuda"
+    ).int()
+    values, scales = _reference_mxfp8(
+        layer.weight.cuda(),
+        layer.weight_scale_inv.cuda(),
+        ids,
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+    out = torch.empty(num_tokens, cols, dim, dtype=torch.float8_e4m3fn, device="cuda")
+    # Stale bytes, so the padding rows must be written rather than assumed.
+    out_scales = torch.full(
+        (-(-num_tokens // 128) * 128 * cols * dim // 32,),
+        255,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    layer.lookup(ids, out, out_scales=out_scales)
+    _assert_mxfp8_input(
+        SimpleNamespace(data=out.flatten(1), scale=out_scales), values, scales
+    )
+
+    packed = torch.empty(
+        num_tokens, cols, dim + dim // 32, dtype=torch.uint8, device="cuda"
+    )
+    layer.lookup(ids, packed)
+    assert torch.equal(packed[..., :dim].flatten(1), values)
+    assert torch.equal(packed[..., dim:].flatten(1), scales)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_engram_mxfp8_rows_reconstruct_table(tp_size, sequence_parallel, monkeypatch):
+    """Gathered MXFP8 rows keep head order, SP token windows and TP padding."""
+    head_sizes = (17, 19, 23, 29, 31, 37, 41)
+    num_rows, dim, num_tokens = sum(head_sizes), 128, 7
+    torch.manual_seed(0)
+    weight = torch.randn(num_rows, dim).to(torch.float8_e4m3fn)
+    scales = torch.randint(120, 134, (num_rows, dim // 32), dtype=torch.uint8)
+    starts = [sum(head_sizes[:head]) for head in range(len(head_sizes))]
+    ids = torch.stack(
+        [
+            torch.randint(start, start + size, (num_tokens,))
+            for start, size in zip(starts, head_sizes)
+        ],
+        dim=1,
+    )
+    ids = ids.int().cuda()
+    values, scale_rows = _reference_mxfp8(
+        weight.cuda(), scales.cuda(), ids, 0, num_rows
+    )
+
+    monkeypatch.setattr(
+        engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    modules = []
+    for rank in range(tp_size):
+        monkeypatch.setattr(
+            engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
+        )
+        with torch.device("cuda"):
+            layer = ParallelEngramEmbedding(
+                num_rows, dim, head_sizes, cpu_offload=False
+            )
+        layer.weight.weight_loader(layer.weight, weight)
+        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scales)
+        module = _mxfp8_engram(layer, num_tokens, sequence_parallel)
+        assert (module.staged_scales is None) == (tp_size > 1)
+        module.prepare_embeddings(ids)
+        modules.append(module)
+
+    def gather(local, dim):
+        assert dim == 0
+        return torch.cat([module.staged_rows[:num_tokens] for module in modules])
+
+    monkeypatch.setattr(engram_ops, "tensor_model_parallel_all_gather", gather)
+    sp = sequence_parallel and tp_size > 1
+    chunk = -(-num_tokens // tp_size) if sp else num_tokens
+    pad = (0, 0, 0, chunk * tp_size - num_tokens) if sp else (0, 0)
+    values = torch.nn.functional.pad(values, pad)
+    scale_rows = torch.nn.functional.pad(scale_rows, pad)
+    for rank, module in enumerate(modules):
+        monkeypatch.setattr(
+            engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
+        )
+        window = slice(rank * chunk, (rank + 1) * chunk) if sp else slice(None)
+        _assert_mxfp8_input(module.embed(ids), values[window], scale_rows[window])
+
+
+def _cutedsl_mxfp8_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+    )
+
+    return FlashInferCutedslMxfp8LinearKernel.is_supported()[0]
+
+
+@pytest.mark.skipif(
+    not _cutedsl_mxfp8_supported(), reason="FlashInfer CuTe-DSL MXFP8 required"
+)
+@pytest.mark.parametrize("num_tokens", [1, 130])
+def test_engram_mxfp8_rows_match_requantized_wkv(num_tokens):
+    """The wkv GEMM gives the same output from the table bytes as from the
+    requantized bf16 rows: ue8m0 requantization of FP8 rows is lossless."""
+    from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearLayerConfig
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+    )
+
+    layer = _make_embedding(cpu_offload=False)
+    in_features, out_features = layer.n_hash_cols * layer.dim, 256
+    module = _mxfp8_engram(layer, num_tokens)
+    ids = torch.randint(
+        0, layer.part_num_embeddings, (num_tokens, layer.n_hash_cols), device="cuda"
+    ).int()
+    module.prepare_embeddings(ids)
+    rows = _reference_lookup(
+        layer.weight.cuda(),
+        layer.weight_scale_inv.cuda(),
+        ids,
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+
+    kernel = FlashInferCutedslMxfp8LinearKernel(
+        Mxfp8LinearLayerConfig((out_features, in_features))
+    )
+    wkv = torch.nn.Module()
+    weight = torch.randn(out_features, in_features, device="cuda")
+    wkv.weight = torch.nn.Parameter(weight.to(torch.float8_e4m3fn), requires_grad=False)
+    wkv.weight_scale = torch.nn.Parameter(
+        torch.randint(
+            118, 124, (out_features, in_features // 32), dtype=torch.uint8
+        ).cuda(),
+        requires_grad=False,
+    )
+    kernel.process_weights_after_loading(wkv)
+    expected = kernel.apply_weights(wkv, rows.flatten(1))
+    output = kernel.apply_weights(wkv, module.embed(ids))
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("register_fails", [False, True])
 def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
     """Huge-page tables and their pinned fallback both give exact lookup rows."""
@@ -844,9 +1034,9 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
     streams = []
     lookup = layer.lookup
 
-    def track_lookup(ids, out, background=False):
+    def track_lookup(ids, out, background=False, **kwargs):
         streams.append(torch.cuda.current_stream())
-        lookup(ids, out, background=background)
+        lookup(ids, out, background=background, **kwargs)
 
     layer.lookup = track_lookup
     main = torch.cuda.current_stream()
@@ -878,9 +1068,10 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
     [(False, None), (True, None), (True, "producer"), (True, "lookup")],
 )
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
-def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
+@pytest.mark.parametrize("mxfp8", [False, True])
+def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay, mxfp8):
     """Temporary lookup IDs survive allocator reuse and graph replay."""
-    _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
+    _run_engram_prepared_rows(cpu_offload, capture, delay=delay, mxfp8=mxfp8)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -903,7 +1094,9 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
         if missing_dependency != "record_stream":
             hash_ids.record_stream(stream)
         with torch.cuda.stream(stream):
-            self.embed_tokens.lookup(hash_ids, rows, background=True)
+            self.embed_tokens.lookup(
+                hash_ids, rows, background=True, out_scales=self.staged_scales
+            )
             self._prefetch_done.record(stream)
 
     def finish(self, event):
@@ -923,7 +1116,13 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, delay=None
+    cpu_offload,
+    capture,
+    tp_size=1,
+    rank=0,
+    use_sequence_parallel=False,
+    delay=None,
+    mxfp8=False,
 ):
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,
@@ -934,9 +1133,9 @@ def _run_engram_prepared_rows(
     if delay == "lookup":
         lookup = layer.lookup
 
-        def delayed_lookup(indices, out, background=False):
+        def delayed_lookup(indices, out, background=False, **kwargs):
             torch.cuda._sleep(2_000_000)
-            lookup(indices, out, background=background)
+            lookup(indices, out, background=background, **kwargs)
 
         layer.lookup = delayed_lookup
     cols, num_tokens = (23, 65) if use_sequence_parallel else (24, 64)
@@ -960,13 +1159,9 @@ def _run_engram_prepared_rows(
                 fn = eager_break_during_capture(inspect.unwrap(getattr(Engram, name)))
                 setattr(engram, name, fn.__get__(engram, Engram))
     engram.use_sequence_parallel = use_sequence_parallel
-    engram.staged_rows = torch.empty(
-        num_tokens,
-        layer.part_n_hash_cols,
-        layer.dim,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
+    engram.mxfp8_rows = mxfp8
+    with torch.device("cuda"):
+        CommonEngram._init_staging(engram, num_tokens, layer.dim)
     # Match the non-contiguous per-layer slice of the model hash tensor.
     hashes = torch.randint(
         0,
@@ -979,9 +1174,21 @@ def _run_engram_prepared_rows(
     local_tokens = (
         (num_tokens + tp_size - 1) // tp_size if use_sequence_parallel else num_tokens
     )
-    out = torch.empty(
-        local_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda"
-    )
+    if mxfp8:
+        out = SimpleNamespace(
+            data=torch.empty(
+                local_tokens, cols * layer.dim, dtype=torch.uint8, device="cuda"
+            ),
+            scale=torch.empty(
+                -(-local_tokens // 128) * 128 * cols * layer.dim // 32,
+                dtype=torch.uint8,
+                device="cuda",
+            ),
+        )
+    else:
+        out = torch.empty(
+            local_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda"
+        )
     embed = engram.embed
     if capture == "compiled":
         embed = torch.compile(embed, backend="eager", fullgraph=True, dynamic=True)
@@ -995,7 +1202,12 @@ def _run_engram_prepared_rows(
         torch.empty_like(hashes).fill_(layer.part_num_embeddings - 1)
         if cap is not None:
             cap.add_eager(lambda: None)
-        out.copy_(embed(src))
+        rows = embed(src)
+        if mxfp8:
+            out.data.copy_(rows.data.view(torch.uint8))
+            out.scale.copy_(rows.scale)
+        else:
+            out.copy_(rows)
 
     warmup = torch.cuda.Stream()
     warmup.wait_stream(torch.cuda.current_stream())
@@ -1024,7 +1236,8 @@ def _run_engram_prepared_rows(
             step()
         else:
             graph.replay()
-        expected = _reference_lookup(
+        reference = _reference_mxfp8 if mxfp8 else _reference_lookup
+        expected = reference(
             layer.weight.cuda(),
             layer.weight_scale_inv.cuda(),
             src,
@@ -1032,10 +1245,26 @@ def _run_engram_prepared_rows(
             layer.vocab_end_idx,
         )
         if use_sequence_parallel:
-            expected = torch.nn.functional.pad(
-                expected, (0, 0, 0, 0, 0, (-num_tokens) % tp_size)
-            )[rank * local_tokens : (rank + 1) * local_tokens]
-        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+            window = slice(rank * local_tokens, (rank + 1) * local_tokens)
+            pad_tokens = (-num_tokens) % tp_size
+            if mxfp8:
+                expected = [
+                    torch.nn.functional.pad(e, (0, 0, 0, pad_tokens))[window]
+                    for e in expected
+                ]
+            else:
+                expected = torch.nn.functional.pad(
+                    expected, (0, 0, 0, 0, 0, pad_tokens)
+                )[window]
+        if mxfp8:
+            _assert_mxfp8_input(
+                SimpleNamespace(
+                    data=out.data.view(torch.float8_e4m3fn), scale=out.scale
+                ),
+                *expected,
+            )
+        else:
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
 def _engram_tp_worker(rank, tp_size, port):
@@ -1045,10 +1274,11 @@ def _engram_tp_worker(rank, tp_size, port):
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(tp_size, 1, rank, str(port), local_rank=rank)
     try:
-        for cpu_offload in (False, True):
-            for sp in (False, True):
-                for capture in ("eager", "compiled", "full", "breakable"):
-                    _run_engram_prepared_rows(cpu_offload, capture, tp_size, rank, sp)
+        for cpu_offload, sp, mxfp8 in itertools.product((False, True), repeat=3):
+            for capture in ("eager", "compiled", "full", "breakable"):
+                _run_engram_prepared_rows(
+                    cpu_offload, capture, tp_size, rank, sp, mxfp8=mxfp8
+                )
     finally:
         cleanup_dist_env_and_memory()
 
