@@ -1762,16 +1762,16 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
 
 
-def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
+def test_msa_indexer_requires_the_aiter_attend(monkeypatch):
     """The top-k emits the attend's page table, so it needs that attend.
 
     Selected without it, the indexer would reach its top-k with no table to
     resolve through; falling back instead surfaces the fp8 index cache as the
     configuration error it is.
     """
-    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
 
-    monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(indexer_msa_mod.current_platform, "is_rocm", lambda: True)
     kwargs = dict(
         topk_blocks=TOPK,
         sparse_block_size=BLOCK_SIZE,
@@ -1782,17 +1782,17 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     )
 
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = indexer_msa_mod.msa_indexer_unsupported_reason(**kwargs)
     assert reason is not None and "AITER sparse PA attend" in reason
 
     # With the attend asked for, the gate moves on to the kernel-contract
     # checks rather than stopping here.
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = indexer_msa_mod.msa_indexer_unsupported_reason(**kwargs)
     assert reason is None or "AITER sparse PA attend" not in reason
 
 

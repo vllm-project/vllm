@@ -54,8 +54,14 @@ class AiterCustomAllreduce:
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
         return self._impl.custom_all_reduce(inp)
 
+    @property
+    def supports_custom_all_gather(self) -> bool:
+        return hasattr(self._impl, "custom_all_gather") and hasattr(
+            self._impl, "should_custom_ag"
+        )
+
     def should_custom_ag(self, inp: torch.Tensor) -> bool:
-        return self._impl.should_custom_ag(inp)
+        return self.supports_custom_all_gather and self._impl.should_custom_ag(inp)
 
     def should_custom_rs(self, inp: torch.Tensor, dim: int) -> bool:
         return self._impl.should_custom_rs(inp, dim)

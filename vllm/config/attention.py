@@ -86,6 +86,14 @@ class AttentionConfig:
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
 
+    indexer_cp: bool = False
+    """Context-parallelize the MiniMax-M3 lightning indexer instead of tensor-
+    parallelizing it. Every rank projects all index heads and scores 1/P of the
+    128-token blocks, then one exchange gives each rank every shard's
+    candidates for the heads it owns. The KV caches, the sparse attend and the
+    MoE stay exactly as they are -- this shards indexer *work*, not the cache,
+    so it is not `decode_context_parallel_size` and requires that to be 1."""
+
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
