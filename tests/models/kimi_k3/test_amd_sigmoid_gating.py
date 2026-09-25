@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm Kimi-K3 sigmoid-gating kernel vs a float32 recurrence.
 
-The CUDA Qwen kernel is covered by tests/kernels/test_fused_sigmoid_gating_delta_rule.py.
-This file covers vllm.models.kimi_k3.amd.ops.fused_sigmoid_gating, including the
-Kimi gate_lower_bound path that kernel does not implement.
+The CUDA Qwen kernel is covered by
+tests/kernels/test_fused_sigmoid_gating_delta_rule.py. This file covers
+vllm.models.kimi_k3.amd.ops.fused_sigmoid_gating, including the Kimi
+gate_lower_bound path that kernel does not implement.
 """
 
 import pytest
