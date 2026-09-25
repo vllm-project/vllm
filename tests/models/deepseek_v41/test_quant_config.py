@@ -2,9 +2,9 @@
 """Unit tests for DeepSeek-V4.1 quant method routing and shared experts exclusion."""
 
 from types import SimpleNamespace
+
 import pytest
 import torch
-
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
@@ -41,8 +41,12 @@ def test_shared_experts_excluded_from_modelopt_linear_method(vllm_config_context
     cfg._resolved_expert_dtype = "fp4"
 
     layer = DummyLinear()
-    method_gate = cfg.get_quant_method(layer, prefix="model.layers.0.mlp.shared_experts.gate_proj")
-    method_down = cfg.get_quant_method(layer, prefix="model.layers.0.mlp.shared_experts.down_proj")
+    method_gate = cfg.get_quant_method(
+        layer, prefix="model.layers.0.mlp.shared_experts.gate_proj"
+    )
+    method_down = cfg.get_quant_method(
+        layer, prefix="model.layers.0.mlp.shared_experts.down_proj"
+    )
 
     # Shared experts must NOT use ModelOptLinearMethod
     assert not isinstance(method_gate, ModelOptLinearMethod)
@@ -53,7 +57,8 @@ def test_shared_experts_excluded_from_modelopt_linear_method(vllm_config_context
 
 
 def test_dense_and_attn_linear_use_modelopt_linear_method(vllm_config_context):
-    """Verify attention and dense linear layers use ModelOptLinearMethod under [32, 32]."""
+    """Verify attention and dense linear layers use ModelOptLinearMethod
+    under [32, 32]."""
     cfg = DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
@@ -70,7 +75,8 @@ def test_dense_and_attn_linear_use_modelopt_linear_method(vllm_config_context):
 
 
 def test_quant_method_fallback_for_128x128_block_size(vllm_config_context):
-    """Verify fallback to standard Fp8LinearMethod for standard [128, 128] block size."""
+    """Verify fallback to standard Fp8LinearMethod for standard [128, 128]
+    block size."""
     cfg = DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
@@ -80,7 +86,9 @@ def test_quant_method_fallback_for_128x128_block_size(vllm_config_context):
 
     layer = DummyLinear()
     method_attn = cfg.get_quant_method(layer, prefix="model.layers.0.self_attn.q_proj")
-    method_shared = cfg.get_quant_method(layer, prefix="model.layers.0.mlp.shared_experts.gate_proj")
+    method_shared = cfg.get_quant_method(
+        layer, prefix="model.layers.0.mlp.shared_experts.gate_proj"
+    )
 
     # When block size is not [32, 32], standard Fp8LinearMethod is used for both
     assert isinstance(method_attn, Fp8LinearMethod)
@@ -94,26 +102,29 @@ def test_deepseek_v4_quark_block_size_discovery():
     )
 
     # 1. Top-level weight_block_size
-    cfg1 = DeepseekV4CoreFP8Config.from_config({
-        "quant_method": "quark",
-        "weight_block_size": [32, 32],
-    })
+    cfg1 = DeepseekV4CoreFP8Config.from_config(
+        {
+            "quant_method": "quark",
+            "weight_block_size": [32, 32],
+        }
+    )
     assert cfg1.weight_block_size == [32, 32]
 
     # 2. Nested in layer_quant_config
-    cfg2 = DeepseekV4CoreFP8Config.from_config({
-        "quant_method": "quark",
-        "layer_quant_config": {
-            "model.layers.0.self_attn.q_proj": {
-                "weight": {"block_size": [32, 32]}
-            }
-        },
-    })
+    cfg2 = DeepseekV4CoreFP8Config.from_config(
+        {
+            "quant_method": "quark",
+            "layer_quant_config": {
+                "model.layers.0.self_attn.q_proj": {"weight": {"block_size": [32, 32]}}
+            },
+        }
+    )
     assert cfg2.weight_block_size == [32, 32]
 
     # 3. Default fallback to [128, 128]
-    cfg3 = DeepseekV4CoreFP8Config.from_config({
-        "quant_method": "quark",
-    })
+    cfg3 = DeepseekV4CoreFP8Config.from_config(
+        {
+            "quant_method": "quark",
+        }
+    )
     assert cfg3.weight_block_size == [128, 128]
-

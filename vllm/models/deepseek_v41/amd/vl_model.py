@@ -312,11 +312,13 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Stream language_model weights as a contiguous block without sorting/materializing
-        # the entire 48-shard generator into a Python list. Materializing all 48 shards
-        # prematurely retains all checkpoint tensors simultaneously and exhausts host
-        # memory. Non-language_model tensors (vision tower, aligner, image tokens, ~266 tensors /
-        # ~400 MB total in Shards 1-2) are buffered in host memory and yielded after language_model.
+        # Stream language_model weights as a contiguous block without
+        # sorting/materializing the entire 48-shard generator into a Python
+        # list. Materializing all 48 shards prematurely retains all checkpoint
+        # tensors simultaneously and exhausts host memory. Non-language_model
+        # tensors (vision tower, aligner, image tokens, ~266 tensors / ~400 MB
+        # total in Shards 1-2) are buffered in host memory and yielded after
+        # language_model.
         def _stream_reordered():
             non_lm_weights: list[tuple[str, torch.Tensor]] = []
             for name, tensor in self.hf_to_vllm_mapper.apply(weights):

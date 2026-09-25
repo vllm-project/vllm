@@ -723,18 +723,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # Vision weights are loaded by the outer multimodal wrapper.
                 logger.warning_once("Skipping non-text weight: %s", name)
                 continue
-            is_shared = (
-                ".ffn.shared_experts." in name or ".shared_experts." in name
-            )
+            is_shared = ".ffn.shared_experts." in name or ".shared_experts." in name
             is_fse_redirect = is_shared and fuse_by_layer.get(
                 extract_layer_index(name), False
             )
             if is_fse_redirect:
-                name = name.replace(".shared_experts.down_proj", f".experts.{n_routed}.w2")
-                name = name.replace(".shared_experts.gate_proj", f".experts.{n_routed}.w1")
-                name = name.replace(".shared_experts.up_proj", f".experts.{n_routed}.w3")
+                name = name.replace(
+                    ".shared_experts.down_proj", f".experts.{n_routed}.w2"
+                )
+                name = name.replace(
+                    ".shared_experts.gate_proj", f".experts.{n_routed}.w1"
+                )
+                name = name.replace(
+                    ".shared_experts.up_proj", f".experts.{n_routed}.w3"
+                )
                 name = name.replace(".shared_experts.w", f".experts.{n_routed}.w")
-            if pad_shared_expert and (is_shared or is_fse_redirect):
+            if pad_shared_expert and is_shared:
                 loaded_weight = self._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
                 )
@@ -863,9 +867,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             for mod in self.modules()
             if isinstance(mod, DeepseekV4MoEBase)
         )
-        num_experts = self.config.n_routed_experts + (
-            n_shared if is_fse else 0
-        )
+        num_experts = self.config.n_routed_experts + (n_shared if is_fse else 0)
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",

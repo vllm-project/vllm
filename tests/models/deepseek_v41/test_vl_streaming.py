@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for DeepSeek-V4.1 VLM non-materialized generator streaming."""
 
-import pytest
 import torch
 
 
 def simulate_stream_reordered(weights_stream):
-    """Simulate _stream_reordered generator logic from DeepseekV41ForCausalLM.load_weights."""
+    """Simulate _stream_reordered generator logic from
+    DeepseekV41ForCausalLM.load_weights."""
     non_lm_weights: list[tuple[str, torch.Tensor]] = []
     for name, tensor in weights_stream:
         if name.startswith("language_model."):
@@ -18,7 +18,8 @@ def simulate_stream_reordered(weights_stream):
 
 
 def test_stream_reordered_lazy_consumption():
-    """Verify pulling the first LM weight does not eagerly consume all input weights."""
+    """Verify pulling the first LM weight does not eagerly consume all input
+    weights."""
     consumed_count = 0
 
     def generating_weights():
@@ -42,12 +43,14 @@ def test_stream_reordered_lazy_consumption():
 
     # First yielded item must be the first LM layer encountered
     assert first_name == "language_model.layers.0.weight"
-    # It only needed to consume up to item 2 (vision.patch_embed and language_model.layers.0)
+    # It only needed to consume up to item 2 (vision.patch_embed and
+    # language_model.layers.0)
     assert consumed_count == 2
 
 
 def test_stream_reordered_ordering_guarantee():
-    """Verify all language_model weights precede non-LM weights while preserving relative order."""
+    """Verify all language_model weights precede non-LM weights while
+    preserving relative order."""
     input_weights = [
         ("vision.patch_embed.weight", torch.tensor([1.0])),
         ("language_model.layers.0.weight", torch.tensor([2.0])),
@@ -73,7 +76,8 @@ def test_stream_reordered_ordering_guarantee():
 
 
 def test_stream_reordered_tensor_cloning():
-    """Verify non-LM tensors are cloned to isolate against in-place upstream mutations."""
+    """Verify non-LM tensors are cloned to isolate against in-place upstream
+    mutations."""
     mutable_tensor = torch.tensor([10.0, 20.0])
     input_weights = [
         ("vision.head.weight", mutable_tensor),

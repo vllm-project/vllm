@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for DeepSeek-V4.1 Fused Shared Experts (FSE) routing, padding, and expert mapping."""
+"""Unit tests for DeepSeek-V4.1 Fused Shared Experts (FSE) routing, padding,
+and expert mapping."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-import pytest
-import torch
 
-from vllm.models.deepseek_v41.amd.model import DeepseekV4MoEBase, DeepseekV4Model
+import torch
+from vllm.models.deepseek_v41.amd.model import DeepseekV4Model, DeepseekV4MoEBase
 
 
 def test_fse_weight_name_redirection():
-    """Verify shared_experts weights are redirected to virtual expert slot when FSE is enabled."""
+    """Verify shared_experts weights are redirected to virtual expert slot
+    when FSE is enabled."""
     n_routed = 256
     model = MagicMock(spec=DeepseekV4Model)
     model.config = SimpleNamespace(n_routed_experts=n_routed, n_shared_experts=1)
@@ -90,7 +91,8 @@ def test_fse_weight_name_redirection():
 
 
 def test_pad_shared_expert_weight_dim1_for_w2_and_down_proj():
-    """Verify down_proj and w2 weights/scales are padded along dimension 1 (intermediate axis)."""
+    """Verify down_proj and w2 weights/scales are padded along dimension 1
+    (intermediate axis)."""
     with patch(
         "vllm.models.deepseek_v41.amd.model.get_tensor_model_parallel_world_size",
         return_value=2,
@@ -168,7 +170,8 @@ def test_pad_shared_expert_weight_dim0_for_w1_w3_and_gate_up():
 
 
 def test_pad_shared_expert_weight_no_op_when_aligned():
-    """Verify already-aligned tensor is returned unchanged without copying or allocating pad."""
+    """Verify already-aligned tensor is returned unchanged without copying or
+    allocating pad."""
     with patch(
         "vllm.models.deepseek_v41.amd.model.get_tensor_model_parallel_world_size",
         return_value=2,
@@ -183,7 +186,8 @@ def test_pad_shared_expert_weight_no_op_when_aligned():
 
 
 def test_get_expert_mapping_expansion_under_fse():
-    """Verify get_expert_mapping expands num_experts by n_shared_experts when FSE is enabled."""
+    """Verify get_expert_mapping expands num_experts by n_shared_experts
+    when FSE is enabled."""
     model = MagicMock(spec=DeepseekV4Model)
     model.config = SimpleNamespace(n_routed_experts=256, n_shared_experts=1)
 

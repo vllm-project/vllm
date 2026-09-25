@@ -2,7 +2,6 @@
 """Unit tests for DeepSeek-V4.1 engram scale key regex mapping."""
 
 import pytest
-
 from vllm.models.deepseek_v41.amd.model import (
     _make_deepseek_v4_weights_mapper as _make_amd_mapper,
 )
