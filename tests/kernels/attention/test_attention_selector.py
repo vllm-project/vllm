@@ -73,6 +73,7 @@ def _make_gemma4_vllm_config(
         diffusion_config=None,
         scheduler_config=None,
         attention_config=AttentionConfig(backend=backend),
+        cache_config=CacheConfig(),
     )
 
 
