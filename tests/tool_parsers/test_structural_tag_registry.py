@@ -29,6 +29,7 @@ from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+from vllm.tool_parsers.mimo_tool_parser import MiMoToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import (
@@ -528,6 +529,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (Llama3JsonToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
         (Qwen3EngineToolParser, "qwen_3_coder"),
+        (MiMoToolParser, "mimo"),
     ],
 )
 def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model):
@@ -590,7 +592,7 @@ def test_get_structural_tag_disables_reasoning(
 
 
 @pytest.mark.parametrize(
-    "parser_cls", [Qwen3EngineToolParser, DeepSeekV41EngineToolParser]
+    "parser_cls", [Qwen3EngineToolParser, DeepSeekV41EngineToolParser, MiMoToolParser]
 )
 def test_unified_parser_get_structural_tag_disables_reasoning(
     parser_cls,
@@ -1030,3 +1032,78 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("strict")
     with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("off")
+
+
+@pytest.mark.parametrize("policy", ["auto", "required", "named"])
+def test_mimo_strict_compact_xml(policy):
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "run",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"n": {"type": "integer", "minimum": 1}},
+                    "required": ["n"],
+                    "additionalProperties": False,
+                },
+            },
+        )
+    ]
+    choice = (
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="run")
+        )
+        if policy == "named"
+        else policy
+    )
+    tag = get_model_structural_tag("mimo", tools, choice, reasoning=False)
+    grammar = Grammar.from_structural_tag(tag)
+    call = "<tool_call><function=run><parameter=n>2</parameter></function></tool_call>"
+    assert _is_grammar_accept_string(grammar, call)
+    assert _is_grammar_accept_string(grammar, call * 2) == (policy != "named")
+    assert _is_grammar_accept_string(grammar, "answer") == (policy == "auto")
+    for invalid in [
+        call.replace("function=run", "function=unknown"),
+        call.replace("<parameter=n>2</parameter>", ""),
+        call.replace(">2</parameter>", ">bad</parameter>"),
+        call.replace(">2</parameter>", ">0</parameter>"),
+        call.replace("<parameter=n>", "<parameter=other>"),
+        call.replace("</function>", "<parameter=n>3</parameter></function>"),
+        "<think>plan</think>" + call,
+    ]:
+        assert not _is_grammar_accept_string(grammar, invalid)
+    tools[0].function.strict = False
+    relaxed = Grammar.from_structural_tag(
+        get_model_structural_tag("mimo", tools, "required", reasoning=False)
+    )
+    assert _is_grammar_accept_string(
+        relaxed, call.replace("<parameter=n>", "<parameter=other>")
+    )
+
+
+@pytest.mark.parametrize("policy", ["auto", "required"])
+def test_mimo_request_limits_parallel_calls(sample_tools_strict, policy):
+    from vllm.parser.parser_manager import ParserManager
+
+    request = ChatCompletionRequest(
+        model="mimo",
+        messages=[],
+        tools=[t.model_dump() for t in sample_tools_strict],
+        tool_choice=policy,
+        parallel_tool_calls=False,
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mimo", enable_auto_tools=True
+    )
+    parser = parser_cls(MagicMock(), tools=sample_tools_strict)
+    adjusted = parser.adjust_request(request)
+    grammar = Grammar.from_structural_tag(adjusted.structured_outputs.structural_tag)
+    call = (
+        "<tool_call><function=get_weather><parameter=city>北京</parameter>"
+        "</function></tool_call>"
+    )
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call * 2)
+    assert not _is_grammar_accept_string(grammar, call + "extra text")

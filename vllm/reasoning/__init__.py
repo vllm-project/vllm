@@ -105,8 +105,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "K2HorizonReasoningParser",
     ),
     "mimo": (
-        "qwen3_engine_reasoning_parser",
-        "Qwen3ParserReasoningAdapter",
+        "mimo_engine_reasoning_parser",
+        "MiMoParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
