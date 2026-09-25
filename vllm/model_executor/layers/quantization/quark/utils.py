@@ -48,8 +48,7 @@ def should_ignore_layer(
     # See:
     # https://huggingface.co/amd/GLM-5.2-MXFP4/blob/main/config.json#L793-L795
     if check_children and any(
-        target == layer_name
-        or target == clean_layer_name
+        target in (layer_name, clean_layer_name)
         or target.startswith(layer_name + ".")
         or target.startswith(clean_layer_name + ".")
         for target in ignore
@@ -62,8 +61,13 @@ def should_ignore_layer(
     # ignore=["re:.*qkv_proj.*"] yields [{"re:.*qkv_proj.*"}]. In contrast,
     # ignore=["re:.*[qkv]_proj"] yields one matching set per expanded shard.
     per_shard_matches = find_matching_patterns(layer_name, ignore, fused_mapping)
-    if not any(matches for matches in per_shard_matches) and clean_layer_name != layer_name:
-        per_shard_matches = find_matching_patterns(clean_layer_name, ignore, fused_mapping)
+    if (
+        not any(matches for matches in per_shard_matches)
+        and clean_layer_name != layer_name
+    ):
+        per_shard_matches = find_matching_patterns(
+            clean_layer_name, ignore, fused_mapping
+        )
     shards_ignored = [len(matches) > 0 for matches in per_shard_matches]
     if any(shards_ignored) and not all(shards_ignored):
         raise ValueError(
