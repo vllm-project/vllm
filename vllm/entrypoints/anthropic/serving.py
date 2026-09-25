@@ -453,10 +453,21 @@ class AnthropicServingMessages(OpenAIServingChat):
         if role == "user":
             cls._convert_user_tool_result(block, openai_messages)
         else:
-            tool_result_text = str(block.content) if block.content else ""
+            tool_result_text = cls._mark_tool_error(
+                str(block.content) if block.content else "", block.is_error
+            )
             content_parts.append(
                 {"type": "text", "text": f"Tool result: {tool_result_text}"}
             )
+
+    @classmethod
+    def _mark_tool_error(cls, tool_text: str, is_error: bool | None) -> str:
+        """Prefix a tool result with ``Error:`` when the tool call failed,
+        so the model can tell failed tool calls from successful ones."""
+        tool_text = tool_text or ""
+        if is_error:
+            return f"Error: {tool_text}" if tool_text else "Error"
+        return tool_text
 
     @classmethod
     def _convert_user_tool_result(
@@ -494,7 +505,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             {
                 "role": "tool",
                 "tool_call_id": block.tool_use_id or "",
-                "content": tool_text or "",
+                "content": cls._mark_tool_error(tool_text, block.is_error),
             }
         )
 
