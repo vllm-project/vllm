@@ -97,9 +97,12 @@ class PagedCacheView:
         row_bytes = row_width * itemsize
         if block_stride % (block_size * row_bytes):
             return cls(cache, cache, block_size, block_size)
-        attention_cache = (
-            raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
-        )
+        # The backing allocation may be padded past the last whole block (ROCm
+        # rounds it to a page); drop the tail so the reshape stays exact.
+        tail = raw_tensor[byte_offset:].view(dtype)
+        rows_per_block = block_size * row_width
+        tail = tail[: tail.numel() // rows_per_block * rows_per_block]
+        attention_cache = tail.view(-1, block_size, row_width)
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 

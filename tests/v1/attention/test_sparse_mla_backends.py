@@ -87,6 +87,7 @@ from vllm.v1.hisparse import runtime as hisparse_runtime
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
+    PagedCacheView,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
@@ -185,6 +186,25 @@ def test_hisparse_routes_prefill_to_sparse_mqa():
     layer = SimpleNamespace(hisparse_cache=object())
 
     assert not mla_attention.MLAAttention._use_sparse_mha(layer, SimpleNamespace())
+
+
+def test_paged_cache_view_binds_page_padded_backing():
+    """ROCm pads the KV backing to a page, leaving a partial trailing block."""
+    block_size, row_width, num_blocks = 16, 576, 3
+    block_stride = block_size * row_width
+    raw = torch.zeros(num_blocks * block_stride + 2048, dtype=torch.uint8)
+
+    view = PagedCacheView.bind(
+        raw,
+        dtype=torch.uint8,
+        row_width=row_width,
+        byte_offset=0,
+        block_stride=block_stride,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    assert view.attention_cache.shape == (num_blocks, block_size, row_width)
 
 
 def test_hisparse_metadata_keeps_short_prefill_indexer_enabled():

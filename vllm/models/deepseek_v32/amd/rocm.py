@@ -36,13 +36,21 @@ class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
 class DeepseekV32MLAAttention(DeepseekV32Attention):
     indexer_cls = DeepseekV32ROCmIndexer
 
-    def __init__(self, vllm_config, config, prefix, topk_indices_buffer=None):
+    def __init__(
+        self,
+        vllm_config,
+        config,
+        prefix,
+        topk_indices_buffer=None,
+        index_group_builder=None,
+    ):
         super().__init__(
             vllm_config,
             config,
             prefix,
             topk_indices_buffer,
             attn_backend=ROCMAiterMLASparseBackend,
+            index_group_builder=index_group_builder,
         )
 
         self.indexer_op: SparseAttnIndexer | None = None
@@ -204,14 +212,26 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
+        self.impl.prepare_for_batch(attn_metadata)
+        hisparse_cache = self.hisparse_cache
+
         if attn_metadata is None:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
         else:
-            mla_kv_cache = self.kv_cache
+            # HiSparse routes the KV write through update_kv_cache so the
+            # host mirror sees it; the fused kernel only returns the rows.
+            mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
+
+        if hisparse_cache is not None:
+            kv_c_out = torch.empty_like(kv_c)
+            k_pe_out = torch.empty_like(k_pe)
+        else:
+            kv_c_out = None
+            k_pe_out = None
 
         q_c = fused_norm_rope(
             positions,
@@ -237,7 +257,21 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            kv_c_out=kv_c_out,
+            k_pe_out=k_pe_out,
         )
+
+        if hisparse_cache is not None and mla_slot is not None:
+            assert kv_c_out is not None and k_pe_out is not None
+            self.update_kv_cache(
+                kv_c_out,
+                k_pe_out,
+                self.kv_cache,
+                mla_slot,
+                attn_metadata,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
         ql_nope, q_pe = self._compute_ql_nope(q_c)
 
@@ -265,6 +299,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
         if self.indexer is not None and not self.skip_topk:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
+        self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         if attn_metadata is None:
             output.zero_()
