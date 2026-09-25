@@ -12,7 +12,7 @@ cannot run in CI).
 import pytest
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.vllm import VllmConfig, set_current_vllm_config
 from vllm.models.minimax_m3.common.encoder_cudagraph import (
@@ -23,6 +23,7 @@ from vllm.models.minimax_m3.common.vision_tower import (
     MiniMaxVLVisionTransformer,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 pytestmark = pytest.mark.skipif(
@@ -69,10 +70,9 @@ def _build_transformer(device, dtype, vision_segment_max_frames=None):
     # vLLM sets torch's default dtype to the model dtype during load, and the
     # tower reads torch.get_default_dtype() for backend selection; bf16 makes
     # get_vit_attn_backend pick FLASH_ATTN as in production.
-    torch.set_default_dtype(dtype)
-    with set_current_vllm_config(VllmConfig()):
+    with set_default_torch_dtype(dtype), set_current_vllm_config(VllmConfig()):
         tower = MiniMaxVLVisionTransformer(
-            PretrainedConfig.from_dict(_vision_config_dict(vision_segment_max_frames)),
+            PreTrainedConfig.from_dict(_vision_config_dict(vision_segment_max_frames)),
             require_post_norm=False,
         ).to(device=device)
     _reinit_weights(tower)
@@ -84,10 +84,10 @@ class _ViTOnlyModel(nn.Module, MiniMaxM3EncoderCudaGraphMixin):
 
     def __init__(self, device, dtype):
         super().__init__()
-        torch.set_default_dtype(dtype)
-        with set_current_vllm_config(VllmConfig()):
+        self.multimodal_config = None
+        with set_default_torch_dtype(dtype), set_current_vllm_config(VllmConfig()):
             self.vision_tower = MiniMaxVLVisionModel(
-                PretrainedConfig.from_dict(_vision_config_dict()),
+                PreTrainedConfig.from_dict(_vision_config_dict()),
                 text_hidden_size=256,
             ).to(device=device)
         _reinit_weights(self.vision_tower)
@@ -174,14 +174,19 @@ class TestMiniMaxM3EncoderCudaGraph:
         mgr.capture(graph_pool=current_platform.graph_pool_handle())
         return model, mgr
 
-    def test_execute_matches_eager(self, model_and_mgr):
+    @pytest.mark.parametrize(
+        "grid_thw",
+        [
+            [[1, 24, 24], [1, 16, 16], [1, 16, 16]],
+            [[2, 24, 24]],
+        ],
+    )
+    def test_execute_matches_eager(self, model_and_mgr, grid_thw):
         model, mgr = model_and_mgr
-        # 144 + 64 + 64 = 272 output tokens, fits budget 512 in one batch.
-        grid_thw = [[1, 24, 24], [1, 16, 16], [1, 16, 16]]
         mm_kwargs = _make_mm_kwargs(grid_thw, mgr.device, mgr.dtype, seed=1)
         result = mgr.execute(mm_kwargs)
-        assert len(result) == 3
-        assert mgr.graph_hits == 3
+        assert len(result) == len(grid_thw)
+        assert mgr.graph_hits == len(grid_thw)
         assert mgr.graph_misses == 0
 
         # Replay is not bitwise vs eager: the varlen attention kernel's
@@ -203,14 +208,16 @@ class TestMiniMaxM3EncoderCudaGraph:
         (ref,) = _eager_per_item(model.vision_tower, mm_kwargs)
         torch.testing.assert_close(result[0], ref, rtol=0, atol=0)
 
-    def test_video_falls_back_to_eager(self, model_and_mgr):
+    def test_small_image_replay_matches_eager(self, model_and_mgr):
         model, mgr = model_and_mgr
-        # t != 1 items get an output-token sentinel and always miss.
-        grid_thw = [[2, 24, 24]]
+        # A small image leaves nearly all captured rows in one padding sequence.
+        grid_thw = [[1, 4, 4]]
         mm_kwargs = _make_mm_kwargs(grid_thw, mgr.device, mgr.dtype, seed=3)
         result = mgr.execute(mm_kwargs)
         assert len(result) == 1
-        assert mgr.graph_misses == 1
+        assert mgr.graph_hits == 1
+        buffers = mgr.budget_graphs["default"][512].input_buffers
+        assert buffers["cu_seqlens"].diff().max().item() <= buffers["max_seqlen"].item()
 
         (ref,) = _eager_per_item(model.vision_tower, mm_kwargs)
-        torch.testing.assert_close(result[0], ref, rtol=0, atol=0)
+        torch.testing.assert_close(result[0], ref, rtol=1e-2, atol=2e-2)
