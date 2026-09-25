@@ -823,30 +823,26 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
-            # Decode rows sort first, so the phases are contiguous slices.
             kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
-            num_decode_tokens = attn_metadata.num_decode_tokens
-            if num_decode_tokens > 0:
+            if attn_metadata.num_decode_tokens == num_tokens:
                 rocm_sparse_attn_decode_bf16(
-                    q=q[:num_decode_tokens],
+                    q=q,
                     kv=kv,
                     scale=self.scale,
                     head_dim=q.shape[-1],
                     nope_head_dim=self.kv_lora_rank,
                     rope_head_dim=q.shape[-1] - self.kv_lora_rank,
                     attn_sink=triton_sinks,
-                    output=output[:num_decode_tokens],
+                    output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
-                    ragged_indptr=attn_metadata.paged_kv_indptr[
-                        : num_decode_tokens + 1
-                    ],
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
                     sparse_len=min(
                         attn_metadata.max_seq_len, attn_metadata.topk_tokens
                     ),
                 )
-            if num_decode_tokens < num_tokens:
+            else:
                 rocm_sparse_attn_prefill(
-                    q=q[num_decode_tokens:],
+                    q=q,
                     kv=kv,
                     indices=None,
                     topk_length=None,
@@ -855,9 +851,9 @@ class ROCMAiterMLASparseImpl(
                     nope_head_dim=self.kv_lora_rank,
                     rope_head_dim=q.shape[-1] - self.kv_lora_rank,
                     attn_sink=triton_sinks,
-                    output=output[num_decode_tokens:],
+                    output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
-                    ragged_indptr=attn_metadata.paged_kv_indptr[num_decode_tokens:],
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
