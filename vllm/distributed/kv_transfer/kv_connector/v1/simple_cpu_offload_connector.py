@@ -319,8 +319,13 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         return None
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.scheduler_manager is not None:
-            return self.scheduler_manager.get_stats()
+        # Worker-side callers may invoke this hook on connectors constructed
+        # via __new__ (as in test_worker.py), which lack scheduler_manager.
+        scheduler_manager: SimpleCPUOffloadScheduler | None = getattr(
+            self, "scheduler_manager", None
+        )
+        if scheduler_manager is not None:
+            return scheduler_manager.get_stats()
         return None
 
     @classmethod
