@@ -3174,6 +3174,44 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     ) == (544, 136)
 
 
+@pytest.mark.parametrize(
+    ("prefix_match_unit", "accepted"), [(None, True), (16, True), (32, False)]
+)
+def test_single_group_rejects_prefix_match_unit_it_cannot_honor(
+    prefix_match_unit, accepted
+):
+    """One KV cache group always hashes at its block size. Dropping any other
+    `prefix_match_unit` silently let the Mamba prefill checkpoint builder, which
+    reads the flag directly, checkpoint where the scheduler never registers."""
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((16,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["model.mamba"], mamba_spec)],
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=prefix_match_unit,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
+    if accepted:
+        assert kv_cache_utils.resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        ) == (16, 16)
+    else:
+        with pytest.raises(ValueError, match="prefix_match_unit=32"):
+            kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
 def test_resolve_dcp_kv_block_size_unwraps_uniform_type_specs():
     attention = FullAttentionSpec(
         block_size=16,
