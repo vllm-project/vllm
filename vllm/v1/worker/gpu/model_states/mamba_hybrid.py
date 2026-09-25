@@ -43,16 +43,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         return {"is_prefilling": self.is_prefilling[:num_reqs]}
 
     def get_extra_attn_kwargs(
-        self,
-        attn_metadata_builder: Any,
-        num_reqs: int,
+        self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
@@ -250,7 +246,11 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        # Prefer the promised bound: a capture dummy's measured max is its even
+        # split, not the length the graph must replay.
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
@@ -278,10 +278,18 @@ class MambaHybridModelState(DefaultModelState):
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
-                # A row is a spec-decode row only when its whole prompt is already
-                # computed, i.e. exactly one non-draft (decode) token is scheduled.
-                is_decode = (
-                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                # Test request state, not num_scheduled_tokens == draft_count+1:
+                # adaptive rewrites num_scheduled_tokens to an even split, so that
+                # equality rarely holds and would demote every verify row to decode.
+                # A one-token prompt tail over prior state that the scheduler padded
+                # with placeholder drafts is also a spec-decode row: the prefill
+                # kernels can't roll the placeholders back.
+                num_computed = input_batch.num_computed_prefill_tokens_np
+                is_prompt_tail = (num_computed > 0) & (
+                    input_batch.prefill_len_np - num_computed == 1
+                )
+                is_decode = (~input_batch.is_prefilling_np | is_prompt_tail) & (
+                    input_batch.num_scheduled_tokens > 0
                 )
                 spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
@@ -333,9 +341,7 @@ class MambaHybridModelState(DefaultModelState):
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
-                attn_metadata,
-                attn_groups,
-                for_capture=for_capture,
+                attn_metadata, attn_groups, for_capture=for_capture
             )
         return attn_metadata
 

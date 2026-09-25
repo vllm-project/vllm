@@ -80,10 +80,12 @@ def _validate(enable_trace_replay: bool) -> None:
         model_config=SimpleNamespace(
             return_sampling_mask=False,
             enable_trace_replay=enable_trace_replay,
+            is_diffusion=False,
         ),
         vllm_config=SimpleNamespace(reasoning_config=None),
         speculative_config=None,
         structured_outputs_config=None,
+        diffusion_config=None,
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
     )
