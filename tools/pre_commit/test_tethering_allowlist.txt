@@ -41,7 +41,7 @@ tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transf
 tests/entrypoints/cli/test_serve.py  # added by #53124 (2026-09-15); no job collects tests/entrypoints/cli/
 
 # tests/kernels/
-tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with no follow-up job
+tests/kernels/test_shuffle_rows.py  # left out of (B200) Miscellaneous Kernels as broken on main, no follow-up job
 
 # tests/lora/ - explicitly --ignore'd from the sharded LoRA run, with no
 # dedicated *_tp job (unlike the other ignored *_tp tests).
