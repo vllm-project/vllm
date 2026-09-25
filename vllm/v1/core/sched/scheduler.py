@@ -2164,8 +2164,8 @@ class Scheduler(SchedulerInterface):
                     request, self._num_tokens_to_cache_after_output(request)
                 )
 
-            if new_token_ids and self.structured_output_manager.should_advance(
-                request, new_token_ids=new_token_ids
+            if new_token_ids and not self.structured_output_manager.accept_tokens(
+                request, new_token_ids
             ):
                 logger.error(
                     "Unexpected: grammar rejected tokens %s for request %s. "

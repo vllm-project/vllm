@@ -4140,10 +4140,13 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
         assert scheduler_config.long_prefill_token_threshold == 0
 
 
-# =======================================================================# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests start
+# ==============================================================================
+# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests start
 # NOTE: In E->P->D disagg case, both KV and EC Connector works in P instance
 # Unless specify, the existence of KV Connector should not affect any test results
-# ================================================================
+# ==============================================================================
+
+
 def _assert_right_encoder_cache_allocated(
     scheduler: Scheduler,
     hashes_to_check: list[str] | None = None,
@@ -5205,8 +5208,11 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
 
 
-# =======================================================================# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
-# ================================================================
+# ==============================================================================
+# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
+# ==============================================================================
+
+
 def test_prepend_skipped_requests_order():
     scheduler = create_scheduler(max_num_seqs=1, use_kv_connector=True)
     requests = create_requests(num_requests=4)
@@ -5605,8 +5611,11 @@ def test_ec_connector_update_connector_output_called():
     )
 
 
-# =======================================================================# Variable-length encoder cross-attention block allocation tests
-# ================================================================
+# ==============================================================================
+# Variable-length encoder cross-attention block allocation tests
+# ==============================================================================
+
+
 def _create_encoder_decoder_scheduler(
     block_size: int = 16,
     num_blocks: int = 10000,
