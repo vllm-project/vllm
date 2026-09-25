@@ -338,5 +338,5 @@ class GrammarOutput:
     # Per request, ordered as structured_output_request_ids: how many leading
     # drafts the bitmask constrained. `grammar_bitmask` fills every row after
     # the first -1 placeholder with the all-permissive `_full_mask`, so drafts
-    # from this index on must not be accepted. None means nothing to invalidate.
+    # from this index on must not be accepted. None invalidates every draft.
     num_acceptable_drafts: list[int] | None = None
