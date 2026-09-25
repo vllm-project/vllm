@@ -493,6 +493,7 @@ steps:
   source_file_dependencies: &cpu-async-engine-deps
   - vllm/assets/
   - vllm/config/
+  - vllm/device_allocator/
   - vllm/engine/arg_utils.py
   - vllm/entrypoints/chat_utils.py
   - vllm/entrypoints/mcp/
@@ -534,9 +535,11 @@ steps:
   - tests/parser
   - tests/transformers_utils
   - tests/config
+  - tests/device_allocator
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s device_allocator
   - pytest -v -s test_envs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pcp_dp.py

@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
+    VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1264,6 +1265,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
+    ),
+    # Turn expandable_segments off during CUDA graph capture so AITER custom
+    # all-reduce can skip its staging copy. ROCm only; needs ROCm/aiter#5799.
+    "VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL": lambda: (
+        os.getenv("VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL", "False").lower()
+        in ("true", "1")
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
