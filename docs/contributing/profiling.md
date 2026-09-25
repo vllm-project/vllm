@@ -88,6 +88,27 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 $ curl -X POST http://localhost:8000/stop_profile
 ```
 
+`/start_profile` also accepts an optional JSON body with settings for that
+profiling session. The Python and Rust API frontends accept the same fields:
+
+```shell
+curl -X POST http://localhost:8000/start_profile \
+    -H "Content-Type: application/json" \
+    -d '{
+        "profile_prefix": "sharegpt_run_1",
+        "delay_iterations": 5000,
+        "max_iterations": 20
+    }'
+```
+
+`profile_prefix` identifies the generated trace files. `delay_iterations`
+skips worker iterations before collection starts, and `max_iterations` limits
+the number of collected worker iterations (`0` means no limit). These iteration
+bounds do not apply to the AsyncLLM frontend CPU profiler, which records from
+`/start_profile` until `/stop_profile`. Always call `/stop_profile`, including
+after the worker reaches `max_iterations`; starting another session before
+stopping the current one returns HTTP 409.
+
 ## Profile with Triton Proton
 
 [Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton)

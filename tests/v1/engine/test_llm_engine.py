@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm import LLM
+from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -16,6 +19,38 @@ else:
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
+
+
+def test_duplicate_profile_start_rejected_before_engine_core_dispatch():
+    engine = object.__new__(LLMEngine)
+    engine.engine_core = MagicMock()
+    engine._profile_session_active = False
+
+    engine.start_profile("first")
+
+    with pytest.raises(ProfilerAlreadyActiveError):
+        engine.start_profile("duplicate")
+
+    engine.engine_core.profile.assert_called_once_with(True, "first", None, None)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"profile_prefix": "../trace"},
+        {"delay_iterations": -1},
+        {"max_iterations": -1},
+    ],
+)
+def test_invalid_profile_controls_rejected_before_engine_core_dispatch(kwargs):
+    engine = object.__new__(LLMEngine)
+    engine.engine_core = MagicMock()
+    engine._profile_session_active = False
+
+    with pytest.raises(ValueError):
+        engine.start_profile(**kwargs)
+
+    engine.engine_core.profile.assert_not_called()
 
 
 def _vllm_model(

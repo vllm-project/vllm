@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::future::join_all;
@@ -271,6 +272,7 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    profile_active: AtomicBool,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
     runtime: BackgroundShutdownRuntime,
@@ -418,6 +420,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            profile_active: AtomicBool::new(false),
             runtime,
             output_task,
             dispatcher_task,
@@ -945,14 +948,37 @@ impl EngineCoreClient {
     }
 
     /// Start profiling the engine.
-    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
-        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+    pub async fn start_profile(
+        &self,
+        profile_prefix: Option<&str>,
+        delay_iterations: Option<u64>,
+        max_iterations: Option<u64>,
+    ) -> Result<()> {
+        if self
+            .profile_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(Error::ProfileAlreadyActive);
+        }
+
+        if let Err(error) = self
+            .call_utility::<(), _>(
+                "profile",
+                (true, profile_prefix, delay_iterations, max_iterations),
+            )
+            .await
+        {
+            self.profile_active.store(false, Ordering::Release);
+            return Err(error);
+        }
         Ok(())
     }
 
     /// Stop profiling the engine.
     pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
         self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
+        self.profile_active.store(false, Ordering::Release);
         Ok(())
     }
 

@@ -269,8 +269,24 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.collective_rpc("profile", args=(is_start, profile_prefix))
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        kwargs: dict[str, int] = {}
+        if delay_iterations is not None:
+            kwargs["delay_iterations"] = delay_iterations
+        if max_iterations is not None:
+            kwargs["max_iterations"] = max_iterations
+        self.collective_rpc(
+            "profile",
+            args=(is_start, profile_prefix),
+            kwargs=kwargs or None,
+        )
 
     def save_sharded_state(
         self,

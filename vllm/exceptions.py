@@ -173,3 +173,14 @@ class MaxQueuedTokensError(GracefulHTTPError):
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )
+
+
+class ProfilerAlreadyActiveError(GracefulHTTPError):
+    """Raised when a profiling session is already active."""
+
+    def __init__(self):
+        super().__init__(
+            "A profiling session is already active. Call /stop_profile before "
+            "starting another session.",
+            HTTPStatus.CONFLICT,
+        )

@@ -20,6 +20,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
+from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -1289,7 +1290,14 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1300,6 +1308,8 @@ class Worker(WorkerBase):
             )
 
         if is_start:
+            validate_profile_prefix(profile_prefix)
+
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1311,9 +1321,6 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            if self.profiler_config.profiler == "proton" and self.profiler is not None:
-                self.profiler.set_output_name(trace_name)
-
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
                 self.profiler = create_worker_profiler(
@@ -1322,7 +1329,11 @@ class Worker(WorkerBase):
                     local_rank=self.local_rank,
                 )
 
-            self.profiler.start()
+            self.profiler.set_output_name(trace_name)
+            self.profiler.start(
+                delay_iterations=delay_iterations,
+                max_iterations=max_iterations,
+            )
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
