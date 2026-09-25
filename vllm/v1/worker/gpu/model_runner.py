@@ -1250,6 +1250,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         prefill_runs_as_decode_np = None
+        decode_graph_eligible = not has_prefill
         if has_prefill and self.pcp_manager is None:
             # One new prompt token over existing context (possibly padded with
             # placeholder drafts) runs as a decode. PCP partitions prefill rows.
@@ -1258,9 +1259,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
             one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
             prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
-
-        decode_graph_eligible = not has_prefill
-        if prefill_runs_as_decode_np is not None:
             decode_graph_eligible = bool(
                 (prefill_runs_as_decode_np | ~is_prefilling_np).all()
             )
@@ -1275,8 +1273,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             is_prefilling_np=is_prefilling_np,
             has_prefill=has_prefill,
-            decode_graph_eligible=decode_graph_eligible,
             prefill_runs_as_decode_np=prefill_runs_as_decode_np,
+            decode_graph_eligible=decode_graph_eligible,
         )
         return batch_state, get_uniform_decode_token_count(
             num_reqs, num_toks, max_query_len, decode_graph_eligible
@@ -1462,8 +1460,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
-            decode_graph_eligible=batch_req_state.decode_graph_eligible,
             prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
+            decode_graph_eligible=batch_req_state.decode_graph_eligible,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=is_padding,
@@ -2339,8 +2337,8 @@ class BatchReqState(NamedTuple):
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
     has_prefill: bool
-    decode_graph_eligible: bool
     prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
+    decode_graph_eligible: bool
 
 
 def sort_batch_req_ids(
