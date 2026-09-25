@@ -211,6 +211,7 @@ steps:
     - vllm/utils/
     - vllm/v1/
     - tests/v1
+    - tests/watermarking
   device: cpu-small
   commands:
     # split the test to avoid interference
@@ -222,6 +223,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
+    - pytest -v -s watermarking
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
