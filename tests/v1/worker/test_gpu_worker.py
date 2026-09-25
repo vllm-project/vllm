@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
@@ -55,6 +56,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
 @pytest.mark.skipif(
     not torch.accelerator.is_available(), reason="needs the CUDA allocator"
 )
+# A fresh allocator: blocks cached by earlier tests could serve the large buffer.
+@create_new_process_for_each_test("spawn")
 def test_scoped_max_split_keeps_freed_large_blocks_releasable():
     """A small allocation made after a large buffer is freed must not pin the
     buffer's segment: the profiling run (determine_available_memory) grows
