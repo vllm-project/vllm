@@ -80,26 +80,11 @@ PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    from vllm.config.cache import get_kv_cache_dtype_handler
-
-    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
-    if handler is not None:
-        return handler.is_quantized()
     return (
         kv_cache_dtype.startswith("fp8")
         or kv_cache_dtype.endswith("per_token_head")
         or kv_cache_dtype.startswith("nvfp4")
     )
-
-
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    from vllm.config.cache import get_kv_cache_dtype_handler
-
-    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
-    if handler is not None:
-        return handler.quant_mode().is_per_token_head
-    return kv_cache_dtype.endswith("per_token_head")
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:

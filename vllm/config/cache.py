@@ -14,9 +14,11 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     is_quantized_kv_cache,
+)
+from vllm.v1.kv_cache_interface import (
+    KVQuantMode,
     kv_cache_uses_per_token_head_scales,
 )
-from vllm.v1.kv_cache_interface import KVQuantMode
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 logger = init_logger(__name__)
@@ -90,15 +92,12 @@ class KVCacheDTypeHandler(Protocol):
         """
         ...
 
-    def is_quantized(self) -> bool:
-        """True if the cache is stored in a quantized (non-native) format."""
-        ...
 
     def quant_mode(self) -> KVQuantMode:
         """The :class:`KVQuantMode` used by generic kernels.
 
         Return an existing mode to reuse generic kernel paths, or
-        ``KVQuantMode.BACKEND`` when the backend fully self-manages kernel
+        ``KVQuantMode.CUSTOM`` when the backend fully self-manages kernel
         dispatch.
         """
         ...
@@ -121,7 +120,7 @@ def register_kv_cache_dtype(name: str):
     - resolve ``torch_dtype()`` once and inject it into
       ``STR_DTYPE_TO_TORCH_DTYPE``, so all existing ``dict[name]`` /
       ``name in dict`` sites need zero changes;
-    - be stored for later ``quant_mode()`` / ``is_quantized()`` queries.
+    - be stored for later ``quant_mode()`` queries.
 
     Examples:
         >>> @register_kv_cache_dtype("int8")
@@ -131,11 +130,9 @@ def register_kv_cache_dtype(name: str):
         ...     def torch_dtype(self):
         ...         return torch.int8
         ...
-        ...     def is_quantized(self):
-        ...         return True
         ...
         ...     def quant_mode(self):
-        ...         return KVQuantMode.BACKEND
+        ...         return KVQuantMode.CUSTOM
     """
 
     def _decorate(cls):
@@ -468,13 +465,6 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType | str) -> CacheDType | str:
-        from vllm.platforms import current_platform
-
-        # Accessing current_platform triggers platform activation, which
-        # lets out-of-tree backends register their custom dtypes (via
-        # @register_kv_cache_dtype in their Platform.__init__) before
-        # membership is checked.
-        _ = current_platform
         if not is_known_kv_cache_dtype(cache_dtype):
             raise ValueError(
                 f"Invalid kv_cache_dtype: {cache_dtype!r}. "

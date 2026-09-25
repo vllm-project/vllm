@@ -21,12 +21,12 @@ from vllm.config.cache import (
 )
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    is_quantized_kv_cache,
-    kv_cache_uses_per_token_head_scales,
 )
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_head_scales,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -41,11 +41,8 @@ class TestC8Handler:
     def torch_dtype(self):
         return torch.int8
 
-    def is_quantized(self):
-        return True
-
     def quant_mode(self):
-        return KVQuantMode.BACKEND
+        return KVQuantMode.CUSTOM
 
 
 @register_kv_cache_dtype("test-ith")
@@ -56,9 +53,6 @@ class TestIthHandler:
 
     def torch_dtype(self):
         return torch.int8
-
-    def is_quantized(self):
-        return True
 
     def quant_mode(self):
         return KVQuantMode.INT8_PER_TOKEN_HEAD
@@ -71,8 +65,7 @@ def test_register_kv_cache_dtype():
 
     handler = get_kv_cache_dtype_handler("test-c8")
     assert handler is not None
-    assert handler.quant_mode() == KVQuantMode.BACKEND
-    assert handler.is_quantized() is True
+    assert handler.quant_mode() == KVQuantMode.CUSTOM
 
     assert is_known_kv_cache_dtype("test-c8") is True
     assert is_known_kv_cache_dtype("auto") is True
@@ -81,7 +74,7 @@ def test_register_kv_cache_dtype():
     # Upstream dtypes have no handler and keep their existing mapping.
     assert get_kv_cache_dtype_handler("fp8") is None
     assert get_kv_quant_mode("fp8") == KVQuantMode.FP8_PER_TENSOR
-    assert get_kv_quant_mode("test-c8") == KVQuantMode.BACKEND
+    assert get_kv_quant_mode("test-c8") == KVQuantMode.CUSTOM
 
 
 def test_merged_quantized_helpers():
@@ -119,8 +112,8 @@ def test_cache_config_accepts_custom_dtype():
 
 
 def test_backend_sentinel_properties():
-    """BACKEND reads as quantized but matches no generic kernel mode."""
-    mode = KVQuantMode.BACKEND
+    """CUSTOM reads as quantized but matches no generic kernel mode."""
+    mode = KVQuantMode.CUSTOM
     assert mode != KVQuantMode.NONE
     assert mode.is_per_token_head is False
     assert mode.is_nvfp4 is False

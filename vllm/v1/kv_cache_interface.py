@@ -60,7 +60,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    BACKEND = 11
+    CUSTOM = 11
 
     @property
     def is_per_token_head(self) -> bool:
@@ -87,15 +87,15 @@ class KVQuantMode(IntEnum):
         )
 
     @property
-    def is_backend(self) -> bool:
+    def is_custom_mode(self) -> bool:
         """True when a platform backend fully self-manages kernel dispatch.
 
         The attention selector should defer to the backend's own kernel
         selection rather than a generic per-token-head / fp8 / turboquant
-        path. Distinct from NONE (which means non-quantized): BACKEND is
+        path. Distinct from NONE (which means non-quantized): CUSTOM is
         quantized, just with no generic kernel mode.
         """
-        return self == KVQuantMode.BACKEND
+        return self == KVQuantMode.CUSTOM
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
@@ -149,6 +149,11 @@ def replace_as(
     }
     kwargs.update(changes)
     return target_cls(**kwargs)
+
+
+def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+    return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
 class KVCacheSpecKind(str, Enum):

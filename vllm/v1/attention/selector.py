@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 import torch
 
 import vllm.envs as envs
-from vllm.config.cache import CacheDType
+from vllm.config.cache import (
+    CacheDType, 
+    KV_CACHE_DTYPES,
+    is_known_kv_cache_dtype,
+)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
@@ -117,11 +121,6 @@ def get_attn_backend(
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     if kv_cache_dtype is not None:
-        from vllm.config.cache import (
-            KV_CACHE_DTYPES,
-            is_known_kv_cache_dtype,
-        )
-
         assert is_known_kv_cache_dtype(kv_cache_dtype), (
             f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
             f"Valid values are: {KV_CACHE_DTYPES}"
