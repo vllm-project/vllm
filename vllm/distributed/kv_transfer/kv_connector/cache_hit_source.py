@@ -9,19 +9,23 @@ from enum import Enum
 
 
 class CacheHitSource(str, Enum):
-    """Bounded origins for cached prompt tokens, declared fastest to slowest."""
+    """Where cached prompt tokens' KV came from.
+
+    Ordered by offload tier: KV cascades from the accelerator to host memory
+    and on to secondary tiers, so later members sit further from the GPU.
+    """
 
     DEVICE = "device"
     HOST = "host"
     P2P = "p2p"
     DISK = "disk"
-    # Fallback: uninstrumented connector or remote store. Ranks slowest so a
-    # token partly served from an unknown tier is never labeled a known one.
+    # Fallback: uninstrumented connector or remote store. Last, so mixing
+    # with a known tier never reports the known one.
     EXTERNAL_UNSPECIFIED = "external_unspecified"
 
     @classmethod
     def slowest(cls, sources: Iterable[CacheHitSource]) -> CacheHitSource:
-        """The slowest of ``sources``; a token needs KV from all of them."""
+        """The slowest of ``sources``."""
         order = list(cls)
         return max(sources, key=order.index)
 
