@@ -11,8 +11,10 @@ left as noise, one denoise step gives a distribution over each slot. These
 | `diffusion_pinned` | `list[int]` of canvas positions | held at their seed value on every denoise step, so a read past one step keeps its template |
 | `diffusion_max_steps` | `int` | denoise steps before the canvas is emitted |
 | `diffusion_read_only` | `bool` | emit the argmax canvas as soon as the cap is reached, end the request there, and return temperature-1 logprobs at every position |
+| `diffusion_constrained` | `bool` | run the unembedding, sampler and self-conditioning over the request's `logprob_token_ids` only. Logprobs are normalized over that set. A step uses this only when every read in it has the same set |
 
-`structured_server.py` turns a question schema into those fields. It serves
+`structured_server.py` turns a question schema into those fields, with
+`diffusion_constrained` on for every read (`--no-constrained` turns it off). It serves
 `/v1/chat/completions`: the system message is the schema, the user message
 is the state JSON, and the reply content is one distribution per question
 with a standard error over a few noise draws.

@@ -109,6 +109,23 @@ steps:
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
     - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Kimi K3"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      commands:
+      # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
+      # The two kernels/ files the NVIDIA job adds are CUDA-only (they import
+      # cuda.bindings.driver), so they are deliberately left out here.
+      - pytest -v -s models/kimi_k3
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
@@ -152,6 +169,8 @@ steps:
       - image-build-amd
       commands:
       - pytest -v -s models/qwen4_exp/test_qsa_amd.py
+      # PLE and QSA import conflicting HC registrations in a shared process.
+      - pytest -v -s models/qwen4_exp/test_ple.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu

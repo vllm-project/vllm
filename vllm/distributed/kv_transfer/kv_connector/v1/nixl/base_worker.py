@@ -1567,7 +1567,13 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
-                storage_is_block_major = num_blocks * block_stride == registration_len
+                # A connector that registers the backing as one memory region
+                # may need its length rounded up to a page boundary. Such a tail
+                # is shorter than one block, so it cannot make the storage
+                # segmented.
+                storage_is_block_major = (
+                    0 <= registration_len - num_blocks * block_stride < block_stride
+                )
                 # A view with a contiguous page can own a strided region even
                 # when sibling layers share the same backing allocation.
                 page_contiguous = (
@@ -1589,7 +1595,9 @@ class NixlBaseConnectorWorker:
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
-                    storage_block_len = registration_len // num_blocks
+                    # The complete storage row is one block stride. Dividing the
+                    # registered length instead would fold the padding tail in.
+                    storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
