@@ -34,10 +34,8 @@ from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausal
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.model_executor.models.llama_pard2 import Pard2LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
-from vllm.model_executor.models.qwen3_pard2 import Pard2Qwen3ForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -121,17 +119,6 @@ class SpecDecodeBaseProposer:
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
-        # PARD-2 is trained and evaluated with the draft seeing the full
-        # sequence, i.e. token 0 paired with a zero target feature. The
-        # EAGLE-style shift above drops that row; for drafts whose attention
-        # sink is bound to the first token this costs a large amount of
-        # acceptance. Prepend it back as an "anchor" row, which costs one
-        # extra draft row per request.
-        self.pard2_anchor = self.method == "pard2"
-        if self.pard2_anchor:
-            self.net_num_new_slots_per_request += 1
-            self.needs_extra_input_slots = True
-
         # When True, all draft steps reuse the same position as the
         # first step instead of advancing by one each iteration.
         # Used by draft models with Q-only attention that share KV
@@ -170,8 +157,6 @@ class SpecDecodeBaseProposer:
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
                 max_num_tokens=self.max_num_tokens,
-                net_new_slots_per_request=self.net_num_new_slots_per_request,
-                anchor=self.pard2_anchor,
             )
         self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
@@ -245,7 +230,6 @@ class SpecDecodeBaseProposer:
 
         self.is_rejected_token_mask: torch.Tensor | None = None
         self.is_masked_token_mask: torch.Tensor | None = None
-        self.is_anchor_token_mask: torch.Tensor | None = None
         if self.needs_extra_input_slots:
             # For draft models and parallel drafting, we need to keep track of
             # which tokens are rejected to update the slot mapping with padding slots.
@@ -258,12 +242,6 @@ class SpecDecodeBaseProposer:
             self.is_masked_token_mask = torch.zeros(
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
-            if self.pard2_anchor:
-                # Marks the PARD-2 anchor row (token 0) of each prefilling
-                # request; those rows are fed a zero target feature.
-                self.is_anchor_token_mask = torch.zeros(
-                    (self.max_num_tokens,), dtype=torch.bool, device=device
-                )
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.inputs_embeds_size),
@@ -401,9 +379,7 @@ class SpecDecodeBaseProposer:
                 "specified in its config.json."
             )
 
-        # PARD-2 fills masked slots with repeat-last-feat instead of a static
-        # mask feature, so it needs neither the tensor nor the model buffer.
-        if self.pass_hidden_states_to_model and self.method != "pard2":
+        if self.pass_hidden_states_to_model:
             self.parallel_drafting_hidden_state_tensor = torch.empty(
                 self.hidden_size, dtype=self.dtype, device=self.device
             )
@@ -557,7 +533,7 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method in ("eagle3", "dflash", "pard2"):
+        if self.method in ("eagle3", "dflash"):
             model = self.model
             if isinstance(model, BreakableCUDAGraphWrapper):
                 model = model.unwrap()
@@ -569,8 +545,6 @@ class SpecDecodeBaseProposer:
                     DFlashQwen3ForCausalLM,
                     Eagle3Qwen3ForCausalLM,
                     DFlashLagunaForCausalLM,
-                    Pard2LlamaForCausalLM,
-                    Pard2Qwen3ForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(
@@ -707,9 +681,7 @@ class SpecDecodeBaseProposer:
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
         # (i.e., not the first proposal).
-        if (
-            self.num_speculative_tokens > 1 or self.needs_extra_input_slots
-        ) and num_rejected_tokens_gpu is not None:
+        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
 
         block_size = self.block_size
@@ -919,19 +891,6 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            if self.pard2_anchor:
-                # A request gets the anchor row only when it starts at
-                # position 0, i.e. this is its prefill. Decode requests
-                # already have the anchor in their draft KV cache.
-                anchor_flags = (target_positions[query_start_loc[:-1]] == 0).to(
-                    torch.int32
-                )
-                anchor_mask_buf = self.is_anchor_token_mask
-            else:
-                # Unused when ANCHOR is False; pass valid pointers anyway.
-                anchor_flags = self.arange[:batch_size]
-                anchor_mask_buf = self.is_rejected_token_mask
-
             _copy_and_expand_eagle_inputs(
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
@@ -954,43 +913,20 @@ class SpecDecodeBaseProposer:
                 total_input_tokens=total_num_input_tokens,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
-                anchor_flags_ptr=anchor_flags,
-                out_is_anchor_mask_ptr=anchor_mask_buf,
-                net_new_slots_per_request=self.net_num_new_slots_per_request,
                 BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-                ANCHOR=self.pard2_anchor,
                 batch_size=batch_size,
                 num_blocks=num_blocks,
             )
             if self.pass_hidden_states_to_model:
-                n = total_num_output_tokens
+                assert self.parallel_drafting_hidden_state_tensor is not None
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
-                if self.pard2_anchor:
-                    # The anchor row is fed a zero feature, matching how the
-                    # reference implementation pads position 0.
-                    self.hidden_states[:n].masked_fill_(
-                        self.is_anchor_token_mask[:n].unsqueeze(1), 0
-                    )
                 # Use torch.where to avoid DtoH sync from boolean indexing
-                mask = self.is_masked_token_mask[:n]
-                if self.method == "pard2":
-                    # PARD-2 repeat-last-feat: each masked parallel slot reuses the
-                    # most recent real token's projected hidden state (forward-fill
-                    # over the token axis). Safe across requests since each request's
-                    # first slot is always real.
-                    idx = torch.arange(n, device=self.device)
-                    last_real = torch.cummax(
-                        torch.where(mask, torch.zeros_like(idx), idx), dim=0
-                    ).values
-                    masked_slot_src = self.hidden_states[:n].index_select(0, last_real)
-                else:
-                    assert self.parallel_drafting_hidden_state_tensor is not None
-                    masked_slot_src = self.parallel_drafting_hidden_state_tensor
+                mask = self.is_masked_token_mask[:total_num_output_tokens]
                 torch.where(
                     mask.unsqueeze(1),
-                    masked_slot_src,
-                    self.hidden_states[:n],
-                    out=self.hidden_states[:n],
+                    self.parallel_drafting_hidden_state_tensor,
+                    self.hidden_states[:total_num_output_tokens],
+                    out=self.hidden_states[:total_num_output_tokens],
                 )
 
             # 2.
@@ -1015,15 +951,6 @@ class SpecDecodeBaseProposer:
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
-            if self.pard2_anchor:
-                # Requests that were not given an anchor row this step still
-                # have the anchor entry in their draft KV cache from prefill,
-                # so their key length is one larger than the query layout
-                # suggests. Their extra row is a junk (rejected) row.
-                new_cad.seq_lens += 1 - anchor_flags
-                new_cad.max_seq_len += 1
-                new_cad._seq_lens_cpu = None
-                new_cad._num_computed_tokens_cpu = None
 
             return total_num_output_tokens, token_indices_to_sample, new_cad
 
@@ -1748,7 +1675,7 @@ class SpecDecodeBaseProposer:
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
         """
-        if self.method not in ("eagle3", "pard2"):
+        if self.method != "eagle3":
             return False
         # Assume that eagle3 heads use aux hidden states by default
         use_aux_hidden_state = True

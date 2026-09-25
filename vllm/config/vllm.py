@@ -3082,10 +3082,12 @@ class VllmConfig:
         ):
             unsupported.append("pipeline parallelism with async scheduling")
 
-        # DSpark is implemented only by the V2 GPU model runner.
+        # DSpark and PARD-2 are implemented only by the V2 GPU model runner.
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            if self.speculative_config.method == "pard2":
+                unsupported.append("pard2 speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
 
