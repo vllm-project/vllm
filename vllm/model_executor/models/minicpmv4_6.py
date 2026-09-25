@@ -87,34 +87,110 @@ def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         fields["use_vit_merger"] = MultiModalFieldConfig.batched(
             "image", keep_on_cpu=True
         )
+    if "video_use_vit_merger" in hf_inputs:
+        fields["video_use_vit_merger"] = MultiModalFieldConfig.batched(
+            "video", keep_on_cpu=True
+        )
     return fields
+
+
+def _collapsed_flag(value: object) -> bool | None:
+    """Collapse a batched per-item boolean flag into a single bool."""
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return bool(value.any().item())
+    if isinstance(value, list | tuple):
+        return any(
+            bool(t.any().item()) if isinstance(t, torch.Tensor) else bool(t)
+            for t in value
+        )
+    return bool(value)
+
+
+# HF-style modality-scoped keys inside `mm_processor_kwargs`. They scope a value
+# to a single modality and must not be forwarded to the processors, which take
+# flat arguments only.
+_MODALITY_SCOPED_MM_KWARGS = ("images_kwargs", "videos_kwargs", "audio_kwargs")
+
+
+def _flat_processor_kwargs(
+    mm_kwargs: Mapping[str, object],
+    downsample_mode: str,
+) -> dict[str, object]:
+    """Drop the modality-scoped nesting and pin the resolved downsample mode.
+
+    The placeholder count and the vision tower must read the same mode, so the
+    value resolved for this modality is passed down explicitly rather than
+    leaving the processor to fall back to its own default.
+    """
+    kwargs = {
+        key: value
+        for key, value in mm_kwargs.items()
+        if key not in _MODALITY_SCOPED_MM_KWARGS
+    }
+    kwargs["downsample_mode"] = downsample_mode
+    return kwargs
 
 
 class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
     def _resolve_downsample_mode(
         self,
         mm_kwargs: Mapping[str, object],
+        modality: str = "image",
     ) -> str:
-        ds = mm_kwargs.get("downsample_mode")
-        if ds is not None:
-            return str(ds)
+        # A flat `downsample_mode` applies to both modalities; the nested
+        # `images_kwargs` / `videos_kwargs` forms scope it to one, matching
+        # MiniCPMV4_6Processor.
         info = self.info
         assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        merged = info.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
+        downsample_mode = merged.get("downsample_mode")
+        if downsample_mode is not None:
+            return str(downsample_mode)
         return info._get_downsample_mode()
+
+    def _resolve_max_slice_nums(
+        self,
+        mm_kwargs: Mapping[str, object],
+    ) -> int | None:
+        # Per-request max_slice_nums. None keeps the processor default.
+        # This must match what `process_images` passes to the image processor:
+        # the placeholder count and the visual token count are derived from it
+        # separately, so they diverge (and the engine aborts) if the two sides
+        # read different values.
+        max_slice = mm_kwargs.get("max_slice_nums")
+        if max_slice is None:
+            return None
+        return int(max_slice)
 
     def get_image_prompt_texts(
         self,
         image_size,
         image_idx: int = 0,
         downsample_mode: str | None = None,
+        max_slice_nums: int | None = None,
     ) -> str:
         info = self.info
         assert isinstance(info, MiniCPMV4_6ProcessingInfo)
         return info.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
+            max_slice_nums=max_slice_nums,
             downsample_mode=downsample_mode,
         )
+
+    def _video_local_id_prefix(self, video_idx: int) -> str:
+        """`<image_id>{idx}</image_id>` prefix emitted in front of a video placeholder.
+
+        MiniCPM-V 4.6 numbers each video with a local id, matching
+        MiniCPMV4_6Processor. 4.7 treats a video as one temporal sequence and is
+        trained without these ids, so it overrides this to return an empty string.
+        """
+        tokenizer = self.info.get_tokenizer()
+        id_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+        id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
+        return f"{id_start}{video_idx}{id_end}"
 
     def get_video_prompt_texts(
         self,
@@ -144,8 +220,6 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         image_end = getattr(tokenizer, "image_end_token", "</image>")
         slice_start = getattr(tokenizer, "slice_start_token", "<slice>")
         slice_end = getattr(tokenizer, "slice_end_token", "</slice>")
-        id_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
-        id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
 
         per_frame = image_start + video_token * source_tokens + image_end
         if grids[0] > 0 and grids[1] > 0 and patch_tokens > 0:
@@ -154,7 +228,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             per_frame += "\n".join(rows)
 
         body = per_frame * num_frames
-        return f"{id_start}{video_idx}{id_end}" + body
+        return self._video_local_id_prefix(video_idx) + body
 
     def process_images(
         self,
@@ -179,10 +253,12 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         n_images = len(parsed_images)
         image_processor = self.info.get_image_processor()
         patch_size = image_processor.patch_size
+        ds_mode = self._resolve_downsample_mode(mm_kwargs, modality="image")
+        image_proc_kwargs = _flat_processor_kwargs(mm_kwargs, ds_mode)
         per_image_pixel_values: list[torch.Tensor] = []
         per_image_tgt_sizes: list[torch.Tensor] = []
         for image in parsed_images:
-            ip_out = image_processor([image], **mm_kwargs)
+            ip_out = image_processor([image], **image_proc_kwargs)
             pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
             ts = ip_out["target_sizes"]  # (n_slices, 2)
             if pv.ndim == 4 and pv.shape[0] == 1:
@@ -210,7 +286,6 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             "tgt_sizes": per_image_tgt_sizes,
         }
 
-        ds_mode = self._resolve_downsample_mode(mm_kwargs)
         insert_layer_id = getattr(
             self.info.get_hf_config(),
             "insert_layer_id",
@@ -245,7 +320,11 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         image_processor = self.info.get_image_processor()
         patch_size = image_processor.patch_size
         video_max_slice = self.info.get_video_max_slice_num()
-        video_mm_kwargs = {**mm_kwargs, "max_slice_nums": video_max_slice}
+        video_ds_mode = self._resolve_downsample_mode(mm_kwargs, modality="video")
+        video_mm_kwargs = {
+            **_flat_processor_kwargs(mm_kwargs, video_ds_mode),
+            "max_slice_nums": video_max_slice,
+        }
 
         per_video_pixel_values: list[torch.Tensor] = []
         per_video_tgt_sizes: list[torch.Tensor] = []
@@ -312,10 +391,17 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         if not per_video_pixel_values:
             return {}
 
+        insert_layer_id = getattr(self.info.get_hf_config(), "insert_layer_id", -1)
+        merger_flag = video_ds_mode != "4x" and insert_layer_id >= 0
+
         return {
             "video_pixel_values": per_video_pixel_values,
             "video_tgt_sizes": per_video_tgt_sizes,
             "video_image_sizes": per_video_image_sizes,
+            "video_use_vit_merger": [
+                torch.tensor([merger_flag], dtype=torch.bool)
+                for _ in per_video_pixel_values
+            ],
         }
 
     def _get_prompt_updates(
@@ -324,7 +410,13 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs,
     ):
-        ds_mode = self._resolve_downsample_mode(hf_processor_mm_kwargs)
+        image_ds_mode = self._resolve_downsample_mode(
+            hf_processor_mm_kwargs, modality="image"
+        )
+        video_ds_mode = self._resolve_downsample_mode(
+            hf_processor_mm_kwargs, modality="video"
+        )
+        image_max_slice = self._resolve_max_slice_nums(hf_processor_mm_kwargs)
 
         placeholders = [
             ("image", self.info.image_pattern),
@@ -360,7 +452,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                     self.get_image_prompt_texts(
                         image_size,
                         item_idx,
-                        downsample_mode=ds_mode,
+                        downsample_mode=image_ds_mode,
+                        max_slice_nums=image_max_slice,
                     ),
                     add_special_tokens=False,
                 ),
@@ -389,7 +482,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                             self.get_video_prompt_texts(
                                 frame_size,
                                 num_frames,
-                                downsample_mode=ds_mode,
+                                downsample_mode=video_ds_mode,
                                 video_idx=item_idx,
                             ),
                             add_special_tokens=False,
@@ -409,7 +502,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                     self.get_video_prompt_texts(
                         frame_size,
                         num_frames,
-                        downsample_mode=ds_mode,
+                        downsample_mode=video_ds_mode,
                         video_idx=item_idx,
                     ),
                     add_special_tokens=False,
@@ -438,30 +531,27 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             cached_update, new_item_idx
         )
         # MiniCPM-V 4.6 prefixes video placeholders with `<image_id>{idx}</image_id>`
-        # (the base class only rewrites the image modality).
+        # (the base class only rewrites the image modality). 4.7 emits no such
+        # prefix, so there is nothing to renumber.
         if cached_update.modality == "video":
-            tokenizer = self.info.get_tokenizer()
-            id_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
-            id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
-            video_token = getattr(tokenizer, "video_token", "<|video_pad|>")
+            old_prefix = self._video_local_id_prefix(cached_update.item_idx)
+            new_prefix = self._video_local_id_prefix(new_item_idx)
+            if old_prefix and old_prefix != new_prefix:
+                tokenizer = self.info.get_tokenizer()
+                video_token = getattr(tokenizer, "video_token", "<|video_pad|>")
 
-            text = tokenizer.decode(cached_update.content.full)
-            prev_item_idx = cached_update.item_idx
+                text = tokenizer.decode(cached_update.content.full)
 
-            new_update = new_update.with_content(
-                PromptUpdateDetails.select_token_ids(
-                    cached_encode(
-                        tokenizer,
-                        text.replace(
-                            f"{id_start}{prev_item_idx}{id_end}",
-                            f"{id_start}{new_item_idx}{id_end}",
-                            1,
+                new_update = new_update.with_content(
+                    PromptUpdateDetails.select_token_ids(
+                        cached_encode(
+                            tokenizer,
+                            text.replace(old_prefix, new_prefix, 1),
+                            add_special_tokens=False,
                         ),
-                        add_special_tokens=False,
-                    ),
-                    cached_encode(tokenizer, video_token, add_special_tokens=False),
+                        cached_encode(tokenizer, video_token, add_special_tokens=False),
+                    )
                 )
-            )
         return new_update
 
     def _get_mm_fields_config(
@@ -674,6 +764,31 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             downsample_mode=downsample_mode,
         )
         return source_tokens + grids[0] * grids[1] * patch_tokens
+
+
+def _stack_vit_merger_qkv(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Fold separate vit_merger q/k/v projections into the fused qkv_proj module.
+
+    HF checkpoints store the window-attention projections separately, while
+    vLLM keeps them fused. The shard_id mechanism on the submodule's
+    WeightsMapper cannot do this: AutoWeightsLoader still recurses over every
+    incoming key after calling a submodule's load_weights, so a "k_proj" key
+    with no matching child raises before the mapping is honoured.
+    """
+    pairs = (
+        ("vit_merger.self_attn.q_proj.", "q"),
+        ("vit_merger.self_attn.k_proj.", "k"),
+        ("vit_merger.self_attn.v_proj.", "v"),
+    )
+    for name, tensor in weights:
+        for src, shard in pairs:
+            if src in name:
+                name = name.replace(src, "vit_merger.self_attn.qkv_proj.", 1)
+                tensor.shard_id = shard
+                break
+        yield name, tensor
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
@@ -1193,16 +1308,8 @@ class MiniCPMV4_6ForConditionalGeneration(
     # ----- Multimodal embedding interface -----
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        use_vit_merger_tensors = kwargs.pop("use_vit_merger", None)
-        use_vit_merger = None
-        if use_vit_merger_tensors is not None:
-            if isinstance(use_vit_merger_tensors, torch.Tensor):
-                use_vit_merger = bool(use_vit_merger_tensors.any().item())
-            elif isinstance(use_vit_merger_tensors, list | tuple):
-                use_vit_merger = any(
-                    bool(t.any().item()) if isinstance(t, torch.Tensor) else bool(t)
-                    for t in use_vit_merger_tensors
-                )
+        use_vit_merger = _collapsed_flag(kwargs.pop("use_vit_merger", None))
+        video_use_vit_merger = _collapsed_flag(kwargs.pop("video_use_vit_merger", None))
 
         image_kwargs = {
             k: v
@@ -1235,7 +1342,7 @@ class MiniCPMV4_6ForConditionalGeneration(
                 multimodal_embeddings += tuple(
                     self._process_vision_input(
                         video_input,
-                        use_vit_merger=use_vit_merger,
+                        use_vit_merger=video_use_vit_merger,
                     )
                 )
 
@@ -1298,7 +1405,10 @@ class MiniCPMV4_6ForConditionalGeneration(
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(
+            _stack_vit_merger_qkv(weights),
+            mapper=self.hf_to_vllm_mapper,
+        )
 
     def get_mm_mapping(self) -> MultiModelKeys:
         return MultiModelKeys.from_string_field(

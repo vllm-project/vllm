@@ -30,6 +30,11 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
+from vllm.entrypoints.openai.chat_completion.minicpmv_response_normalizer import (
+    MINICPMV_NORMALIZE_MODEL_TYPES,
+    MiniCPMVResponseNormalizer,
+    normalize_response_text,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -155,6 +160,9 @@ class OpenAIServingChat(GenerateBaseServing):
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
+        self._normalize_minicpmv_output = (
+            self.model_config.hf_config.model_type in MINICPMV_NORMALIZE_MODEL_TYPES
+        )
 
         self.enable_auto_tools: bool = enable_auto_tools
         self._include_reasoning_tokens_details = bool(reasoning_parser)
@@ -500,6 +508,12 @@ class OpenAIServingChat(GenerateBaseServing):
                 ]
             else:
                 parsers = [None] * num_choices
+            response_normalizers: list[MiniCPMVResponseNormalizer | None] = [
+                MiniCPMVResponseNormalizer()
+                if self._normalize_minicpmv_output
+                else None
+                for _ in range(num_choices)
+            ]
         except Exception as e:
             logger.exception("Error in parser creation.")
             data = self.create_streaming_error_response(e)
@@ -667,6 +681,13 @@ class OpenAIServingChat(GenerateBaseServing):
                     # handle streaming just a content delta (no parsers)
                     else:
                         delta_message = DeltaMessage(content=delta_text)
+
+                    response_normalizer = response_normalizers[i]
+                    if response_normalizer is not None:
+                        delta_message = response_normalizer.normalize_delta(
+                            delta_message,
+                            finished=output.finish_reason is not None,
+                        )
 
                     previous_texts[i] += delta_text
 
@@ -989,6 +1010,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 content = output.text
                 tool_calls = []
                 suppress_metadata = False
+
+            if self._normalize_minicpmv_output:
+                reasoning = normalize_response_text(reasoning)
+                content = normalize_response_text(content)
 
             auto_tools_called = False
             is_named_tool_choice = (

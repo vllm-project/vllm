@@ -10,6 +10,9 @@ from fastapi import Request
 
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.chat_completion.minicpmv_response_normalizer import (
+    normalize_response_text,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionResponse,
@@ -276,6 +279,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else:
                     reasoning = None
                     content = output.text
+
+                if self._normalize_minicpmv_output:
+                    reasoning = normalize_response_text(reasoning)
+                    content = normalize_response_text(content)
 
                 role = (
                     self.response_role

@@ -1156,6 +1156,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "openbmb/MiniCPM-V-4_6",
         min_transformers_version="5.7.0",
     ),
+    "MiniCPMV4_7ForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_6",
+        min_transformers_version="5.7.0",
+        hf_overrides={"architectures": ["MiniCPMV4_7ForConditionalGeneration"]},
+    ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
