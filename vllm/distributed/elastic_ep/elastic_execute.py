@@ -707,7 +707,12 @@ class ElasticEPScalingExecutor:
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
         ):
-            runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
+            runner._dummy_run(
+                runner.max_num_tokens,
+                is_profile=True,
+                skip_eplb=True,
+                randomize_inputs=self.worker.randomize_dummy_inputs,
+            )
             self.worker.compile_or_warm_up_model()
 
         lock_workspace()

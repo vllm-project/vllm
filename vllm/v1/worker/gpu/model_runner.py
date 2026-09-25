@@ -934,7 +934,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
@@ -947,7 +947,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True, is_profile=True
+            self.max_num_tokens,
+            skip_attn=True,
+            is_profile=True,
+            randomize_inputs=randomize_inputs,
         )
 
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
@@ -1790,9 +1793,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
             )
-            if randomize_inputs or (
-                envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.dp_size > 1
-            ):
+            if randomize_inputs:
                 # All-zero input_ids route every token to the same experts,
                 # which inflates EP dispatch buffers sized during profiling.
                 input_batch.input_ids.random_(0, self.vocab_size)
