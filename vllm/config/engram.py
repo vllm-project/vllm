@@ -54,8 +54,9 @@ class EngramConfig:
     reads pageable host memory through the host page tables (checked through
     the CUDA device attributes at startup): there is no table-sized device or
     pinned allocation, and the table's clean, file-backed page-cache pages can
-    be dropped and re-read and are shared between processes. Qwen4Exp only, not
-    with embedding_across_dp; validated on DGX Spark (GB10, unified memory) only."""
+    be dropped and re-read and are shared between processes. Qwen4Exp on CUDA
+    only, not with embedding_across_dp; validated on DGX Spark (GB10, unified
+    memory) only."""
 
     dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
@@ -119,6 +120,10 @@ class EngramConfig:
                 f"{sorted(_CHECKPOINT_MAPPED_ARCHITECTURES)} only, not "
                 f"{model_config.architecture}."
             )
+        if self.checkpoint_mapped and not current_platform.is_cuda():
+            # The ROCm Qwen4Exp path has no mapped backend and would silently
+            # store the full pinned table instead.
+            raise ValueError("Engram checkpoint_mapped is implemented for CUDA only.")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
