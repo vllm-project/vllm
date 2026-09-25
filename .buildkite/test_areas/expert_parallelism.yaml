@@ -64,7 +64,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/compilation/
   - tests/distributed/
   commands:
