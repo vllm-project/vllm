@@ -1422,13 +1422,18 @@ class TestDetectMergeInlineSystem:
     def test_probes_resolved_template_without_cli_override(
         self, monkeypatch, resolved, expected
     ):
-        """Without --chat-template, probe the tokenizer's template (#58727)."""
+        """Without --chat-template, probe the tokenizer's template (#58727).
+
+        Merging defeats prefix caching, so it is warned about at startup.
+        """
         import vllm.entrypoints.anthropic.serving as serving_mod
         from vllm.renderers.hf import HfRenderer
 
         monkeypatch.setattr(
             serving_mod, "resolve_chat_template", lambda *a, **kw: resolved
         )
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
         renderer = MagicMock(spec=HfRenderer)
         renderer.tokenizer = MagicMock()
         online_renderer = SimpleNamespace(
@@ -1440,6 +1445,7 @@ class TestDetectMergeInlineSystem:
             AnthropicServingMessages._should_merge_inline_system(online_renderer)
             is expected
         )
+        assert mock_logger.warning.called is expected
 
 
 # ======================================================================

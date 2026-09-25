@@ -51,10 +51,11 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.logger import init_logger
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 def _build_anthropic_usage(
@@ -203,18 +204,29 @@ class AnthropicServingMessages(OpenAIServingChat):
         renderer = online_renderer.renderer
         tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
         if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
-            return cls._detect_merge_inline_system(online_renderer.chat_template)
-        return any(
-            cls._detect_merge_inline_system(
-                resolve_chat_template(
-                    renderer.tokenizer,
-                    online_renderer.chat_template,
-                    tools,
-                    model_config=online_renderer.model_config,
+            merge = cls._detect_merge_inline_system(online_renderer.chat_template)
+        else:
+            merge = any(
+                cls._detect_merge_inline_system(
+                    resolve_chat_template(
+                        renderer.tokenizer,
+                        online_renderer.chat_template,
+                        tools,
+                        model_config=online_renderer.model_config,
+                    )
                 )
+                for tools in tool_variants
             )
-            for tools in tool_variants
-        )
+        if merge:
+            logger.warning(
+                "The chat template requires system-first ordering, so inline "
+                "system messages in /v1/messages requests (e.g. Claude Code's "
+                "per-turn reminders) are merged into the leading system prompt. "
+                "Each new one changes the prompt prefix, so the rest of the "
+                "conversation misses the prefix cache. Pass a --chat-template "
+                "that accepts non-leading system messages to avoid this."
+            )
+        return merge
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
