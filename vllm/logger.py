@@ -9,15 +9,20 @@ import os
 import sys
 from collections.abc import Generator, Hashable
 from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import replace
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
+
+if TYPE_CHECKING:
+    from vllm.config.logging import LoggingConfig
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -40,15 +45,18 @@ def _use_color() -> bool:
 
 DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
+        # The "()" factory form forwards custom kwargs such as log_level.
         "vllm": {
-            "class": "vllm.logging_utils.NewLineFormatter",
+            "()": "vllm.logging_utils.NewLineFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
+            "log_level": envs.VLLM_LOGGING_LEVEL,
         },
         "vllm_color": {
-            "class": "vllm.logging_utils.ColoredFormatter",
+            "()": "vllm.logging_utils.ColoredFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
+            "log_level": envs.VLLM_LOGGING_LEVEL,
         },
     },
     "handlers": {
@@ -70,6 +78,8 @@ DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "version": 1,
     "disable_existing_loggers": False,
 }
+
+_last_configured_logging_config: "LoggingConfig | None" = None
 
 
 @lru_cache
@@ -165,36 +175,46 @@ _METHODS_TO_PATCH = {
 }
 
 
-def _configure_vllm_root_logger() -> None:
+def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
+    """Configure logging from explicit config or bootstrap environment values."""
     logging_config: dict[str, dict[str, Any] | Any] = {}
+    if config is None:
+        configure_logging = envs.VLLM_CONFIGURE_LOGGING
+        log_level = envs.VLLM_LOGGING_LEVEL
+        log_config_file = envs.VLLM_LOGGING_CONFIG_PATH
+    else:
+        configure_logging = config.configure_logging
+        log_level = config.log_level
+        log_config_file = config.pylogging_config_file
 
-    if not envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_CONFIG_PATH:
+    if not configure_logging and log_config_file:
         raise RuntimeError(
-            "VLLM_CONFIGURE_LOGGING evaluated to false, but "
-            "VLLM_LOGGING_CONFIG_PATH was given. VLLM_LOGGING_CONFIG_PATH "
-            "implies VLLM_CONFIGURE_LOGGING. Please enable "
-            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH."
+            "Logging configuration is disabled, but a Python logging config "
+            "file was given. pylogging_config_file requires "
+            "configure_logging to be enabled."
         )
 
-    if envs.VLLM_CONFIGURE_LOGGING:
-        logging_config = DEFAULT_LOGGING_CONFIG
+    if configure_logging:
+        logging_config = deepcopy(DEFAULT_LOGGING_CONFIG)
 
         vllm_handler = logging_config["handlers"]["vllm"]
         # Refresh these values in case env vars have changed.
-        vllm_handler["level"] = envs.VLLM_LOGGING_LEVEL
+        vllm_handler["level"] = log_level
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
         vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
 
         vllm_loggers = logging_config["loggers"]["vllm"]
-        vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL
+        vllm_loggers["level"] = log_level
+        for formatter in logging_config["formatters"].values():
+            formatter["log_level"] = log_level
 
-    if envs.VLLM_LOGGING_CONFIG_PATH:
-        if not path.exists(envs.VLLM_LOGGING_CONFIG_PATH):
+    if log_config_file:
+        if not path.exists(log_config_file):
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
-                envs.VLLM_LOGGING_CONFIG_PATH,
+                log_config_file,
             )
-        with open(envs.VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
+        with open(log_config_file, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
@@ -212,11 +232,57 @@ def _configure_vllm_root_logger() -> None:
     if logging_config:
         dictConfig(logging_config)
 
+    # Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
+    # so we set its logging level to WARNING when vLLM's logging level is INFO.
+    # httpx2 is the successor huggingface_hub switches to in its 2.x releases.
+    if log_level == "INFO":
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpx2").setLevel(logging.WARNING)
+
+
+def configure_logging(config: "LoggingConfig") -> None:
+    """Apply a logging configuration in the current process."""
+    _configure_vllm_root_logger(config)
+    global _last_configured_logging_config
+    _last_configured_logging_config = config
+    _log_platform_warnings(config)
+
+
+def _log_platform_warnings(config: "LoggingConfig") -> None:
+    """Emit platform diagnostics only after an enabled config is active."""
+    if not config.configure_logging:
+        return
+
+    # Import lazily because platform modules use init_logger during import.
+    from vllm.platforms import current_platform
+
+    current_platform.log_warnings()
+
+
+def configure_logging_if_needed(config: "LoggingConfig") -> None:
+    """Apply a logging configuration unless it is already active in this process."""
+    if config != _last_configured_logging_config:
+        configure_logging(config)
+
+
+def configure_logging_from_args(args: Any) -> "LoggingConfig":
+    """Apply parsed logging arguments and retain them for child processes."""
+    from vllm.config.logging import LoggingConfig
+
+    config = getattr(args, "logging_config", None) or LoggingConfig()
+    if hasattr(args, "log_level"):
+        config = replace(config, log_level=args.log_level)
+    if hasattr(args, "log_config_file"):
+        config = replace(config, pylogging_config_file=args.log_config_file)
+
+    configure_logging_if_needed(config)
+    args.log_config_file = config.pylogging_config_file
+    args.logging_config = config
+    return config
+
 
 def init_logger(name: str) -> _VllmLogger:
-    """The main purpose of this function is to ensure that loggers are
-    retrieved in such a way that we can be sure the root vllm logger has
-    already been configured."""
+    """Retrieve a logger and add vLLM's convenience logging methods."""
     logger = logging.getLogger(name)
 
     for method_name, method in _METHODS_TO_PATCH.items():
@@ -245,18 +311,6 @@ def current_formatter_type(logger: Logger) -> Literal["color", "newline", None]:
         lgr = lgr.parent
     return None
 
-
-# The root logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-_configure_vllm_root_logger()
-
-# Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
-# so we set its logging level to WARNING when vLLM's logging level is INFO.
-# httpx2 is the successor huggingface_hub switches to in its 2.x releases.
-if envs.VLLM_LOGGING_LEVEL == "INFO":
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 logger = init_logger(__name__)
 

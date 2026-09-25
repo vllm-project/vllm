@@ -327,7 +327,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/utils/import_utils.py
-  - scripts/benchmark_helion_kernels.py
+  - tools/benchmark_helion_kernels.py
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
@@ -1995,7 +1995,7 @@ steps:
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Model Executor" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2014,7 +2014,6 @@ steps:
   - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
   - tests/model_executor/test_jit_warmup_triton_launcher.py
   commands:
-  - apt-get update && apt-get install -y curl libsodium23
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTHONFAULTHANDLER=1
   - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
@@ -3814,6 +3813,45 @@ steps:
     not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
     ROCM_AITER_MLA'
 
+- label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP" # TBD
+  timeout_in_minutes: 85
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_8
+  num_gpus: 8
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - requirements/kv_connectors_rocm.txt
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/models/deepseek_v4/
+  - vllm/v1/attention/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  # A mirror does not inherit the parent env, so it is repeated here in
+  # the parent's order. The layouts must stay empty: unset, the script
+  # defaults to HND, which the V4 indexer rejects.
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    ENABLE_HMA_FLAG=1
+    DP_EP=1
+    GPU_MEMORY_UTILIZATION=0.85
+    PREFILLER_TP_SIZE=4
+    DECODER_TP_SIZE=4
+    PREFILL_BLOCK_SIZE=256
+    DECODE_BLOCK_SIZE=256
+    MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
+    VLLM_ENGINE_READY_TIMEOUT_S=1800
+    VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+    PREFILLER_KV_LAYOUT=
+    DECODER_KV_LAYOUT=
+    bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server) %N"
@@ -4125,6 +4163,33 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc-rocm.txt
+
+- label: ":amd: (MI355) LM Eval TurboQuant t3nc"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/test-amd.yaml
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/triton_unified_attention.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+  - vllm/v1/attention/ops/flydsl_kernels/
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
 - label: ":amd: (MI355) LM Eval Small Models Distributed"
   timeout_in_minutes: 55
