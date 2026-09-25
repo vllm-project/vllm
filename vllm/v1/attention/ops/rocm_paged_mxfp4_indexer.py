@@ -27,8 +27,6 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _apply_candidate_mask_strided,
-    _get_aiter_top_k_kernel,
-    _launch_aiter_top_k_per_row_decode,
     _max_decode_logits_rows,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -71,6 +69,14 @@ def _aiter_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
 
 
 @functools.cache
+def _aiter_topk() -> Callable[..., None]:
+    """The aiter per-row top-k."""
+    from aiter.ops.topk import top_k_per_row_decode
+
+    return top_k_per_row_decode
+
+
+@functools.cache
 def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
     """Why this platform cannot run the ROCm MXFP4 indexer, or None."""
     from vllm.platforms.rocm import on_gfx950
@@ -80,6 +86,7 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
     try:
         pa = _aiter()
         _aiter_cache_ops()
+        _aiter_topk()
     except ImportError as e:
         return f"aiter's paged MXFP4 indexer ops are unavailable ({e})"
     try:
@@ -307,29 +314,28 @@ def reserve_rocm_mxfp4_indexer_workspace(
 
 
 def _topk(
-    logits: torch.Tensor,
-    lengths: torch.Tensor,
-    out: torch.Tensor,
-    k: int,
-    compress_ratio: int = 0,
-    max_len: int = 0,
+    logits: torch.Tensor, lengths: torch.Tensor, out: torch.Tensor, k: int
 ) -> None:
-    """Top-k over each row's [0, lengths[row]); -1 pads rows shorter than k."""
-    rows = logits.shape[0]
+    """Top-k over each row's [0, lengths[row]); -1 pads rows shorter than k.
+
+    aiter's kernel is faster on the candidate top-k and from 128 rows on; below
+    that, a wide decode step is faster on vLLM's. Shape alone decides, so a FULL
+    graph replays the same choice at every context length.
+    """
+    rows, width = logits.shape
     if rows == 0:
         return
-    kernel = None
-    if logits.shape[1] >= k:
-        kernel = _get_aiter_top_k_kernel(
-            is_prefill=False,
-            compress_ratio=compress_ratio,
-            num_rows=rows,
-            max_valid_seq_len=max_len,
-            num_columns=logits.shape[1],
-            topk_tokens=k,
+    if width >= k and (k >= 2048 or rows >= 128):
+        _aiter_topk()(
+            logits,
+            1,
+            lengths.reshape(-1),
+            out,
+            rows,
+            logits.stride(0),
+            logits.stride(1),
+            k=k,
         )
-    if kernel is not None:
-        _launch_aiter_top_k_per_row_decode(kernel, logits, lengths, out, k)
     else:
         torch.ops._C.top_k_per_row_decode(
             logits, 1, lengths, out, rows, logits.stride(0), logits.stride(1), k
@@ -515,8 +521,6 @@ def _dense_prefill(
         plan.row_ends,
         layer.topk_buffer[t0:t1, : layer.topk_tokens],
         layer.topk_tokens,
-        layer.compress_ratio,
-        plan.width,
     )
 
 
@@ -563,20 +567,11 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         _topk(scores[0], metadata.decode_block_ends, candidates, candidates.shape[1])
     elif candidates is not None:
         _apply_candidate_mask_strided(logits, None, lengths, candidates, layer.block)
-    # FULL graphs replay every context length, so the top-k is picked for the
-    # longest one.
-    max_len = (
-        logits_width
-        if layer.full_graph
-        else metadata.max_seq_len // layer.compress_ratio
-    )
     _topk(
         logits,
         lengths,
         layer.topk_buffer[:rows, : layer.topk_tokens],
         layer.topk_tokens,
-        layer.compress_ratio,
-        max_len,
     )
 
 

@@ -286,6 +286,25 @@ def test_k_store_stays_inside_its_pages(block):
     assert int(case.pool[~case.page_bytes].count_nonzero()) == 0
 
 
+@pytest.mark.parametrize(
+    "rows, width, k",
+    # vLLM's kernel below 128 rows, aiter's from 128 rows and on every k=2048
+    [(8, 4096, 512), (128, 4096, 512), (8, 16384, 2048)],
+)
+def test_topk_matches_torch_on_both_kernels(rows, width, k):
+    logits = torch.randn(rows, width, device=DEVICE)
+    lengths = torch.randint(1, width + 1, (rows,), dtype=torch.int32, device=DEVICE)
+    lengths[0] = k // 2  # shorter than k, so the rest of the row pads with -1
+    out = torch.full((rows, k), 7, dtype=torch.int32, device=DEVICE)
+    ops._topk(logits, lengths, out, k)
+    for r in range(rows):
+        n = min(k, int(lengths[r]))
+        want = torch.topk(logits[r, : int(lengths[r])], n).indices.sort().values
+        got = out[r]
+        assert torch.equal(got[got >= 0].sort().values, want.int())
+        assert int((got == -1).sum()) == k - n
+
+
 def _run_layers(monkeypatch, case, rows, metadata):
     """Ratio-2 dense layer, the candidate source, and a consumer both ways;
     each checked against the torch reference."""
