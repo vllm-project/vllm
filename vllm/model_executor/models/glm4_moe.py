@@ -43,6 +43,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -137,14 +138,12 @@ class Glm4MoE(nn.Module):
                 f"Unsupported activation: {config.hidden_act}. "
                 "Only silu is supported for now."
             )
-        # NOTE In the transformers implementation, the gate isn't an nn.Linear,
-        # so we cannot use ReplicatedLinear here.
-        # See: https://github.com/huggingface/transformers/blob/v4.55.1/src/transformers/models/glm4_moe/modeling_glm4_moe.py#L260
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            dtype=torch.float32,
+            out_dtype=torch.float32,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32)
@@ -212,7 +211,7 @@ class Glm4MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states.to(dtype=torch.float32))
+        router_logits, _ = self.gate(hidden_states)
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits

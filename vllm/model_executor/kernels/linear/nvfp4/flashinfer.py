@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     as_quantized_activation,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    nvfp4_weight_padding_bytes,
     pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
@@ -20,12 +21,92 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_prepare_bf16_fp4_weights,
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
     has_flashinfer_b12x_gemm,
+    has_flashinfer_bf16_fp4,
 )
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
+
+
+class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
+    """BF16 x NVFP4 GEMM via FlashInfer's CuTe-DSL backend."""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if compute_capability is None:
+            if not current_platform.is_cuda():
+                return False, "FlashInfer CuTe-DSL W4A16 requires CUDA"
+            capability = current_platform.get_device_capability()
+            if capability is None:
+                return False, "CUDA compute capability is unavailable"
+            compute_capability = capability.to_int()
+
+        if compute_capability not in (100, 103) and not (
+            compute_capability >= 120 and compute_capability < 130
+        ):
+            return False, "FlashInfer CuTe-DSL W4A16 requires sm_100 or sm_12x"
+        if not has_flashinfer_bf16_fp4():
+            return False, "FlashInfer CuTe-DSL BF16 x FP4 GEMM is unavailable"
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        padded_weight, weights_padding_bytes = pad_nvfp4_weight_for_cutlass(
+            layer.weight.data, alignment=64
+        )
+        swizzled_scale = swizzle_blockscale(layer.weight_scale.data)
+        weight, weight_scale, global_scale = flashinfer_prepare_bf16_fp4_weights(
+            padded_weight,
+            swizzled_scale,
+            layer.weight_global_scale.data.reshape(1),
+            backend="cute-dsl",
+        )
+        assert global_scale is not None
+
+        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+        layer.weight_global_scale = torch.nn.Parameter(
+            global_scale, requires_grad=False
+        )
+        layer.weights_padding_cols = weights_padding_bytes
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if x.dtype != torch.bfloat16:
+            raise ValueError(
+                f"FlashInfer CuTe-DSL W4A16 requires BF16 input, got {x.dtype}"
+            )
+
+        output_size = layer.output_size_per_partition
+        output_shape = [*x.shape[:-1], output_size]
+        x_2d = x.reshape(-1, x.shape[-1])
+        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
+        if weights_padding_bytes:
+            x_2d = torch.nn.functional.pad(x_2d, (0, weights_padding_bytes * 2))
+        x_2d = x_2d.contiguous()
+
+        out = torch.ops.vllm.flashinfer_mm_bf16_fp4(
+            x_2d,
+            layer.weight,
+            layer.weight_scale,
+            layer.weight_global_scale,
+        )
+        out = slice_nvfp4_output(out, output_size)
+        if bias is not None:
+            out = out + bias
+        return out.view(*output_shape)
 
 
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
@@ -50,11 +131,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
-        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-            layer.weight.data
-        )
+        padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
-        layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
         self,
@@ -74,7 +152,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, getattr(layer, "weights_padding_cols", 0)
+            x_fp4, nvfp4_weight_padding_bytes(layer)
         )
 
         out = flashinfer_scaled_fp4_mm(
@@ -126,11 +204,8 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
-        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-            layer.weight.data
-        )
+        padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
-        layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
         self,
@@ -139,7 +214,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
+        weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -263,11 +338,8 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
-        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-            layer.weight.data
-        )
+        padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
-        layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
         self,
@@ -278,7 +350,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
-        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
+        weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
@@ -328,11 +400,8 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
-        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-            layer.weight.data
-        )
+        padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
-        layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
         self,
@@ -352,7 +421,7 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, getattr(layer, "weights_padding_cols", 0)
+            x_fp4, nvfp4_weight_padding_bytes(layer)
         )
 
         out = flashinfer_scaled_fp4_mm(

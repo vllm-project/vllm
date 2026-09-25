@@ -73,6 +73,13 @@ class SleepModeBackend(ABC):
         (suspended) engine from a healthy-serving one (see RFC #34303)."""
         return self._state
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        """Discard selected tagged allocations without preserving contents."""
+        raise RuntimeError(
+            f"Sleep-mode backend {type(self).__name__!r} does not support "
+            "selective discard."
+        )
+
     # -- Capability introspection (no instance required) --
 
     @classmethod
@@ -132,10 +139,16 @@ class CuMemBackend(SleepModeBackend):
         allocator.wake_up(tags)
         self._state = "RUNNING"
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        allocator = get_mem_allocator_instance()
+        allocator.discard(tags)
+        self._state = "SUSPENDED"
+
     @classmethod
     def preserves_communicators(cls) -> bool:
-        # Communicator buffers (e.g. NCCL) live outside CuMemAllocator's pool, so
-        # an allocator-level sleep leaves them intact (no reinit needed on resume).
+        # Comm identity/topology survive memory suspension; no reinit needed.
         return True
 
 

@@ -20,6 +20,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -72,10 +73,7 @@ class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
             dim=0,
         )
         lengths_cpu = spatial_shapes.prod(dim=-1).to(torch.int32)
-        lengths = lengths_cpu.to(
-            device=pixel_values.device,
-            non_blocking=True,
-        )
+        lengths = async_tensor_h2d(lengths_cpu, pixel_values.device)
 
         cu_seqlens = torch.zeros(
             lengths.numel() + 1,
@@ -145,8 +143,7 @@ def patch_merging_by_param(
 
 
 class Cosmos3EdgePatchMerger(nn.Module):
-    """
-    Projector: LayerNorm -> Linear -> GELU -> Linear
+    """Projector: LayerNorm -> Linear -> GELU -> Linear.
 
     Reads config from projector_config (not vision_config).
     input_hidden_size * spatial_merge_size² -> merger_intermediate_size
@@ -484,8 +481,7 @@ class Cosmos3EdgeForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
 ):
-    """
-    Cosmos3 Edge model with a SigLIP2 vision encoder.
+    """Cosmos3 Edge model with a SigLIP2 vision encoder.
 
     Architecture:
         - self.visual: SigLIP2 encoder + patch merger + projector
@@ -569,7 +565,9 @@ class Cosmos3EdgeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Cosmos3EdgeForCausalLM(
-                vllm_config=vllm_config,
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config, architectures=["NemotronHForCausalLM"]
+                ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 

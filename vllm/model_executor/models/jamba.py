@@ -15,11 +15,11 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -72,11 +72,9 @@ class JambaMoE(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         if self.num_total_experts > 1:
-            self.router = ReplicatedLinear(
+            self.router = GateLinear(
                 self.hidden_size,
                 self.num_total_experts,
-                bias=False,
-                quant_config=None,
                 params_dtype=params_dtype,
                 prefix=f"{prefix}.router",
             )
@@ -118,7 +116,7 @@ class JambaMambaDecoderLayer(nn.Module):
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        is_lora_enabled: bool | None = False,
+        is_lora_enabled: bool = False,
         prefix: str = "",
         **kwargs,
     ) -> None:

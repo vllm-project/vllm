@@ -215,3 +215,78 @@ def test_varlen_with_paged_kv(
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FA4 only has a dedicated head_size=256 kernel on Blackwell",
+)
+@pytest.mark.parametrize(
+    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@torch.inference_mode()
+def test_fa4_hd256_paged_call_shape(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    sliding_window: int | None,
+) -> None:
+    """Handles excess block-table columns with page-aligned ``max_seqlen_k``."""
+    from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
+
+    if not is_fa_version_supported(4):
+        pytest.skip(f'FA4 unsupported: "{fa_version_unsupported_reason(4)}"')
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    head_size = 256
+    block_size = FA4_HD256_PAGE_SIZE
+    num_blocks = 2048
+    dtype = torch.bfloat16
+    num_query_heads, num_kv_heads = num_heads
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    max_kv_len = max(kv_lens)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    num_pages = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (len(seq_lens), num_pages + 3), dtype=torch.int32
+    )
+
+    output = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=num_pages * block_size,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables[:, :num_pages],
+        num_splits=1,
+        fa_version=4,
+    )
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)

@@ -26,7 +26,7 @@
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -99,7 +99,7 @@ class SolarMLP(nn.Module):
 class SolarAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -182,7 +182,7 @@ class SolarAttention(nn.Module):
 class SolarDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -315,9 +315,11 @@ class SolarModel(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             if i in self.config.bskcn_1:
                 bskcn_h_1 = hidden_states.clone()
+                assert residual is not None
                 bskcn_r_1 = residual.clone()
             if i in self.config.bskcn_2:
                 bskcn_h_2 = hidden_states.clone()
+                assert residual is not None
                 bskcn_r_2 = residual.clone()
             if i in self.config.bskcn_3:
                 hidden_states = bskcn_h_1 * bskcn_tv + hidden_states * (1 - bskcn_tv)

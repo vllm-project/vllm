@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
+use crate::normalize_top_k;
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
@@ -83,10 +84,11 @@ impl HfSpecialTokens {
 
 /// Minimal subset of `config.json` (the model's main HF config).
 ///
-/// This intentionally supports only the two layouts we currently care about in
+/// This intentionally supports only the layouts we currently care about in
 /// the Rust frontend:
 /// - pure text models that keep text metadata at the top level
-/// - composite models that expose a single nested `text_config`
+/// - composite models that expose a single nested `text_config` or its
+///   `llm_config` alias (used by Nemotron)
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
@@ -101,6 +103,7 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
+    #[serde(alias = "llm_config")]
     text_config: Option<Box<ModelConfig>>,
 }
 
@@ -118,23 +121,19 @@ pub(super) struct GenerationConfig {
     pub max_new_tokens: Option<u32>,
 }
 
-/// Deserialize vLLM-compatible `top_k` values from generation configs.
+/// Deserialize a generation-config `top_k` into the text sampling model.
 ///
-/// Both `-1` and `0` disable top-k sampling and become `None`; positive values
-/// are preserved.
+/// Null, `-1`, and `0` all disable top-k sampling; positive limits are
+/// preserved.
 fn deserialize_top_k<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match Option::<i64>::deserialize(deserializer)? {
-        None | Some(-1) | Some(0) => Ok(None),
-        Some(value) if value > 0 => {
-            u32::try_from(value).map(Some).map_err(serde::de::Error::custom)
-        }
-        Some(value) => Err(serde::de::Error::custom(format!(
-            "top_k must be -1, 0, or a positive integer, got {value}"
-        ))),
-    }
+    Option::<i64>::deserialize(deserializer)?
+        .map(normalize_top_k)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(serde::de::Error::custom)
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.
@@ -191,7 +190,7 @@ impl ModelConfig {
     /// Return the config that the Rust frontend treats as the text/LLM config.
     ///
     /// This is deliberately narrower than Python/transformers: we only support
-    /// either the top-level config itself or a single nested `text_config`.
+    /// either the top-level config itself or a single nested text config.
     fn effective_text_config(&self) -> &Self {
         self.text_config.as_deref().unwrap_or(self)
     }
@@ -236,7 +235,8 @@ impl ModelConfig {
     /// config.
     ///
     /// The only intentional simplification here is how we pick the text config:
-    /// Rust only looks at the top level or `text_config`, not the broader
+    /// Rust only looks at the top level or `text_config` (including its
+    /// `llm_config` alias), not the broader
     /// transformers composite-config surface.
     fn num_experts_from_block_configs(&self) -> u32 {
         self.effective_text_config()
@@ -406,6 +406,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vocab_size().unwrap(), 151936);
+    }
+
+    #[test]
+    fn model_config_uses_llm_config_for_nemotron_composite_models() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "model_type": "nemotron_h_omni",
+                "llm_config": {
+                    "model_type": "nemotron_h",
+                    "vocab_size": 131072,
+                    "n_routed_experts": 256,
+                    "eos_token_id": 2
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.model_type(), Some("nemotron_h_omni"));
+        assert_eq!(config.vocab_size().unwrap(), 131072);
+        assert_eq!(config.eos_token_ids(), &[2]);
+        assert_eq!(config.num_experts(), 256);
     }
 
     #[test]

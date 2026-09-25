@@ -30,7 +30,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_moe_expert_param_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeMoE
@@ -478,6 +481,9 @@ class GraniteMoeHybridModel(nn.Module):
                     continue
 
                 name_mapped = name.replace(weight_name, param_name)
+                name_mapped = maybe_remap_moe_expert_param_name(
+                    name_mapped, params_dict
+                )
 
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name_mapped, self):
@@ -586,7 +592,7 @@ class GraniteMoeHybridForCausalLM(
     SupportsQuant,
     SupportsMambaPrefixCaching,
 ):
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -626,6 +632,7 @@ class GraniteMoeHybridForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config

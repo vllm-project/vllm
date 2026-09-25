@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.utils import torch_int
 
 from vllm.model_executor.layers.activation import get_act_fn
@@ -63,7 +63,7 @@ class InternS1VisionPatchEmbeddings(nn.Module):
 
 
 class InternS1VisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
@@ -89,15 +89,13 @@ class InternS1VisionEmbeddings(nn.Module):
     def interpolate_pos_encoding(
         self, embeddings: torch.Tensor, height: int, width: int
     ) -> torch.Tensor:
-        """
-        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
+        """This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
         images. This method is also adapted to support torch.jit tracing.
 
         Adapted from:
         - https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174-L194, and
         - https://github.com/facebookresearch/dinov2/blob/e1277af2ba9496fbadf7aec6eba56e8d882d1e35/dinov2/models/vision_transformer.py#L179-L211
         """  # noqa: E501
-
         num_patches = embeddings.shape[1] - 1
         num_positions = self.position_embeddings.shape[1] - 1
 
@@ -162,11 +160,11 @@ class InternS1VisionEmbeddings(nn.Module):
 
 
 class InternSdpaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
@@ -223,8 +221,7 @@ class InternSdpaAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x shape: (B, N, C)"""
-
+        """X shape: (B, N, C)."""
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
@@ -243,7 +240,7 @@ class InternSdpaAttention(nn.Module):
 class InternS1VisionMLP(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -277,7 +274,7 @@ class InternS1VisionMLP(nn.Module):
 class InternS1VisionLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
@@ -312,7 +309,7 @@ class InternS1VisionLayer(nn.Module):
 
     def _init_attn(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         num_dummy_heads: int,
@@ -344,7 +341,7 @@ class InternS1VisionLayer(nn.Module):
 class InternS1VisionEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -383,7 +380,7 @@ class InternS1VisionEncoder(nn.Module):
 class InternS1VisionModel(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

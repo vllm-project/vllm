@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only GLM-4.7-Flash model compatible with HuggingFace weights."""
 
+import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import TYPE_CHECKING
@@ -59,6 +60,10 @@ from vllm.model_executor.models.glm4_moe import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -101,6 +106,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         prefix: str,
         config: "Glm4MoeLiteConfig | None" = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         super().__init__()
 
@@ -129,6 +135,11 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             attn_cls = Glm4MoeLiteMLAAttention
         else:
             attn_cls = Glm4MoeLiteAttention
+        attn_kwargs: dict[str, typing.Any] = (
+            {"index_group_builder": index_group_builder}
+            if attn_cls is Glm4MoeLiteMLAAttention
+            else {}
+        )
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -145,6 +156,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            **attn_kwargs,
         )
 
         if (
@@ -227,6 +239,14 @@ class Glm4MoeLiteModel(nn.Module):
             )
         else:
             topk_indices_buffer = None
+        index_group_builder = (
+            SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            )
+            if topk_indices_buffer is not None
+            else None
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -245,6 +265,7 @@ class Glm4MoeLiteModel(nn.Module):
                 config=config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                index_group_builder=index_group_builder,
             ),
             prefix=f"{prefix}.layers",
         )

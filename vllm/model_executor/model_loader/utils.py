@@ -5,7 +5,7 @@
 import inspect
 import warnings
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -13,10 +13,15 @@ from torch import nn
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    LoadConfig,
+    ModelConfig,
+    VllmConfig,
+    replace,
+    set_current_vllm_config,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
-from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -25,14 +30,45 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    is_draft_model_cacheable,
+)
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
+    """Get load config for the speculative draft model."""
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is not None
+        and speculative_config.draft_load_config is not None
+    ):
+        return speculative_config.draft_load_config
+    load_config = vllm_config.load_config
+    if load_config is not None and load_config.load_format != "ipc_cache":
+        return load_config
+    kwargs = (
+        # Route the draft to the daemon's draft group.
+        {
+            "model_loader_extra_config": {
+                **load_config.model_loader_extra_config,
+                "is_draft": True,
+            }
+        }
+        if is_draft_model_cacheable(speculative_config)
+        # No daemon draft group for this method; load from disk instead of
+        # hitting the target daemon with a mismatching fingerprint.
+        else {"load_format": "auto", "model_loader_extra_config": {}}
+    )
+    return replace(load_config, **kwargs)
 
 
 @instrument(span_name="Initialize model")
@@ -98,19 +134,40 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
+    """Post-process loaded weights into runtime format.
+
+    Under ``weights_already_processed`` (weight cache IPC loader), quant
+    methods skip tensor transforms and must declare
+    ``supports_pre_processed_weights``, otherwise this raises ``RuntimeError``.
+    """
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
     maybe_retie_word_embeddings(model, model_config)
 
-    for _, module in model.named_modules():
+    for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
+            if (
+                is_weights_pre_processed()
+                and not quant_method.supports_pre_processed_weights
+            ):
+                raise RuntimeError(
+                    f"layer {name or '<root>'}: {type(quant_method).__name__} "
+                    "does not support pre-processed weights"
+                )
             # When quant methods need to process weights after loading
-            # (for repacking, quantizing, etc), they expect parameters
+            # (for repacking, quantizing, etc), they typically expect parameters
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            # Methods that can process weights in place (e.g. PLE scale
+            # validation) set requires_device_loading=False to skip this move.
+            loading_context = (
+                device_loading_context(module, target_device)
+                if quant_method.requires_device_loading
+                else nullcontext()
+            )
+            with loading_context:
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -133,15 +190,6 @@ def process_weights_after_loading(
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
 
-    # Process HPC modules (HpcRopeNorm, etc.) that rely on
-    # process_weights_after_loading being called from the model's
-    # load_weights(). When using DummyModelLoader (e.g. profiling or
-    # sleep/wake_up reload), the model's load_weights() is not called, so we
-    # must handle HPC modules here generically.
-    for _, module in model.named_modules():
-        if isinstance(module, HpcModule):
-            module.process_weights_after_loading(model)
-
     # Model-level post-load hook, after the per-layer quant finalize.
     if hasattr(model, "process_weights_after_loading"):
         model.process_weights_after_loading()
@@ -159,13 +207,13 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
         yield module
         return
 
-    original_device_states: dict[str, torch.device] = {}
+    cpu_params: set[str] = set()
     uva_offloaded_parameters: list[str] = []
 
-    # Store original device states and move parameters to GPU if they're on CPU
+    # Store which parameters are on CPU and move them to the GPU
     for name, p in module.named_parameters():
         if p.device.type == "cpu":
-            original_device_states[name] = p.device
+            cpu_params.add(name)
             p.data = p.data.to(target_device)
         if getattr(p, "_vllm_is_uva_offloaded", False):
             uva_offloaded_parameters.append(name)
@@ -179,20 +227,21 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
             is_pin_memory_available()
             and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
         )
-        # Restore parameters to their original devices, ignoring new parameters
+        # Restore the CPU-resident parameters, ignoring new parameters.
         for name, p in module.named_parameters():
-            if name in original_device_states:
-                original_device: torch.device = original_device_states[name]
-                p.data = p.data.to(original_device)
+            if name in cpu_params:
+                p.data = torch.empty_like(
+                    p.data, device="cpu", pin_memory=use_pin_memory
+                ).copy_(p.data)
 
             # parameter is UVA offloaded, but was replaced with a new device tensor
             # re-offload it to CPU using UVA
             if name in uva_offloaded_parameters and not getattr(
                 p, "_vllm_is_uva_offloaded", False
             ):
-                cpu_data = p.data.to(device="cpu")
-                if use_pin_memory:
-                    cpu_data = cpu_data.pin_memory()
+                cpu_data = torch.empty_like(
+                    p.data, device="cpu", pin_memory=use_pin_memory
+                ).copy_(p.data)
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 
@@ -266,8 +315,7 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 def configure_quant_config(
     quant_config: QuantizationConfig, model_class: type[nn.Module]
 ):
-    """
-    Pass packed_modules_mapping by reference to quant_config so that
+    """Pass packed_modules_mapping by reference to quant_config so that
     quant_config can properly match fused modules
 
     Note that model attributes are passed by reference to quant_config,

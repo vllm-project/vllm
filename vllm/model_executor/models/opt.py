@@ -216,6 +216,7 @@ class OPTDecoder(nn.Module):
         )
 
         # Project out & in will be replicated if they exist.
+        self.project_out: ReplicatedLinear | None
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_out = ReplicatedLinear(
                 config.hidden_size,
@@ -227,6 +228,7 @@ class OPTDecoder(nn.Module):
         else:
             self.project_out = None
 
+        self.project_in: ReplicatedLinear | None
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_in = ReplicatedLinear(
                 config.word_embed_proj_dim,

@@ -16,7 +16,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
@@ -72,12 +73,11 @@ from .vision import (
 
 
 class SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -126,13 +126,15 @@ class SiglipProcessingInfo(BaseProcessingInfo):
 
         pooler_config = self.ctx.model_config.pooler_config
         assert pooler_config is not None
+        pooling_type = pooler_config.seq_pooling_type
+        assert pooling_type is not None
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
+            _get_vision_feature_select_strategy(pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -156,20 +158,16 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -396,7 +394,7 @@ class SiglipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -771,8 +769,9 @@ class SiglipVisionTransformer(nn.Module):
         """Apply the post layer norm and head if they are enabled,
         given the last hidden states tensor.
 
-        args:
+        Args:
             encoder_outputs: The last hidden states from the visual encoder.
+
         """
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)
@@ -1006,7 +1005,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         flip_indices_cpu = (
             starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
         ) - (1 + current_positions_cpu)
-        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
+        flip_indices = async_tensor_h2d(flip_indices_cpu, features.device)
 
         return features[flip_indices]
 
@@ -1016,9 +1015,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
-            feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.seq_pooling_type
-            )
+            pooling_type = self.pooler_config.seq_pooling_type
+            assert pooling_type is not None
+            feature_select_strategy = _get_vision_feature_select_strategy(pooling_type)
 
         pooled_output = self.vision_model(
             pixel_values=pixel_values,

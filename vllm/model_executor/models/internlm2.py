@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -193,7 +193,7 @@ class InternLM2Attention(nn.Module):
 class InternLMDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -319,7 +319,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
     hf_to_vllm_mapper = InternLM2Model.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_prefix={"output.": "lm_head."}
     )
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "wqkv": ["wqkv"],
         "gate_up_proj": ["w1", "w3"],
     }
