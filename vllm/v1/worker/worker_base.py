@@ -123,11 +123,14 @@ class WorkerBase:
         sizes into one block instead of padding them to a common page and
         splitting them into more KV cache groups. They cannot split a manager
         block into smaller kernel blocks, so only prefer them when every
-        backend accepts each attention layer's block size directly.
+        backend accepts each attention layer's block size directly, and when
+        packing avoids full attention padding or needs fewer groups.
         """
+        from vllm.v1.core.kv_cache_utils import packed_kv_cache_layout_is_better
         from vllm.v1.worker.utils import select_common_block_size
 
-        specs = list(self.get_kv_cache_spec().values())
+        kv_cache_spec = self.get_kv_cache_spec()
+        specs = list(kv_cache_spec.values())
         if len({spec.page_size_bytes for spec in specs}) <= 1:
             return False
         for spec in specs:
@@ -139,7 +142,7 @@ class WorkerBase:
                 return False
             if kernel_block_size != spec.block_size:
                 return False
-        return True
+        return packed_kv_cache_layout_is_better(self.vllm_config, kv_cache_spec)
 
     def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""

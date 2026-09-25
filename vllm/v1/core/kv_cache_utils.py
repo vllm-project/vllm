@@ -1438,6 +1438,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
     vllm_config: VllmConfig,
+    warn_padding: bool = True,
 ) -> list[KVCacheGroupSpec]:
     """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
@@ -1498,6 +1499,7 @@ def _get_kv_cache_groups_uniform_page_size(
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
         vllm_config: The global VllmConfig
+        warn_padding: Log a warning for each padded bucket.
 
     Returns:
         The generated KVCacheGroupSpecs
@@ -1560,7 +1562,7 @@ def _get_kv_cache_groups_uniform_page_size(
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
-        if num_padding_layers != group_size:
+        if warn_padding and num_padding_layers != group_size:
             logger.warning(
                 "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
                 num_padding_layers,
@@ -2007,8 +2009,19 @@ def _get_packed_kv_cache_groups(
     share one page size.
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not layout.is_block_outermost:
+        return None
+    return _plan_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+
+
+def _plan_packed_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """The groups ``_get_packed_kv_cache_groups`` would build for a
+    block-outermost layout, or None if all layers share one page size."""
     page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
-    if not layout.is_block_outermost or len(page_sizes) <= 1:
+    if len(page_sizes) <= 1:
         return None
 
     buckets: list[dict[str, KVCacheSpec]] = []
@@ -2126,6 +2139,35 @@ def _get_packed_kv_cache_groups(
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
+
+
+def packed_kv_cache_layout_is_better(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> bool:
+    """Whether a block-outermost (packed) layout beats the layer-outermost
+    grouping: it avoids full attention padding, whose memory grows with the
+    context, or needs fewer KV cache groups."""
+    specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if not isinstance(spec, HiddenStateCacheSpec)
+    }
+    packed = _plan_packed_kv_cache_groups(vllm_config, specs)
+    if packed is None:
+        return False
+    try:
+        uniform = _get_kv_cache_groups_uniform_page_size(
+            unify_kv_cache_spec_page_size(specs), vllm_config, warn_padding=False
+        )
+    except NotImplementedError:
+        return True
+    group_size = max(len(group.layer_names) for group in uniform)
+    pads_full_attention = any(
+        isinstance(group.kv_cache_spec, FullAttentionSpec)
+        and len(group.layer_names) < group_size
+        for group in uniform
+    )
+    return pads_full_attention or len(packed) < len(uniform)
 
 
 def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
