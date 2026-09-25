@@ -346,12 +346,14 @@ def rocm_unquantized_gemm_impl(
     if use_skinny:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
-        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        # Note: Only build that view inside the branches that consume it.
         if (m == 1 or m > 8) and 0 < n <= 5:
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
         elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
             out = ops.LLMM1(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
@@ -513,7 +515,10 @@ def dispatch_cpu_unquantized_gemm(
             )
         )
         if remove_weight:
-            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            layer.weight = torch.nn.Parameter(
+                torch.empty(0, dtype=dtype, device=layer.weight.device),
+                requires_grad=False,
+            )
         logger.debug_once(
             "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
             is_prepacked,
@@ -539,7 +544,10 @@ def dispatch_cpu_unquantized_gemm(
             bias,
         )
         if remove_weight:
-            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            layer.weight = torch.nn.Parameter(
+                torch.empty(0, dtype=dtype, device=layer.weight.device),
+                requires_grad=False,
+            )
         logger.debug_once(
             "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
         )
@@ -554,7 +562,10 @@ def dispatch_cpu_unquantized_gemm(
             handler = ops.create_onednn_mm(origin_weight.t(), 32)
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:
-                layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+                layer.weight = torch.nn.Parameter(
+                    torch.empty(0, dtype=dtype, device=layer.weight.device),
+                    requires_grad=False,
+                )
             logger.debug_once("CPU unquantized GEMM dispatch: using oneDNN onednn_mm")
             return
         except RuntimeError as e:

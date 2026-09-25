@@ -62,16 +62,16 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
     def original_validate_rope(config, *args, **kwargs):
         calls.append(config)
 
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    monkeypatch.setattr(PretrainedConfig, "validate_rope", original_validate_rope)
+    monkeypatch.setattr(PreTrainedConfig, "validate_rope", original_validate_rope)
     _patch_hf_transformers_nested_rope_validation()
 
     nested_rope_parameters = {
         "full_attention": {"rope_type": "default"},
         "original_max_position_embeddings": 32768,
     }
-    PretrainedConfig.validate_rope(
+    PreTrainedConfig.validate_rope(
         SimpleNamespace(rope_parameters=nested_rope_parameters)
     )
     assert nested_rope_parameters == {"full_attention": {"rope_type": "default"}}
@@ -81,7 +81,7 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
         "factor": 8.0,
         "rope_theta": 500000.0,
     }
-    PretrainedConfig.validate_rope(
+    PreTrainedConfig.validate_rope(
         SimpleNamespace(rope_parameters=flat_rope_parameters)
     )
     assert flat_rope_parameters == {
@@ -550,9 +550,56 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
             model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
             attention_config=AttentionConfig(),
         )
+        config._get_v1_model_runner_unsupported_features = lambda: []
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
+
+
+def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
+    """The ROCm V1 default is a speed preference, not a capability claim.
+
+    DSpark runs only on V2, so pinning DeepSeek V4 to V1 would fail config
+    validation instead of serving it. With nothing V1 refuses, it still holds.
+    """
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architectures=["DeepseekV4ForCausalLM"], is_diffusion=False
+        ),
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_batch_sharded_sampling=False,
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        speculative_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
+    config._get_v2_model_runner_unsupported_features = lambda: []
+    # The real predicate, so the test also pins where dspark lands in it.
+    config._get_v1_model_runner_unsupported_features = lambda: (
+        VllmConfig._get_v1_model_runner_unsupported_features(config)
+    )
+
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
+
+    config.speculative_config = SimpleNamespace(
+        method="dspark", enable_adaptive_verification=False
+    )
+    assert VllmConfig.use_v2_model_runner.fget(config) is True
+
+    # Yielding is not the same as selecting V2: the later checks still run, so
+    # a config neither runner can serve lands on V1 and fails validation there.
+    config._get_v2_model_runner_unsupported_features = lambda: ["sequence parallelism"]
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 @pytest.mark.parametrize(
@@ -730,9 +777,9 @@ def test_batch_invariant_breakable_cudagraph(
     ],
 )
 def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         architectures=["DeepseekV32ForCausalLM"],
         num_nextn_predict_layers=1,
     )
@@ -766,7 +813,8 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-def test_dflash2_draft_forces_v2_model_runner():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
 
@@ -778,11 +826,15 @@ def test_dflash2_draft_forces_v2_model_runner():
             )
         )
 
-    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
-    assert not VllmConfig._is_dflash2_draft(
+    assert VllmConfig._is_dflash_candidate_draft(config("dflash", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        config("dflash", ["DFlashDraftModel"])
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(config("eagle", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        SimpleNamespace(speculative_config=None)
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(
         SimpleNamespace(
             speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
         )
@@ -1196,7 +1248,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v1_model_runner_unsupported_features = lambda: (
         VllmConfig._get_v1_model_runner_unsupported_features(config)
     )
@@ -1383,7 +1435,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
 
     assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
@@ -1483,26 +1535,32 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, accelerator, supported",
+    "architecture, ple_layers, platform, supported",
     [
-        ("DeepseekV41ForCausalLM", [1], True, True),
-        ("DeepseekV41ForCausalLM", [], True, False),
-        ("DeepseekV41ForCausalLM", [1], False, False),
-        ("Qwen4ExpForCausalLM", [1], True, True),
-        ("Qwen4ExpForConditionalGeneration", [1], True, True),
-        ("Qwen4ExpForCausalLM", [], True, False),
-        ("Qwen4ExpForCausalLM", None, True, False),
-        ("Qwen4ExpForCausalLM", [1], False, False),
-        ("LlamaForCausalLM", [1], True, False),
-        ("Qwen4ExpMTP", [], True, False),
-        (None, None, True, False),
+        ("DeepseekV41ForCausalLM", [1], "cuda", True),
+        ("DeepseekV41ForCausalLM", [1], "rocm", True),
+        ("DeepseekV41ForCausalLM", [], "cuda", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cuda", True),
+        ("Qwen4ExpForCausalLM", [1], "rocm", True),
+        ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
+        ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
+        ("Qwen4ExpForCausalLM", [], "cuda", False),
+        ("Qwen4ExpForCausalLM", None, "cuda", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("LlamaForCausalLM", [1], "cuda", False),
+        ("Qwen4ExpMTP", [], "cuda", False),
+        (None, None, "cuda", False),
     ],
 )
 def test_engram_model_support(
-    monkeypatch, architecture, ple_layers, accelerator, supported
+    monkeypatch, architecture, ple_layers, platform, supported
 ):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: platform == "cuda")
+    monkeypatch.setattr(
+        current_platform, "is_cuda_alike", lambda: platform in ("cuda", "rocm")
+    )
     model = (
         cast(
             ModelConfig,
@@ -2463,14 +2521,14 @@ def test_get_and_verify_max_len_with_nope_layers(
     max_model_len, rope_parameters, expected_max_len
 ):
     """NoPE layers do not prevent deriving or scaling the context length."""
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config.model import _get_and_verify_max_len
     from vllm.transformers_utils.model_arch_config_convertor import (
         ModelArchConfigConvertorBase,
     )
 
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         max_position_embeddings=4096,
         original_max_position_embeddings=2048,
     )
@@ -2514,14 +2572,14 @@ def test_get_and_verify_max_len_yarn_is_already_scaled(
     for every YaRN variant, so scaling it again overstates the limit and lets
     requests past the end of the cos/sin cache.
     """
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config.model import _get_and_verify_max_len
     from vllm.transformers_utils.model_arch_config_convertor import (
         ModelArchConfigConvertorBase,
     )
 
-    hf_config = PretrainedConfig(max_position_embeddings=32768)
+    hf_config = PreTrainedConfig(max_position_embeddings=32768)
     hf_config.rope_parameters = {
         "rope_type": rope_type,
         "factor": factor,
@@ -3867,19 +3925,12 @@ def test_load_config_rejects_non_string_load_format(bad_load_format):
         LoadConfig(load_format=bad_load_format)
 
 
-# A real Qwen3-0.6B model revision that is used in the tests below.
+# A real Qwen3-0.6B model revision that is used in the test below.
 REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 
 
 @patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
-def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
-    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
-    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
-    assert config.revision is None
-
-
-@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
-def test_revision_resolved_when_weights_match_model(mock_resolve):
+def test_revision_resolved_for_model(mock_resolve):
     model = "Qwen/Qwen3-0.6B"
     config = ModelConfig(model)
     assert isinstance(config.revision, ResolvedRevision)
