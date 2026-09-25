@@ -17,7 +17,9 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor import multiproc_executor as multiproc_executor_module
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+from vllm.v1.executor.multiproc_executor import (
+    MultiprocExecutor,
+)
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher,
     UniProcExecutor,
@@ -61,12 +63,16 @@ class _FakeProcess:
         self.clock = clock
         self.exits_at = exits_at
         self.terminate_called = False
+        self.kill_called = False
 
     def is_alive(self) -> bool:
         return self.clock.time() < self.exits_at
 
     def terminate(self) -> None:
         self.terminate_called = True
+
+    def kill(self) -> None:
+        self.kill_called = True
 
 
 @pytest.mark.parametrize(
