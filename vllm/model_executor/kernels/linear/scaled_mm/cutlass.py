@@ -183,7 +183,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         """
         key = self.config.activation_quant_key
         # Per-tensor quantization (static)
-        if key in (kFp8StaticTensorSym):
+        if key == kFp8StaticTensorSym:
             return key
         # Per-block dynamic quantization (e.g., DeepSeek block FP8)
         if key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
