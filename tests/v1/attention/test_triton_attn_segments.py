@@ -10,10 +10,17 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
+from vllm.v1.attention.backends.triton_attn_diffkv import (
+    TritonAttentionDiffKVMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 # 64 segments only while num_seqs * num_kv_heads * 16 < 188 SMs on SM12.0.
+@pytest.mark.parametrize(
+    "builder_cls",
+    [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
+)
 @pytest.mark.parametrize(
     "capability,num_kv_heads,num_seqs,segments",
     [
@@ -25,7 +32,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
     ],
 )
 def test_split_k_segments_follow_sm_occupancy(
-    monkeypatch, capability, num_kv_heads, num_seqs, segments
+    monkeypatch, builder_cls, capability, num_kv_heads, num_seqs, segments
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
@@ -48,8 +55,14 @@ def test_split_k_segments_follow_sm_occupancy(
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=num_kv_heads, head_size=128, dtype=torch.bfloat16
     )
-    builder = TritonAttentionMetadataBuilder(spec, ["layer.0"], config, "cpu")
+    builder = builder_cls(spec, ["layer.0"], config, "cpu")
     batch = BatchSpec(seq_lens=[128] * num_seqs, query_lens=[1] * num_seqs)
     metadata = builder.build(0, create_common_attn_metadata(batch, 16, "cpu"))
     assert metadata.num_par_softmax_segments == segments
     assert metadata.softmax_segm_output.shape[2] == segments
+    # DiffKV re-allocates the output; it must stay sized like the base buffers.
+    assert builder.softmax_segm_output.shape[0] == builder.softmax_segm_max.shape[0]
+    assert (
+        metadata.softmax_segm_output.data_ptr()
+        == builder.softmax_segm_output.data_ptr()
+    )
