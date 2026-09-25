@@ -92,7 +92,6 @@ class KVCacheDTypeHandler(Protocol):
         """
         ...
 
-
     def quant_mode(self) -> KVQuantMode:
         """The :class:`KVQuantMode` used by generic kernels.
 
@@ -130,9 +129,9 @@ def register_kv_cache_dtype(name: str):
         ...     def torch_dtype(self):
         ...         return torch.int8
         ...
-        ...
         ...     def quant_mode(self):
         ...         return KVQuantMode.CUSTOM
+
     """
 
     def _decorate(cls):

@@ -6,7 +6,7 @@ Run `pytest tests/config/test_kv_cache_dtype.py`.
 """
 
 import logging
-import re
+import regex as re
 from pathlib import Path
 
 import pytest

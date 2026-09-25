@@ -8,8 +8,8 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import (
-    CacheDType, 
     KV_CACHE_DTYPES,
+    CacheDType,
     is_known_kv_cache_dtype,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
