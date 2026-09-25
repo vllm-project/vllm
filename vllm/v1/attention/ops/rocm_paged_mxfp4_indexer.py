@@ -305,10 +305,17 @@ def reserve_rocm_mxfp4_indexer_workspace(
         specs.append(((rows, nblocks), torch.float32))
         budget += budget // candidate_block_size
     if gather_block_size:
-        # aiter allocates the candidate lists, and every consumer layer of the
-        # step reuses them: each gathered row, 8 B per candidate block (int32
-        # slot and position).
-        budget += hidden_states.shape[0] * (num_candidate_cols // gather_block_size) * 8
+        # aiter allocates the candidate lists: each gathered row, 8 B per
+        # candidate block (int32 slot and position). The first consumer builds
+        # them and they live until the step ends, across the later layers, so
+        # one reservation is held for the rest of the forward.
+        held = get_forward_context().additional_kwargs
+        if "rocm_mxfp4_candidate_lists" not in held:
+            held["rocm_mxfp4_candidate_lists"] = torch.empty(
+                hidden_states.shape[0] * (num_candidate_cols // gather_block_size) * 8,
+                dtype=torch.uint8,
+                device=hidden_states.device,
+            )
     current_workspace_manager().get_simultaneous(*specs)
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
