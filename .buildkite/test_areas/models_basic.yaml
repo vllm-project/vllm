@@ -169,6 +169,8 @@ steps:
       - image-build-amd
       commands:
       - pytest -v -s models/qwen4_exp/test_qsa_amd.py
+      # PLE and QSA import conflicting HC registrations in a shared process.
+      - pytest -v -s models/qwen4_exp/test_ple.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
