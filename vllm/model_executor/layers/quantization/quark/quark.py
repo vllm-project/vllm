@@ -757,11 +757,19 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_quant_config") or {}
             )
+            clean_layer_name = layer_name.removeprefix("model.")
             for name_pattern, config in layer_quant_config.items():
-                if "*" not in name_pattern:
-                    matches = layer_name in name_pattern
+                clean_pattern = name_pattern.removeprefix("model.")
+                if "*" not in clean_pattern:
+                    matches = (
+                        clean_layer_name == clean_pattern
+                        or clean_pattern.startswith(clean_layer_name + ".")
+                        or clean_layer_name.startswith(clean_pattern + ".")
+                    )
                 else:
-                    matches = fnmatch.fnmatch(layer_name, name_pattern)
+                    matches = fnmatch.fnmatch(
+                        clean_layer_name, clean_pattern
+                    ) or fnmatch.fnmatch(layer_name, name_pattern)
                 if matches:
                     return config
             return None
