@@ -1502,6 +1502,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    # LiLiCorr checkpoints are not published yet.
+    "LiLiCorrDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="LiLiCorrDraftModel",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     "DFlash2DraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.8-27B",
         speculative_model="z-lab/Qwen3.8-27B-DFlash2",
