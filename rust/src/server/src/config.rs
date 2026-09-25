@@ -59,6 +59,9 @@ pub struct ApiServerOptions {
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// Idle interval after which streaming SSE responses send a keep-alive
+    /// comment. `None` disables keep-alive comments.
+    pub sse_keep_alive_interval: Option<Duration>,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.

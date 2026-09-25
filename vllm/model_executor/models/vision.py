@@ -9,7 +9,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
@@ -25,7 +25,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
-_C = TypeVar("_C", bound=PretrainedConfig)
+_C = TypeVar("_C", bound=PreTrainedConfig)
 
 
 class _RootConfig(Protocol[_C]):
@@ -62,7 +62,7 @@ class VisionEncoderInfo(ABC, Generic[_C]):
 
 
 class VisionLanguageConfig(Protocol):
-    vision_config: Final[PretrainedConfig]
+    vision_config: Final[PreTrainedConfig]
 
 
 def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
