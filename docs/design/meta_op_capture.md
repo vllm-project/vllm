@@ -12,7 +12,7 @@ A tensor on `torch.device("meta")` has a shape and a dtype but no memory; operat
 
 1. **Build the config.** `EngineArgs(load_format="meta")` produces an ordinary `VllmConfig`.
 2. **Register meta kernels** for vLLM's custom ops (see below).
-3. **Settle kernel choices as a worker does**: the current vLLM config, `kernel_config.ir_op_priority` and the vLLM IR wrap flag. These decide whether a layer calls `_C::rms_norm` or a wrapper around it, so they are set before the model is built.
+3. **Settle kernel choices as a worker does**: the current vLLM config, `kernel_config.ir_op_priority`, the vLLM IR wrap flag and, on XPU, the model runner's `torch.cuda` aliases for `torch.xpu`. The first three decide whether a layer calls `_C::rms_norm` or a wrapper around it, so they are set before the model is built.
 4. **Create a single-rank Gloo process group**, which model code expects. At world size 1 no collective reaches the backend.
 5. **Build the model** through `MetaModelLoader`, under `torch.device("meta")` and without loading weights.
 6. **Plan the KV cache for real.** Layers are grouped by attention backend, the layout is resolved, and the cache is sized for one request at `max_model_len`, allocated (shaped but empty) and bound to the layers.

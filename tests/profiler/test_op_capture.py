@@ -202,6 +202,21 @@ def test_keep_going_reports_where_the_forward_pass_stopped(monkeypatch):
     assert not capture.missing_kernels
 
 
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU model runner")
+def test_capture_applies_the_model_runner_torch_cuda_aliases(monkeypatch):
+    """Model code calls `torch.cuda` on XPU, as the real model runner allows."""
+    forward = Qwen2MLP.forward
+
+    def calls_torch_cuda(self, x):
+        assert not torch.cuda.is_current_stream_capturing()
+        return forward(self, x)
+
+    monkeypatch.setattr(Qwen2MLP, "forward", calls_torch_cuda)
+    before = dict(vars(torch.cuda))
+    _capture(num_hidden_layers=1)
+    assert vars(torch.cuda) == before
+
+
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU kernels")
 def test_xpu_mhc_overrides_match_the_kernels():
     """Hand-written output shapes must agree with what the kernel returns."""

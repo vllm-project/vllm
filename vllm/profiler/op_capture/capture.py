@@ -12,7 +12,8 @@ comes from the `meta` load format, so an HF config is all that is needed.
 
 import os
 import traceback
-from contextlib import ExitStack, nullcontext
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
@@ -64,6 +65,31 @@ from vllm.v1.worker.utils import (
     prepare_kernel_block_sizes,
 )
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+
+@contextmanager
+def _model_runner_torch_cuda() -> Iterator[None]:
+    """The `torch.cuda` aliases the XPU model runner leaves installed.
+
+    Model code calls `torch.cuda.current_stream()` and the like, which on XPU
+    only work once the runner has pointed them at `torch.xpu`. A harness
+    shares its process, so the original attributes are restored on exit.
+    """
+    if not current_platform.is_xpu():
+        yield
+        return
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    saved = dict(vars(torch.cuda))
+    try:
+        with _torch_cuda_wrapper():
+            yield
+    finally:
+        for name in set(vars(torch.cuda)) - set(saved):
+            delattr(torch.cuda, name)
+        for name, value in saved.items():
+            if vars(torch.cuda).get(name) is not value:
+                setattr(torch.cuda, name, value)
 
 
 def _kv_cache_budget(config: VllmConfig, specs: dict[str, KVCacheSpec]) -> int:
@@ -297,6 +323,7 @@ class ForwardHarness:
                 self.vllm_config.compilation_config.ir_enable_torch_wrap
             )
         )
+        self._exit_stack.enter_context(_model_runner_torch_cuda())
         self._init_distributed()
         # As a worker does before building the model: fused MoE kernels take
         # their scratch buffers from the workspace.
