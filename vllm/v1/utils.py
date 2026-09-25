@@ -391,6 +391,16 @@ class RustFrontendProcessManager:
                 "data_parallel_hybrid_lb",
             },
         )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven
