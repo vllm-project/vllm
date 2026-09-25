@@ -169,6 +169,15 @@ def test_store_after_ring_window_fails_closed(monkeypatch):
         snap.apply([stored([1], medium="CPU")])
 
 
+def test_remove_after_ring_window_fails_closed(monkeypatch):
+    snap = KVCacheSnapshot()
+    monkeypatch.setattr(snap, "RING_BATCHES", 1)
+    snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
+    snap.apply([stored([9])])
+    with pytest.raises(ValueError, match="Missing reconstruction"):
+        snap.apply([BlockRemoved(block_hashes=[1], medium="CPU")])
+
+
 def test_conflicting_metadata_fails_closed():
     snap = KVCacheSnapshot()
     snap.apply([stored([1])])

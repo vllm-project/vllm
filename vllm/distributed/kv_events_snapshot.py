@@ -231,6 +231,11 @@ class KVCacheSnapshot:
     def _remove(self, key: _BlockKey) -> None:
         count = self._live.get(key)
         if count is None:
+            # A consumer bootstrapped from this recorder must resolve it too.
+            if key[2] not in self._records:
+                raise ValueError(
+                    f"Missing reconstruction metadata for block {key[2]!r}"
+                )
             return
         if count > 1:
             self._live[key] = count - 1
