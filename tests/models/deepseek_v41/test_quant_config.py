@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for DeepSeek-V4.1 quant method routing and shared experts exclusion."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod

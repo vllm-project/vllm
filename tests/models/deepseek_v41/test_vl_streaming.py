@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for DeepSeek-V4.1 VLM non-materialized generator streaming."""
 
 import torch

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for DeepSeek-V4.1 Fused Shared Experts (FSE) routing, padding,
 and expert mapping."""
 
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from vllm.models.deepseek_v41.amd.model import DeepseekV4Model, DeepseekV4MoEBase
 
 
