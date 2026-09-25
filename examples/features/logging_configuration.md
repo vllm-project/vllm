@@ -3,46 +3,60 @@
 vLLM leverages Python's `logging.config.dictConfig` functionality to enable
 robust and flexible configuration of the various loggers used by vLLM.
 
-vLLM offers two environment variables that can be used to accommodate a range
-of logging configurations that range from simple-and-inflexible to
-more-complex-and-more-flexible.
+For `vllm serve`, configure logging with CLI arguments:
 
-- No vLLM logging (simple and inflexible)
-    - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
-- vLLM's default logging configuration (simple and inflexible)
-    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
-- Fine-grained custom logging configuration (more complex, more flexible)
-    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
-    set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
+- Use the built-in configuration, optionally with `--log-level`.
+- Use a custom Python logging configuration file with
+  `--logging-config.pylogging_config_file`.
+- Disable vLLM logging configuration with
+  `--logging-config.configure_logging false`.
 
-## Logging Configuration Environment Variables
+## CLI logging configuration
 
-### `VLLM_CONFIGURE_LOGGING`
+`--logging-config` accepts a JSON object. Its fields are `log_level`,
+`configure_logging`, and `pylogging_config_file`. For example:
 
-`VLLM_CONFIGURE_LOGGING` controls whether or not vLLM takes any action to
-configure the loggers used by vLLM. This functionality is enabled by default,
-but can be disabled by setting `VLLM_CONFIGURE_LOGGING=0` when running vLLM.
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 \
+    --logging-config '{"log_level":"DEBUG","configure_logging":true}'
+```
 
-If `VLLM_CONFIGURE_LOGGING` is enabled and no value is given for
-`VLLM_LOGGING_CONFIG_PATH`, vLLM will use built-in default configuration to
-configure the root vLLM logger. By default, no other vLLM loggers are
-configured and, as such, all vLLM loggers defer to the root vLLM logger to make
-all logging decisions.
+Fields can also be set individually with dotted arguments:
 
-If `VLLM_CONFIGURE_LOGGING` is disabled and a value is given for
-`VLLM_LOGGING_CONFIG_PATH`, an error will occur while starting vLLM.
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 \
+    --logging-config.log_level DEBUG
+```
 
-### `VLLM_LOGGING_CONFIG_PATH`
+`--log-level` is a shortcut for `--logging-config.log_level` and takes
+precedence if both are supplied. It sets the level of vLLM's built-in logging
+configuration. `--log-config-file` is deprecated and will be removed in
+v0.33.0; use `--logging-config.pylogging_config_file` in new commands.
 
-`VLLM_LOGGING_CONFIG_PATH` allows users to specify a path to a JSON file of
-alternative, custom logging configuration that will be used instead of vLLM's
-built-in default logging configuration. The logging configuration should be
-provided in JSON format following the schema specified by Python's [logging
+If `configure_logging` is `false`, vLLM does not apply a logging
+configuration. It cannot be combined with `pylogging_config_file`. This has
+the same effect as the legacy `VLLM_CONFIGURE_LOGGING=0` setting.
+
+The custom logging configuration file must be JSON following Python's [logging
 configuration dictionary
 schema](https://docs.python.org/3/library/logging.config.html#dictionary-schema-details).
 
-If `VLLM_LOGGING_CONFIG_PATH` is specified, but `VLLM_CONFIGURE_LOGGING` is
-disabled, an error will occur while starting vLLM.
+!!! note "Custom configurations override `--log-level`"
+    When `pylogging_config_file` is set, vLLM loads that JSON file and replaces
+    its built-in `dictConfig`; it does not merge the two. Therefore,
+    `--log-level` applies only when no custom configuration file is provided.
+    Set logger and handler levels in the custom file itself. vLLM applies the
+    resolved configuration in its child processes as well.
+
+## Environment variables
+
+The CLI configuration is recommended for `vllm serve`. The legacy
+`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_LEVEL`, and
+`VLLM_LOGGING_CONFIG_PATH` variables remain supported as defaults. The default
+handler's stream, prefix, and color are currently controlled only through
+environment variables. Values from a YAML `--config` file or the command line
+override those defaults. See [Environment Variables](https://docs.vllm.ai/en/latest/configuration/env_vars/)
+for those settings.
 
 ## Examples
 
@@ -61,7 +75,8 @@ To begin, first, create an appropriate JSON logging configuration file:
     {
       "formatters": {
         "json": {
-          "class": "pythonjsonlogger.jsonlogger.JsonFormatter"
+          "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+          "format": "%(asctime)s %(levelname)s %(name)s %(vllm_process_name)s %(process)d %(message)s"
         }
       },
       "handlers": {
@@ -83,13 +98,28 @@ To begin, first, create an appropriate JSON logging configuration file:
     }
     ```
 
-Finally, run vLLM with the `VLLM_LOGGING_CONFIG_PATH` environment variable set
-to the path of the custom logging configuration JSON file:
+Finally, run vLLM with the custom logging configuration JSON file:
 
 ```bash
-VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
-    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
+vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
+    --logging-config.pylogging_config_file /path/to/logging_config.json
 ```
+
+Each vLLM log record is one JSON object and includes `vllm_process_name`, which
+identifies vLLM's logical process (including worker ranks where applicable).
+The standard `process` record attribute contains the operating-system PID.
+vLLM avoids altering `stdout` or `stderr`, so no text is prepended to JSON
+log records.
+
+This applies to records emitted through the configured Python loggers. A JSON
+formatter cannot convert unrelated output into JSON, such as a third-party
+library writing directly to `stdout` or `stderr`; configure or route such
+output separately when a consumer requires every collected line to be JSON.
+
+When serving, `VLLM_LOGGING_CONFIG_PATH` is also used as Uvicorn's logging
+configuration. This example configures only `vllm`; configure `uvicorn`,
+`uvicorn.error`, and `uvicorn.access` with a JSON handler when those server
+logs must also be structured.
 
 ### Example 2: Silence a particular vLLM logger
 
@@ -137,25 +167,26 @@ configuration for the root vLLM logger and for the logger you wish to silence:
     }
     ```
 
-Finally, run vLLM with the `VLLM_LOGGING_CONFIG_PATH` environment variable set
-to the path of the custom logging configuration JSON file:
+Finally, run vLLM with the custom logging configuration JSON file:
 
 ```bash
-VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
-    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
+vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
+    --logging-config.pylogging_config_file /path/to/logging_config.json
 ```
 
 ### Example 3: Disable vLLM default logging configuration
 
-To disable vLLM's default logging configuration and silence all vLLM loggers,
-simple set `VLLM_CONFIGURE_LOGGING=0` when running vLLM. This will prevent vLLM
-for configuring the root vLLM logger, which in turn, silences all other vLLM
-loggers.
+To disable vLLM's default logging configuration and silence vLLM log output,
+set `--logging-config.configure_logging false` when running vLLM. This prevents
+vLLM from configuring the root vLLM logger, which in turn silences other vLLM
+loggers unless the application or Python root logger configures a handler.
 
 ```bash
-VLLM_CONFIGURE_LOGGING=0 \
-    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
+vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
+    --logging-config.configure_logging false
 ```
+
+For legacy launch scripts, `VLLM_CONFIGURE_LOGGING=0` has the same effect.
 
 ### Example 4: Disable access logs for health check endpoints
 
