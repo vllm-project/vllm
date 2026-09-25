@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import sys
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
@@ -691,6 +692,108 @@ class TestDPSynchronizedProfiler:
         assert profiler.stop_call_count == 1
         assert worker._dp_profiler_requested is False
         assert not profiler.is_armed
+
+
+@pytest.mark.parametrize(
+    "device_type",
+    ["cuda", pytest.param("cpu", marks=pytest.mark.forked), "xpu"],
+)
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize("synchronized,dp_size", [(True, 2), (False, 2), (True, 1)])
+def test_worker_init_enables_requested_profiler_clock(
+    device_type,
+    use_v2,
+    synchronized,
+    dp_size,
+    default_profiler_config,
+    monkeypatch,
+):
+    """Each init path must make an armed profile advance, not wait forever."""
+    if device_type == "cpu":
+        # Import only in a child: CPUWorker installs process-wide Torch shims.
+        from vllm.v1.worker.cpu_worker import CPUWorker
+
+        worker_type = CPUWorker
+    else:
+        worker_type = Worker if device_type == "cuda" else XPUWorker
+    worker = object.__new__(worker_type)
+    worker.rank = worker.local_rank = 0
+    worker.use_v2_model_runner = use_v2
+    worker.distributed_init_method = "file:///tmp/mock"
+    worker.device_config = SimpleNamespace(
+        device=torch.device(device_type), device_type=device_type
+    )
+    worker.model_config = SimpleNamespace(dtype=torch.float16, seed=0)
+    worker.cache_config = SimpleNamespace()
+    worker.parallel_config = SimpleNamespace(
+        data_parallel_size=dp_size,
+        world_size=1,
+        distributed_executor_backend="external_launcher",
+        assigned_physical_gpu_ids=None,
+        enable_dbo=False,
+    )
+    default_profiler_config.synchronize_iterations_across_dp = synchronized
+    worker.profiler_config = default_profiler_config
+    worker.profiler = profiler = ConcreteWorkerProfiler(default_profiler_config)
+    worker._dp_profiler_requested = False
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=worker.parallel_config,
+        speculative_config=None,
+        is_mm_encoder_only=False,
+        profiler_config=worker.profiler_config,
+    )
+    runner = SimpleNamespace(dp_profiler_is_ready=None, dp_profiler_advance=None)
+    module = sys.modules[worker_type.__module__]
+    monkeypatch.setattr(
+        module,
+        "torch",
+        MagicMock(
+            device=torch.device,
+            accelerator=MagicMock(device_count=Mock(return_value=1)),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "current_platform",
+        MagicMock(
+            logical_device_id_to_visible_device_id=Mock(return_value=0),
+        ),
+    )
+    for name in (
+        "init_worker_distributed_environment",
+        "set_random_seed",
+        "MemorySnapshot",
+        "request_memory",
+        "init_workspace_manager",
+        "report_usage_stats",
+    ):
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, Mock(return_value=0))
+    runner_paths = {
+        "cuda": ("gpu_model_runner.GPUModelRunner", "gpu.model_runner.GPUModelRunner"),
+        "cpu": ("cpu_worker.CPUModelRunner", "cpu.model_runner.CPUModelRunner"),
+        "xpu": ("xpu_worker.XPUModelRunner", "xpu_worker.XPUModelRunnerV2"),
+    }
+    with (
+        patch.dict(os.environ),
+        patch(
+            f"vllm.v1.worker.{runner_paths[device_type][use_v2]}", return_value=runner
+        ),
+        patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
+    ):
+        worker.init_device()
+        worker.profile()
+
+    if synchronized and dp_size > 1:
+        assert not profiler.is_armed
+        assert runner.dp_profiler_is_ready()
+        runner.dp_profiler_advance(True)
+    else:
+        assert runner.dp_profiler_is_ready is None
+        assert runner.dp_profiler_advance is None
+    assert profiler.start_call_count == 1
+    worker.profile(is_start=False)
+    assert profiler.stop_call_count == 1
 
 
 class _BoundaryObserved(Exception):
@@ -1463,11 +1566,8 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
     assert wrapper.return_value.start.call_count == 2
 
 
-@_requires_cuda_for_proton
 def test_gpu_worker_reuses_cuda_graph_proton_session():
-    worker = MagicMock()
-    worker.rank = 1
-    worker.profiler = MagicMock(spec=ProtonProfilerWrapper)
+    worker = _make_worker(MagicMock(spec=ProtonProfilerWrapper))
     worker.profiler.has_cuda_graph_session = True
     worker.profiler_config.profiler = "proton"
 

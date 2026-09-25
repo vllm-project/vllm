@@ -537,11 +537,7 @@ class Worker(WorkerBase):
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
-        if self._use_dp_synchronized_profiler_iterations():
-            self.model_runner.dp_profiler_is_ready = self._dp_profiler_is_ready
-            self.model_runner.dp_profiler_advance = (
-                self._advance_dp_synchronized_profiler
-            )
+        self._configure_dp_synchronized_profiler()
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -1142,6 +1138,13 @@ class Worker(WorkerBase):
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         """Get encoder timing stats from model runner."""
         return self.model_runner.get_encoder_timing_stats()
+
+    def _configure_dp_synchronized_profiler(self) -> None:
+        if self._use_dp_synchronized_profiler_iterations():
+            self.model_runner.dp_profiler_is_ready = self._dp_profiler_is_ready
+            self.model_runner.dp_profiler_advance = (
+                self._advance_dp_synchronized_profiler
+            )
 
     def _use_dp_synchronized_profiler_iterations(self) -> bool:
         return (
