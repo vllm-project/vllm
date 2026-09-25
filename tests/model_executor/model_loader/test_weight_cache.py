@@ -7,11 +7,14 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +23,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 
 class WeightCacheDaemon:
@@ -33,6 +37,7 @@ class WeightCacheDaemon:
     ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
+        self.health_port = get_open_port()
         self._cmd = [
             sys.executable,
             "-m",
@@ -44,6 +49,10 @@ class WeightCacheDaemon:
             "--weight-cache-socket-dir",
             self.socket_dir,
             "--enforce-eager",
+            "--weight-cache-health-host",
+            "127.0.0.1",
+            "--weight-cache-health-port",
+            str(self.health_port),
             *(extra_args or []),
         ]
         self._proc: subprocess.Popen | None = None
@@ -61,6 +70,21 @@ class WeightCacheDaemon:
     def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
         self._proc.stderr.read()
+
+    def check_health(self, expected: int) -> dict[str, Any]:
+        url = f"http://127.0.0.1:{self.health_port}/health"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                body = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            body = json.loads(error.read())
+            raise AssertionError(
+                f"Unexpected daemon health response: {body}"
+            ) from error
+        assert body["status"] == "ready"
+        assert body["expected"] == expected
+        assert body["ready"] == expected
+        return body
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -199,6 +223,12 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        expected_daemons = 2 if case.llm_kwargs.get("speculative_config") else 1
+        health = d.check_health(expected_daemons)
+        assert health["ready_ranks"]
+        assert {rank["role"] for rank in health["ready_ranks"]} == (
+            {"target", "draft"} if expected_daemons == 2 else {"target"}
+        )
         # Warm restart: a second engine lifetime against the same daemon.
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
 
