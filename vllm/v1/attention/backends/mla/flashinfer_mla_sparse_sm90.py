@@ -83,6 +83,7 @@ def _pack_topk_indices(
 
 
 class FlashInferMLASparseSM90Backend(AttentionBackend):
+    requires_kv_cache_zeroing: ClassVar[bool] = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",

@@ -52,6 +52,7 @@ from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 
@@ -1089,6 +1090,67 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
     assert backend.supports_non_causal()
     assert builder.supports_non_causal_multi_token_decode
     assert backend.supports_non_causal_dcp()
+
+
+def test_only_flashinfer_mla_backends_require_kv_cache_zeroing():
+    flashinfer_mla_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashinfer_mla"
+    )
+    flashinfer_sparse_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashinfer_mla_sparse"
+    )
+    flashinfer_sparse_sm90_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90"
+    )
+    flashmla_sparse_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashmla_sparse"
+    )
+    deepseek_v4_module = pytest.importorskip(
+        "vllm.models.deepseek_v4.nvidia.flashinfer_sparse"
+    )
+    deepseek_v41_module = pytest.importorskip(
+        "vllm.models.deepseek_v41.nvidia.flashinfer_sparse"
+    )
+    full_spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    sliding_spec = SlidingWindowMLASpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+    )
+
+    flashinfer_backends = (
+        (flashinfer_mla_module.FlashInferMLABackend, full_spec),
+        (flashinfer_sparse_module.FlashInferMLASparseTRTLLMBackend, full_spec),
+        (flashinfer_sparse_module.FlashInferMLASparseSM120Backend, full_spec),
+        (flashinfer_sparse_sm90_module.FlashInferMLASparseSM90Backend, full_spec),
+        (deepseek_v4_module.DeepseekV4FlashInferMLASparseBackend, full_spec),
+        (deepseek_v4_module.DeepseekSparseSWAFlashInferBackend, sliding_spec),
+        (deepseek_v41_module.DeepseekV4FlashInferMLASparseBackend, full_spec),
+        (deepseek_v41_module.DeepseekSparseSWAFlashInferBackend, sliding_spec),
+    )
+
+    for backend, spec in flashinfer_backends:
+        assert backend.customize_spec(spec).requires_kv_cache_zeroing
+
+    assert not mla_attention_module.MLACommonBackend.customize_spec(
+        full_spec
+    ).requires_kv_cache_zeroing
+    assert not flashmla_module.FlashMLABackend.customize_spec(
+        full_spec
+    ).requires_kv_cache_zeroing
+    assert not flashmla_sparse_module.FlashMLASparseBackend.customize_spec(
+        full_spec
+    ).requires_kv_cache_zeroing
+    assert not mla_attention_module.MLACommonBackend.customize_spec(
+        sliding_spec
+    ).requires_kv_cache_zeroing
 
 
 @pytest.mark.parametrize(

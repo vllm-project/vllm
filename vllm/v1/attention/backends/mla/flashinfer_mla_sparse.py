@@ -46,6 +46,8 @@ logger = init_logger(__name__)
 class _FlashInferMLASparseBackendBase(AttentionBackend):
     """Common metadata for concrete FlashInfer sparse MLA backends."""
 
+    requires_kv_cache_zeroing: ClassVar[bool] = True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE"
