@@ -27,6 +27,12 @@ With all these factors taken into consideration, usually we can guarantee that t
 
 A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all the compilation finishes before we serve any requests. No requests will trigger new compilations. Otherwise, the engine would be blocked on that request, and the response time will have unexpected spikes.
 
+An explicit `TRITON_CACHE_DIR` is preserved, allowing processes and model
+configurations to reuse Triton artifacts. The directory can start empty: the
+first compilation populates it and later matching specializations reuse it.
+When copying compilation caches, also copy this directory if set. Cold-cache
+tests should set it to a fresh directory.
+
 By default, the cache saves compiled artifacts as binary files. If you would like to interact with the generated code for debugging purposes, set the field `compile_cache_save_format=unpacked` in the compilation config, or omit this and set the env variable `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`.
 
 ## Dynamic shapes and vllm guard dropping
