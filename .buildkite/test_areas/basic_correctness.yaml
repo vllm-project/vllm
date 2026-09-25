@@ -16,19 +16,12 @@ steps:
   - pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Correctness"
+      label: ":amd: (MI300) Basic Correctness Models %N"
       dind: false
       device: mi300_1
-      parallelism: 1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
-      commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - pytest -v -s basic_correctness/memory
-      - pytest -v -s basic_correctness/models
-      - pytest -v -s basic_correctness/cpu_offload
-      - pytest -v -s basic_correctness/prefetch_offload
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness CuMem"
   key: basic-correctness-cumem
@@ -38,6 +31,14 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/cumem
+  mirror:
+    amd:
+      label: ":amd: (MI300) Basic Correctness CuMem"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode"
   key: basic-correctness-sleep-mode
@@ -47,6 +48,14 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/sleep_mode
+  mirror:
+    amd:
+      label: ":amd: (MI300) Basic Correctness Sleep Mode"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness CPU Offload"
   key: basic-correctness-cpu-offload
@@ -56,6 +65,14 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/cpu_offload
+  mirror:
+    amd:
+      label: ":amd: (MI300) Basic Correctness CPU Offload"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness Prefetch Offload"
   key: basic-correctness-prefetch-offload
@@ -65,3 +82,11 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/prefetch_offload
+  mirror:
+    amd:
+      label: ":amd: (MI300) Basic Correctness Prefetch Offload"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd

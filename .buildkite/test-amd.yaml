@@ -538,7 +538,23 @@ steps:
 
 #-----------------------------------------------------  mi300 · basic_correctness  -----------------------------------------------------#
 
-- label: ":amd: (MI300) Basic Correctness" # TBD
+- label: ":amd: (MI300) Basic Correctness Models %N" # TBD
+  timeout_in_minutes: 60
+  parallelism: 2
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  fast_check: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/
+  optional: true
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: ":amd: (MI300) Basic Correctness CuMem" # TBD
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -551,9 +567,51 @@ steps:
   optional: true
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/memory
-  - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/models
+  - pytest -v -s basic_correctness/memory/cumem
+
+- label: ":amd: (MI300) Basic Correctness Sleep Mode" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  fast_check: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/
+  optional: true
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/memory/sleep_mode
+
+- label: ":amd: (MI300) Basic Correctness CPU Offload" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  fast_check: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/
+  optional: true
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/cpu_offload
+
+- label: ":amd: (MI300) Basic Correctness Prefetch Offload" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  fast_check: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/
+  optional: true
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/prefetch_offload
 
 - label: ":amd: (MI300) Distributed Models Shard %N"

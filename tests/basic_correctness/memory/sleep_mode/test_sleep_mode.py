@@ -12,7 +12,7 @@ from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
-from ....utils import create_new_process_for_each_test, requires_fp8
+from ....utils import create_new_process_for_each_test, multi_gpu_test, requires_fp8
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -154,8 +154,8 @@ def _lora_logits_mapping_present(model) -> bool:
     )
 
 
-@create_new_process_for_each_test()
-def test_deep_sleep_lora_tp2(num_gpus_available, monkeypatch):
+@multi_gpu_test(num_gpus=2)
+def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
     With TP > 1 the LoRA logits processor carries
@@ -164,9 +164,6 @@ def test_deep_sleep_lora_tp2(num_gpus_available, monkeypatch):
     attribute allocated in the sleep-mode pool, so level-2 sleep destroys
     its contents — it must be restored after reload.
     """
-    if num_gpus_available < 2:
-        pytest.skip("Requires at least 2 GPUs")
-
     # Needed for apply_model to reach the multiproc TP workers below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
