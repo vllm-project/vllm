@@ -659,9 +659,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # Collapse the hc copies with the pre-mix from the last layer's FFN
         # mixes — the mix the reference applies via
         # ``last_layer.hc_pre(h, pre_mix)`` (v4.1 has no learned hc_head).
-        assert pre_mix is not None
-        hidden_states = torch.ops.vllm.hc_collapse_triton(hidden_states, pre_mix)
-        hidden_states = self.norm(hidden_states)
+        assert isinstance(self.norm, RMSNorm)
+        hidden_states = torch.ops.vllm.hc_collapse_rms_norm_triton(
+            hidden_states,
+            pre_mix,
+            self.norm.weight,
+            self.norm.variance_epsilon,
+        )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

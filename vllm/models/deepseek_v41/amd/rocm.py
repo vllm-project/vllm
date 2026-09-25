@@ -63,13 +63,6 @@ def _trust_dsv4_extra_cache_nan_free(
     )
 
 
-def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
-    lengths = lengths.to(dtype=torch.int32).contiguous()
-    indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
-    torch.cumsum(lengths, dim=0, out=indptr[1:])
-    return indptr
-
-
 def apply_pre_quantized_block_scaled_mm(
     linear: torch.nn.Module,
     x_fp8: torch.Tensor,
@@ -260,6 +253,50 @@ def combine_topk_swa_indices(
 
 
 @triton.jit
+def _build_global_topk_ragged_kernel(
+    global_topk_ragged_ptr,
+    topk_lens_ptr,
+    topk_indptr_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    topk,
+    is_valid_token_ptr,
+    num_tokens,
+    BLOCK_TOPK: tl.constexpr,
+):
+    offsets = tl.arange(0, BLOCK_TOPK)
+    topk_mask = offsets < topk
+    running = tl.zeros((), dtype=tl.int32)
+    tl.store(topk_indptr_ptr, running)
+    for token_idx in tl.range(0, num_tokens):
+        local_idx = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + offsets,
+            mask=topk_mask,
+            other=-1,
+        )
+        is_valid_token = tl.load(is_valid_token_ptr + token_idx)
+        valid = topk_mask & (local_idx >= 0) & is_valid_token
+        count = tl.sum(valid.to(tl.int32), axis=0)
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        block_indices = local_idx // block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=valid,
+            other=0,
+        )
+        block_offsets = local_idx % block_size
+        slot_ids = block_numbers * block_size + block_offsets
+        tl.store(global_topk_ragged_ptr + running + offsets, slot_ids, mask=valid)
+        running += count
+        tl.store(topk_lens_ptr + token_idx, count)
+        tl.store(topk_indptr_ptr + token_idx + 1, running)
+
+
+@triton.jit
 def _compute_topk_lens_kernel(
     topk_lens_ptr,
     topk_indices_ptr,
@@ -283,6 +320,21 @@ def _compute_topk_lens_kernel(
         count += tl.sum((local_idx >= 0).to(tl.int32), axis=0)
 
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+
+
+@triton.jit
+def _build_topk_indptr_kernel(
+    topk_lens_ptr,
+    topk_indptr_ptr,
+    num_tokens,
+    BLOCK_ROWS: tl.constexpr,
+):
+    rows = tl.arange(0, BLOCK_ROWS)
+    mask = rows < num_tokens
+    lengths = tl.load(topk_lens_ptr + rows, mask=mask, other=0)
+    inclusive = tl.cumsum(lengths, axis=0)
+    tl.store(topk_indptr_ptr, 0)
+    tl.store(topk_indptr_ptr + rows + 1, inclusive, mask=mask)
 
 
 @triton.jit
@@ -339,25 +391,18 @@ def compute_global_topk_ragged_indices_and_indptr(
     topk = topk_indices.shape[1]
 
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
-    _compute_topk_lens_kernel[(num_tokens,)](
-        topk_lens,
-        topk_indices,
-        topk_indices.stride(0),
-        topk,
-        is_valid_token,
-        TRITON_BLOCK_SIZE=1024,
+    topk_indptr = torch.empty(
+        num_tokens + 1, dtype=torch.int32, device=topk_indices.device
     )
-
-    topk_indptr = _build_indptr_from_lengths(topk_lens)
     global_topk_ragged = torch.empty(
         num_tokens * topk,
         dtype=torch.int32,
         device=topk_indices.device,
     )
-    if global_topk_ragged.numel() > 0:
-        block = 128
-        _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
+    if num_tokens <= 4:
+        _build_global_topk_ragged_kernel[(1,)](
             global_topk_ragged,
+            topk_lens,
             topk_indptr,
             topk_indices,
             topk_indices.stride(0),
@@ -366,8 +411,39 @@ def compute_global_topk_ragged_indices_and_indptr(
             block_table.stride(0),
             block_size,
             topk,
-            BLOCK_SIZE=block,
+            is_valid_token,
+            num_tokens,
+            BLOCK_TOPK=triton.next_power_of_2(max(topk, 1)),
         )
+    else:
+        _compute_topk_lens_kernel[(num_tokens,)](
+            topk_lens,
+            topk_indices,
+            topk_indices.stride(0),
+            topk,
+            is_valid_token,
+            TRITON_BLOCK_SIZE=1024,
+        )
+        _build_topk_indptr_kernel[(1,)](
+            topk_lens,
+            topk_indptr,
+            num_tokens,
+            BLOCK_ROWS=triton.next_power_of_2(num_tokens),
+        )
+        if global_topk_ragged.numel() > 0:
+            block = 128
+            _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
+                global_topk_ragged,
+                topk_indptr,
+                topk_indices,
+                topk_indices.stride(0),
+                token_to_req_indices,
+                block_table,
+                block_table.stride(0),
+                block_size,
+                topk,
+                BLOCK_SIZE=block,
+            )
     return global_topk_ragged, topk_indptr, topk_lens
 
 
@@ -898,27 +974,33 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
+        topk_indices = None
         topk_lens = None
         topk_ragged_indices = None
         topk_ragged_indptr = None
+        use_direct_topk = not swa_only and _ON_GFX950 and num_decode_tokens <= 64
         if not swa_only:
-            (
-                topk_ragged_indices,
-                topk_ragged_indptr,
-                topk_lens,
-            ) = self._decode_topk_ragged(
-                swa_metadata=swa_metadata,
-                attn_metadata=attn_metadata,
-                num_decodes=num_decodes,
-                num_decode_tokens=num_decode_tokens,
-            )
+            assert self.topk_indices_buffer is not None
+            if use_direct_topk:
+                topk_indices = self.topk_indices_buffer[:num_decode_tokens]
+            else:
+                (
+                    topk_ragged_indices,
+                    topk_ragged_indptr,
+                    topk_lens,
+                ) = self._decode_topk_ragged(
+                    swa_metadata=swa_metadata,
+                    attn_metadata=attn_metadata,
+                    num_decodes=num_decodes,
+                    num_decode_tokens=num_decode_tokens,
+                )
 
         return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
             swa_only=swa_only,
-            topk_indices=None,
+            topk_indices=topk_indices,
             topk_lens=topk_lens,
             swa_indices=swa_metadata.decode_swa_indices,
             swa_lens=swa_metadata.decode_swa_lens,
@@ -926,6 +1008,24 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             swa_ragged_indptr=swa_metadata.decode_swa_ragged_indptr,
             topk_ragged_indices=topk_ragged_indices,
             topk_ragged_indptr=topk_ragged_indptr,
+            topk_token_to_req_indices=(
+                swa_metadata.token_to_req_indices if use_direct_topk else None
+            ),
+            topk_block_table=(
+                attn_metadata.block_table[:num_decodes]
+                if use_direct_topk and attn_metadata is not None
+                else None
+            ),
+            topk_seq_lens=swa_metadata.seq_lens if use_direct_topk else None,
+            topk_query_start_loc=(
+                swa_metadata.query_start_loc if use_direct_topk else None
+            ),
+            topk_is_valid_token=(
+                swa_metadata.is_valid_token[:num_decode_tokens]
+                if use_direct_topk and swa_metadata.is_valid_token is not None
+                else None
+            ),
+            topk_compress_ratio=self.compress_ratio if use_direct_topk else 0,
             attn_sink=self.attn_sink,
             scale=self.scale,
             head_dim=self.head_dim,
@@ -938,7 +1038,15 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
-                not swa_only and kv_cache is not None,
+                not swa_only
+                and kv_cache is not None
+                and (
+                    topk_indices is not None
+                    or (
+                        topk_ragged_indices is not None
+                        and topk_ragged_indptr is not None
+                    )
+                ),
             ),
         )
 

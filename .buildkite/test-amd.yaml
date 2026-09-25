@@ -4365,6 +4365,9 @@ steps:
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_rocm_fp32_router_gemm.py
+  - tests/kernels/test_mhc_kernels.py
+  - vllm/model_executor/kernels/mhc/
+  - vllm/models/deepseek_v41/amd/model.py
   - vllm/model_executor/layers/fused_moe/router/gate_linear.py
   - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
   - vllm/model_executor/layers/rotary_embedding/
@@ -4373,7 +4376,7 @@ steps:
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   optional: true
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py kernels/test_mhc_kernels.py::test_hc_collapse_rms_norm_matches_separate_ops --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45
