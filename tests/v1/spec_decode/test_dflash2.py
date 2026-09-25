@@ -282,3 +282,212 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_selector_projection_loads_draft_quantization(monkeypatch, excluded):
+    from vllm.config import (
+        CompilationConfig,
+        DeviceConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.quantization import modelopt
+    from vllm.model_executor.models.qwen3_dflash2 import CandidateSelector
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    monkeypatch.setattr(
+        parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
+    )
+    monkeypatch.setattr(
+        modelopt,
+        "select_linear_kernel",
+        lambda *a, **kw: SimpleNamespace(input_quant_key=lambda: None),
+    )
+    prefix = "model.candidate_selector"
+    quant_config = modelopt.ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        exclude_modules=[f"{prefix}.hidden_projection"] if excluded else [],
+    )
+    with set_current_vllm_config(
+        VllmConfig(
+            device_config=DeviceConfig("cpu"),
+            compilation_config=CompilationConfig(mode=0),
+        )
+    ):
+        selector = CandidateSelector(
+            hidden_size=16,
+            vocab_size=32,
+            rank=8,
+            top_k=4,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+    weight = torch.ones(
+        8,
+        16 if excluded else 8,
+        dtype=torch.bfloat16 if excluded else torch.uint8,
+    )
+    AutoWeightsLoader(selector).load_weights([("hidden_projection.weight", weight)])
+    torch.testing.assert_close(selector.hidden_projection.weight, weight)
+    assert selector.predecessor_codebook.dtype == torch.bfloat16
+    assert selector.successor_codebook.dtype == torch.bfloat16
+
+
+@pytest.fixture(params=["dflash", "dspark"])
+def draft_lm_head_model(request, monkeypatch):
+    from torch import nn
+
+    from vllm.config import (
+        CompilationConfig,
+        DeviceConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.quantization import modelopt
+    from vllm.model_executor.models import qwen3_dflash, qwen3_dspark
+    from vllm.model_executor.models import utils as model_utils
+
+    monkeypatch.setattr(
+        parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
+    )
+    monkeypatch.setattr(
+        modelopt,
+        "select_linear_kernel",
+        lambda *a, **kw: SimpleNamespace(input_quant_key=lambda: None),
+    )
+    quant_config = modelopt.ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+    )
+    for module in (qwen3_dflash, qwen3_dspark, model_utils):
+        monkeypatch.setattr(module, "get_draft_quant_config", lambda _: quant_config)
+
+    class Backbone(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.quant_config = quant_config
+            self.use_aux_hidden_state = True
+            self.has_separate_mask_embedding = False
+            self.confidence_head = None
+
+        def _build_fused_kv_buffers(self):
+            pass
+
+    monkeypatch.setattr(qwen3_dflash.DFlashQwen3ForCausalLM, "model_cls", Backbone)
+    monkeypatch.setattr(qwen3_dspark, "Qwen3DSparkModel", Backbone)
+    monkeypatch.setattr(
+        qwen3_dflash.DFlashQwen3ForCausalLM, "_read_mask_embedding", lambda _: None
+    )
+    cls = (
+        qwen3_dflash.DFlashQwen3ForCausalLM
+        if request.param == "dflash"
+        else qwen3_dspark.Qwen3DSparkForCausalLM
+    )
+
+    def build(owned):
+        hf_config = SimpleNamespace(
+            vocab_size=64,
+            draft_vocab_size=64,
+            hidden_size=16,
+            has_own_lm_head=owned,
+            num_hidden_layers=0,
+            dflash_config={},
+        )
+        config = SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                draft_model_config=SimpleNamespace(
+                    hf_config=hf_config, get_vocab_size=lambda: 64
+                ),
+                attention_backend=None,
+                kv_cache_dtype=None,
+                draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            ),
+            model_config=SimpleNamespace(
+                get_total_num_hidden_layers=lambda: 0, get_vocab_size=lambda: 64
+            ),
+            attention_config=SimpleNamespace(backend=None),
+            cache_config=SimpleNamespace(),
+            load_config=SimpleNamespace(),
+            parallel_config=SimpleNamespace(),
+        )
+        with set_current_vllm_config(
+            VllmConfig(
+                device_config=DeviceConfig("cpu"),
+                compilation_config=CompilationConfig(mode=0),
+            )
+        ):
+            model = cls(vllm_config=config)
+        return model, config
+
+    return request.param, build
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_declared_draft_lm_head_loads_and_is_not_replaced(
+    monkeypatch, draft_lm_head_model, owned
+):
+    from vllm.model_executor import model_loader
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+    from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
+    from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
+    from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+
+    kind, build = draft_lm_head_model
+    model, config = build(owned)
+    original_head = model.lm_head
+    if owned:
+        with pytest.raises(ValueError, match="has_own_lm_head=true"):
+            model.load_weights([])
+        assert original_head.weight.dtype == torch.uint8
+        assert original_head.weight.shape == (64, 8)
+        weights = {
+            "lm_head." + name: torch.ones_like(value)
+            for name, value in original_head.state_dict().items()
+            if name != "input_scale"
+        }
+        model.load_weights(weights.items())
+        for name, value in weights.items():
+            torch.testing.assert_close(
+                getattr(original_head, name.removeprefix("lm_head.")), value
+            )
+    else:
+        model.load_weights([])
+        assert original_head.weight.dtype == torch.float32
+
+    target_head = build(owned)[0].lm_head
+    with torch.no_grad():
+        original_head.weight.fill_(1)
+        target_head.weight.fill_(1)
+        if owned:
+            target_head.weight_scale_2.fill_(2)
+    embedding = VocabParallelEmbedding(64, 16)
+    target = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=embedding), lm_head=target_head
+    )
+    monkeypatch.setattr(
+        eagle_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1)
+    )
+    for module in (dflash_utils, dspark_utils):
+        monkeypatch.setattr(
+            module, "replace", lambda obj, **kw: SimpleNamespace(**(vars(obj) | kw))
+        )
+        monkeypatch.setattr(module, "get_pp_safe_draft_load_config", lambda c: c)
+    monkeypatch.setattr(dflash_utils, "get_model", lambda **kw: model)
+    monkeypatch.setattr(model_loader, "get_model", lambda **kw: model)
+    monkeypatch.setattr(dspark_utils, "_get_dspark_parallel_config", lambda c, tp: c)
+    monkeypatch.setattr(
+        dspark_utils, "_resolve_dspark_attention_backend", lambda *a: None
+    )
+    load_model = (
+        dflash_utils.load_dflash_model
+        if kind == "dflash"
+        else dspark_utils.load_dspark_model
+    )
+    assert load_model(target, config) is model
+    assert model.lm_head is (original_head if owned else target_head)

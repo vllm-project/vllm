@@ -38,6 +38,7 @@ from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
 )
@@ -248,6 +249,11 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            quant_config=(
+                get_draft_quant_config(vllm_config)
+                if getattr(self.config, "has_own_lm_head", False)
+                else None
+            ),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(
@@ -338,6 +344,12 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # the target by load_dspark_model, so skip the unloaded params here.
         uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
         uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
+        if getattr(self.config, "has_own_lm_head", False) and not includes_lm_head:
+            raise ValueError(
+                "Qwen3 DSpark checkpoints marked has_own_lm_head=true must "
+                "include lm_head weights."
+            )
+
         if uses_expanded_input_vocab and not includes_embed_tokens:
             raise ValueError(
                 "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
