@@ -4,6 +4,7 @@ import enum
 import io
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from vllm.config import LoggingConfig
 from vllm.logger import (
     _DATE_FORMAT,
     _FORMAT,
+    _JSON_FORMAT,
     _configure_vllm_root_logger,
     _use_color,
     configure_logging,
@@ -28,6 +30,7 @@ from vllm.logger import (
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+from vllm.utils.system_utils import decorate_logs
 
 
 def f1(x):
@@ -108,6 +111,33 @@ def test_offline_llm_configures_logging_before_logging_args(monkeypatch):
 
     with pytest.raises(StopInitialization):
         llm_module.LLM(model="facebook/opt-125m")
+
+
+def test_builtin_json_formatter(monkeypatch):
+    output = io.StringIO()
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(sys, "stdout", output)
+            _configure_vllm_root_logger(LoggingConfig(formatter="json"))
+            decorate_logs("Worker_DP0")
+            init_logger("vllm.structured_log_probe").info("structured log probe")
+
+            log = json.loads(output.getvalue())
+            formatter = logging.getLogger("vllm").handlers[0].formatter
+    finally:
+        _configure_vllm_root_logger()
+
+    assert log == {
+        "asctime": log["asctime"],
+        "levelname": "INFO",
+        "name": "vllm.structured_log_probe",
+        "processName": multiprocessing.current_process().name,
+        "process": os.getpid(),
+        "message": "structured log probe",
+    }
+    assert formatter is not None
+    assert formatter._fmt == _JSON_FORMAT
 
 
 def test_use_color_force_color(monkeypatch):
