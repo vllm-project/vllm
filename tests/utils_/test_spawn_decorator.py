@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for spawn_new_process_for_each_test decorator."""
 
+from pathlib import Path
+
 import pytest
 
 from tests.utils import spawn_new_process_for_each_test
+
+pytest_plugins = ["pytester"]
 
 
 @spawn_new_process_for_each_test
@@ -24,6 +28,15 @@ def test_spawn_decorator_failure_is_caught():
 def test_spawn_decorator_skip():
     """pytest.skip inside subprocess should propagate correctly."""
     pytest.skip("intentional skip")
+
+
+def test_spawn_decorator_reports_skip(pytester):
+    """A child skip must remain a skip in the parent pytest report."""
+    result = pytester.runpytest_subprocess(
+        f"{Path(__file__).resolve()}::test_spawn_decorator_skip", "-rs"
+    )
+    result.assert_outcomes(skipped=1)
+    result.stdout.fnmatch_lines(["SKIPPED *intentional skip"])
 
 
 @spawn_new_process_for_each_test
