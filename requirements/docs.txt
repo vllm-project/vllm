@@ -20,8 +20,6 @@ click==8.3.3
     #   properdocs
 colorama==0.4.6
     # via mkdocs-material
-csscompressor==0.9.5
-    # via mkdocs-minify-plugin
 ghp-import==2.1.0
     # via
     #   mkdocs
@@ -32,8 +30,6 @@ gitpython==3.1.50
     # via mkdocs-git-revision-date-localized-plugin
 griffelib==2.0.2
     # via mkdocstrings-python
-htmlmin2==0.1.13
-    # via mkdocs-minify-plugin
 idna==3.13
     # via requests
 jinja2==3.1.6
@@ -42,8 +38,6 @@ jinja2==3.1.6
     #   mkdocs-material
     #   mkdocstrings
     #   properdocs
-jsmin==3.0.1
-    # via mkdocs-minify-plugin
 markdown==3.10.2
     # via
     #   mkdocs
@@ -72,7 +66,6 @@ mkdocs==1.6.1
     #   mkdocs-gen-files
     #   mkdocs-git-revision-date-localized-plugin
     #   mkdocs-material
-    #   mkdocs-minify-plugin
     #   mkdocs-redirects
     #   mkdocstrings
 mkdocs-api-autonav==0.4.0
@@ -95,8 +88,6 @@ mkdocs-material==9.7.6
     # via -r requirements/docs.in
 mkdocs-material-extensions==1.3.1
     # via mkdocs-material
-mkdocs-minify-plugin==0.8.0
-    # via -r requirements/docs.in
 mkdocs-redirects==1.2.3
     # via -r requirements/docs.in
 mkdocstrings==1.0.4
