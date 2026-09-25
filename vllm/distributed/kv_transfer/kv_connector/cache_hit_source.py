@@ -11,8 +11,8 @@ from enum import Enum
 class CacheHitSource(str, Enum):
     """Where cached prompt tokens' KV came from.
 
-    Ordered by offload tier: KV cascades from the accelerator to host memory
-    and on to secondary tiers, so later members sit further from the GPU.
+    Members are listed in the order blocks are offloaded: accelerator, then
+    host memory, then secondary tiers.
     """
 
     DEVICE = "device"
