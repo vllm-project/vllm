@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 MLA backends without GPUModelRunner dependency.
 
-The parametrized backend-correctness matrix lives in ``../correctness/``, one
-directory per MLA prefill backend, over the shared bodies in
+The parametrized backend-correctness matrix lives in
+``../test_mla_backend_correctness.py``, over the shared bodies in
 ``tests/v1/attention/_mla_backends.py``.
 """
 

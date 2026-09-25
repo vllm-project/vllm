@@ -6,8 +6,8 @@
 Not collected by pytest (the leading underscore keeps it out of ``test_*.py``
 discovery); it holds the batch specs, mock attention layers, KV-cache
 prepopulation and the backend-correctness runner shared by
-``mla/backends/test_mla_backends.py``, the per-prefill-backend directories under
-``mla/correctness/`` and the sparse MLA tests.
+``mla/backends/test_mla_backends.py``, ``mla/test_mla_backend_correctness.py``
+and the sparse MLA tests.
 
 Known Issues:
 - FLASH_ATTN_MLA backend occasionally produces NaN values in
@@ -106,8 +106,7 @@ MLA_DIMENSIONS_TO_TEST = [
 ]
 
 
-# The batch specs `test_backend_correctness` sweeps, shared by every
-# `mla/correctness/` directory so the matrix is declared in exactly one place.
+# The batch specs `test_backend_correctness` sweeps.
 BACKEND_CORRECTNESS_BATCH_SPEC_NAMES = [
     "small_decode",
     "small_prefill",
@@ -149,21 +148,15 @@ def _invalid_reasons(
         return ["ImportError"]
 
 
-def prefill_backend_dimension_params(
-    prefill_backend: MLAPrefillBackendEnum, dimensions_id: str | None = None
-):
-    """Params for one MLA prefill backend, optionally one MLA dimension set.
+def prefill_backend_dimension_params(prefill_backend: MLAPrefillBackendEnum):
+    """Params for one MLA prefill backend across the MLA dimensions.
 
-    Each ``mla/correctness/`` directory calls this for the backend (and, where
-    the directory is per-dimension, the dimensions) it owns. A param is always
-    emitted, carrying a skip mark when the combination is unavailable on this
-    device, so every directory collects the same cases on every lane and no
-    shard can come up empty.
+    A param is always emitted, carrying a skip mark when the combination is
+    unavailable on this device, so the correctness matrix collects the same
+    cases on every lane and no shard can come up empty.
     """
     params = []
     for dim_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-        if dimensions_id is not None and dim_id != dimensions_id:
-            continue
         invalid_reasons = _invalid_reasons(
             prefill_backend, qk_nope_head_dim, v_head_dim
         )
@@ -186,8 +179,6 @@ def prefill_backend_dimension_params(
                 marks=marks,
             )
         )
-    if not params:
-        raise ValueError(f"no MLA dimensions match {dimensions_id!r}")
     return params
 
 

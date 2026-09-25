@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA backend correctness for the TRT-LLM ragged prefill backend.
+"""MLA backend correctness across every GPU MLA prefill backend.
 
-The test bodies live in ``tests/v1/attention/_mla_backends.py``; this file only
-pins the slice of the correctness matrix that this file owns. One
-file per prefill backend lets the pipeline YAML say which shard runs
-which part of the matrix, instead of hash-sharding the cases of one file.
+The test bodies live in ``tests/v1/attention/_mla_backends.py``. Every GPU
+prefill backend in ``MLAPrefillBackendEnum`` is parametrized here, so a newly
+added backend is collected automatically; one that cannot run on this device
+collects a skip-marked case instead of disappearing from the matrix.
 """
 
 import pytest
@@ -17,9 +17,12 @@ from tests.v1.attention._mla_backends import (
 )
 from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackendEnum
 
-PREFILL_BACKEND_DIMENSIONS = prefill_backend_dimension_params(
-    MLAPrefillBackendEnum.TRTLLM_RAGGED
-)
+PREFILL_BACKEND_DIMENSIONS = [
+    param
+    for prefill_backend in MLAPrefillBackendEnum
+    if prefill_backend not in (MLAPrefillBackendEnum.CPU, MLAPrefillBackendEnum.CUSTOM)
+    for param in prefill_backend_dimension_params(prefill_backend)
+]
 
 
 @pytest.mark.parametrize("batch_spec_name", BACKEND_CORRECTNESS_BATCH_SPEC_NAMES)

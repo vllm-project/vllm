@@ -53,7 +53,10 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    # One parametrized file over every GPU prefill backend, so a new backend is
+    # covered without a new file. Its matrix is too large for one worker, so the
+    # file itself is hash-sharded.
+    - pytest -v -s v1/attention/mla/test_mla_backend_correctness.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 3
 
 - label: ":nvidia: (B200) V1 Attention / Dense and SSM"
