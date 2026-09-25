@@ -68,7 +68,9 @@ class EAGLEConfig(PreTrainedConfig):
             )
             kwargs["architectures"] = [
                 arch
-                if arch.startswith("DFlash") or arch.endswith("DFlash")
+                if arch.startswith("DFlash")
+                or arch.endswith("DFlash")
+                or arch == "LiLiCorrDraftModel"
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]

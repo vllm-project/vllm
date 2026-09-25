@@ -322,6 +322,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+    def prepare_context_anchor(
+        self, input_batch: InputBatch, num_rejected: torch.Tensor
+    ) -> None:
+        """Publish context features required by a draft's candidate head."""
+
     @torch.inference_mode()
     def propose(
         self,
@@ -369,6 +374,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         else:
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
+        self.prepare_context_anchor(input_batch, num_rejected)
 
         if dummy_run and skip_attn_for_dummy_run:
             # Memory profiling path: block_tables / kv_cache_config are not initialized.
