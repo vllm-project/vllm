@@ -151,6 +151,7 @@ print([op.name for op in capture.custom_ops])
 
 - **The eager path is captured.** The harness sets `enforce_eager`, which also makes vLLM enable all custom ops. A default-config step instead runs under `torch.compile` with `custom_ops=["none"]`, so `CustomOp` layers such as `SiluAndMul` take their native forward, Inductor and the compilation passes fuse the result, and graph capture pads the batch. Ops dispatched through vLLM IR follow `kernel_config.ir_op_priority` either way. A capture therefore matches an `--enforce-eager` step; passing `compilation_config={"custom_ops": ["none"]}` in `engine_args` shows the pre-Inductor sequence instead.
 - **Branches on a tensor's device see `meta`.** Code that checks `tensor.is_cuda` or `tensor.device.type` rather than `current_platform` takes its non-CUDA branch, e.g. the SM100 skinny-GEMM dispatch in `vllm/model_executor/layers/utils.py` and the Triton slot-mapping path in `vllm/v1/attention/backends/mla/indexer.py`. On CUDA a capture differs from the real step at such sites.
+- **Kernels called outside the dispatcher are not covered**, apart from raw Triton launches. Libraries such as FlashInfer, DeepGEMM, CuTe DSL and aiter's Python API take tensors directly unless vLLM wraps the call in a custom op with a fake impl. Those that go through DLPack refuse meta tensors (`BufferError: Cannot pack tensors on meta`), which `--keep-going` reports as where the forward pass stopped. An extension that reads `data_ptr()` instead gets a null pointer, so on a real accelerator it may launch a kernel on it.
 - **Values are undefined.** Nothing data-dependent is real, including MoE routing; only shapes and the operator sequence are.
 - **Single process only.** The harness needs `tp=pp=dp=1`. A capture still matches one rank of a tensor-parallel run, minus the collectives and with per-rank shapes.
 - **The batch must fit one scheduler step**, i.e. within `max_num_batched_tokens` and `max_num_seqs`, because metadata builders size their buffers by those.
@@ -165,6 +166,9 @@ print([op.name for op in capture.custom_ops])
 
 `UnsupportedMetaOpError: Triton kernel '<name>' reached the device without going through kernel[grid](...)`
 : The kernel was launched some other way (`kernel.run(...)`, say), so it could not be dropped. Launch it with `kernel[grid](...)`, or wrap it in a custom op with a fake impl.
+
+`BufferError: Cannot pack tensors on meta`
+: A library kernel was called directly with meta tensors. Wrap the call in a custom op with a fake impl, as vLLM does for its other library kernels.
 
 `AssertionError: ... requires a CUDA device` (or similar)
 : The model's code is restricted to another platform; capture it there.

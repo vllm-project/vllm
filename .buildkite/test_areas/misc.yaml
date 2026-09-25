@@ -434,6 +434,14 @@ steps:
   - tests/profiler/
   commands:
   - pytest -v -s profiler/test_op_capture.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Meta-Device Op Capture"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) Python-only Installation"
   key: python-only-installation

@@ -338,6 +338,7 @@ steps:
     - vllm/model_executor/model_loader/
     - vllm/profiler/op_capture/
     - vllm/utils/torch_utils.py
+    - vllm/v1/worker/xpu_model_runner.py
     - tests/profiler/
   commands:
     - >-

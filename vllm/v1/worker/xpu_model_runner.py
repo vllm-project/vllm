@@ -21,7 +21,7 @@ class XPUModelRunner(GPUModelRunner):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        with _torch_cuda_wrapper():
+        with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
         # FIXME: To be verified.
         self.cascade_attn_enabled = False
@@ -35,12 +35,12 @@ class XPUModelRunnerV2(GPUModelRunnerV2):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        with _torch_cuda_wrapper():
+        with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
 
 @contextmanager
-def _torch_cuda_wrapper():
+def torch_cuda_wrapper():
     # Replace cuda APIs with xpu APIs. Each callable gets its own functools.partial
     # so it is not the same object as torch.xpu.* (Torch Dynamo _get_handlers()
     # asserts on duplicate registration when cuda aliases xpu directly).

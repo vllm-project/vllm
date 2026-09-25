@@ -85,6 +85,15 @@ def _fa2_varlen_fwd(arguments: dict[str, Any]) -> list[torch.Tensor]:
     ]
 
 
+def _like_wrapper(op_name: str) -> MetaKernel:
+    """Outputs of `vllm::<op_name>`, which only forwards to the kernel.
+
+    On `meta` the wrapper runs its `register_fake` impl, so the shapes stay
+    with the op's owner rather than being restated here.
+    """
+    return lambda arguments: getattr(torch.ops.vllm, op_name)(*arguments.values())
+
+
 def _mhc_pre_outputs(residual: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """`(post_mix, comb_mix, layer_input)` for an mHC pre block.
 
@@ -107,15 +116,8 @@ OVERRIDES: dict[str, MetaKernel] = {
     "_vllm_fa2_C::varlen_fwd": _fa2_varlen_fwd,
     # Returns the output buffer it was handed.
     "_xpu_C::cutlass_grouped_gemm_interface": lambda arguments: arguments["ptr_D"],
-    # [G, M, K] @ [G, K, N]; vLLM's only caller always passes `out_dtype`.
-    "_xpu_C::fp8_bmm": lambda arguments: arguments["A"].new_empty(
-        (*arguments["A"].shape[:2], arguments["B"].shape[2]),
-        dtype=arguments["out_dtype"],
-    ),
-    # A logit per (query token, key token), in fp32.
-    "_xpu_C::fp8_mqa_logits": lambda arguments: arguments["q"].new_empty(
-        (arguments["q"].shape[0], arguments["kv"].shape[0]), dtype=torch.float32
-    ),
+    "_xpu_C::fp8_bmm": _like_wrapper("xpu_fp8_bmm"),
+    "_xpu_C::fp8_mqa_logits": _like_wrapper("xpu_fp8_mqa_logits"),
     "_xpu_C::mhc_pre": lambda arguments: _mhc_pre_outputs(arguments["residual"]),
     # The residual after the post block, then the next pre block's outputs.
     "_xpu_C::mhc_post": lambda arguments: torch.empty_like(arguments["residual"]),

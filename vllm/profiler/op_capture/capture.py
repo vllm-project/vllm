@@ -78,11 +78,11 @@ def _model_runner_torch_cuda() -> Iterator[None]:
     if not current_platform.is_xpu():
         yield
         return
-    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+    from vllm.v1.worker.xpu_model_runner import torch_cuda_wrapper
 
     saved = dict(vars(torch.cuda))
     try:
-        with _torch_cuda_wrapper():
+        with torch_cuda_wrapper():
             yield
     finally:
         for name in set(vars(torch.cuda)) - set(saved):
