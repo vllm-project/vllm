@@ -18,7 +18,9 @@ import torch
 from torch import nn
 
 from vllm.config.load import LoadConfig
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 
 class _SerializedQuantMethod:
@@ -175,3 +177,38 @@ def test_nested_parameter_names_resolve_against_the_module_prefix():
     outer.quant_method = _SerializedQuantMethod()
     model = _model({"attn": outer})
     assert _track(model, set()) is None
+
+
+def test_moe_runner_reports_expert_names_as_registered():
+    """MoE layers load through `MoERunner.load_weights`, which forwards to its
+    `routed_experts` child. `AutoWeightsLoader` qualifies what the runner
+    returns with the runner's own prefix, so the names must include
+    `routed_experts.`, or every expert weight is reported as not loaded."""
+
+    class RoutedExperts(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.w13_weight = _param(2, 8, 4)
+            self.w2_weight = _param(2, 4, 4)
+            self.quant_method = _SerializedQuantMethod()
+
+        def load_weights(self, weights):
+            for name, _ in weights:
+                yield "w13_weight" if "gate_up_proj" in name else "w2_weight"
+
+    class Runner(nn.Module):
+        load_weights = MoERunner.load_weights
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.routed_experts = RoutedExperts()
+
+    model = _model({"experts": Runner()})
+    loaded = AutoWeightsLoader(model).load_weights(
+        [
+            ("experts.gate_up_proj", torch.zeros(2, 8, 4)),
+            ("experts.down_proj", torch.zeros(2, 4, 4)),
+        ]
+    )
+    assert loaded == {name for name, _ in model.named_parameters()}
+    assert _track(model, loaded) is None
