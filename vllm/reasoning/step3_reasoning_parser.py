@@ -121,3 +121,8 @@ class Step3ReasoningParser(ReasoningParser):
             return []
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1 :]
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if self.think_end_token_id not in token_ids:
+            return len(token_ids)
+        return list(token_ids).index(self.think_end_token_id)
