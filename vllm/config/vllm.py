@@ -3395,6 +3395,18 @@ class VllmConfig:
         else:
             self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
 
+        # ATOM KDA ReplaySSM on ROCm is the only path that runs on Model Runner
+        # V2 and with KV connectors / MLA CPU offload. Keep every other
+        # ReplaySSM backend on the upstream V1 / no-connector rules.
+        kimi_kda_rocm = current_platform.is_rocm() and (
+            self.model_config is not None
+            and self.model_config.architecture
+            in (
+                "KimiLinearForCausalLM",
+                "KimiK3ForConditionalGeneration",
+            )
+        )
+
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
@@ -3444,22 +3456,11 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        elif self.use_v2_model_runner and not current_platform.is_rocm():
+        elif self.use_v2_model_runner and not kimi_kda_rocm:
             raise ValueError(
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
-        # ATOM KDA ReplaySSM on ROCm is compatible with KV connectors / CPU
-        # offload (the MLA offload tier). NVIDIA RecoverSSM and other
-        # ReplaySSM backends are not; keep the upstream rejection there.
-        kimi_kda_rocm = current_platform.is_rocm() and (
-            self.model_config is not None
-            and self.model_config.architecture
-            in (
-                "KimiLinearForCausalLM",
-                "KimiK3ForConditionalGeneration",
-            )
-        )
         if (
             not kimi_kda_rocm
             and self.kv_transfer_config is not None
