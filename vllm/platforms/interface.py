@@ -681,20 +681,62 @@ class Platform:
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
+        pre_block_size = cache_config.block_size
         if model_config.is_hybrid:
-            cls._align_hybrid_block_size(vllm_config, backend_classes[0])
+            cls._align_hybrid_block_size(vllm_config, backend_classes)
 
         # Phase 3: Align block/page sizes when multiple KV dtypes share the
         # block pool (e.g. nvfp4 primary + unquantized skip layers).
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
-            cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+            cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes)
+
+        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+    @classmethod
+    def _check_aligned_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_classes: "list[type[AttentionBackend]]",
+        pre_block_size: int,
+    ) -> None:
+        """Fail now, not at worker setup, if alignment left a rejected size."""
+        from vllm.config.vllm import set_current_vllm_config
+
+        block_size = vllm_config.cache_config.block_size
+        if block_size == pre_block_size:
+            return
+        with set_current_vllm_config(vllm_config):
+            rejecting = [
+                b.get_name()
+                for b in backend_classes
+                if not b.supports_block_size(block_size)
+            ]
+        if rejecting:
+            raise ValueError(
+                f"Aligned KV cache block size {block_size} is not supported by "
+                f"attention backend(s): {', '.join(rejecting)}."
+            )
+
+    @staticmethod
+    def _kernel_block_granularity(
+        backend_classes: "list[type[AttentionBackend]]",
+    ) -> int:
+        """LCM of each backend's smallest kernel block size."""
+        from vllm.v1.attention.backend import MultipleOf
+
+        sizes = [
+            min(s.base if isinstance(s, MultipleOf) else s for s in supported)
+            for b in backend_classes
+            if (supported := b.get_supported_kernel_block_sizes())
+        ]
+        return math.lcm(*sizes) if sizes else 1
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
         cls,
         vllm_config: "VllmConfig",
-        backend_cls: "type[AttentionBackend]",
+        backend_classes: "list[type[AttentionBackend]]",
     ) -> None:
         """Align block size when several KV dtypes share one block pool.
 
@@ -715,6 +757,7 @@ class Platform:
         To add a padded-spec type: append its per-token page to ``padded_pages``
         and set its ``*_page_size_padded`` hint below.
         """
+        backend_cls = backend_classes[0]  # primary: packs the KV spec
         from vllm.config.vllm import set_current_vllm_config
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -770,10 +813,12 @@ class Platform:
         # block is rounded up to (never below the already-chosen block_size).
         with set_current_vllm_config(vllm_config):
             supported = backend_cls.get_supported_kernel_block_sizes()
+            granularity = cls._kernel_block_granularity(backend_classes)
         smallest_kernel_block = min(
             s.base if isinstance(s, MultipleOf) else s for s in supported
         )
-        block_alignment = max(smallest_kernel_block, cache_config.block_size)
+        # Rounding must suit every backend; the padded page stays the primary's.
+        block_alignment = max(granularity, cache_config.block_size)
 
         # Bytes one padded-spec page spans at its own smallest kernel block;
         # also cover any mamba page a hybrid model already padded.
@@ -818,18 +863,18 @@ class Platform:
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
-        backend_cls: "type[AttentionBackend]",
+        backend_classes: "list[type[AttentionBackend]]",
     ) -> None:
         """For hybrid attention/mamba models, ensure that the attention page
         size is >= the mamba page size, and pad the mamba page size to match.
         """
+        backend_cls = backend_classes[0]  # primary: packs the KV spec
         from math import lcm
 
         from vllm.config.vllm import set_current_vllm_config
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-        from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,
             MambaSpec,
@@ -932,10 +977,7 @@ class Platform:
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
             kernel_block_alignment_size = max(
-                min(
-                    s.base if isinstance(s, MultipleOf) else s
-                    for s in backend_cls.get_supported_kernel_block_sizes()
-                ),
+                cls._kernel_block_granularity(backend_classes),
                 cache_config.block_size,
             )
             if model_config.use_mla:
