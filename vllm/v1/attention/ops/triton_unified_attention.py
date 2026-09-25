@@ -217,7 +217,7 @@ def kernel_unified_attention(
     SLIDING_WINDOW: tl.constexpr,  # int
     USE_CAUSAL: tl.constexpr,  # bool
     USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
-    per_seq_causal_ptr,  # [num_seqs] bool, or None
+    per_seq_causal_ptr,  # [num_seqs] int32, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
