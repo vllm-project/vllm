@@ -11,14 +11,19 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.parser.minicpmv import (
     EscapedNewlineNormalizer,
     MiniCPMVOutputNormalizer,
     MiniCPMVParser,
     recover_newlines,
 )
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParserManager
+from vllm.tool_parsers import ToolParserManager
 
 _VOCAB = {
     "<think>": 10,
@@ -46,6 +51,51 @@ def test_reasoning_parser_is_registered():
     parser_cls = ReasoningParserManager.get_reasoning_parser("minicpmv")
 
     assert parser_cls.__name__ == "MiniCPMVParserReasoningAdapter"
+
+
+def test_tool_parser_is_registered():
+    parser_cls = ToolParserManager.get_tool_parser("minicpmv")
+
+    assert parser_cls.__name__ == "MiniCPMVEngineToolParser"
+
+
+def test_tool_parser_composes_with_reasoning_parser(mock_tokenizer):
+    """`--tool-call-parser minicpmv` must work through the serving Parser."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        )
+    ]
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=tools,
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="minicpmv",
+        reasoning_parser_name="minicpmv",
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(mock_tokenizer, request.tools)
+
+    _, _, tool_calls = parser.parse(
+        "<tool_call><function=get_weather>"
+        "<parameter=city>SF</parameter></function></tool_call>",
+        request,
+        enable_auto_tools=True,
+    )
+
+    assert tool_calls is not None
+    assert tool_calls[0].name == "get_weather"
+    assert "SF" in tool_calls[0].arguments
 
 
 class TestNonThinking:

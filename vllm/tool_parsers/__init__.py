@@ -158,6 +158,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minicpm5xml_tool_parser",
         "MiniCPM5XMLToolParser",
     ),
+    "minicpmv": (
+        "minicpmv_engine_tool_parser",
+        "MiniCPMVEngineToolParser",
+    ),
     "mistral": (
         "mistral_tool_parser",
         "MistralToolParser",
