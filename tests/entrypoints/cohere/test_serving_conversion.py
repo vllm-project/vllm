@@ -2510,3 +2510,24 @@ class TestCreateErrorResponse:
         assert err.error.message == "oops"
         assert err.error.code == 400
         assert err.error.type == "bad_request"
+
+
+def test_watermarking_defaults_to_unspecified():
+    assert _convert(_make_request()).watermarking is None
+
+
+def test_watermarking_explicit_enable_is_forwarded():
+    assert _convert(_make_request(watermarking=True)).watermarking is True
+
+
+def test_watermarking_opt_out_is_forwarded():
+    assert _convert(_make_request(watermarking=False)).watermarking is False
+
+
+@pytest.mark.parametrize("watermarking", [None, True, False])
+def test_watermarking_reaches_sampling_params(watermarking):
+    request = _make_request(watermarking=watermarking)
+
+    params = _convert(request).to_sampling_params(16, {})
+
+    assert params.watermarking is watermarking
