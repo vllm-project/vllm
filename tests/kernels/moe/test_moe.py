@@ -1511,8 +1511,14 @@ def test_humming_delegates_to_instance_activation():
     )
 
 
+@pytest.mark.parametrize(
+    "use_m_major_w4a8,has_expert_counts",
+    [(False, None), (True, None), (True, False), (True, True)],
+)
 def test_humming_grouped_apply_forwards_valid_prefix(
     monkeypatch: pytest.MonkeyPatch,
+    use_m_major_w4a8: bool,
+    has_expert_counts: bool | None,
 ):
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -1529,7 +1535,8 @@ def test_humming_grouped_apply_forwards_valid_prefix(
     }
     experts = SimpleNamespace(
         num_experts=2,
-        estimate_local_valid_shape_m=lambda _: 6,
+        use_m_major_w4a8=use_m_major_w4a8,
+        estimate_local_valid_shape_m=lambda _: 16,
         prepare_buffers=lambda *_: buffers,
         _get_permute_scratch=lambda _, *, indices_only=False: object(),
         process_input=Mock(
@@ -1572,7 +1579,13 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         a2_scale=None,
         workspace13=torch.empty(0),
         workspace2=torch.empty(0),
-        expert_tokens_meta=None,
+        expert_tokens_meta=(
+            None
+            if has_expert_counts is None
+            else SimpleNamespace(
+                expert_num_tokens=object() if has_expert_counts else None
+            )
+        ),
         apply_router_weight_on_input=False,
     )
 
@@ -1581,6 +1594,10 @@ def test_humming_grouped_apply_forwards_valid_prefix(
     assert call_kwargs["inputs"].shape == (6, 4)
     assert call_kwargs["quanted_input"].shape == (6, 2)
     torch.testing.assert_close(call_kwargs["num_valid_tokens"], expert_offsets[-1:])
+    expected_m = topk_ids.numel() if use_m_major_w4a8 and has_expert_counts else 16
+    assert [
+        call.kwargs["valid_shape_m"] for call in experts.humming_forward.call_args_list
+    ] == [expected_m, expected_m]
 
 
 def test_batched_marlin_activation_uses_expert_token_counts(

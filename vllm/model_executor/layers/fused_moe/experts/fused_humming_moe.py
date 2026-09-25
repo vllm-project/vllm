@@ -4,6 +4,7 @@
 
 import json
 import math
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -154,24 +155,44 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
 
     def init_humming_moe(self):
-        from vllm.utils.humming import get_heuristics_config
+        from vllm.utils.humming import MmaType, dtypes, get_heuristics_config
 
+        self.use_m_major_w4a8 = (
+            os.getenv("HUMMING_EXPERIMENTAL_RS_W4A8") == "1"
+            and self.humming_gemm_type().value == "grouped_contiguous"
+            and all(
+                config.sm_version == 90
+                and config.mma_type == MmaType.WGMMA
+                and config.a_dtype == dtypes.float8e4m3
+                and config.b_dtype == dtypes.float4e2m1
+                and config.as_dtype == dtypes.float32
+                and config.bs_dtype == dtypes.float8e8m0
+                and config.use_fused_e8m0_scale
+                and config.input_scale_group_size == 128
+                and config.weight_scale_group_size == 32
+                and 1 <= config.num_experts <= 256
+                for config in self.humming_configs.values()
+            )
+        )
         self.compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
             "gemm_type": self.humming_gemm_type().value,
+            "use_m_major_input_scale": self.use_m_major_w4a8,
         }
         self.w13_tuning_config = get_heuristics_config(
             layer_config=self.humming_configs["w13"],
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type(),
+            use_m_major_input_scale=self.use_m_major_w4a8,
         )
         self.w2_tuning_config = get_heuristics_config(
             layer_config=self.humming_configs["w2"],
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type(),
+            use_m_major_input_scale=self.use_m_major_w4a8,
         )
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
@@ -199,6 +220,27 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert scatter_idx is None
             if activation is not None:
                 raise ValueError("Cannot apply activation to prequantized input")
+            if self.use_m_major_w4a8:
+                # DeepEP sends row-major FP32 block scales. The optimized
+                # Humming kernel consumes the same values K-group major.
+                rows = input_scale.size(0)
+                if rows % 4 == 0 and os.getenv(
+                    "HUMMING_EXPERIMENTAL_DEEPGEMM_SCALE_TRANSPOSE", "0"
+                ) == "1":
+                    from deep_gemm.utils.layout import (
+                        get_mn_major_tma_aligned_tensor,
+                    )
+
+                    # DeepGEMM produces (M, groups) with strides (1, M).
+                    # Viewing it as (groups, M) meets Humming's contiguous
+                    # scale-layout contract without another GPU copy.
+                    input_scale = get_mn_major_tma_aligned_tensor(input_scale).T
+                else:
+                    input_scale = input_scale.T.contiguous()
+                    if rows % 4:
+                        input_scale = torch.nn.functional.pad(
+                            input_scale, (0, 4 - rows % 4)
+                        )
             return inputs, input_scale, None
 
         activation_kwargs = {}
@@ -224,6 +266,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             expert_tokens=expert_tokens if layout == "grouped_mask" else None,
             scatter_idx=scatter_idx,
             num_valid_tokens=num_valid_tokens,
+            m_major_scale=self.use_m_major_w4a8,
             **activation_kwargs,
         )
         input_scale = group_scales if mode.has_group_scale else token_scales
@@ -259,7 +302,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
 
     def _get_permute_scratch(
-        self, topk: int, indices_only: bool = False
+        self,
+        topk: int,
+        indices_only: bool = False,
+        hidden_dtype: torch.dtype | None = None,
     ) -> MoEPermuteScratch | None:
         if not moe_permute_unpermute_supported():
             return None
@@ -276,7 +322,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             num_local_experts=self.moe_config.num_local_experts,
             device=torch.device(self.moe_config.device),
             hidden_size=None if indices_only else self.moe_config.hidden_dim,
-            hidden_dtype=None if indices_only else self.moe_config.in_dtype,
+            hidden_dtype=(
+                None if indices_only else hidden_dtype or self.moe_config.in_dtype
+            ),
         )
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
@@ -370,10 +418,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         to FP8 before dispatch sends FP8 rather than BF16 over the interconnect,
         and Humming then consumes the pre-quantized FP8 + scale directly (see
         the apply() methods, which forward the dispatch scale into
-        HummingExpertsBase.process_input, which is a
-        no-op when an input scale is already supplied). The scale layout
-        produced by vLLM's block-FP8 quantization ([M, K // 128] float32,
-        row-major) matches what the Humming WGMMA grouped GEMM expects.
+        HummingExpertsBase.process_input). vLLM dispatches row-major
+        [M, K // 128] float32 scales; the opt-in RS W4A8 path transposes
+        them to M-major layout before the grouped GEMM.
         """
         quant_config = self.quant_config
         return (
@@ -900,7 +947,16 @@ class HummingGroupedExperts(HummingExpertsBase):
         """
         assert not apply_router_weight_on_input
 
-        valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
+        # Expanded prefill has exact local rows. A present metadata object in
+        # CUDA-graph decode has no counts and still describes a padded buffer.
+        if (
+            self.use_m_major_w4a8
+            and expert_tokens_meta is not None
+            and expert_tokens_meta.expert_num_tokens is not None
+        ):
+            valid_shape_m = topk_ids.numel()
+        else:
+            valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
 
         buffers = self.prepare_buffers(
             workspace13,
@@ -926,7 +982,9 @@ class HummingGroupedExperts(HummingExpertsBase):
                 n_expert=global_num_experts,
                 n_local_expert=self.num_experts,
                 expert_map=expert_map,
-                scratch=self._get_permute_scratch(topk_ids.size(1)),
+                scratch=self._get_permute_scratch(
+                    topk_ids.size(1), hidden_dtype=hidden_states.dtype
+                ),
             )
             scatter_idx = None
             num_valid_tokens = None
