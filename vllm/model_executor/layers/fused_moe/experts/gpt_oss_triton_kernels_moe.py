@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version, has_triton_kernels
 
 from ..utils import swiglu_limit_func
 
@@ -441,48 +441,59 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
     _routing.sort_tokens = _sort_tokens_pow2
 
 
-# Two API generations of triton_kernels are supported:
-#   - v3.5.1 (the version bundled with vLLM): exposes `routing()` and
-#     `routing_from_bitmatrix()` in triton_kernels.routing; the `Bitmatrix`
-#     constructor takes a `scratchpad` argument.
-#   - v3.6.0+: removes the `routing` module in favor of a `SparseMatrix`
-#     based path, and adds a `dtype=BIT` kwarg to `Bitmatrix`. Used only
-#     when the user has triton_kernels installed system-wide at v3.6.0+.
-#
-# `use_legacy_triton_kernels` selects between them at import time based on
-# whether `SparseMatrix` is importable.
-use_legacy_triton_kernels = False
+triton_kernels_version = get_triton_kernels_version()
 
-if has_triton_kernels():
+if triton_kernels_version is not None:
     try:
         import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import (
-            FnSpecs,
-            FusedActivation,
-            GatherIndx,
-            RoutingData,
-            ScatterIndx,
-            matmul_ogs,
-        )
-        from triton_kernels.tensor import (
-            BIT,
-            Bitmatrix,
-        )
 
+        if triton_kernels_version == "3.8":
+            from triton_kernels.matmul import FnSpecs, FusedActivation, matmul
+            from triton_kernels.matmul_details.opt_flags import (
+                update_opt_flags_constraints,
+            )
+            from triton_kernels.tensor import make_ragged_tensor_metadata
+
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
+                # block_n=64/block_k=256 fit gfx950's 160KB LDS + the CDNA4
+                # scale swizzle; block_m=32 avoids an autotuner block_m=128
+                # padding cliff (~15x) at decode-sized ragged MoE shapes.
+                update_opt_flags_constraints(
+                    {"block_m": 32, "block_n": 64, "block_k": 256}
+                )
+        else:
+            from triton_kernels.matmul_ogs import (
+                FnSpecs,
+                FusedActivation,
+                GatherIndx,
+                RoutingData,
+                ScatterIndx,
+                matmul_ogs,
+            )
+
+            if triton_kernels_version == "3.6":
+                from triton_kernels.tensor import (
+                    SparseMatrix,
+                    make_ragged_tensor_metadata,
+                )
+
+        # BIT/Bitmatrix exist in v3.5.1/v3.6, gone in v3.8.
         try:
             from triton_kernels.tensor import (
-                SparseMatrix,
-                make_ragged_tensor_metadata,
+                BIT,
+                Bitmatrix,
             )
         except ImportError:
-            # TODO(mgoin): drop the v3.5.1 pin and remove this fallback once
-            # the gpt-oss perf regression in v3.6.0+ is resolved upstream.
-            # Tracking: https://github.com/triton-lang/triton/issues/9969
-            use_legacy_triton_kernels = True
-        if not use_legacy_triton_kernels:
+            BIT = None
+            Bitmatrix = None
+
+        # Patch the routing kernels for non-pow2 top_k (DeepSeek-V4 top_k=6);
+        # v3.8 rebuilds routing from topk ids and needs no patch.
+        if triton_kernels_version == "3.6":
             _patch_make_bitmatrix_metadata()
-        else:
-            # Legacy routing fails to compile for non-pow2 top_k (DeepSeek-V4).
+        elif triton_kernels_version == "3.5.1":
             _patch_legacy_routing_for_nonpow2_topk()
     except (AttributeError, ImportError) as e:
         logger.error(
@@ -490,6 +501,21 @@ if has_triton_kernels():
             "version is compatible. Error: %s",
             e,
         )
+
+
+if triton_kernels_version == "3.8":
+    # 3.8's matmul dropped matmul_ogs's in-kernel scatter+topk-reduce, so the
+    # forward combines externally via index_add; this is the ragged routing
+    # bundle the (inlined) 3.8 paths pass around, in place of matmul_ogs's.
+    class RoutingData:  # type: ignore[no-redef]
+        __slots__ = ("ragged", "gate_scal", "gather_tok", "n_expts_act", "n_valid")
+
+        def __init__(self, ragged, gate_scal, gather_tok, n_expts_act, n_valid):
+            self.ragged = ragged
+            self.gate_scal = gate_scal
+            self.gather_tok = gather_tok
+            self.n_expts_act = n_expts_act
+            self.n_valid = n_valid
 
 
 @triton.jit
@@ -502,8 +528,7 @@ def pack_bitmatrix(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
-    """
-    Packs topk_ids into a bitmatrix.
+    """Packs topk_ids into a bitmatrix.
     code reference:
     https://github.com/triton-lang/triton/blob/dd1bbc52b34d202dfe5ffea1e04fb16166c5c04e/python/triton_kernels/bench/distributed.py#L264
     """
@@ -563,7 +588,7 @@ def triton_kernel_moe_forward(
     # three separate kernels used by the generic path below.
     # Only available in the legacy (v3.5.1) API; the v3.6.0+ path inlines
     # equivalent logic via SparseMatrix in `make_routing_data`.
-    if use_legacy_triton_kernels and expert_map is None:
+    if triton_kernels_version == "3.5.1" and expert_map is None:
         from triton_kernels.routing import routing as fused_routing
 
         routing_data, gather_idx, scatter_idx = fused_routing(
@@ -578,13 +603,14 @@ def triton_kernel_moe_forward(
         if sm_first:
             logits = torch.softmax(logits, dim=-1)
         topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+        is_sparse_topk = not isinstance(topk_result, tuple)
         # topk may return a tuple (vals, indx, bitmatrix) or a
         # SparseMatrix depending on the triton_kernels version.
-        if isinstance(topk_result, tuple):
-            topk_weights, topk_ids_raw, _ = topk_result
-        else:
+        if is_sparse_topk:
             topk_weights = topk_result.vals
             topk_ids_raw = topk_result.indx
+        else:
+            topk_weights, topk_ids_raw, _ = topk_result
 
         if expert_map is not None:
             # topk_ids_raw contains global expert IDs - remap to local.
@@ -597,11 +623,23 @@ def triton_kernel_moe_forward(
             effective_expert_map = None
             effective_global_num_experts = local_num_experts
         else:
-            topk_ids = topk_ids_raw.to(torch.long)
-            routing_data, gather_idx, scatter_idx = make_routing_data(
-                topk_ids, topk_weights, gating_output.shape[-1]
-            )
-            effective_expert_map = expert_map
+            if is_sparse_topk:
+                # v3.6+ topk returns a SparseMatrix whose construction already
+                # computed the bitmatrix and its metadata; reuse it instead of
+                # re-packing the bitmatrix and recomputing the metadata in
+                # make_routing_data. Only the monolithic path reaches this reuse;
+                # the modular OAITritonExperts (expert-parallel) path calls
+                # make_routing_data directly.
+                routing_data, gather_idx, scatter_idx = routing_data_from_sparse_topk(
+                    topk_result, gating_output.shape[-1]
+                )
+            else:
+                topk_ids = topk_ids_raw.to(torch.long)
+                routing_data, gather_idx, scatter_idx = make_routing_data(
+                    topk_ids, topk_weights, gating_output.shape[-1]
+                )
+
+            effective_expert_map = None
             effective_global_num_experts = global_num_experts
 
     output = torch.empty_like(hidden_states)
@@ -650,6 +688,52 @@ def triton_kernel_fused_experts(
     assert activation == MoEActivation.SWIGLUOAI, (
         "Only SWIGLUOAI activation is supported"
     )
+
+    if triton_kernels_version == "3.8":
+        # 3.8 has no in-kernel scatter+topk-reduce, so the two matmuls are
+        # followed by an external index_add combine.
+        assert quant_config is not None
+        M, K = hidden_states.shape[-2:]
+        a_ragged = routing_data.ragged
+        gather_tok = routing_data.gather_tok
+        gammas = routing_data.gate_scal
+        act = FusedActivation(
+            FnSpecs(
+                "swiglu",
+                triton_kernels.swiglu.swiglu_fn,
+                ("alpha", "limit"),
+                reduction_n=2,
+            ),
+            (swiglu_alpha, swiglu_limit),
+        )
+        inter = matmul(
+            hidden_states,
+            w1,
+            quant_config.w1_bias,
+            a_ragged,
+            None,
+            gather_tok,
+            None,
+            quant_config.w1_precision,
+            gammas=gammas if apply_router_weight_on_input else None,
+            fused_activation=act,
+        )
+        y = matmul(
+            inter,
+            w2,
+            quant_config.w2_bias,
+            a_ragged,
+            None,
+            None,
+            None,
+            quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+        )
+        acc = torch.zeros((M, K), dtype=torch.float32, device=hidden_states.device)
+        acc.index_add_(0, gather_tok.to(torch.int64), y.to(torch.float32))
+        out = output_tensor.view(M, K)
+        out.copy_(acc.to(out.dtype))
+        return out
     assert quant_config is not None
 
     # type check, uint8 means mxfp4
@@ -692,7 +776,7 @@ def triton_kernel_fused_experts(
             ),
             (swiglu_alpha, swiglu_limit),
         )
-        if not use_legacy_triton_kernels
+        if triton_kernels_version != "3.5.1"
         else FusedActivation(
             FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
             (swiglu_alpha, swiglu_limit),
@@ -732,6 +816,24 @@ def make_routing_data(
     topk_weights: torch.Tensor,
     num_local_experts: int,
 ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
+    if triton_kernels_version == "3.8":
+        _, topk = topk_ids.shape
+        flat_e = topk_ids.reshape(-1)
+        valid = flat_e >= 0
+        flat_e = flat_e.to(torch.int64).clamp(min=0)
+        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid.to(torch.float32)
+        nrows = flat_e.shape[0]
+        order = torch.argsort(flat_e, stable=True)
+        col_sum = torch.zeros(
+            num_local_experts, dtype=torch.int32, device=flat_e.device
+        )
+        col_sum.scatter_add_(0, flat_e, torch.ones_like(flat_e, dtype=torch.int32))
+        ragged = make_ragged_tensor_metadata(col_sum, nrows)
+        gather_tok = (order // topk).to(torch.int32)
+        gammas = flat_w[order]
+        routing = RoutingData(ragged, gammas, gather_tok, topk, nrows)
+        return routing, gather_tok, gather_tok
+
     topk_ids = topk_ids.to(torch.int16)
     topk_weights = topk_weights.to(torch.bfloat16)
 
@@ -762,7 +864,7 @@ def make_routing_data(
         Bitmatrix(
             bitmatrix, dtype=BIT, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max
         )
-        if not use_legacy_triton_kernels
+        if triton_kernels_version != "3.5.1"
         else Bitmatrix(
             bitmatrix,
             shape=bitmatrix_shape,
@@ -774,7 +876,7 @@ def make_routing_data(
     # matmul_ogs expects invalid topk_weights to be -1s
     topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
 
-    if use_legacy_triton_kernels:
+    if triton_kernels_version == "3.5.1":
         from triton_kernels.routing import routing_from_bitmatrix
 
         return routing_from_bitmatrix(
@@ -782,18 +884,40 @@ def make_routing_data(
         )
 
     sparse_logits = SparseMatrix(indx=topk_ids, vals=topk_weights, mask=bitmatrix)
-    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
-    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
+    return routing_data_from_sparse_topk(sparse_logits, num_local_experts)
+
+
+def routing_data_from_sparse_topk(
+    sparse_topk,  # SparseMatrix
+    n_expts: int,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """Build routing structures from the ``SparseMatrix`` returned by
+    ``triton_kernels.topk``, reusing its precomputed bitmatrix metadata.
+
+    ``make_routing_data`` re-packs a bitmatrix from the topk ids and
+    constructs a second ``SparseMatrix``, recomputing metadata the topk
+    call already produced; when the topk ids are used as-is (no expert-map
+    remapping) that work is redundant.
+    """
+    if triton_kernels_version == "3.8":
+        # 3.8 routing is rebuilt from raw ids; no SparseMatrix reuse.
+        return make_routing_data(sparse_topk.indx, sparse_topk.vals, n_expts)
+
+    dispatch_indx = sparse_topk.mask_metadata.row_sorted_indx
+    combine_indx = sparse_topk.mask_metadata.col_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(
-        sparse_logits.mask_metadata.col_sum,
+        sparse_topk.mask_metadata.col_sum,
         dispatch_indx.shape[0],
     )
-    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    n_expts_act = sparse_topk.indx.shape[1]
+    # Unlike make_routing_data, no bfloat16 cast: gate_scal inherits the
+    # gating dtype, which is bfloat16 for all callers of this path.
+    gate_scal = sparse_topk.vals.flatten()[combine_indx]
     routing_data = RoutingData(
         gate_scal,
         ragged_batch_metadata.block_sizes,
-        num_local_experts,
-        num_topk,
+        n_expts,
+        n_expts_act,
         ragged_batch_metadata,
     )
     gather_indx = GatherIndx(combine_indx, dispatch_indx)
@@ -918,8 +1042,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
-        """
-        Extract the MoE problem size from the given tensor arguments:
+        """Extract the MoE problem size from the given tensor arguments:
         - a: The hidden states, input to the MoE layer.
         - w1: The first set of expert weights.
         - w2: The second set of expert weights.
@@ -1044,8 +1167,7 @@ class OAITritonExperts(BaseOAITritonExperts):
 
 
 class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
-    """
-    A Triton based MoE expert class that operates on expert standard
+    """A Triton based MoE expert class that operates on expert standard
     format and explicitly keeps the activation and reduction (moe_sum) steps
     unfused from the matmul_ogs kernel. This exposes injection points
     for activation and moe_sum.
@@ -1168,6 +1290,50 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         )
 
         topk = topk_ids.size(1)
+
+        if triton_kernels_version == "3.8":
+            # Activation and topk-reduce kept unfused from the matmuls (3.8 has
+            # no in-kernel scatter+reduce); combine via external index_add.
+            assert self._lora_context is None, (
+                "tk38 unfused MoE path does not support LoRA yet"
+            )
+            act_out_dim = self.adjust_N_for_activation(w1.shape[2], activation)
+            M, K = hidden_states.shape[-2:]
+            a_ragged = routing_data.ragged
+            gather_tok = routing_data.gather_tok
+            gammas = routing_data.gate_scal
+            inter = matmul(
+                hidden_states,
+                w1,
+                quant_config.w1_bias,
+                a_ragged,
+                None,
+                gather_tok,
+                None,
+                quant_config.w1_precision,
+                gammas=gammas if apply_router_weight_on_input else None,
+            )
+            act_out = torch.empty(
+                (routing_data.n_valid, act_out_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            self.activation(activation, act_out, inter)
+            down = matmul(
+                act_out,
+                w2,
+                quant_config.w2_bias,
+                a_ragged,
+                None,
+                None,
+                None,
+                quant_config.w2_precision,
+                gammas=None if apply_router_weight_on_input else gammas,
+            )
+            acc = torch.zeros((M, K), dtype=torch.float32, device=hidden_states.device)
+            acc.index_add_(0, gather_tok.to(torch.int64), down.to(torch.float32))
+            output.view(M, K).copy_(acc.to(output.dtype))
+            return
 
         # type check, uint8 means mxfp4
         assert hidden_states.dtype == torch.bfloat16

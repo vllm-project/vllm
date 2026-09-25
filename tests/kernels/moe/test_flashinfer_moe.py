@@ -72,7 +72,6 @@ def test_flashinfer_swigluoai_params_are_forwarded(activation, monkeypatch):
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=torch.bfloat16,
         routing_method=RoutingMethodType.TopK,
-        max_num_tokens=16_384,
     )
     quant_config = FusedMoEQuantConfig.make(
         gemm1_alpha=1.702,
@@ -111,7 +110,6 @@ def test_flashinfer_swigluoai_params_are_forwarded(activation, monkeypatch):
 
     assert experts._supports_activation(activation)
     assert call_args["activation_type"] == ActivationType.Swiglu
-    assert call_args["tune_max_num_tokens"] == 16_384
     for name, value in (
         ("swiglu_alpha", 1.702),
         ("swiglu_beta", 1.0),

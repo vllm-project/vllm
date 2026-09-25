@@ -3,6 +3,8 @@
 import contextlib
 import enum
 import functools
+import itertools
+import math
 import os
 import platform
 import sys
@@ -122,8 +124,7 @@ class DeviceCapability(NamedTuple):
         return f"{self.major}.{self.minor}"
 
     def to_int(self) -> int:
-        """
-        Express device capability as an integer `<major><minor>`.
+        """Express device capability as an integer `<major><minor>`.
 
         It is assumed that the minor version is always a single digit.
         """
@@ -145,6 +146,10 @@ class Platform:
     # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438 # noqa
     # empty string means the device does not support ray
     ray_device_key: str = ""
+
+    @classmethod
+    def log_warnings(cls) -> None:
+        """Log platform-specific diagnostics after logging is configured."""
 
     # platform-agnostic way to specify the device control environment variable,
     # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
@@ -175,7 +180,7 @@ class Platform:
 
     @property
     def pass_key(self) -> str:
-        """Inductor config key for the PassManager custom pass"""
+        """Inductor config key for the PassManager custom pass."""
         return "post_grad_custom_post_pass"
 
     @property
@@ -238,23 +243,19 @@ class Platform:
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
-        """
-        Get the pass manager class for this platform.
+        """Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
         return "vllm.compilation.passes.pass_manager.PostGradPassManager"
 
     @classmethod
     def get_compile_backend(cls) -> str:
-        """
-        Get the custom compile backend for current platform.
-        """
+        """Get the custom compile backend for current platform."""
         return cls.simple_compile_backend
 
     @classmethod
     def import_ir_kernels(cls) -> None:
-        """
-        The default implementation imports ``vllm.kernels``, which registers
+        """The default implementation imports ``vllm.kernels``, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should
         override this method to import their own kernel modules.
         """
@@ -365,9 +366,22 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C: %r", e)
+            logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Override core Triton kernels with platform implementations.
+
+        Platforms whose Triton kernels need replacement implementations
+        (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
+        override this method and call
+        :func:`vllm.triton_utils.dispatcher.register_kernels`
+        with their overrides. It runs during model runner init, before any
+        kernel launch. The default implementation does nothing.
+        """
+        return
 
     @classmethod
     def get_attn_backend_cls(
@@ -392,8 +406,7 @@ class Platform:
         dtype: torch.dtype,
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
-        """
-        Get the vision attention backend class of a device.
+        """Get the vision attention backend class of a device.
 
         NOTE: ViT Attention should be checked and override in the platform-specific
         implementation. we should not override this in any other places, like
@@ -426,6 +439,7 @@ class Platform:
         Args:
             device_id: Device index in the visible device namespace, matching
                 the argument accepted by torch.cuda.
+
         """
         return None
 
@@ -435,8 +449,7 @@ class Platform:
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
-        """
-        Test whether this platform is compatible with a device capability.
+        """Test whether this platform is compatible with a device capability.
 
         The `capability` argument can either be:
 
@@ -459,8 +472,7 @@ class Platform:
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
-        """
-        Test whether this platform has exactly the specified device capability.
+        """Test whether this platform has exactly the specified device capability.
 
         The `capability` argument can either be:
 
@@ -483,8 +495,7 @@ class Platform:
         capability: int,
         device_id: int = 0,
     ) -> bool:
-        """
-        Returns True if the device capability is any <major>.x.
+        """Returns True if the device capability is any <major>.x.
         Mirrors CUDA 13 'family' architecture semantics (e.g. 10.x, 11.x, 12.x).
         """
         current_capability = cls.get_device_capability(device_id=device_id)
@@ -532,9 +543,7 @@ class Platform:
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         raise NotImplementedError
 
     @classmethod
@@ -546,8 +555,7 @@ class Platform:
     def pre_register_and_update(
         cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
-        """
-        Do some pre-registration or update action for the current platform.
+        """Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or
@@ -560,8 +568,7 @@ class Platform:
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Apply the platform-specific default values to the config.
+        """Apply the platform-specific default values to the config.
 
         This function is called during the initialization of global VllmConfig, after
         parsing cli arguments.
@@ -574,8 +581,7 @@ class Platform:
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Check and update the configuration for the current platform.
+        """Check and update the configuration for the current platform.
 
         It can raise an exception if the configuration is not compatible with
         the current platform, or it can update the configuration to make it
@@ -586,10 +592,10 @@ class Platform:
         pass
 
     @classmethod
-    def _find_non_ssm_backend(
+    def _find_non_ssm_backends(
         cls, vllm_config: "VllmConfig"
-    ) -> "type[AttentionBackend] | None":
-        """Find the first non-SSM attention backend from model layers."""
+    ) -> "list[type[AttentionBackend]]":
+        """Distinct non-SSM attention backends, in layer order."""
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -599,19 +605,70 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        backends: list[type[AttentionBackend]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm():
-                return b
-        return None
+            if not b.is_ssm() and b not in backends:
+                backends.append(b)
+        return backends
+
+    @classmethod
+    def _preferred_block_size_for_backends(
+        cls,
+        backend_classes: "list[type[AttentionBackend]]",
+        default_block_size: int,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        """Smallest block size every backend accepts.
+
+        ``supports_block_size`` may be overridden to accept exact sizes only
+        (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
+        one supported size per backend, each checked against every backend.
+
+        Raises:
+            ValueError: If the backends share no supported block size.
+
+        """
+        from vllm.config.vllm import set_current_vllm_config
+        from vllm.v1.attention.backend import MultipleOf
+
+        # Backends may read the current config to decide a preference.
+        with set_current_vllm_config(vllm_config):
+            if len(backend_classes) == 1:
+                return backend_classes[0].get_preferred_block_size(default_block_size)
+            if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                return default_block_size
+            # A backend declaring no sizes accepts any, so it contributes 1.
+            per_backend_sizes = [
+                [
+                    s.base if isinstance(s, MultipleOf) else s
+                    for s in b.get_supported_kernel_block_sizes()
+                ]
+                or [1]
+                for b in backend_classes
+            ]
+            candidates = sorted(
+                {math.lcm(*sizes) for sizes in itertools.product(*per_backend_sizes)}
+            )
+            for candidate in candidates:
+                if all(b.supports_block_size(candidate) for b in backend_classes):
+                    return candidate
+        raise ValueError(
+            "The attention backends share no supported KV cache block size ("
+            + "; ".join(
+                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                for b in backend_classes
+            )
+            + ")."
+        )
 
     @classmethod
     def _find_non_ssm_backend_source(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple["type[AttentionBackend] | None", Any | None, int | None]:
+    ) -> tuple["list[type[AttentionBackend]]", Any | None, int | None]:
         """Find the PP rank that owns the first non-SSM backend."""
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
 
         from vllm.distributed.parallel_state import (
             get_pp_group,
@@ -619,16 +676,16 @@ class Platform:
         )
 
         if not model_parallel_is_initialized():
-            return backend_cls, None, 0 if backend_cls is not None else None
+            return backend_classes, None, 0 if backend_classes else None
 
         pp_group = get_pp_group()
         if pp_group.world_size == 1:
-            return backend_cls, None, 0 if backend_cls is not None else None
+            return backend_classes, None, 0 if backend_classes else None
 
         backend_presence = [False] * pp_group.world_size
         torch.distributed.all_gather_object(
             backend_presence,
-            backend_cls is not None,
+            bool(backend_classes),
             group=pp_group.cpu_group,
         )
 
@@ -637,8 +694,8 @@ class Platform:
             None,
         )
         if backend_rank != pp_group.rank_in_group:
-            backend_cls = None
-        return backend_cls, pp_group, backend_rank
+            backend_classes = []
+        return backend_classes, pp_group, backend_rank
 
     @staticmethod
     def _sync_block_size_config_across_pp(
@@ -667,12 +724,10 @@ class Platform:
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Ensure block_size is compatible with the attention backend.
+        """Ensure block_size is compatible with the attention backend.
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
-        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -681,37 +736,39 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls, pp_group, backend_rank = cls._find_non_ssm_backend_source(
+        backend_classes, pp_group, backend_rank = cls._find_non_ssm_backend_source(
             vllm_config
         )
         if backend_rank is None:
             return
 
-        if backend_cls is not None:
-            # Phase 1: Pick block size from backend (skip if user set --block-size)
+        if backend_classes:
+            # Phase 1: Pick a block size every attention backend supports (skip if
+            # user set --block-size). Models can mix backends with disjoint
+            # preferences, and a size from the first alone later fails
+            # select_common_block_size().
             if not cache_config.user_specified_block_size:
-                with set_current_vllm_config(vllm_config):
-                    preferred = backend_cls.get_preferred_block_size(
-                        CacheConfig.DEFAULT_BLOCK_SIZE
-                    )
+                preferred = cls._preferred_block_size_for_backends(
+                    backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+                )
                 if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                     logger.info(
-                        "Setting kv cache block size to %d for %s backend.",
+                        "Setting kv cache block size to %d for %s backend(s).",
                         preferred,
-                        backend_cls.get_name(),
+                        "/".join(b.get_name() for b in backend_classes),
                     )
                 cache_config.block_size = preferred
 
             # Phase 2: Align block/mamba sizes for hybrid models
             # (may override user settings).
             if model_config.is_hybrid:
-                cls._align_hybrid_block_size(vllm_config, backend_cls)
+                cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
             # Phase 3: Align block/page sizes when multiple KV dtypes share the
             # block pool (e.g. nvfp4 primary + unquantized skip layers).
             # May override the user's --block-size.
             if cache_config.kv_cache_dtype_skip_layers:
-                cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+                cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
 
         if pp_group is not None:
             cls._sync_block_size_config_across_pp(vllm_config, pp_group, backend_rank)
@@ -830,13 +887,23 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
+    def _get_indexer_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
+        """Extra ``block_size`` multiple a sparse indexer needs, else ``None``.
+
+        The CUDA kpool paged-MQA indexer virtually splits each storage block
+        into pool pages, so ``block_size`` must be a multiple of
+        ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` — implemented in the CUDA
+        platform override. Other platforms impose no extra constraint.
+        """
+        return None
+
+    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
         backend_cls: "type[AttentionBackend]",
     ) -> None:
-        """
-        For hybrid attention/mamba models, ensure that the attention page
+        """For hybrid attention/mamba models, ensure that the attention page
         size is >= the mamba page size, and pad the mamba page size to match.
         """
         from math import lcm
@@ -871,6 +938,7 @@ class Platform:
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
+                cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
         elif cache_config.cache_dtype.startswith("turboquant_"):
@@ -921,11 +989,18 @@ class Platform:
             model_config.architecture,
             model_config=model_config,
         )
-        mamba_page_size = MambaSpec(
-            shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-            dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-            block_size=-1,
-        ).page_size_bytes
+        # Qwen4Exp has multiple Mamba state layouts with different sizes.
+        if hasattr(model_cls, "get_mamba_specs_from_config"):
+            mamba_page_size = max(
+                spec.page_size_bytes
+                for spec in model_cls.get_mamba_specs_from_config(vllm_config)
+            )
+        else:
+            mamba_page_size = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+                block_size=-1,
+            ).page_size_bytes
 
         if mamba_page_size == 0:
             return
@@ -971,6 +1046,9 @@ class Platform:
                 mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
             )
+            indexer_align = cls._get_indexer_block_alignment(vllm_config)
+            if indexer_align:
+                attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
@@ -1007,15 +1085,12 @@ class Platform:
 
     @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Register custom KVCacheSpec class on current platform.
-        """
+        """Register custom KVCacheSpec class on current platform."""
         pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
-        """
-        Verify whether the current platform supports the specified model
+        """Verify whether the current platform supports the specified model
         architecture.
 
         - This will raise an Error or Warning based on the model support on
@@ -1026,9 +1101,7 @@ class Platform:
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
-        """
-        Verify whether the quantization is supported by the current platform.
-        """
+        """Verify whether the quantization is supported by the current platform."""
         if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
                 f"{quant} quantization is currently not supported in {cls.device_name}."
@@ -1036,8 +1109,7 @@ class Platform:
 
     @classmethod
     def get_cpu_architecture(cls) -> CpuArchEnum:
-        """
-        Determine the CPU architecture of the current system.
+        """Determine the CPU architecture of the current system.
         Returns CpuArchEnum indicating the architecture type.
         """
         machine = platform.machine().lower()
@@ -1075,50 +1147,37 @@ class Platform:
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        """
-        Return the memory usage in bytes.
-        """
+        """Return the memory usage in bytes."""
         raise NotImplementedError
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        """
-        Return the punica wrapper for current platform.
-        """
+        """Return the punica wrapper for current platform."""
         raise NotImplementedError
 
     @classmethod
     def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
-        """
-        Return the platform specific values for (-inf, inf)
-        """
+        """Return the platform specific values for (-inf, inf)."""
         return float("-inf"), float("inf")
 
     @classmethod
     def can_update_inplace(cls) -> bool:
-        """
-        Checks if the platform allows inplace memory updates
-        """
+        """Checks if the platform allows inplace memory updates."""
         return True
 
     @classmethod
     def get_lora_vocab_padding_size(cls) -> int:
-        """
-        Returns how much padding the LoRA logits need for kernels
-        """
+        """Returns how much padding the LoRA logits need for kernels."""
         return 256
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        """
-        Get device specific communicator class for distributed communication.
-        """
+        """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
-        """
-        Returns whether the GPU is an integrated (UMA) device that shares
+        """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU.
 
         On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
@@ -1129,22 +1188,17 @@ class Platform:
 
     @classmethod
     def supports_mx(cls) -> bool:
-        """
-        Returns whether the current platform supports MX types.
-        """
+        """Returns whether the current platform supports MX types."""
         return False
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        """
-        Returns whether the current platform supports FP8 types.
-        """
+        """Returns whether the current platform supports FP8 types."""
         return False
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
-        """
-        Returns whether the preferred FP8 type is FNUZ on the current platform.
+        """Returns whether the preferred FP8 type is FNUZ on the current platform.
 
         There are two representations of FP8, OCP FP8 and FNUZ FP8.
         The OCP specification can be found at https://tinyurl.com/b7jvwpft.
@@ -1157,8 +1211,7 @@ class Platform:
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
-        """
-        Returns the preferred FP8 type on the current platform.
+        """Returns the preferred FP8 type on the current platform.
 
         See the documentation for is_fp8_fnuz for details.
         """
@@ -1166,22 +1219,17 @@ class Platform:
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        """
-        Whether to use allgather in LogitsProcessor to gather the logits.
-        """
+        """Whether to use allgather in LogitsProcessor to gather the logits."""
         return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        """
-        Returns if custom allreduce is supported on the current platform
-        """
+        """Returns if custom allreduce is supported on the current platform."""
         return False
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
-        """
-        Returns True if we register attention as one giant opaque custom op
+        """Returns True if we register attention as one giant opaque custom op
         on the current platform
         """
         return False
@@ -1192,7 +1240,7 @@ class Platform:
         processed_inputs: "EngineInput",
         params: "SamplingParams | PoolingParams",
     ) -> None:
-        """Raises if this request is unsupported on this platform"""
+        """Raises if this request is unsupported on this platform."""
 
     def __getattr__(self, key: str):
         # Pickle checks dunder methods like __getstate__. If we return None
@@ -1216,9 +1264,7 @@ class Platform:
         return None
 
     def get_global_graph_pool(self) -> Any:
-        """
-        Return the global graph pool for this platform.
-        """
+        """Return the global graph pool for this platform."""
         cls = self.__class__
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
@@ -1226,9 +1272,7 @@ class Platform:
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
-        """
-        Get static graph wrapper class for static graph.
-        """
+        """Get static graph wrapper class for static graph."""
         return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
     @classmethod
@@ -1240,36 +1284,27 @@ class Platform:
         group_size: int,
         timeout: timedelta,
     ) -> "ProcessGroup":
-        """
-        Init platform-specific torch distributed process group.
-        """
+        """Init platform-specific torch distributed process group."""
         raise NotImplementedError
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
-        """
-        Check if the dtype is supported by the current platform.
-        """
+        """Check if the dtype is supported by the current platform."""
         raise NotImplementedError
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
-        """
-        Returns if the hybrid kv cache is supported by the current platform.
-        """
+        """Returns if the hybrid kv cache is supported by the current platform."""
         return False
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        """
-        Returns if the graph mode is supported by the current platform.
-        """
+        """Returns if the graph mode is supported by the current platform."""
         return False
 
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
-        """
-        Check whether the platform's ModelRunner can handle multiple attention
+        """Check whether the platform's ModelRunner can handle multiple attention
         layers that share the same layer index (e.g. cross attention and self
         attention in the same decoder block of an encoder-decoder model such as
         BART).
@@ -1285,15 +1320,12 @@ class Platform:
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """
-        Returns if DeepGEMM is supported by the current platform.
-        """
+        """Returns if DeepGEMM is supported by the current platform."""
         return False
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        """
-        Whether this platform should use torch.ops.vllm.* custom ops for collectives.
+        """Whether this platform should use torch.ops.vllm.* custom ops for collectives.
 
         Returns False by default - platforms must explicitly opt-in.
         """
@@ -1301,16 +1333,12 @@ class Platform:
 
     @classmethod
     def use_sync_weight_loader(cls) -> bool:
-        """
-        Returns if the current platform needs to sync weight loader.
-        """
+        """Returns if the current platform needs to sync weight loader."""
         return False
 
     @classmethod
     def make_synced_weight_loader(cls, original_weight_loader):
-        """
-        Wrap the original weight loader to make it synced.
-        """
+        """Wrap the original weight loader to make it synced."""
         if not cls.use_sync_weight_loader():
             return original_weight_loader
 
@@ -1324,37 +1352,29 @@ class Platform:
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
-        """
-        Returns a mapping from device_type to a tuple of supported
+        """Returns a mapping from device_type to a tuple of supported
         kv_buffer_device for nixl.
         """
         return {}
 
     @classmethod
     def get_nixl_memory_type(cls) -> str | None:
-        """
-        Returns the nixl memory type for the current platform.
-        """
+        """Returns the nixl memory type for the current platform."""
         return None
 
     @classmethod
     def check_max_model_len(cls, max_model_len: int) -> int:
-        """
-        Check max_model_len for the current platform.
-        """
+        """Check max_model_len for the current platform."""
         return max_model_len
 
     @classmethod
     def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
-        """
-        Set some additional forward context for the current platform if needs.
-        """
+        """Set some additional forward context for the current platform if needs."""
         return {}
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        """
-        Get the number of compute units for the current platform.
+        """Get the number of compute units for the current platform.
         (NVIDIA SM / AMD CU / Intel EU)
         """
         raise NotImplementedError(
@@ -1373,10 +1393,24 @@ class Platform:
 
     @classmethod
     def is_arch_support_pdl(cls) -> bool:
-        """
-        Does the current platform support PDL (Programmatic Dependent Launch)?
-        """
+        """Does the current platform support PDL (Programmatic Dependent Launch)?"""
         return False
+
+    @classmethod
+    def validate_environ(cls, hard_fail: bool) -> None:
+        """Validate environment variables for the current platform."""
+        from vllm import envs
+
+        for env in os.environ:
+            if env.startswith("VLLM_") and env not in envs.environment_variables:
+                if hard_fail:
+                    raise ValueError(
+                        f"Unknown vLLM environment variable detected: {env}"
+                    )
+                else:
+                    logger.warning(
+                        "Unknown vLLM environment variable detected: %s", env
+                    )
 
 
 class UnspecifiedPlatform(Platform):

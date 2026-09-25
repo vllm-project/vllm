@@ -7,7 +7,7 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 def get_act_fn(
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     static_num_labels: bool = True,
 ) -> "PoolerActivation":
     # get classification act_fn

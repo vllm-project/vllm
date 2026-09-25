@@ -16,9 +16,15 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     make_tool_call_id,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    PerRequestMetrics,
+    RequestResponseMetadata,
+    ToolCall,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
-    GenerationError,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
@@ -36,23 +42,19 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     CompletionTokenUsageInfo,
-    DeltaMessage,
     ErrorResponse,
-    FunctionCall,
-    PerRequestMetrics,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
-    ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -130,6 +132,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -159,6 +162,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
@@ -196,12 +200,29 @@ class OpenAIServingChat(GenerateBaseServing):
             .chat_template_kwargs
         )
 
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
+
+        The same dict is used twice: to build the API-server-side parser
+        instance, and to populate
+        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
+        side. The latter crosses ZMQ as msgpack, so a handler that stashes
+        request-scoped state only the API-server-side parser needs (values
+        msgpack can't encode, or payloads not worth shipping) can drop
+        those entries here without affecting the in-process parser.
+
+        Must not mutate the argument -- the caller still needs the full
+        dict. The default forwards it unchanged.
+        """
+        return chat_template_kwargs
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
-        """
-        Validate the model and preprocess a chat completion request.
+        """Validate the model and preprocess a chat completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
@@ -209,17 +230,14 @@ class OpenAIServingChat(GenerateBaseServing):
         Returns:
             A tuple of (conversation, engine_inputs) on success,
             or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight(request.n or 1)
 
         return await self.online_renderer.render_chat(request)
 
@@ -228,8 +246,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
-        """
-        Chat Completion API similar to OpenAI's API.
+        """Chat Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI
@@ -360,7 +377,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
-                        "chat_template_kwargs": chat_template_kwargs,
+                        "chat_template_kwargs": self._engine_chat_template_kwargs(
+                            chat_template_kwargs
+                        ),
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
@@ -674,11 +693,13 @@ class OpenAIServingChat(GenerateBaseServing):
                         logprobs = None
 
                     if delta_message is None:
-                        # NOTE: If return_token_ids is enabled, we still need to
-                        # send a chunk with token_ids even if delta_message is None
+                        # NOTE: If return_token_ids or logprobs are enabled, we
+                        # still need to send a chunk even if delta_message is None
                         # to ensure all tokens are included in the response
-                        if output.finish_reason is None and (
-                            not request.return_token_ids or hide_stream_metadata
+                        if (
+                            output.finish_reason is None
+                            and logprobs is None
+                            and (not request.return_token_ids or hide_stream_metadata)
                         ):
                             continue
                         delta_message = DeltaMessage()
@@ -738,7 +759,11 @@ class OpenAIServingChat(GenerateBaseServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
+                        if (
+                            tools_streamed[i]
+                            and not tool_choice_function_name
+                            and output.finish_reason == "stop"
+                        ):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (

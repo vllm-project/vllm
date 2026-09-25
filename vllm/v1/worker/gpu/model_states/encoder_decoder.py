@@ -27,9 +27,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         encoder_seq_lens = self.encoder_seq_lens.get(kv_cache_group_id)
         if encoder_seq_lens is None:
@@ -43,7 +41,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
 
 class EncoderDecoderModelState(ModelState):
     """ModelState for cross-attention encoder-decoder models
-    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    (Whisper, CohereASR, NemotronParse, ...)
     """
 
     def __init__(
@@ -116,7 +114,9 @@ class EncoderDecoderModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding

@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.minimax_m3_tool_parser import MinimaxM3ToolParser
 
