@@ -289,7 +289,9 @@ class DeepseekV41RocmMxfp4IndexerBackend(DeepseekV41IndexerBackend):
         return "DEEPSEEK_V41_ROCM_MXFP4_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: KVCacheSpec | None = None,
+    ) -> list[int | MultipleOf]:
         # 128 is preferred (see DeepseekV4ROCMAiterMLASparseBackend); 64 keeps
         # an explicit --block-size 64 working.
         return [64, 128]
