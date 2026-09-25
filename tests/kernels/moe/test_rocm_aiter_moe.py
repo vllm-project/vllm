@@ -22,6 +22,7 @@ import importlib
 import math
 import warnings
 from typing import Any, NamedTuple
+from unittest import mock
 
 import pytest
 import torch
@@ -643,6 +644,76 @@ def test_aiter_moe_padding_env_var(
         mp.setenv("VLLM_ROCM_MOE_PADDING", "1" if moe_padding else "0")
         envs = _reload_envs()
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
+
+
+# Dispatch-policy forwarding test ------------------------------------------
+
+
+@pytest.mark.parametrize("dispatch_policy", [0, 1, 2])
+def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
+    dispatch_policy: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_ROCM_AITER_MOE_DISPATCH_POLICY should reach rocm_aiter_ops.fused_moe
+    unchanged, the same forwarding AiterExperts.apply does via
+    rocm_aiter_fused_experts, for every documented policy value (0=auto,
+    1=always single-pass, 2=always multi-pass). See vllm-project/vllm#54966.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=8,
+        hidden_dim=256,
+        intermediate_dim=512,
+        num_experts=4,
+        topk=2,
+        seed=5,
+    )
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(case["w1"], case["w2"])
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=torch.bfloat16,
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", str(dispatch_policy))
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.get_moe_dispatch_policy() == dispatch_policy, (
+            "rocm_aiter_ops cached a stale dispatch policy after the env var changed."
+        )
+
+        with mock.patch.object(
+            rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+        ) as fused_moe_mock:
+            rocm_aiter_fused_experts(
+                hidden_states=case["hidden_states"],
+                w1=w1_shuffled,
+                w2=w2_shuffled,
+                topk_weights=case["topk_weights"],
+                topk_ids=case["topk_ids"],
+                moe_config=moe_config,
+                activation=MoEActivation.SILU,
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            )
+
+        assert (
+            fused_moe_mock.call_args.kwargs["moe_sorting_dispatch_policy"]
+            == dispatch_policy
+        ), (
+            "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY was not forwarded to "
+            "rocm_aiter_ops.fused_moe."
+        )
 
 
 # Enum tests --------------------------------------------------------------
