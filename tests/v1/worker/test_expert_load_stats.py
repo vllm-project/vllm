@@ -92,6 +92,7 @@ def test_reporter_keeps_iteration_layers_separate_and_resets_summary(tmp_path):
     assert [r["counts"] for r in summaries] == [[1, 4, 1], [3, 1, 2]]
     assert summaries[0]["max_mean_ratio"] == 2.0
     assert summaries[0]["dropped_trace_iterations"] == 1
+    assert all("export_errors" not in record for record in records)
     assert [(r["iteration"], r["layer"]) for r in records[:4]] == [
         (1, 3),
         (1, 7),
@@ -146,6 +147,7 @@ def test_cumulative_summary_retains_counts_without_changing_trace_rows():
 def test_writer_errors_disable_file_export_without_failing_serving(
     tmp_path, monkeypatch, caplog, operation
 ):
+    caplog.set_level("INFO", logger="vllm.v1.worker.expert_load_stats")
     reporter = ExpertLoadReporter(
         ExpertLoadStatsConfig(enabled=True, output_dir=str(tmp_path)),
         [2],
@@ -170,7 +172,8 @@ def test_writer_errors_disable_file_export_without_failing_serving(
     assert caplog.text.count("JSONL export disabled") == 1
     next_records = reporter.consume(counts, counts[None][:0], [], 2, 0, True)
     assert next_records[0]["assignments"] == 64
-    assert next_records[0]["export_errors"] == 1
+    assert "export_errors" not in next_records[0]
+    assert "1 export errors" in caplog.text
 
 
 def test_summary_logging_is_bounded_and_keeps_vectors_in_jsonl(tmp_path, monkeypatch):
