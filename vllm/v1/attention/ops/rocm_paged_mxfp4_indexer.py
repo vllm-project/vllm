@@ -303,11 +303,9 @@ def reserve_rocm_mxfp4_indexer_workspace(
         budget += budget // candidate_block_size
     if gather_block_size:
         # aiter allocates the candidate lists, and every consumer layer of the
-        # step reuses them: each gathered row, 24 B per candidate block (int64
-        # value and scale offsets and position).
-        budget += (
-            hidden_states.shape[0] * (num_candidate_cols // gather_block_size) * 24
-        )
+        # step reuses them: each gathered row, 8 B per candidate block (int32
+        # slot and position).
+        budget += hidden_states.shape[0] * (num_candidate_cols // gather_block_size) * 8
     current_workspace_manager().get_simultaneous(*specs)
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
