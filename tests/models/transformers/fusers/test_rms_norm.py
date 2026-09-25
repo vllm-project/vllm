@@ -50,6 +50,55 @@ class WeightlessRMSNorm(RMSNorm):
         return self._rms(x.to(torch.float32)).to(x.dtype)
 
 
+class Gemma4RMSNorm(RMSNorm):
+    """`pow(v, -0.5)` where the others write `rsqrt(v)` (HF `Gemma4RMSNorm._norm`).
+
+    Gemma 4 spells the reciprocal square root as `torch.pow(..., -0.5)` to keep
+    Torch and JAX in agreement, and -- unlike Gemma 1-3 -- its weight is *not*
+    zero-centered, so this fuses to a plain `RMSNorm`.
+    """
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, -0.5)
+
+    def forward(self, x):
+        return (self._rms(x.float()) * self.weight.float()).type_as(x)
+
+
+class PowOperatorRMSNorm(Gemma4RMSNorm):
+    """The `v ** -0.5` operator spelling of the same reciprocal square root."""
+
+    def _rms(self, x):
+        return x * (x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon) ** -0.5
+
+
+class KwargPowRMSNorm(Gemma4RMSNorm):
+    """The keyword spelling `torch.pow(v, exponent=-0.5)` of the same rsqrt."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, exponent=-0.5)
+
+
+class KwargBasePowRMSNorm(Gemma4RMSNorm):
+    """The fully functional spelling `torch.pow(input=v, exponent=-0.5)`."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(input=mean_squared, exponent=-0.5)
+
+
+class WeightlessGemma4RMSNorm(Gemma4RMSNorm):
+    """Gemma 4 with `with_scale=False`: the `pow` spelling and no scale parameter."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__(hidden, eps, weight=False)
+
+    def forward(self, x):
+        return self._rms(x.float()).type_as(x)
+
+
 class LayerNorm(RMSNorm):
     """An RMSNorm not named `*RMSNorm`, keeping the input dtype (no upcast)."""
 
@@ -156,6 +205,11 @@ class UntraceableGatedRMSNorm(RMSNorm):
         (RMSNorm, 1e-5, False),
         (GemmaRMSNorm, 1e-6, True),
         (WeightlessRMSNorm, 1e-6, False),
+        (Gemma4RMSNorm, 1e-6, False),
+        (PowOperatorRMSNorm, 1e-6, False),
+        (KwargPowRMSNorm, 1e-6, False),
+        (KwargBasePowRMSNorm, 1e-6, False),
+        (WeightlessGemma4RMSNorm, 1e-6, False),
         (LayerNorm, 1e-6, False),
         (torch.nn.RMSNorm, 1e-5, False),  # fused `F.rms_norm` op
     ],
@@ -188,6 +242,10 @@ def test_gated_rms_norm_is_not_fused(cls):
         (RMSNorm, "RMSNorm", False),
         (GemmaRMSNorm, "GemmaRMSNorm", True),
         (WeightlessRMSNorm, "RMSNorm", False),
+        (Gemma4RMSNorm, "RMSNorm", False),
+        (KwargPowRMSNorm, "RMSNorm", False),
+        (KwargBasePowRMSNorm, "RMSNorm", False),
+        (WeightlessGemma4RMSNorm, "RMSNorm", False),
     ],
 )
 def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_config):
@@ -211,6 +269,25 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     weight = getattr(module, "weight", None)
     assert isinstance(built.weight, nn.Parameter) == (weight is not None)
     assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
+
+
+@pytest.mark.parametrize(
+    "cls", [Gemma4RMSNorm, PowOperatorRMSNorm, KwargPowRMSNorm, KwargBasePowRMSNorm]
+)
+def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
+    """Matching `pow(v, -0.5)` is only sound if it really is the reciprocal square
+    root: the fused norm must reproduce the unfused forward, not just replace it.
+    `pow` and `rsqrt` take different paths to the same value, so compare at float32
+    tolerance rather than bit-for-bit."""
+    torch.manual_seed(0)
+    module = cls(16)
+    with torch.no_grad():
+        module.weight.copy_(torch.randn(16))
+    built = get_fuser(module, RMSNormFuser).fuse(module, "norm", default_vllm_config)
+    with torch.no_grad():
+        built.weight.copy_(module.weight)
+    x = torch.randn(4, 16)
+    torch.testing.assert_close(built(x), module(x), rtol=1e-5, atol=1e-6)
 
 
 def test_weightless_norm_has_no_hidden_size(default_vllm_config):
