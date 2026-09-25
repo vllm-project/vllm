@@ -32,6 +32,7 @@ def generative_scoring(request: Request) -> ServingGenerativeScoring | None:
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
