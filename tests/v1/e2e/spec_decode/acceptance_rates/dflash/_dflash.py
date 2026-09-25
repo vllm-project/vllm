@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Shared DFlash configs and test bodies; not collected by pytest."""
 
 from dataclasses import dataclass
 
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
-from tests.utils import single_gpu_only
 from vllm.config import CompilationConfig
 
 from ...utils import compute_acceptance_len
@@ -64,8 +64,7 @@ LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
 )
 
 
-@pytest.mark.parametrize("use_mrv2", [False, True])
-def test_dflash_reference_acceptance_lengths(
+def run_dflash_reference_acceptance_lengths(
     monkeypatch: pytest.MonkeyPatch,
     use_mrv2: bool,
     vllm_runner,
@@ -99,33 +98,7 @@ def test_dflash_reference_acceptance_lengths(
     )
 
 
-@single_gpu_only
-@pytest.mark.parametrize(
-    ("config", "use_mrv2"),
-    [
-        pytest.param(
-            QWEN3_DFLASH,
-            False,
-            id="qwen3-mrv1",
-        ),
-        pytest.param(
-            QWEN3_DFLASH,
-            True,
-            id="qwen3-mrv2",
-        ),
-        pytest.param(
-            LAGUNA_DFLASH_NVFP4,
-            True,
-            id="laguna-nvfp4-mrv2",
-        ),
-        pytest.param(
-            QWEN3_8_DFLASH2_NVFP4,
-            True,
-            id="qwen3.8-dflash2-nvfp4-mrv2",
-        ),
-    ],
-)
-def test_dflash_correctness(
+def run_dflash_correctness(
     monkeypatch: pytest.MonkeyPatch,
     config: DFlashCorrectnessConfig,
     use_mrv2: bool,
