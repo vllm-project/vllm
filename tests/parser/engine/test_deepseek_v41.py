@@ -146,3 +146,30 @@ def test_python_argument_conversion_and_partial_values():
         "bare": 7,
         "text": "  a<b",
     }
+
+
+def test_deepseek_v41_config_disables_arg_structural_chars():
+    config = deepseek_v41_config()
+    assert config.arg_structural_chars is None
+
+
+def test_streaming_argument_deltas_are_incremental_without_buffering():
+    tokenizer, tokens = tokenizer_for(CALLS, False)
+    parser = parser_for(tokenizer, {"thinking": False})
+    deltas = replay_streaming(
+        parser,
+        tokens,
+        chunk_size=1,
+        finished_on_last=True,
+        tools=DUMMY_TOOLS,
+    )
+    hang_idx = next(i for i, (_, t) in enumerate(tokens) if t == "杭")
+    zhou_idx = next(i for i, (_, t) in enumerate(tokens) if t == "州")
+
+    hang_delta = deltas[hang_idx]
+    assert hang_delta is not None and hang_delta.tool_calls
+    assert hang_delta.tool_calls[0].function.arguments == "杭"
+
+    zhou_delta = deltas[zhou_idx]
+    assert zhou_delta is not None and zhou_delta.tool_calls
+    assert zhou_delta.tool_calls[0].function.arguments == "州"
