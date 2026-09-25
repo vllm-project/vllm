@@ -23,4 +23,4 @@ generation_config:
   extra_body:
     chat_template_kwargs:
       enable_thinking: true
-server_args: "--tensor-parallel-size 4"
+server_args: "--tensor-parallel-size 4 --enable-expert-parallel"

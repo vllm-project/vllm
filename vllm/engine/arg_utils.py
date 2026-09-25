@@ -443,6 +443,33 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+def _moe_intermediate_size_from_model_config(model_config: ModelConfig) -> int | None:
+    """Return the checkpoint MoE N-dim, preferring moe_intermediate_size."""
+    cfg = model_config.hf_text_config
+    for name in ("moe_intermediate_size", "intermediate_size"):
+        value = getattr(cfg, name, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _fp8_weight_block_n_from_model_config(model_config: ModelConfig) -> int | None:
+    """Return FP8 weight block_n from HF / architecture quantization config."""
+    quant_cfg = model_config.model_arch_config.quantization_config
+    if not isinstance(quant_cfg, dict):
+        quant_cfg = getattr(model_config.hf_config, "quantization_config", None)
+    if not isinstance(quant_cfg, dict):
+        return None
+    block = quant_cfg.get("weight_block_size")
+    if isinstance(block, int) and block > 0:
+        return block
+    if isinstance(block, (list, tuple)) and block:
+        block_n = block[0]
+        if isinstance(block_n, int) and block_n > 0:
+            return block_n
+    return None
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -2081,6 +2108,42 @@ class EngineArgs:
             jit_monitor_verbose=self.jit_monitor_verbose,
         )
 
+    def _maybe_auto_enable_fp8_moe_expert_parallel(
+        self, model_config: ModelConfig
+    ) -> bool:
+        """Enable EP when FP8 MoE TP would violate weight block_n alignment."""
+        if self.enable_expert_parallel:
+            return True
+        if not model_config.is_moe:
+            return False
+
+        # Without EP, MoE layers form a TP group of size TP × DP.
+        moe_tp = self.tensor_parallel_size * self.data_parallel_size
+        moe_n = _moe_intermediate_size_from_model_config(model_config)
+        block_n = _fp8_weight_block_n_from_model_config(model_config)
+        if moe_n is None or block_n is None:
+            return False
+
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            fp8_moe_tp_requires_expert_parallel,
+        )
+
+        if not fp8_moe_tp_requires_expert_parallel(moe_n, moe_tp, block_n):
+            return False
+
+        logger.warning(
+            "Auto-enabling --enable-expert-parallel: MoE intermediate size %d "
+            "cannot be tensor-parallel-sharded across %d ranks with FP8 "
+            "weight block_n=%d (%d per rank). Expert parallelism keeps the "
+            "full intermediate size on each rank. Pass "
+            "--enable-expert-parallel explicitly to silence this message.",
+            moe_n,
+            moe_tp,
+            block_n,
+            moe_n // moe_tp,
+        )
+        return True
+
     def create_engine_config(
         self,
         usage_context: UsageContext | None = None,
@@ -2412,7 +2475,9 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
-            enable_expert_parallel=self.enable_expert_parallel,
+            enable_expert_parallel=self._maybe_auto_enable_fp8_moe_expert_parallel(
+                model_config
+            ),
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
