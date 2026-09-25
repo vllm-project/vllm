@@ -388,8 +388,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
                 + 1
             )
         topk = self._index_topk
-        kpool = max(self._index_kpool, 1)
-        lens = torch.where(ctx <= topk, ctx, topk + ctx % kpool)
+        lens = torch.where(ctx <= topk, ctx, topk + ctx % self._index_kpool)
         return num_rows, lens.to(torch.int32)
 
     def build(
