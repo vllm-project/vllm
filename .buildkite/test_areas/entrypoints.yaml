@@ -230,10 +230,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)"
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling Scoring)"
   device: h200_35gb
-  key: entrypoints-integration-pooling
-  timeout_in_minutes: 75
+  key: entrypoints-integration-pooling-scoring
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -241,13 +241,79 @@ steps:
   - tests/entrypoints/pooling
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/pooling
+  - pytest -v -s entrypoints/pooling/scoring
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Integration (Pooling)"
+      label: ":amd: (MI355) Entrypoints Integration (Pooling Scoring)"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 65
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling Embed)"
+  device: h200_35gb
+  key: entrypoints-integration-pooling-embed
+  timeout_in_minutes: 35
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/pooling
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/pooling/embed
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Pooling Embed)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling Classify, Reward and Token)"
+  device: h200_35gb
+  key: entrypoints-integration-pooling-classify-reward-token
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/pooling
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/pooling/classify entrypoints/pooling/reward entrypoints/pooling/token_classify entrypoints/pooling/token_embed
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Pooling Classify, Reward and Token)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling Basic)"
+  device: h200_35gb
+  key: entrypoints-integration-pooling-basic
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/pooling
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/pooling/basic entrypoints/pooling/test_factories.py entrypoints/pooling/test_io_processor.py entrypoints/pooling/test_utils.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Pooling Basic)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 15
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
