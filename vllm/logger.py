@@ -22,7 +22,7 @@ import vllm.envs as envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 if TYPE_CHECKING:
-    from vllm.config.logging import LoggingConfig
+    from vllm.config.logging import LogColor, LoggingConfig
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -31,14 +31,22 @@ _FORMAT = (
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 
-def _use_color() -> bool:
+def log_color_from_env() -> "LogColor":
+    """Resolve the default log color from ``NO_COLOR``, ``VLLM_LOGGING_COLOR``
+    and ``FORCE_COLOR``."""
     if envs.NO_COLOR or envs.VLLM_LOGGING_COLOR == "0":
-        return False
+        return "never"
     if envs.VLLM_LOGGING_COLOR == "1" or envs.FORCE_COLOR:
-        return True
-    if envs.VLLM_LOGGING_STREAM == "ext://sys.stdout":  # stdout
+        return "always"
+    return "auto"
+
+
+def _use_color(log_color: "LogColor", log_stream: str) -> bool:
+    if log_color != "auto":
+        return log_color == "always"
+    if log_stream == "ext://sys.stdout":
         return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-    elif envs.VLLM_LOGGING_STREAM == "ext://sys.stderr":  # stderr
+    elif log_stream == "ext://sys.stderr":
         return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
     return False
 
@@ -63,7 +71,11 @@ DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
         "vllm": {
             "class": "logging.StreamHandler",
             # Choose formatter based on color setting.
-            "formatter": "vllm_color" if _use_color() else "vllm",
+            "formatter": (
+                "vllm_color"
+                if _use_color(log_color_from_env(), envs.VLLM_LOGGING_STREAM)
+                else "vllm"
+            ),
             "level": envs.VLLM_LOGGING_LEVEL,
             "stream": envs.VLLM_LOGGING_STREAM,
         },
@@ -182,10 +194,14 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         configure_logging = envs.VLLM_CONFIGURE_LOGGING
         log_level = envs.VLLM_LOGGING_LEVEL
         log_config_file = envs.VLLM_LOGGING_CONFIG_PATH
+        log_color = log_color_from_env()
+        log_stream = envs.VLLM_LOGGING_STREAM
     else:
         configure_logging = config.configure_logging
         log_level = config.log_level
         log_config_file = config.pylogging_config_file
+        log_color = config.log_color
+        log_stream = config.log_stream
 
     if not configure_logging and log_config_file:
         raise RuntimeError(
@@ -198,10 +214,11 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         logging_config = deepcopy(DEFAULT_LOGGING_CONFIG)
 
         vllm_handler = logging_config["handlers"]["vllm"]
-        # Refresh these values in case env vars have changed.
         vllm_handler["level"] = log_level
-        vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
-        vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+        vllm_handler["stream"] = log_stream
+        vllm_handler["formatter"] = (
+            "vllm_color" if _use_color(log_color, log_stream) else "vllm"
+        )
 
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = log_level

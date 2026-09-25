@@ -14,7 +14,8 @@ For `vllm serve`, configure logging with CLI arguments:
 ## CLI logging configuration
 
 `--logging-config` accepts a JSON object. Its fields are `log_level`,
-`configure_logging`, and `pylogging_config_file`. For example:
+`log_stream`, `log_color`, `configure_logging`, and `pylogging_config_file`.
+For example:
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 \
@@ -33,6 +34,16 @@ precedence if both are supplied. It sets the level of vLLM's built-in logging
 configuration. `--log-config-file` is deprecated and will be removed in
 v0.33.0; use `--logging-config.pylogging_config_file` in new commands.
 
+`log_stream` selects the stream of the built-in handler, for example
+`ext://sys.stderr`. `log_color` is one of `auto`, `always`, or `never`; `auto`
+colors output only when `log_stream` is a terminal:
+
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 \
+    --logging-config.log_stream ext://sys.stderr \
+    --logging-config.log_color never
+```
+
 If `configure_logging` is `false`, vLLM does not apply a logging
 configuration. It cannot be combined with `pylogging_config_file`. This has
 the same effect as the legacy `VLLM_CONFIGURE_LOGGING=0` setting.
@@ -44,18 +55,21 @@ schema](https://docs.python.org/3/library/logging.config.html#dictionary-schema-
 !!! note "Custom configurations override `--log-level`"
     When `pylogging_config_file` is set, vLLM loads that JSON file and replaces
     its built-in `dictConfig`; it does not merge the two. Therefore,
-    `--log-level` applies only when no custom configuration file is provided.
+    `--log-level`, `log_stream`, and `log_color` apply only when no custom
+    configuration file is provided.
     Set logger and handler levels in the custom file itself. vLLM applies the
     resolved configuration in its child processes as well.
 
 ## Environment variables
 
 The CLI configuration is recommended for `vllm serve`. The legacy
-`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_LEVEL`, and
-`VLLM_LOGGING_CONFIG_PATH` variables remain supported as defaults. The default
-handler's stream, prefix, and color are currently controlled only through
-environment variables. Values from a YAML `--config` file or the command line
-override those defaults. See [Environment Variables](https://docs.vllm.ai/en/latest/configuration/env_vars/)
+`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_LEVEL`, `VLLM_LOGGING_CONFIG_PATH`, and
+`VLLM_LOGGING_STREAM` variables remain supported as defaults. `log_color`
+defaults to `never` if `NO_COLOR` is set or `VLLM_LOGGING_COLOR=0`, and to
+`always` if `VLLM_LOGGING_COLOR=1` or `FORCE_COLOR` is set. The default
+handler's prefix is currently controlled only through `VLLM_LOGGING_PREFIX`.
+Values from a YAML `--config` file or the command line override those
+defaults. See [Environment Variables](https://docs.vllm.ai/en/latest/configuration/env_vars/)
 for those settings.
 
 ## Examples
