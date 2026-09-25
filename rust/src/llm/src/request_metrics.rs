@@ -324,7 +324,7 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
     }
 }
 
-pub(crate) fn resolve_cache_source_metric_handles(
+fn resolve_cache_source_metric_handles(
     model_name: &str,
     engine: u32,
 ) -> [U64Counter; CacheHitSource::ALL.len()] {

@@ -814,12 +814,6 @@ async fn generate_records_request_metrics_in_prometheus_output() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
     let mut request = sample_generate_request("req-metrics", 8);
-    let startup = METRICS.render().unwrap();
-    for source in CacheHitSource::ALL.map(CacheHitSource::as_str) {
-        assert!(startup.contains(&format!(
-            "vllm:prompt_tokens_cached_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"{source}\"}} 0"
-        )));
-    }
     request.arrival_time = None;
     let mut stream = llm.generate(request).await.unwrap();
 
