@@ -28,11 +28,13 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
+    PerRequestMetrics,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_per_request_timing_metrics,
+    build_spec_decoding_metrics,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -874,6 +876,18 @@ class OpenAIServingResponses(GenerateBaseServing):
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics, num_generated_tokens
             )
+        # Per-request spec-decode acceptance stats, gated by the engine's
+        # --per-request-spec-decode-metrics level. Only SimpleContext carries a
+        # RequestOutput; omit for multi-turn responses whose metrics don't cover
+        # all generation turns.
+        if context.request_metrics_cover_all_generation_turns and isinstance(
+            context, SimpleContext
+        ):
+            spec_stats = build_spec_decoding_metrics(context.final_output)
+            if spec_stats is not None:
+                if per_request_metrics is None:
+                    per_request_metrics = PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
