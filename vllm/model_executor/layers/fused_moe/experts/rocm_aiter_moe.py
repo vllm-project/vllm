@@ -252,7 +252,7 @@ def aiter_moe_pads(
     So both stage 1 kernels expect the undoubled pad. Recheck these lines on an
     AITER bump.
     """
-    if activation == MoEActivation.SITU:
+    if activation in (MoEActivation.SITU, MoEActivation.RELU2_NO_MUL):
         return hidden_pad, intermediate_pad
     double = (
         tp_size == 1
@@ -271,6 +271,7 @@ _AITER_ACTIVATION_NAMES = {
     MoEActivation.SWIGLUOAI: "swiglu",
     MoEActivation.SWIGLUOAI_UNINTERLEAVE: "swiglu",
     MoEActivation.SITU: "situ",
+    MoEActivation.RELU2_NO_MUL: "relu2",
 }
 
 
@@ -384,9 +385,7 @@ def rocm_aiter_fused_experts(
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
-
     activation_method, activation_interleave = _resolve_aiter_activation(activation)
-    # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
@@ -442,6 +441,8 @@ def rocm_aiter_fused_experts(
             if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
             else GateMode.SEPARATED.value
         )
+    elif activation == MoEActivation.RELU2_NO_MUL:
+        gate_mode = GateMode.SEPARATED.value
     elif gate_mode_override is not None:
         gate_mode = gate_mode_override
     elif activation_interleave is not None:
@@ -531,7 +532,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -541,6 +542,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
