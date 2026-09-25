@@ -4,16 +4,14 @@
 import logging
 from pathlib import Path
 
-from vllm import envs
-
 
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
-    def __init__(self, fmt, datefmt=None, style="%"):
+    def __init__(self, fmt, datefmt=None, style="%", *, log_level: str | None = None):
         super().__init__(fmt, datefmt, style)
 
-        self.use_relpath = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.use_relpath = log_level == "DEBUG"
         if self.use_relpath:
             self.root_dir = Path(__file__).resolve().parent.parent.parent
 
@@ -95,7 +93,7 @@ class ColoredFormatter(NewLineFormatter):
     GREY = "\033[90m"  # Grey for timestamp and file info
     RESET = "\033[0m"
 
-    def __init__(self, fmt, datefmt=None, style="%"):
+    def __init__(self, fmt, datefmt=None, style="%", *, log_level: str | None = None):
         # Inject grey color codes into format string for timestamp and file info
         if fmt:
             # Wrap %(asctime)s with grey
@@ -107,7 +105,7 @@ class ColoredFormatter(NewLineFormatter):
             )
 
         # Call parent __init__ with potentially modified format string
-        super().__init__(fmt, datefmt, style)
+        super().__init__(fmt, datefmt, style, log_level=log_level)
 
     def format(self, record):
         # Store original levelname to restore later (in case record is reused)

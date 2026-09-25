@@ -28,7 +28,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, PromptType
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
@@ -122,6 +122,8 @@ class AsyncLLM(EngineClient):
             None
 
         """
+        configure_logging_if_needed(vllm_config.logging_config)
+
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
 

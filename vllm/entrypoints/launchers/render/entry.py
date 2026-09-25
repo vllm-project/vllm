@@ -8,7 +8,7 @@ from argparse import Namespace
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 
 from ..app import build_app
 from ..launcher import serve_http, setup_server
@@ -87,7 +87,10 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # cache space warning from CpuPlatform.check_and_update_config.
     envs.VLLM_CPU_KVCACHE_SPACE = 0
 
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        logging_config=engine_args.create_logging_config(),
+    )
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
     )
@@ -115,6 +118,7 @@ if __name__ == "__main__":
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    configure_logging_from_args(args)
     validate_parsed_serve_args(args)
 
     uvloop.run(run_launch_fastapi(args))

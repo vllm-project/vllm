@@ -1430,16 +1430,20 @@ def temporary_enable_log_propagate():
     import logging
 
     logger = logging.getLogger("vllm")
+    previous_propagate = logger.propagate
     logger.propagate = True
     yield
-    logger.propagate = False
+    logger.propagate = previous_propagate
 
 
 @pytest.fixture()
 def caplog_vllm(temporary_enable_log_propagate, caplog):
-    # To capture vllm log, we should enable propagate=True temporarily
-    # because caplog depends on logs propagated to the root logger.
-    yield caplog
+    # caplog depends on logs propagated to the root logger. The vLLM logger
+    # inherits this INFO level until runtime initialization configures it.
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        yield caplog
 
 
 @pytest.fixture()

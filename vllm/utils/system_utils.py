@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import multiprocessing
 import os
 import signal
@@ -63,7 +64,7 @@ def suppress_stdout():
     """Suppress stdout from C libraries at the file descriptor level.
 
     Only suppresses stdout, not stderr, to preserve error messages.
-    Suppression is disabled when VLLM_LOGGING_LEVEL is set to DEBUG.
+    Suppression is disabled when vLLM debug logging is enabled.
 
     Example:
         with suppress_stdout():
@@ -72,7 +73,7 @@ def suppress_stdout():
 
     """
     # Don't suppress if logging level is DEBUG
-    if envs.VLLM_LOGGING_LEVEL == "DEBUG":
+    if logger.isEnabledFor(logging.DEBUG):
         yield
         return
 
