@@ -27,22 +27,22 @@ pub struct BaseCacheStats {
 pub struct CachedTokensBySource {
     pub device: u64,
     pub host: u64,
-    pub disk: u64,
     pub p2p: u64,
+    pub disk: u64,
     pub external_unspecified: u64,
 }
 
 impl CachedTokensBySource {
     /// Label values, in the same order as [`Self::counts`].
     pub const SOURCES: [&'static str; 5] =
-        ["device", "host", "disk", "p2p", "external_unspecified"];
+        ["device", "host", "p2p", "disk", "external_unspecified"];
 
     pub fn counts(&self) -> [u64; 5] {
         [
             self.device,
             self.host,
-            self.disk,
             self.p2p,
+            self.disk,
             self.external_unspecified,
         ]
     }
@@ -358,7 +358,7 @@ mod tests {
         });
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
-        assert_eq!(stats.hits_by_source.counts(), [0, 8, 0, 4, 0]);
+        assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
     }
 }

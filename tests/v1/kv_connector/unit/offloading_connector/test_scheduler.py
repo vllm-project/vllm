@@ -21,6 +21,7 @@ from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
     CachedTokensBySource,
+    CacheHitSource,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -803,11 +804,10 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     scheduler.update_state_after_alloc(
         request, KVCacheBlocks(tuple(block_groups)), count
     )
-    rank = ["host", "p2p", "disk", "external_unspecified"]
     sparse_tiers = ["host", "disk"] if sparse_source == "mixed" else [sparse_source]
 
     def slowest(*tiers):
-        return max(tiers, key=rank.index)
+        return CacheHitSource.slowest(map(CacheHitSource, tiers))
 
     expected = CachedTokensBySource()
     if full_attention:
