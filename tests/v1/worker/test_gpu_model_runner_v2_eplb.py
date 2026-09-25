@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -55,7 +56,16 @@ class FakeEplbState:
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.model_config = SimpleNamespace(model="test-model")
+    runner.model_config = SimpleNamespace(model="test-model", logits_processors=None)
+    runner.req_states = SimpleNamespace(
+        device=runner.device,
+        max_num_reqs=8,
+        vocab_size=0,
+        all_token_ids=None,
+        prompt_len=None,
+        prefill_len=None,
+        total_len=None,
+    )
     runner.load_config = SimpleNamespace(load_format="hf")
     runner.parallel_config = SimpleNamespace(
         enable_eplb=True,
@@ -84,6 +94,7 @@ def _make_runner(**overrides: Any) -> Any:
         post_forward=lambda *_, **__: None,
     )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.pooling_runner = None
     runner.execute_model_state = None
     for key, value in overrides.items():
@@ -183,6 +194,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
+        cudagraph_stats=None,
     )
     runner.req_states = SimpleNamespace()
 

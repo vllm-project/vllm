@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -30,6 +31,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
@@ -79,9 +81,7 @@ def _restore_default_dtype():
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
-    """
-    Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
-    """
+    """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()."""
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
@@ -173,6 +173,20 @@ def test_freeze_gc_disables_and_restores_automatic_gc(
             gc.enable()
         else:
             gc.disable()
+
+
+def test_prepare_padding_mask_marks_sequence_parallel_padding():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_padding = torch.empty(8, dtype=torch.bool)
+
+    mask = runner._prepare_padding_mask(1, 8)
+
+    assert mask.tolist() == [False, True, True, True, True, True, True, True]
+    assert mask.data_ptr() == runner.is_padding.data_ptr()
+
+    mask = runner._prepare_padding_mask(0, 8)
+
+    assert mask.all()
 
 
 @pytest.fixture
@@ -311,6 +325,10 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_without_active_backends_uses_manager_size():
+    assert select_common_block_size(256, []) == 256
+
+
 def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
 
@@ -406,6 +424,62 @@ def test_select_common_block_size_no_valid_option():
 
     with pytest.raises(ValueError):
         select_common_block_size(48, [backend_a, backend_b])
+
+
+def _mock_backend(supported: list, *, exact: bool = False):
+    """Backend accepting multiples of ``supported``, or only those exact sizes
+    when ``exact`` (as CPU_MLA does)."""
+    from vllm.v1.attention.backend import AttentionBackend
+
+    class _MockBackendCls(AttentionBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "MOCK_EXACT" if exact else "MOCK"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return list(supported)
+
+        if exact:
+
+            @classmethod
+            def supports_block_size(cls, block_size: int | None) -> bool:
+                return block_size is None or block_size in supported
+
+    return _MockBackendCls
+
+
+@pytest.mark.parametrize(
+    "backends,expected",
+    [
+        # A lone backend keeps the default; MultipleOf(8) makes a
+        # minimum-based regression return 8 instead of 16.
+        ([[MultipleOf(8)]], 16),
+        # Sparse-MLA main backend (32 or 64) beside an indexer supporting only
+        # 64: the main backend alone picks 32, which the indexer rejects at
+        # select_common_block_size time.
+        ([[32, 64], [64]], 64),
+        ([[32, 64]], 32),
+        # Neither divides the other, so only the LCM satisfies both.
+        ([[32], [48]], 96),
+    ],
+)
+def test_preferred_block_size_satisfies_every_backend(backends, expected):
+    classes = [_mock_backend(s) for s in backends]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+
+
+def test_preferred_block_size_searches_past_an_exact_size_backend():
+    # Extending greedily picks lcm(16, 32) = 32, which the exact backend
+    # rejects; 96 is accepted by both.
+    classes = [_mock_backend([16, 96], exact=True), _mock_backend([MultipleOf(32)])]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 96
+
+
+def test_preferred_block_size_rejects_backends_with_no_common_size():
+    classes = [_mock_backend([16], exact=True), _mock_backend([MultipleOf(64)])]
+    with pytest.raises(ValueError, match="share no supported KV cache block size"):
+        Platform._preferred_block_size_for_backends(classes, 16, None)
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
@@ -1188,14 +1262,12 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
-    """
-    The GPU model runner creates different views into the
+    """The GPU model runner creates different views into the
     KVCacheTensors for the attention and mamba layers
     (via _allocate_kv_caches). This test verifies
     that the views are compatible: writing a mamba block
     will not corrupt an attention block and vice versa
     """
-
     set_random_seed(42)
 
     update_environment_variables(
@@ -1378,6 +1450,76 @@ def test_hybrid_attention_mamba_tensor_shapes():
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
             assert torch.equal(actual_ssm, expected_ssm)
+
+
+def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(reasoning_config=None)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
+    runner.cache_config = SimpleNamespace(use_replayssm=False)
+    runner.model_config = SimpleNamespace(get_vocab_size=lambda: 32)
+    runner.max_model_len = 64
+    runner.max_encoder_len = 0
+    runner.max_num_reqs = 1
+    runner.max_num_tokens = 64
+    runner.num_spec_tokens = 0
+    runner.device = torch.device("cpu")
+    runner.is_pooling_model = False
+    runner._init_block_sizes = [16]
+    runner._init_kernel_block_sizes = [16]
+    runner._init_max_num_blocks = [4]
+    runner._init_slot_mapping_modes = [
+        gpu_model_runner_module.SlotMappingMode.TOKEN_TO_KV_SLOT
+    ]
+    runner.cp_kv_cache_interleave_size = 1
+    runner.input_batch = SimpleNamespace(
+        logitsprocs=None,
+        logitsprocs_need_output_token_ids=False,
+    )
+    runner.jit_warmup_registry = Mock()
+    runner.jit_warmup_registry.activate.return_value = nullcontext()
+
+    spec = SimpleNamespace(
+        block_size=16,
+        max_num_blocks_per_req=lambda *_: 4,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
+    )
+    input_batch_cls = Mock(return_value=SimpleNamespace())
+    monkeypatch.setattr(gpu_model_runner_module, "InputBatch", input_batch_cls)
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_kv_cache_spec_kind",
+        lambda _: gpu_model_runner_module.KVCacheSpecKind.FULL_ATTENTION,
+    )
+
+    runner.may_reinitialize_input_batch(kv_cache_config, [16])
+
+    assert input_batch_cls.call_count == 1
+    assert input_batch_cls.call_args.kwargs["cp_kv_cache_interleave_size"] == 16
+
+
+def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as v2_model_runner_module
+
+    runner = object.__new__(v2_model_runner_module.GPUModelRunner)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
+    runner.cp_interleave = 1
+
+    class StopInitialization(Exception):
+        pass
+
+    monkeypatch.setattr(
+        v2_model_runner_module,
+        "deepcopy",
+        Mock(side_effect=StopInitialization),
+    )
+
+    with pytest.raises(StopInitialization):
+        runner.initialize_kv_cache(SimpleNamespace())
+
+    assert runner.cp_interleave == 16
 
 
 def test_hybrid_block_table_initialization():

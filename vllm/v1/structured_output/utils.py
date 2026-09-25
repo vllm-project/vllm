@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, TypeVar
 import regex as re
 import torch
 from cachetools import LRUCache
-from transformers import MistralCommonBackend
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -46,6 +45,20 @@ _T = TypeVar("_T")
 CACHE = None
 
 
+def strip_speculative_padding(token_ids: list[int]) -> list[int]:
+    """Drop speculative-decoding padding from a token block.
+
+    ngram and other speculative backends pad rejected draft positions with a
+    -1 sentinel. Structured-output grammars treat every entry as a real token
+    id, so the sentinels (and everything after the first one) are removed here,
+    before tokens reach any backend, rather than inside a single backend.
+    """
+    for i, token_id in enumerate(token_ids):
+        if token_id < 0:
+            return token_ids[:i]
+    return token_ids
+
+
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 
@@ -61,6 +74,7 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
 
     Raises:
         ValueError: If compilation exceeds the configured timeout.
+
     """
     timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
     if timeout <= 0:
@@ -90,13 +104,14 @@ def apply_grammar_bitmask(
     input_batch: InputBatch,
     logits: torch.Tensor,
 ) -> None:
-    """
-    Apply grammar bitmask to output logits of the model with xgrammar function.
+    """Apply grammar bitmask to output logits of the model with xgrammar function.
 
     Args:
         scheduler_output (SchedulerOutput): The result of engine scheduling.
+        grammar_output (GrammarOutput): The grammar bitmask to apply.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
+
     """
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
@@ -177,8 +192,7 @@ def apply_grammar_bitmask(
 
 
 class OutlinesVocabulary:
-    """
-    Wrapper class for `outlines_core.Vocabulary`,
+    """Wrapper class for `outlines_core.Vocabulary`,
     which allows us to store a hash with the vocabulary
     """
 
@@ -193,7 +207,7 @@ class OutlinesVocabulary:
 
 
 def get_outlines_cache_path() -> str:
-    """Get the context object that contains previously-computed return values"""
+    """Get the context object that contains previously-computed return values."""
     outlines_cache_dir = os.getenv("OUTLINES_CACHE_DIR")
     xdg_cache_home = os.getenv("XDG_CACHE_HOME")
     home_dir = os.path.expanduser("~")
@@ -281,8 +295,7 @@ class OutlinesDiskCache:
 
 
 def get_outlines_cache():
-    """Get the Cache instance to be used for index caching"""
-
+    """Get the Cache instance to be used for index caching."""
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
         logger.warning(
@@ -306,23 +319,12 @@ re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
-    """The grammar backends cannot consume a `MistralCommonBackend` directly."""
-    if not isinstance(tokenizer, MistralCommonBackend):
-        return tokenizer
-
-    # Deferred: `vllm.tokenizers.mistral` pulls in a large dependency tree, and
-    # this module is imported by `vllm.v1.worker.gpu_model_runner`.
-    from vllm.tokenizers.mistral import MistralTokenizer
-
-    return MistralTokenizer(tokenizer)
-
-
 def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
+
     """
     eos_token_id = tokenizer.eos_token_id
 
@@ -402,8 +404,7 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:
-    """
-    Check if grammar appears to use Lark syntax.
+    """Check if grammar appears to use Lark syntax.
 
     Args:
         grammar_str: Input grammar string
@@ -416,6 +417,7 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
         True
         >>> grammar_is_likely_lark("rule ::= 'abc'")
         False
+
     """
     if not grammar_str or not isinstance(grammar_str, str):
         return False
@@ -433,141 +435,20 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
     return True
 
 
-def convert_lark_to_ebnf(grammar_str: str) -> str:
-    """
-    Convert a Lark grammar string to EBNF format.
-
-    EBNF reference:
-    https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
-    Lark grammar reference:
-    https://lark-parser.readthedocs.io/en/latest/grammar.html
-
-    Args:
-        grammar_str: Input grammar in Lark format
-
-    Returns:
-        str: Converted grammar in EBNF format
-
-    Examples:
-        >>> print(convert_lark_to_ebnf("rule: 'hello'"))
-        root ::= rule
-        rule ::= "hello"
-    """
-    if not isinstance(grammar_str, str):
-        raise ValueError(f"Grammar must be a string, got {type(grammar_str)}")
-    if not grammar_str.strip():
-        raise ValueError("Grammar string cannot be empty")
-
-    defined_rules = set()
-    referenced_rules = set()
-    output_lines = []
-
-    def clean_line(line: str) -> str:
-        """Remove comments and whitespace from line."""
-        return re.sub(r"(#|//).*$", "", line).strip()
-
-    def check_quotes(text: str, rule_name: str, line_num: int) -> None:
-        """Validate quote matching in text."""
-        if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
-            raise ValueError(f"Mismatched quotes in {rule_name} on line {line_num}")
-
-    def extract_references(text: str) -> set[str]:
-        """Extract rule references from text."""
-        # Remove quoted strings and special characters
-        text = re.sub(r'"[^"]*"', "", text)
-        text = re.sub(r"[+*?()|\[\]{}]", " ", text)
-        return set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", text))
-
-    # First pass: Find root rule and validate rule definitions
-    lines = [clean_line(line) for line in grammar_str.split("\n")]
-    first_rule = None
-
-    for line_num, line in enumerate(lines, 1):
-        if not line or line.startswith("|"):
-            continue
-
-        if ":" in line:
-            try:
-                name = line.split(":", 1)[0].strip().strip("?")
-                defined_rules.add(name)
-                if first_rule is None:
-                    first_rule = name
-                if name == "start":
-                    first_rule = "start"
-            except IndexError as e:
-                raise ValueError(
-                    f"Invalid rule format on line {line_num}. "
-                    "Expected 'rule_name: definition'"
-                ) from e
-
-    if not defined_rules:
-        raise ValueError("No valid rules found in grammar")
-
-    # Add root rule
-    output_lines.append(f"root ::= {first_rule}")
-
-    # Second pass: Process rule definitions and alternatives
-    current_rule = None
-    current_definition = []
-
-    for line_num, line in enumerate(lines, 1):
-        if not line:
-            continue
-
-        try:
-            if ":" in line and not line.startswith("|"):
-                # Save previous rule if exists
-                if current_rule:
-                    output_lines.append(
-                        f"{current_rule} ::= {' | '.join(current_definition)}"
-                    )
-
-                # Process new rule
-                name, definition = line.split(":", 1)
-                current_rule = name.strip().strip("?")
-
-                check_quotes(definition, f"rule '{current_rule}'", line_num)
-                definition = re.sub(r"'([^']*)'", r'"\1"', definition)
-                referenced_rules.update(extract_references(definition))
-                current_definition = [definition.strip()]
-
-            elif line.startswith("|"):
-                if not current_rule:
-                    raise ValueError(
-                        f"Alternative '|' on line {line_num} "
-                        "without a preceding rule definition"
-                    )
-
-                alt_def = line[1:].strip()
-                check_quotes(
-                    alt_def, f"alternative for rule '{current_rule}'", line_num
-                )
-                alt_def = re.sub(r"'([^']*)'", r'"\1"', alt_def)
-                referenced_rules.update(extract_references(alt_def))
-                current_definition.append(alt_def)
-
-        except ValueError as e:
-            raise ValueError(f"Error on line {line_num}: {str(e)}") from e
-
-    # Add final rule if exists
-    if current_rule:
-        output_lines.append(f"{current_rule} ::= {' | '.join(current_definition)}")
-
-    # Validate all rules are defined
-    undefined_rules = referenced_rules - defined_rules - {"root"}
-    if undefined_rules:
-        raise ValueError(
-            f"Referenced rules are not defined: {', '.join(sorted(undefined_rules))}"
-        )
-
-    return "\n".join(output_lines)
-
-
 def choice_as_grammar(choice: list[str]) -> str:
     def escape_ebnf_string(s: str) -> str:
-        """Escape special characters in a EBNF string."""
-        # Escape double quotes and backslashes
-        return re.sub(r'(["\\])', r"\\\1", s)
+        """Escape EBNF literals, including raw LF, CR, and NUL terminators."""
+        escapes = {"\\": r"\\", '"': r"\"", "\n": r"\n", "\r": r"\r", "\t": r"\t"}
+
+        def escape_char(ch: str) -> str:
+            if ch in escapes:
+                return escapes[ch]
+            # Escape remaining C0 controls (U+0000-U+001F) and DEL (U+007F).
+            if ord(ch) < 0x20 or ord(ch) == 0x7F:
+                return f"\\u{ord(ch):04x}"
+            return ch
+
+        return "".join(escape_char(ch) for ch in s)
 
     escaped_choices = (escape_ebnf_string(c) for c in choice)
     grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)

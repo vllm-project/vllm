@@ -32,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.multimodal.inputs import NestedTensors
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
@@ -73,26 +74,6 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
     )
-
-
-def dflash_target_rope_is_neox_style(target_model: nn.Module) -> bool | None:
-    """The target's RoPE layout, from its first attention layer.
-
-    A DFlash head must rotate Q/K the way the target it was distilled against
-    does, and a mismatch is silent — acceptance collapses but nothing errors and
-    the output stays correct. Draft checkpoints do not carry this, so take it
-    from the target. None if the target uses no RoPE.
-    """
-    language_model = (
-        target_model.get_language_model()
-        if hasattr(target_model, "get_language_model")
-        else target_model
-    )
-    for module in language_model.modules():
-        style = getattr(module, "is_neox_style", None)
-        if isinstance(style, bool):
-            return style
-    return None
 
 
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
@@ -187,6 +168,7 @@ class DFlashQwen3Attention(nn.Module):
         rms_norm_eps: float = 1e-06,
         attention_bias: bool = False,
         add_swa_attention_sink_bias: bool = False,
+        v_scale: float | None = None,
         sliding_window: int | None = None,
         causal: bool = False,
         is_neox_style: bool = True,
@@ -212,6 +194,7 @@ class DFlashQwen3Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
+        self.v_scale = v_scale
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -283,6 +266,8 @@ class DFlashQwen3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
+        if self.v_scale is not None:
+            v = v * self.v_scale
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -316,11 +301,11 @@ class DFlashQwen3DecoderLayer(nn.Module):
         # non-causal) from the draft config.
         sliding_window, causal = _resolve_layer_attention(config, layer_idx)
 
-        # RoPE layout, copied off the target at load time by the draft loader
-        # (see `dflash_target_rope_is_neox_style`). Checkpoints do not carry it:
-        # a head distilled from an interleaved-RoPE target must rotate the way
-        # that target does, or every drafted Q/K is wrong and acceptance
-        # collapses with no error raised.
+        # RoPE layout. The rotation applies to the draft's own Q/K, so this is
+        # fixed by how the head was distilled, not by the target: a neox-trained
+        # head on an interleaved target still needs neox. A mismatch is silent --
+        # acceptance collapses and nothing errors -- so a checkpoint that was
+        # distilled the other way has to say so here.
         is_neox_style = getattr(config, "is_neox_style", True)
 
         self.self_attn = DFlashQwen3Attention(
@@ -331,6 +316,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),
             add_swa_attention_sink_bias=add_swa_attention_sink_bias,
+            v_scale=dflash_config.get("attention_value_scale"),
             sliding_window=sliding_window,
             causal=causal,
             is_neox_style=is_neox_style,
@@ -581,6 +567,15 @@ class DFlashQwen3Model(nn.Module):
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
+        if current_platform.is_xpu():
+            for layer_idx in range(all_k.shape[0]):
+                ops.rms_norm(
+                    all_k_normed[layer_idx],
+                    all_k[layer_idx],
+                    self._k_norm_weights[layer_idx],
+                    self._rms_norm_eps,
+                )
+            return all_k_normed
         ops.rms_norm(
             all_k_normed,
             all_k,
@@ -642,6 +637,10 @@ class DFlashQwen3Model(nn.Module):
 
         if context_slot_mapping is None:
             return
+
+        v_scale = getattr(self.layers[0].self_attn, "v_scale", None)
+        if v_scale is not None:
+            all_v.mul_(v_scale)
 
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
@@ -714,9 +713,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

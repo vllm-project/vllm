@@ -222,6 +222,7 @@ fn header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Granite4",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: None,

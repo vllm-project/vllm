@@ -87,7 +87,7 @@ class TokenspeedMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
@@ -154,6 +154,7 @@ class TokenspeedMLABackend(MLACommonBackend):
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
     # tokenspeed_mla_decode returns LSE in log2 units; its own DCP test merges
     # partial outputs with exp2(lse).
     lse_base_on_e: bool = False

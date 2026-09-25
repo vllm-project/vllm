@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.config.attention import AttentionConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
+from vllm.config.aux_output import AuxOutputConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
     CompilationConfig,
@@ -13,11 +14,13 @@ from vllm.config.device import DeviceConfig
 from vllm.config.diffusion import DiffusionConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.engram import EngramConfig
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
+from vllm.config.logging import LoggingConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.mamba import MambaConfig
 from vllm.config.model import (
@@ -59,13 +62,17 @@ from vllm.config.vllm import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.watermarking import WatermarkConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 
 # __all__ should only contain classes and functions.
 # Types and globals should be imported from their respective modules.
 __all__ = [
+    # From vllm.config.aux_output
+    "AuxOutputConfig",
     # From vllm.config.attention
     "AttentionConfig",
+    "HiSparseConfig",
     # From vllm.config.cache
     "CacheConfig",
     # From vllm.config.compilation
@@ -81,6 +88,8 @@ __all__ = [
     "EncoderCacheManagerConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
+    # From vllm.config.engram
+    "EngramConfig",
     # From vllm.config.kernel
     "KernelConfig",
     # From vllm.config.kv_events
@@ -89,6 +98,8 @@ __all__ = [
     "KVTransferConfig",
     # From vllm.config.load
     "LoadConfig",
+    # From vllm.config.logging
+    "LoggingConfig",
     # From vllm.config.lora
     "LoRAConfig",
     # From vllm.config.mamba
@@ -143,4 +154,5 @@ __all__ = [
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
     "WeightTransferConfig",
+    "WatermarkConfig",
 ]

@@ -8,11 +8,11 @@ import pytest
 from openai.types.responses import FunctionTool
 from prometheus_client import REGISTRY
 
+from vllm.entrypoints.generate.base.protocol import FunctionDefinition
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.metrics import (
     RequestType,
