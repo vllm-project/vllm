@@ -434,10 +434,12 @@ steps:
   source_file_dependencies:
   - vllm/v1/
   - tests/v1/e2e/general/
+  - tests/v1/e2e/test_mamba_prefix_cache_mrv1.py
   - tests/v1/e2e/_mamba_prefix_cache.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general
+  - pytest -v -s v1/e2e/test_mamba_prefix_cache_mrv1.py
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55

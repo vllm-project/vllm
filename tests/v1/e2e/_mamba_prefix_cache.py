@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared body of the mamba prefix-cache tests.
 
-The MRV1 cases run in general/ with the rest of E2E Core; the MRV2 cases need a
-larger GPU slice and run from test_mamba_prefix_cache_mrv2.py.
+The MRV1 and MRV2 cases live in separate wrapper files because the MRV2 cases
+need a larger GPU slice.
 """
 
 import multiprocessing as mp

@@ -80,20 +80,22 @@ steps:
       source_file_dependencies:
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) E2E Core"
+- label: ":nvidia: (H200 MIG 18GB) E2E Core Shard %N"
   device: h200_18gb
   key: e2e-core-1-gpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 35
+  parallelism: 3
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/
-    - tests/v1/e2e/_mamba_prefix_cache.py
   commands:
-    - pytest -v -s v1/e2e/general
+    - pytest -v -s v1/e2e/general --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
       label: ":amd: (MI250) E2E Core"
       dind: false
+      # Explicit so the base step's parallelism does not multiply the unsharded mirror.
+      parallelism: 1
       commands:
       - pytest -v -s v1/e2e/general
       device: mi250_1
@@ -103,6 +105,31 @@ steps:
       source_file_dependencies:
       - vllm/v1/
       - tests/v1/e2e/general/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 18GB) E2E Core Mamba Prefix Cache"
+  device: h200_18gb
+  key: e2e-core-mamba-prefix-cache
+  timeout_in_minutes: 40
+  source_file_dependencies:
+    - vllm/v1/
+    - tests/v1/e2e/test_mamba_prefix_cache_mrv1.py
+    - tests/v1/e2e/_mamba_prefix_cache.py
+  commands:
+    - pytest -v -s v1/e2e/test_mamba_prefix_cache_mrv1.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) E2E Core Mamba Prefix Cache"
+      dind: false
+      commands:
+      - pytest -v -s v1/e2e/test_mamba_prefix_cache_mrv1.py
+      device: mi250_1
+      timeout_in_minutes: 50
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/
+      - tests/v1/e2e/test_mamba_prefix_cache_mrv1.py
       - tests/v1/e2e/_mamba_prefix_cache.py
       - vllm/platforms/rocm.py
 
