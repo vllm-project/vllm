@@ -541,6 +541,7 @@ class InputBatch:
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
+        self.req_prompt_embeds.pop(req_index, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
