@@ -71,13 +71,14 @@ def test_cpu_only_block_retains_gpu_metadata():
     assert consume(wire(snap.export())) == consume(history)
 
 
-def test_unknown_parent_tier_update_exports_a_closed_chain():
+def test_restated_block_with_unknown_parent_fails_closed():
+    # A strict consumer cannot resolve the parent either.
     snap = KVCacheSnapshot()
-    source = store([1])
     update = store([1], parent=99)
     update.medium = "CPU"
-    snap.apply([source, remove([1]), update])
-    assert consume(wire(snap.export())) == Counter({("CPU", None, 1): 1})
+    snap.apply([store([1]), remove([1])])
+    with pytest.raises(ValueError, match="Conflicting"):
+        snap.apply([update])
 
 
 def test_duplicate_references_survive_one_remove():
@@ -113,25 +114,10 @@ def test_offload_bytes_resolve_integer_gpu_hash(monkeypatch):
     assert consume(exported) == Counter({("CPU", None, 1): 1})
 
 
-@pytest.mark.parametrize(
-    "field,values", [("ownership", (None, "disk")), ("locality", ("LOCAL", "REMOTE"))]
-)
-def test_snapshot_preserves_independent_residency_scopes(field, values):
-    snap = KVCacheSnapshot()
-    first, second = store([1]), store([1, 2])
-    setattr(first, field, values[0])
-    setattr(second, field, values[1])
-    removed = remove([1])
-    setattr(removed, field, values[1])
-    snap.apply([first, second, removed])
-    residency: Counter = Counter()
-    for event in wire(snap.export()):
-        for h in event.block_hashes:
-            key = (event.medium, event.group_idx, event.locality, event.ownership, h)
-            residency[key] += 1 if isinstance(event, BlockStored) else -1
-    assert +residency == Counter(
-        {
-            ("GPU", None, first.locality, first.ownership, 1): 1,
-            ("GPU", None, second.locality, second.ownership, 2): 1,
-        }
-    )
+@pytest.mark.parametrize("field", ["ownership", "locality"])
+def test_residency_scopes_fail_closed(field):
+    # Snapshot consumers reject these scopes, so a snapshot cannot carry them.
+    event = store([1])
+    setattr(event, field, "REMOTE")
+    with pytest.raises(ValueError, match="locality or ownership"):
+        KVCacheSnapshot().apply([event])

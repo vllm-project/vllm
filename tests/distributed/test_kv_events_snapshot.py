@@ -111,24 +111,27 @@ def test_dead_records_are_retained_for_recent_batches():
     assert counts(wire(snap.export())) == Counter({("CPU", None, window[0]): 1})
 
 
-def test_dead_records_are_retained_within_ring(monkeypatch):
+def test_heartbeats_do_not_age_dead_records():
     snap = KVCacheSnapshot()
-    monkeypatch.setattr(snap, "RING_BATCHES", 10**9)
-    for h in range(1, 1001):
-        snap.apply([stored([h])])
-        snap.apply([BlockRemoved(block_hashes=[h], medium="GPU")])
-    assert len(snap._records) == 1000 and snap._ring_size == 1000
+    snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
+    for _ in range(10 * KVCacheSnapshot.RING_BATCHES):
+        snap.apply([])
+    snap.apply([stored([1], medium="CPU")])
+    assert counts(wire(snap.export())) == Counter({("CPU", None, 1): 1})
+
+
+def test_ring_budget_fails_closed(monkeypatch):
+    snap = KVCacheSnapshot()
     monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 10)
-    snap.apply([])
-    assert len(snap._records) == 10 and set(snap._records) == set(range(991, 1001))
-    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 0)
-    snap.apply([])
-    assert not snap._records and not snap._ring_size
+    for h in range(1, 11):
+        snap.apply([stored([h]), BlockRemoved(block_hashes=[h], medium="GPU")])
+    with pytest.raises(ValueError, match="ring budget"):
+        snap.apply([stored([11]), BlockRemoved(block_hashes=[11], medium="GPU")])
 
 
 def test_ancestors_of_live_blocks_are_retained(monkeypatch):
     snap = KVCacheSnapshot()
-    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 0)
+    monkeypatch.setattr(snap, "RING_BATCHES", 0)
     for h in range(1, 1501):
         snap.apply([stored([h], parent=h - 1 if h > 1 else None)])
         if h > 1:
@@ -156,14 +159,27 @@ def test_unknown_parent_without_known_block_fails_closed():
         KVCacheSnapshot().apply([stored([2], parent=1)])
 
 
-def test_store_after_ring_overflow_fails_closed(monkeypatch):
+def test_store_after_ring_window_fails_closed(monkeypatch):
     snap = KVCacheSnapshot()
-    monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 1)
+    monkeypatch.setattr(snap, "RING_BATCHES", 1)
     snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
     snap.apply([stored([9]), BlockRemoved(block_hashes=[9], medium="GPU")])
     assert set(snap._records) == {9}
     with pytest.raises(ValueError, match="Missing reconstruction"):
         snap.apply([stored([1], medium="CPU")])
+
+
+def test_conflicting_metadata_fails_closed():
+    snap = KVCacheSnapshot()
+    snap.apply([stored([1])])
+    restated = stored([1])
+    restated.token_ids[0] += 1
+    with pytest.raises(ValueError, match="Conflicting"):
+        snap.apply([restated])
+    snap = KVCacheSnapshot()
+    snap.apply([stored([1], group=0)])
+    with pytest.raises(ValueError, match="Conflicting"):
+        snap.apply([stored([1], medium="CPU", group=1)])
 
 
 def test_offloaded_history_exports_live_state():
@@ -254,7 +270,34 @@ class RouterModel:
                     del self.refs[(scope, h)]
 
     def state(self):
-        return self.entries, +self.refs
+        return frozenset(self.entries), frozenset((+self.refs).items())
+
+
+def test_dead_alias_does_not_remove_live_block():
+    """Hashes whose inputs differ only where the consumer does not look
+    share a consumer key; removing the dead one must not evict the live one."""
+    history = [
+        [stored([1])],
+        [BlockRemoved(block_hashes=[1], medium="GPU")],
+        [
+            BlockStored(
+                block_hashes=[2],
+                parent_block_hash=None,
+                token_ids=[4, 5, 6, 7],
+                block_size=4,
+                lora_id=None,
+                lora_name=None,
+                medium="GPU",
+            )
+        ],
+    ]
+    reference, snap = RouterModel(), KVCacheSnapshot()
+    for events in history:
+        reference.apply(events)
+        snap.apply(events)
+    consumer = RouterModel()
+    consumer.apply(wire(snap.export()))
+    assert consumer.state() == reference.state() and reference.entries
 
 
 def cache_history(seed, steps=300, lag=3):
@@ -262,7 +305,8 @@ def cache_history(seed, steps=300, lag=3):
 
     GPU blocks are evicted tail first, CPU blocks head first, offload stores
     complete up to `lag` steps late (after their GPU copy may be gone), and a
-    step's block-pool events precede its connector events, as in vLLM.
+    step's block-pool events precede its connector events, as in vLLM. Idle
+    heartbeats come between steps.
     """
     rng = random.Random(seed)
     prefixes = [
@@ -348,15 +392,18 @@ def cache_history(seed, steps=300, lag=3):
             pool_events.append(AllBlocksCleared())
             gpu.clear()
         yield pool_events + connector_events
+        for _ in range(rng.choice((0, 0, 0, 1, 5, 40))):
+            yield []
 
 
 @pytest.mark.parametrize("seed", range(20))
-def test_strict_consumer_follows_any_cut(seed, monkeypatch):
-    monkeypatch.setattr(KVCacheSnapshot, "MAX_RING_BLOCKS", 512)
+def test_strict_consumer_follows_any_cut(seed):
     history = list(cache_history(seed))
     reference = RouterModel()
+    states: list[tuple[frozenset, frozenset]] = []
     for events in history:
         reference.apply(events)
+        states.append(reference.state() if events else states[-1])
     snap = KVCacheSnapshot()
     for cut, events in enumerate(history):
         snap.apply(events)
@@ -364,15 +411,17 @@ def test_strict_consumer_follows_any_cut(seed, monkeypatch):
             continue
         consumer = RouterModel()
         consumer.apply(wire(snap.export(max_blocks_per_event=5)))
-        for later in history[cut + 1 :]:
-            consumer.apply(later)
-        assert consumer.state() == reference.state()
+        assert consumer.state() == states[cut]
+        for later in range(cut + 1, len(history)):
+            if history[later]:
+                consumer.apply(history[later])
+                assert consumer.state() == states[later]
 
 
-def test_ring_too_small_fails_recorder_before_consumer(monkeypatch):
+def test_short_ring_fails_recorder_before_consumer(monkeypatch):
     """With a ring that cannot cover the offload lag, the recorder fails
     closed on the same event a strict consumer would reject."""
-    monkeypatch.setattr(KVCacheSnapshot, "MAX_RING_BLOCKS", 0)
+    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 1)
     snap = KVCacheSnapshot()
     with pytest.raises(ValueError, match="Missing reconstruction"):
         for events in cache_history(0, lag=5):
