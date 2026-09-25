@@ -27,7 +27,8 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="encoder CUDA graphs need CUDA"
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="encoder graphs need CUDA or ROCm",
 )
 
 PATCH_DIM = 3 * 2 * 14 * 14  # C * temporal_patch_size * patch_size^2
@@ -68,8 +69,8 @@ def _reinit_weights(module: nn.Module) -> None:
 
 def _build_transformer(device, dtype, vision_segment_max_frames=None):
     # vLLM sets torch's default dtype to the model dtype during load, and the
-    # tower reads torch.get_default_dtype() for backend selection; bf16 makes
-    # get_vit_attn_backend pick FLASH_ATTN as in production.
+    # tower reads torch.get_default_dtype() for backend selection; bf16 selects
+    # the production attention backend on both CUDA and ROCm.
     with set_default_torch_dtype(dtype), set_current_vllm_config(VllmConfig()):
         tower = MiniMaxVLVisionTransformer(
             PreTrainedConfig.from_dict(_vision_config_dict(vision_segment_max_frames)),

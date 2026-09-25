@@ -47,16 +47,30 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "but the image limit is 0. Disable cudagraph_mm_encoder."
             )
 
+        mm_cfg = self.multimodal_config
+        if (
+            mm_cfg is not None
+            and mm_cfg.mm_encoder_attn_dtype == "fp8"
+            and mm_cfg.mm_encoder_fp8_scale_path is None
+        ):
+            raise ValueError(
+                "cudagraph_mm_encoder requires static FP8 scales for the "
+                "MiniMax M3 vision encoder. Set --mm-encoder-fp8-scale-path "
+                "or disable cudagraph_mm_encoder."
+            )
+
         # FlashInfer reads max_seqlen on the host and TORCH_SDPA calls
-        # .tolist() on CUDA cu_seqlens; neither can be captured (same
-        # restriction as DeepSeek-V4.1).
+        # .tolist() on CUDA cu_seqlens; neither can be captured.
         backend = self.vision_tower.vision_model.attn_backend
-        if backend is not AttentionBackendEnum.FLASH_ATTN:
+        if backend not in (
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        ):
             raise ValueError(
                 f"cudagraph_mm_encoder is not supported with the "
                 f"{backend.name} ViT attention backend for MiniMax M3. Set "
-                "--mm-encoder-attn-backend FLASH_ATTN or disable "
-                "cudagraph_mm_encoder."
+                "--mm-encoder-attn-backend FLASH_ATTN or ROCM_AITER_FA "
+                "(ROCm), or disable cudagraph_mm_encoder."
             )
 
         pad_totals = self._encoder_cg_pad_totals
