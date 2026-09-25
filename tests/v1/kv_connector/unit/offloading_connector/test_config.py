@@ -431,17 +431,29 @@ def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
             ),
         )
 
+    groups = [
+        _swa_group("swa_128a", 128),  # group[0]: SWA-MLA, sw=128
+        _swa_group("swa_128b", 128),  # group[1]: SWA-MLA, sw=128
+        _mla_group("mla"),  # group[2]: MLA + indexer layers
+        _swa_group("swa_8", 8),  # group[3]: SWA-MLA, sw=8
+        _swa_group("swa_128c", 128),  # group[4]: SWA-MLA, sw=128
+    ]
+    # All specs share the same page size (num_kv_heads=1, head_size=512, fp32).
+    page = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=dtype
+    ).page_size_bytes
+    all_layers = [name for g in groups for name in g.layer_names]
     return KVCacheConfig(
         num_blocks=num_blocks,
-        # Empty tensors: triggers the sum-based worker_kv_bytes_per_block path.
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            _swa_group("swa_128a", 128),  # group[0]: SWA-MLA, sw=128
-            _swa_group("swa_128b", 128),  # group[1]: SWA-MLA, sw=128
-            _mla_group("mla"),  # group[2]: MLA + indexer layers
-            _swa_group("swa_8", 8),  # group[3]: SWA-MLA, sw=8
-            _swa_group("swa_128c", 128),  # group[4]: SWA-MLA, sw=128
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=page * len(all_layers) * num_blocks,
+                layers=all_layers,
+                layer_stride=page * num_blocks,
+                block_stride=page,
+            )
         ],
+        kv_cache_groups=groups,
     )
 
 
@@ -473,7 +485,14 @@ def _make_dsv3_2_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
     )
     return KVCacheConfig(
         num_blocks=num_blocks,
-        kv_cache_tensors=[],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * len(names) * num_blocks,
+                layers=names,
+                layer_stride=spec.page_size_bytes * num_blocks,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
         kv_cache_groups=[group],
     )
 
