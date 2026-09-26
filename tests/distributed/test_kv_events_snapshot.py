@@ -101,7 +101,8 @@ def test_snapshot_references_match_full_history(seed):
     assert counts(wire(snap.export())) == expected
 
 
-def test_dead_records_are_retained_for_recent_batches():
+def test_dead_records_are_retained_for_recent_batches(monkeypatch):
+    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
     snap = KVCacheSnapshot()
     for h in range(1, 101):
         snap.apply([stored([h]), BlockRemoved(block_hashes=[h], medium="GPU")])
@@ -154,7 +155,8 @@ def test_delayed_transfer_preserves_metadata():
     assert counts(exported) == Counter({("CPU", None, 2): 1})
 
 
-def test_unknown_parent_taints_until_its_children_leave():
+def test_unknown_parent_taints_until_its_children_leave(monkeypatch):
+    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
     snap = KVCacheSnapshot()
     snap.apply([stored([2], parent=1)])
     assert snap.tainted == 1 and "reconstruction metadata" in snap.taint_reason
@@ -205,7 +207,8 @@ def test_remove_after_ring_window_is_counted(monkeypatch):
     assert snap.forgotten_removals == 1 and not snap.tainted
 
 
-def test_conflicting_metadata_taints_until_the_block_leaves():
+def test_conflicting_metadata_taints_until_the_block_leaves(monkeypatch):
+    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
     snap = KVCacheSnapshot()
     snap.apply([stored([1])])
     restated = stored([1])
@@ -615,7 +618,8 @@ def test_recorder_that_stays_behind_fails_without_losing_live_batch(
         c.close()
 
 
-def test_healing_renews_identity_after_unavailable_reply(publisher):
+def test_healing_renews_identity_after_unavailable_reply(publisher, monkeypatch):
+    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
     pub, port, _ = publisher
     publish(pub, [stored([1], medium="CPU")])
     reply = request(port)
@@ -639,7 +643,8 @@ def test_healing_renews_identity_after_unavailable_reply(publisher):
         c.close()
 
 
-def test_healing_keeps_identity_without_unavailable_reply(publisher):
+def test_healing_keeps_identity_without_unavailable_reply(publisher, monkeypatch):
+    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
     pub, port, _ = publisher
     old = pub._snapshot_stream_id
     publish(pub, [stored([1], medium="CPU")])

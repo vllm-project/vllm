@@ -89,7 +89,7 @@ caller's index construction.
 
 The recorder keeps one record per block hash: its parent, tokens and hash
 inputs. A record is retained while the block is resident in any tier, while a
-retained record names it as parent, and for 16 event-carrying batches after
+retained record names it as parent, and for 64 event-carrying batches after
 its last residency ends, because an offload store can complete after its GPU
 copy was evicted. A snapshot teaches every retained block, parents first,
 removes them again, and then stores each live residency by hash with its exact

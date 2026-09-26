@@ -98,10 +98,12 @@ class KVCacheSnapshot:
     MAX_REFERENCES = 1_000_000
     # A block's offload store can complete after its GPU eviction: reusing a
     # block flushes its pending store in the same scheduler step, and the
-    # completion is published with that step's or the next step's batch. Dead
-    # records are kept for this many batches that carry events, at most
-    # MAX_RING_BLOCKS of them; beyond that the oldest leave early.
-    RING_BATCHES = 16
+    # completion is published with that step's or the next step's batch. A
+    # GPU-only prefix cache reset does not flush pending stores, so they can
+    # land tens of batches later. Dead records are kept for this many batches
+    # that carry events, at most MAX_RING_BLOCKS of them; beyond that the
+    # oldest leave early.
+    RING_BATCHES = 64
     MAX_RING_BLOCKS = 65_536
 
     def __init__(self) -> None:
