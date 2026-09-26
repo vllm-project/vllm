@@ -41,11 +41,23 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    mamba_prefix_producer_indices: torch.Tensor | None = None
+    mamba_checkpoint_positions: torch.Tensor | None = None
+    mamba_checkpoint_source_block_ids: dict[int, torch.Tensor] | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        kwargs = {"is_prefilling": self.is_prefilling[:num_reqs]}
+        if self.mamba_prefix_producer_indices is not None:
+            kwargs["mamba_prefix_producer_indices"] = self.mamba_prefix_producer_indices
+        if self.mamba_checkpoint_positions is not None:
+            kwargs["mamba_checkpoint_positions"] = self.mamba_checkpoint_positions
+        if self.mamba_checkpoint_source_block_ids is not None:
+            group_src_blocks = self.mamba_checkpoint_source_block_ids.get(kv_cache_group_id)
+            if group_src_blocks is not None:
+                kwargs["mamba_checkpoint_source_block_ids"] = group_src_blocks
+        return kwargs
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -108,6 +120,10 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
 
+        self._mamba_checkpoint_positions: dict[str, int] = {}
+        self._mamba_checkpoint_source_block_ids: dict[str, tuple[int, ...]] = {}
+        self._mamba_prefix_producer_ids: dict[str, str] = {}
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
@@ -117,6 +133,24 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
             )
+        if new_req_data.mamba_checkpoint_position is not None:
+            self._mamba_checkpoint_positions[new_req_data.req_id] = (
+                new_req_data.mamba_checkpoint_position
+            )
+        if new_req_data.mamba_checkpoint_source_block_ids:
+            self._mamba_checkpoint_source_block_ids[new_req_data.req_id] = (
+                new_req_data.mamba_checkpoint_source_block_ids
+            )
+        if new_req_data.mamba_prefix_producer_id:
+            self._mamba_prefix_producer_ids[new_req_data.req_id] = (
+                new_req_data.mamba_prefix_producer_id
+            )
+
+    def remove_request(self, req_id: str) -> None:
+        super().remove_request(req_id)
+        self._mamba_checkpoint_positions.pop(req_id, None)
+        self._mamba_checkpoint_source_block_ids.pop(req_id, None)
+        self._mamba_prefix_producer_ids.pop(req_id, None)
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
@@ -315,10 +349,67 @@ class MambaHybridModelState(DefaultModelState):
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
+        mamba_prefix_producer_indices = None
+        mamba_checkpoint_positions = None
+        mamba_checkpoint_source_block_ids = None
+
+        has_pending_records = bool(
+            self._mamba_checkpoint_positions
+            or self._mamba_checkpoint_source_block_ids
+            or self._mamba_prefix_producer_ids
+        )
+        if has_pending_records and not for_capture:
+            has_checkpoint_reqs = any(
+                req_id in self._mamba_checkpoint_positions
+                or req_id in self._mamba_checkpoint_source_block_ids
+                or req_id in self._mamba_prefix_producer_ids
+                for req_id in input_batch.req_ids
+            )
+            if has_checkpoint_reqs:
+                req_id_to_batch_idx = {
+                    req_id: i for i, req_id in enumerate(input_batch.req_ids)
+                }
+                producer_indices = np.full(num_reqs, -1, dtype=np.int64)
+                checkpoint_positions = np.full(num_reqs, -1, dtype=np.int64)
+
+                mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+                source_block_ids_per_group = {
+                    gid: np.full(num_reqs, -1, dtype=np.int64) for gid in mamba_group_ids
+                }
+
+                for batch_idx, req_id in enumerate(input_batch.req_ids):
+                    prod_id = self._mamba_prefix_producer_ids.get(req_id)
+                    if prod_id is not None and prod_id in req_id_to_batch_idx:
+                        producer_indices[batch_idx] = req_id_to_batch_idx[prod_id]
+                    pos = self._mamba_checkpoint_positions.get(req_id)
+                    if pos is not None:
+                        checkpoint_positions[batch_idx] = pos
+                    src_blocks = self._mamba_checkpoint_source_block_ids.get(req_id)
+                    if src_blocks:
+                        for i, gid in enumerate(mamba_group_ids):
+                            if i < len(src_blocks):
+                                source_block_ids_per_group[gid][batch_idx] = src_blocks[i]
+                        del self._mamba_checkpoint_source_block_ids[req_id]
+                        self._mamba_prefix_producer_ids.pop(req_id, None)
+
+                mamba_prefix_producer_indices = torch.from_numpy(producer_indices).to(
+                    device=self.device, non_blocking=True
+                )
+                mamba_checkpoint_positions = torch.from_numpy(checkpoint_positions).to(
+                    device=self.device, non_blocking=True
+                )
+                mamba_checkpoint_source_block_ids = {
+                    gid: torch.from_numpy(arr).to(device=self.device, non_blocking=True)
+                    for gid, arr in source_block_ids_per_group.items()
+                }
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            mamba_prefix_producer_indices=mamba_prefix_producer_indices,
+            mamba_checkpoint_positions=mamba_checkpoint_positions,
+            mamba_checkpoint_source_block_ids=mamba_checkpoint_source_block_ids,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

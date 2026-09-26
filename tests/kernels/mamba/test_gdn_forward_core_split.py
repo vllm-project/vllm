@@ -69,7 +69,12 @@ from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
     FLA_CHUNK_SIZE,
 )
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
+    CausalConv1dMetadata,
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+)
+from vllm.v1.attention.backends.utils import (  # noqa: E402
+    compute_causal_conv1d_metadata,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 
@@ -300,3 +305,163 @@ def test_forward_core_split_matches_unified(
         atol = rtol = 6e-2
     torch.testing.assert_close(out_split, out_unified, atol=atol, rtol=rtol)
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
+
+
+@torch.inference_mode()
+def test_grouped_prefill_matches_separate_consumer_execution() -> None:
+    torch.manual_seed(1)
+    device = torch.device("cuda")
+    vllm_config = _make_vllm_config()
+    conv_state_shape, temporal_state_shape = (
+        MambaStateShapeCalculator.gated_delta_net_state_shape(
+            1, H, HV, K, V, CONV_KERNEL, num_spec=0
+        )
+    )
+    pool_size = 4
+    conv_state0 = torch.randn(
+        pool_size, *conv_state_shape, dtype=torch.bfloat16, device=device
+    )
+    ssm_state0 = torch.randn(
+        pool_size, *temporal_state_shape, dtype=torch.float32, device=device
+    )
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+    conv_weight = torch.randn(
+        CONV_DIM, 1, CONV_KERNEL, dtype=torch.bfloat16, device=device
+    )
+    conv_bias = torch.randn(CONV_DIM, dtype=torch.bfloat16, device=device)
+    mixed_qkv = torch.randn(32, CONV_DIM, dtype=torch.bfloat16, device=device)
+    a = torch.randn(32, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(32, HV, dtype=torch.bfloat16, device=device)
+
+    def metadata(
+        producer_ranges: list[list[int]],
+        consumer_ranges: list[list[int]],
+        initial_sources: list[int],
+        shared_destinations: list[int],
+        consumer_sources: list[int],
+        private_destinations: list[int],
+    ) -> GDNAttentionMetadata:
+        def packed(ranges: list[list[int]]) -> tuple[list[int], list[int]]:
+            token_indices = [
+                token for start, end in ranges for token in range(start, end)
+            ]
+            query_start_loc = [0]
+            for start, end in ranges:
+                query_start_loc.append(query_start_loc[-1] + end - start)
+            return token_indices, query_start_loc
+
+        def conv_metadata(starts: list[int]) -> CausalConv1dMetadata | None:
+            if len(starts) == 1:
+                return None
+            nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                compute_causal_conv1d_metadata(
+                    torch.tensor(starts, dtype=torch.int32),
+                    device=device,
+                )
+            )
+            return CausalConv1dMetadata(
+                nums_dict,
+                batch_ptr,
+                token_chunk_offset_ptr,
+            )
+
+        producer_tokens, producer_starts = packed(producer_ranges)
+        consumer_tokens, consumer_starts = packed(consumer_ranges)
+        return GDNAttentionMetadata(
+            num_prefills=3,
+            num_prefill_tokens=32,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=32,
+            prefix_producer_ranges=torch.tensor(
+                producer_ranges, dtype=torch.int32, device=device
+            ).reshape(-1, 2),
+            producer_token_indices=torch.tensor(
+                producer_tokens, dtype=torch.long, device=device
+            ),
+            producer_query_start_loc=torch.tensor(
+                producer_starts, dtype=torch.int32, device=device
+            ),
+            producer_conv_metadata=conv_metadata(producer_starts),
+            consumer_ranges=torch.tensor(
+                consumer_ranges, dtype=torch.int32, device=device
+            ).reshape(-1, 2),
+            consumer_token_indices=torch.tensor(
+                consumer_tokens, dtype=torch.long, device=device
+            ),
+            consumer_query_start_loc=torch.tensor(
+                consumer_starts, dtype=torch.int32, device=device
+            ),
+            consumer_conv_metadata=conv_metadata(consumer_starts),
+            shared_initial_state_source=torch.tensor(
+                initial_sources, dtype=torch.int32, device=device
+            ),
+            shared_state_destinations=torch.tensor(
+                shared_destinations, dtype=torch.int32, device=device
+            ),
+            consumer_shared_state_sources=torch.tensor(
+                consumer_sources, dtype=torch.int32, device=device
+            ),
+            private_final_state_destination=torch.tensor(
+                private_destinations, dtype=torch.int32, device=device
+            ),
+        )
+
+    grouped_meta = metadata([[0, 16]], [[16, 24], [24, 32]], [0], [1], [1, 1], [2, 3])
+    grouped_conv = conv_state0.clone()
+    grouped_ssm = ssm_state0.clone()
+    grouped_layer = _build_layer(
+        vllm_config,
+        grouped_conv,
+        grouped_ssm,
+        A_log,
+        dt_bias,
+        conv_weight,
+        conv_bias,
+    )
+    grouped_out = torch.zeros(32, HV, V, dtype=torch.bfloat16, device=device)
+    grouped_layer._forward_core_grouped_prefill(
+        mixed_qkv,
+        b,
+        a,
+        grouped_out,
+        grouped_meta,
+        grouped_conv,
+        grouped_ssm,
+        conv_weight,
+    )
+
+    reference_conv = conv_state0.clone()
+    reference_ssm = ssm_state0.clone()
+    reference_out = torch.zeros_like(grouped_out)
+    producer_meta = metadata([[0, 16]], [], [0], [1], [], [])
+    grouped_layer._forward_core_grouped_prefill(
+        mixed_qkv,
+        b,
+        a,
+        reference_out,
+        producer_meta,
+        reference_conv,
+        reference_ssm,
+        conv_weight,
+    )
+    for start, end, destination in ((16, 24, 2), (24, 32, 3)):
+        consumer_meta = metadata([], [[start, end]], [], [], [1], [destination])
+        grouped_layer._forward_core_grouped_prefill(
+            mixed_qkv,
+            b,
+            a,
+            reference_out,
+            consumer_meta,
+            reference_conv,
+            reference_ssm,
+            conv_weight,
+        )
+
+    torch.testing.assert_close(grouped_out, reference_out, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(grouped_ssm, reference_ssm, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(grouped_conv, reference_conv, atol=0, rtol=0)
+    assert not torch.equal(grouped_ssm[2], grouped_ssm[3])
