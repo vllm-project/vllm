@@ -291,10 +291,11 @@ class DelegatingParser(Parser):
         if tool_parser is None:
             return [], content
 
-        if request.tool_choice == "none":
-            if self._engine_based:
-                result = self.extract_tool_calls(content or "", request=request)
-                return [], result.content
+        # No tools / tool_choice none: do not extract; keep original text.
+        # ChatCompletionRequest defaults omitted tool_choice to "none"; also
+        # treat absent/empty tools as off so enable_auto_tools + tool_choice=None
+        # cannot still run extract_tool_calls.
+        if request.tool_choice == "none" or not request.tools:
             return [], content
 
         supports_required_and_named = tool_parser.supports_required_and_named
@@ -535,23 +536,11 @@ class DelegatingParser(Parser):
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
 
-        if request.tool_choice == "none":
-            if self._engine_based:
-                # Engine-backed parsers route content extraction through
-                # extract_tool_calls_streaming, so run the full pipeline
-                # and strip tool_calls after.
-                delta_message = self.extract_tool_calls_streaming(
-                    previous_text,
-                    current_text,
-                    delta_text,
-                    previous_token_ids,
-                    current_token_ids,
-                    delta_token_ids,
-                    request,  # type: ignore[arg-type]
-                )
-                if delta_message:
-                    delta_message.tool_calls = []
-                return delta_message, False
+        # No tools / tool_choice none: do not extract; keep original text.
+        # ChatCompletionRequest defaults omitted tool_choice to "none"; also
+        # treat absent/empty tools as off so enable_auto_tools + tool_choice=None
+        # cannot still run extract_tool_calls.
+        if request.tool_choice == "none" or not request.tools:
             return (DeltaMessage(content=delta_text) if delta_text else None), False
 
         if (
