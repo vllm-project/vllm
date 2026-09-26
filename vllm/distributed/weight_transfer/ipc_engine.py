@@ -180,6 +180,13 @@ class IPCWeightTransferEngine(
         # path inside the importer.
         self._packed_importer.close()
 
+    def abort_weight_update(self) -> None:
+        """Put the pre-update weights back after a failed update."""
+        from vllm.model_executor.model_loader.reload import abort_layerwise_reload
+
+        abort_layerwise_reload(self.model)
+        self._packed_importer.close()
+
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via CUDA IPC handles and load them.
 

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
+    abort_layerwise_reload,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     initialize_online_processing,
@@ -220,6 +221,87 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+class _TwoWeightLayer(torch.nn.Module):
+    """Two loadable tensors, so one of them can arrive without completing the layer."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.scale = torch.nn.Parameter(torch.ones(2))
+
+
+class _ThreeLayerModel(torch.nn.Module):
+    """One layer that will be left half loaded, one fully loaded, one untouched."""
+
+    def __init__(self):
+        super().__init__()
+        self.partial = _TwoWeightLayer()
+        self.done = torch.nn.Linear(2, 2, bias=False)
+        self.untouched = torch.nn.Linear(2, 2, bias=False)
+        for name, param in self.named_parameters():
+            param.data.fill_(float(len(name)))
+            param.weight_loader = default_weight_loader
+
+
+def test_abort_layerwise_reload_restores_unfinished_layers(default_vllm_config):
+    default_vllm_config.model_config = ModelConfig()
+    model = _ThreeLayerModel()
+    original = {
+        name: param.detach().clone() for name, param in model.named_parameters()
+    }
+    new_weight = torch.full((2, 2), 7.0)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    assert all(param.is_meta for param in model.parameters())
+
+    # `partial` only gets its weight, so the load stays buffered and the layer on
+    # meta; `done` gets everything and is processed and copied back on the spot.
+    model.partial.weight.weight_loader(model.partial.weight, new_weight)
+    model.done.weight.weight_loader(model.done.weight, new_weight)
+    assert model.partial.weight.is_meta
+    assert not model.done.weight.is_meta
+
+    abort_layerwise_reload(model)
+
+    assert not any(param.is_meta for param in model.parameters())
+    # The buffered half-load is dropped, not applied.
+    assert torch.equal(model.partial.weight, original["partial.weight"])
+    assert torch.equal(model.partial.scale, original["partial.scale"])
+    assert torch.equal(model.untouched.weight, original["untouched.weight"])
+    # A layer that completed before the abort keeps what it loaded.
+    assert torch.equal(model.done.weight, new_weight)
+    for layer in (model.partial, model.done, model.untouched):
+        assert not reload_layerwise.get_layerwise_info(layer).can_load()
+
+    # The model can go through a full reload afterwards.
+    initialize_layerwise_reload(model)
+    model.partial.weight.weight_loader(model.partial.weight, torch.full((2, 2), 9.0))
+    model.partial.scale.weight_loader(model.partial.scale, torch.full((2,), 9.0))
+    model.done.weight.weight_loader(model.done.weight, torch.full((2, 2), 9.0))
+    model.untouched.weight.weight_loader(
+        model.untouched.weight, torch.full((2, 2), 9.0)
+    )
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+    for _, param in model.named_parameters():
+        assert not param.is_meta
+        assert torch.equal(param, torch.full_like(param, 9.0))
+
+
+def test_abort_layerwise_reload_without_reload_is_a_no_op():
+    model = _ThreeLayerModel()
+    original = {
+        name: param.detach().clone() for name, param in model.named_parameters()
+    }
+    record_metadata_for_reloading(model)
+
+    abort_layerwise_reload(model)
+
+    for name, param in model.named_parameters():
+        assert not param.is_meta
+        assert torch.equal(param, original[name])
 
 
 def test_restore_layer_replaces_postprocessed_tensor_attribute():
