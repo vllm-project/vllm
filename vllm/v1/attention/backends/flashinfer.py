@@ -30,7 +30,10 @@ from vllm.config import (
     get_current_vllm_config_or_none,
 )
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_dcp_world_size_and_rank,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -748,19 +751,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     self._decode_cudagraph_max_bs,
                     self.compilation_config.max_cudagraph_capture_size,
                 )
-        self.dcp_world_size, self.dcp_rank = 1, 0
-        self.dcp_kv_cache_interleave_size = 1
-        try:
-            if kv_cache_spec.dcp_sharded:
-                dcp_group = get_dcp_group()
-                self.dcp_world_size = dcp_group.world_size
-                self.dcp_rank = dcp_group.rank_in_group
-                self.dcp_kv_cache_interleave_size = (
-                    vllm_config.parallel_config.cp_kv_cache_interleave_size
-                )
-        except AssertionError:
-            # DCP might not be initialized in testing
-            pass
+        self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
+            kv_cache_spec.dcp_sharded
+        )
+        self.dcp_kv_cache_interleave_size = (
+            vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         self.use_dcp = self.dcp_world_size > 1
         self.dcp_a2a = (
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"

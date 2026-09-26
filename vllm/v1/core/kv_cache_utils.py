@@ -2254,15 +2254,10 @@ def _ensure_min_page_size(
     scaled: list[KVCacheGroupSpec] = []
     for g in groups:
         s = g.kv_cache_spec
+        kw: dict[str, Any] = {"block_size": s.block_size * scale}
         if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
-            s = replace(
-                s,
-                block_size=s.block_size * scale,
-                page_size_padded=s.page_size_padded * scale,
-            )
-        else:
-            s = replace(s, block_size=s.block_size * scale)
-        scaled.append(KVCacheGroupSpec(g.layer_names, s))
+            kw["page_size_padded"] = s.page_size_padded * scale
+        scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
     return scaled, common_page
 
 

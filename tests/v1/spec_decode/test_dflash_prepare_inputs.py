@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -80,9 +81,6 @@ def _run_prepare(
     class InputsPrepared(Exception):
         pass
 
-    def stop_before_model(*args):
-        raise InputsPrepared
-
     draft = SimpleNamespace(
         input_buffers=input_buffers,
         context_positions=context_positions,
@@ -93,7 +91,10 @@ def _run_prepare(
         temperature=temperature,
         seeds=seeds,
         hidden_states=torch.zeros(4, 1, device=device),
-        model=SimpleNamespace(precompute_and_store_context_kv=stop_before_model),
+        prepare_context_anchor=lambda *args: None,
+        query_cudagraph_manager=None,
+        dp_size=1,
+        dp_rank=0,
         pcp_manager=None,
         draft_kv_cache_group_id=0,
         draft_kv_cache_group_ids=[0],
@@ -115,7 +116,13 @@ def _run_prepare(
         max_model_len=128,
         sample_from_anchor=True,
     )
-    with pytest.raises(InputsPrepared):
+    with (
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.speculator.dispatch_cg_and_sync_dp",
+            side_effect=InputsPrepared,
+        ),
+        pytest.raises(InputsPrepared),
+    ):
         DFlashSpeculator.propose(
             draft,
             input_batch,

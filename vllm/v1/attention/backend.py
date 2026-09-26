@@ -871,21 +871,13 @@ class AttentionImplBase(ABC, Generic[T]):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
         from vllm.config import get_current_vllm_config_or_none
-        from vllm.distributed.parallel_state import get_dcp_group
+        from vllm.distributed.parallel_state import get_dcp_world_size_and_rank
 
+        # Replicated drafts run at DCP=1 inside a DCP target's process group.
         config = get_current_vllm_config_or_none()
-        self.dcp_world_size, self.dcp_rank = 1, 0
-        try:
-            if (
-                config is None
-                or config.parallel_config.decode_context_parallel_size > 1
-            ):
-                dcp_group = get_dcp_group()
-                self.dcp_world_size = dcp_group.world_size
-                self.dcp_rank = dcp_group.rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            pass
+        self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
+            config is None or config.parallel_config.decode_context_parallel_size > 1
+        )
         try:
             from vllm.distributed.parallel_state import get_pcp_group
 

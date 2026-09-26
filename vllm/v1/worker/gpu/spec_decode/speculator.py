@@ -135,7 +135,7 @@ class DraftModelSpeculator(BaseSpeculator):
             self.speculative_config.use_local_argmax_reduction
         )
 
-        # Parallel configuration
+        # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size

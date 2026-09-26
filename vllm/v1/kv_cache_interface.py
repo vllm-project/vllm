@@ -571,10 +571,11 @@ class FullAttentionSpec(AttentionSpec):
     """
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_blocks = self.max_num_blocks_per_req(
-            vllm_config, vllm_config.model_config.max_model_len
-        )
-        return max_blocks * self.page_size_bytes
+        max_model_len = vllm_config.model_config.max_model_len
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        if self.dcp_sharded and dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
     def merge_window_sizes(cls, window_sizes: set[int]) -> int | None:
@@ -1229,6 +1230,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     kv_cache_specs: dict[str, KVCacheSpec]
 
     def __post_init__(self):
+        super().__post_init__()
         if self.kv_cache_specs:
             object.__setattr__(self, "dcp_sharded", self.first_spec.dcp_sharded)
 

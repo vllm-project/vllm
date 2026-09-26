@@ -111,12 +111,9 @@ def test_attention_uses_draft_dcp_setting_inside_target_process_group(
         config_module, "get_current_vllm_config_or_none", lambda: config
     )
 
-    def get_dcp_group():
-        if configured_dcp == 1:
-            pytest.fail("Replicated draft should not access the DCP group")
-        return SimpleNamespace(world_size=4, rank_in_group=2)
-
-    monkeypatch.setattr(parallel_state, "get_dcp_group", get_dcp_group)
+    monkeypatch.setattr(
+        parallel_state, "_DCP", SimpleNamespace(world_size=4, rank_in_group=2)
+    )
     impl = AttentionImplBase()
     assert impl.dcp_world_size == configured_dcp
     assert impl.dcp_rank == (0 if configured_dcp == 1 else 2)

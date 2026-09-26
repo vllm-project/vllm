@@ -60,7 +60,10 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_dcp_world_size_and_rank,
+)
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
@@ -726,15 +729,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 num_qo_heads=self.num_heads_q,
             )
 
-        self.dcp_world_size, self.dcp_rank = 1, 0
-        try:
-            if kv_cache_spec.dcp_sharded:
-                dcp_group = get_dcp_group()
-                self.dcp_world_size = dcp_group.world_size
-                self.dcp_rank = dcp_group.rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            pass
+        self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
+            kv_cache_spec.dcp_sharded
+        )
 
         # Fused draft decode reuses the captured metadata object across draft
         # steps. For DCP, build-time host-side decisions such as
