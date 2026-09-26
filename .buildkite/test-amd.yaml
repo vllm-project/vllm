@@ -250,11 +250,14 @@ steps:
   source_file_dependencies:
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
+  - .buildkite/scripts/hardware_ci/run-amd-test.sh
   - .buildkite/release-pipeline.yaml
   - docker/Dockerfile
   - docker/Dockerfile.cpu
+  - docker/Dockerfile.rock
   - docker/Dockerfile.rocm
   - docker/Dockerfile.rocm_base
+  - docker/Dockerfile.rocm_gfx1250
   - docker/ci-rocm.hcl
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl

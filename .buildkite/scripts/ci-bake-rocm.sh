@@ -2639,6 +2639,7 @@ upload_wheel_artifacts_if_present() {
     local wheel_dir="./wheel-export"
     local artifact_dir="artifacts/vllm-rocm-install"
     local archive_name="vllm-rocm-install.tar.gz"
+    local source_archive_name="vllm-rocm-source.tar.gz"
     local metadata_dir="${wheel_dir}/.vllm-ci-artifact"
     local build_base_digest=""
     local expected_native_base_image=""
@@ -2661,6 +2662,10 @@ upload_wheel_artifacts_if_present() {
     fi
     whl="${wheels[0]}"
     whl_name=$(basename "${whl}")
+    if [[ ! -s "${wheel_dir}/${source_archive_name}" ]]; then
+        echo "ROCm wheel export is missing ${source_archive_name}" >&2
+        return 1
+    fi
     native_base_image="${CI_BASE_IMAGE_TAG_BUILD_REF:-${CI_BASE_IMAGE:-}}"
     if [[ -z "${native_base_image}" ]]; then
         echo "Native ROCm artifact requires a ci_base image reference" >&2
@@ -2700,6 +2705,14 @@ upload_wheel_artifacts_if_present() {
     printf '%s\n' "${CI_BASE_IMAGE:-}" > "${metadata_dir}/ci-base-image.txt"
     printf '%s\n' "${IMAGE_TAG:-}" > "${metadata_dir}/fallback-image.txt"
     printf '%s\n' "${whl_name}" > "${metadata_dir}/wheel-filename.txt"
+
+    # Bind the clean source to the verified install artifact, but only transfer
+    # the source archive to jobs that exercise editable installation.
+    mv "${wheel_dir}/${source_archive_name}" "${artifact_dir}/${source_archive_name}" || return 1
+    (
+        cd "${artifact_dir}"
+        sha256sum "${source_archive_name}"
+    ) > "${metadata_dir}/source.sha256" || return 1
 
     tar -C "${wheel_dir}" -czf "${artifact_dir}/${archive_name}" .
     (

@@ -128,6 +128,13 @@ ONBUILD RUN git clone ${VLLM_REPO} \
                && git fetch upstream ; fi
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
+# Keep the editable-install source separate from build outputs and the normal
+# test workspace. Native Python-only jobs download this archive on demand.
+FROM fetch_vllm AS python_only_source
+ARG COMMON_WORKDIR
+RUN tar --exclude='./.git' -C "${COMMON_WORKDIR}/vllm" \
+    -czf /vllm-rocm-source.tar.gz .
+
 # Resolve the device-independent source version once for every downstream
 # artifact. setuptools-scm reads Git metadata from local and remote sources.
 FROM fetch_vllm AS vllm-version
@@ -239,6 +246,7 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
+COPY --from=python_only_source /vllm-rocm-source.tar.gz /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
@@ -524,6 +532,7 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 FROM scratch AS export_vllm_wheel_release
 ARG COMMON_WORKDIR
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/dist/*.whl /
+COPY --from=python_only_source /vllm-rocm-source.tar.gz /
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
