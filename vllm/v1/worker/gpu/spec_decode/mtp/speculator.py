@@ -18,6 +18,11 @@ class MTPSpeculator(AutoRegressiveSpeculator):
         target_attn_layer_names: set[str],
     ) -> nn.Module:
         draft_model = load_eagle_model(target_model, self.vllm_config)
+        maybe_init_fp8_proposal_head = getattr(
+            draft_model, "maybe_init_fp8_proposal_head", None
+        )
+        if maybe_init_fp8_proposal_head is not None:
+            maybe_init_fp8_proposal_head()
         spec_config = self.vllm_config.speculative_config
         draft_hf_config = (
             spec_config.draft_model_config.hf_config
