@@ -106,15 +106,28 @@ class TransferRegion:
     block_len: int
     kv_block_len: int
     group_index: int = 0
+    # Groups that share this allocation. Empty unless group_index is -1.
+    shared_group_ids: tuple[int, ...] = ()
 
 
 def _block_ids_for_region(
     block_ids_by_group: list[list[int]],
     group_index: int,
+    shared_group_ids: tuple[int, ...] = (),
 ) -> list[int]:
-    """Follow NIXL `_block_ids_by_region`: -1 concatenates all groups."""
+    """Follow NIXL `_block_ids_by_region`.
+
+    -1 flattens only the groups that share this allocation. NIXL can flatten
+    every group because its packed flag means they all share one storage;
+    Mooncake can still have a separate Mamba group in the same request.
+    """
     if group_index == _SHARED_REGION_GROUP_ID:
-        return list(itertools.chain.from_iterable(block_ids_by_group))
+        assert shared_group_ids, "Shared packed region is missing its group ids."
+        return list(
+            itertools.chain.from_iterable(
+                block_ids_by_group[group] for group in shared_group_ids
+            )
+        )
     assert 0 <= group_index < len(block_ids_by_group), (
         "Transfer region references a missing KV group."
     )
@@ -149,6 +162,7 @@ def _expand_transfer_regions(
     layer_names: list[str],
     layer_indices: list[int],
     group_indices: list[int] | None = None,
+    shared_group_ids: list[tuple[int, ...]] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -170,6 +184,9 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
+    if shared_group_ids is None:
+        shared_group_ids = [() for _ in layer_names]
+    assert len(shared_group_ids) == len(layer_names)
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -178,6 +195,7 @@ def _expand_transfer_regions(
         layer_name,
         layer_index,
         group_index,
+        region_groups,
     ) in zip(
         base_addrs,
         block_lens,
@@ -185,6 +203,7 @@ def _expand_transfer_regions(
         layer_names,
         layer_indices,
         group_indices,
+        shared_group_ids,
     ):
         regions.append(
             TransferRegion(
@@ -194,6 +213,7 @@ def _expand_transfer_regions(
                 block_len=block_len,
                 kv_block_len=kv_block_len,
                 group_index=group_index,
+                shared_group_ids=region_groups,
             )
         )
     return regions
@@ -406,13 +426,14 @@ def _align_transfer_regions(
 def _coalesce_contiguous_transfer_regions(
     local_regions: list[TransferRegion],
     remote_regions: list[TransferRegion],
+    *,
+    promote_full_row: bool = False,
 ) -> tuple[list[TransferRegion], list[TransferRegion]]:
     """Merge aligned packed slices that are adjacent on both sides.
 
-    Follow NIXL packed pages: handshake keeps every layer name so hetero PP
-    can match a subset (#56033). A run that is contiguous on both peers is one
-    copy. Consecutive blocks collapse further only when that copy fills both
-    strides (`_can_coalesce_block_transfers`).
+    Page-contiguous views stay addressable by layer name for hetero PP
+    (#56033). A run that covers the whole row on both peers includes the
+    allocator's padding tail so consecutive blocks can coalesce.
     """
     if len(local_regions) != len(remote_regions) or len(local_regions) <= 1:
         return local_regions, remote_regions
@@ -432,6 +453,7 @@ def _coalesce_contiguous_transfer_regions(
             block_len=region.block_len,
             kv_block_len=kv_block_len,
             group_index=region.group_index,
+            shared_group_ids=region.shared_group_ids,
         )
 
     merged_local: list[TransferRegion] = []
@@ -462,6 +484,17 @@ def _coalesce_contiguous_transfer_regions(
         run_local = [local_region]
         run_remote = [remote_region]
     flush()
+    if (
+        promote_full_row
+        and len(merged_local) == 1
+        and merged_local[0].block_len == merged_remote[0].block_len
+        and merged_local[0].kv_block_len <= merged_local[0].block_len
+        and merged_remote[0].kv_block_len <= merged_remote[0].block_len
+    ):
+        # Padding after the last page is dead bytes inside the registered row.
+        row = merged_local[0].block_len
+        merged_local[0] = span(merged_local[0], row)
+        merged_remote[0] = span(merged_remote[0], row)
     return merged_local, merged_remote
 
 
@@ -1081,6 +1114,8 @@ class MooncakeConnectorWorker:
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
         self.registered_group_indices: list[int] = []
+        # Parallel to registered regions. -1 flattens only these groups.
+        self.region_shared_groups: list[tuple[int, ...]] = []
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
@@ -1334,6 +1369,9 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        shared_groups = self.region_shared_groups
+        if len(shared_groups) != len(self.registered_layer_names):
+            shared_groups = None
         local_regions = self._get_transfer_regions(
             self.kv_caches_base_addr,
             self.block_len_per_layer,
@@ -1341,6 +1379,7 @@ class MooncakeConnectorWorker:
             self.registered_layer_names,
             self.registered_layer_indices,
             self.registered_group_indices,
+            shared_groups,
         )
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
@@ -1350,6 +1389,8 @@ class MooncakeConnectorWorker:
             meta.registered_layer_indices,
             meta.registered_group_indices,
         )
+        pre_align_local = local_regions
+        pre_align_remote = remote_regions
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions,
             remote_regions,
@@ -1364,12 +1405,31 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
-            local_regions, remote_regions
-        )
-        validation_err = self._validate_head_resharding_layout(
+        # Head checks must see every layer name. Coalesce keeps only the first.
+        head_err = self._validate_head_resharding_layout(
             meta.remote_tp_size, local_regions
-        ) or _validate_asymmetric_region_lengths(
+        )
+        if head_err is not None:
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=head_err,
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
+        # Hetero TP indexes kv_block_len as one head-sharded payload. A merged
+        # multi-layer span would land that offset on the wrong layer. MLA is
+        # replicated, so the offset stays 0.
+        tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
+        if tp_ratio == 1 or self.use_mla or self._producer_cache_is_replicated():
+            covered_both_sides = len(local_regions) == len(pre_align_local) and len(
+                remote_regions
+            ) == len(pre_align_remote)
+            local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
+                local_regions,
+                remote_regions,
+                promote_full_row=covered_both_sides,
+            )
+        validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
             local_tp_size=self.tp_size,
@@ -1672,10 +1732,14 @@ class MooncakeConnectorWorker:
                     "KV group."
                 )
                 local_block_ids = _block_ids_for_region(
-                    local_block_ids_by_group, local_region.group_index
+                    local_block_ids_by_group,
+                    local_region.group_index,
+                    local_region.shared_group_ids,
                 )
                 remote_block_ids = _block_ids_for_region(
-                    remote_block_ids_by_group, remote_region.group_index
+                    remote_block_ids_by_group,
+                    remote_region.group_index,
+                    local_region.shared_group_ids,
                 )
                 if not local_block_ids:
                     continue
@@ -1809,9 +1873,10 @@ class MooncakeConnectorWorker:
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
+        self.region_shared_groups: list[tuple[int, ...]] = []
 
         packed_storage_to_region: dict[int, int] = {}
-        packed_view_to_region: dict[int, int] = {}
+        packed_view_to_region: dict[tuple[int, int, int], int] = {}
         collapsed_views = 0
         num_blocks = (
             self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
@@ -1842,9 +1907,25 @@ class MooncakeConnectorWorker:
             )
             tensor_blocks = cache.shape[0] if cache.ndim > 1 else num_blocks
             if cache.ndim == 1:
-                block_stride = storage.nbytes() // tensor_blocks if tensor_blocks else 0
-                storage_is_block_major = tensor_blocks > 0 and block_stride > 0
+                # A flat buffer is block-major only when it is an integral run
+                # of this layer's pages. NIXL uses the same remainder check.
                 hnc_contiguous = False
+                page = (
+                    layer_spec.page_size_bytes
+                    if isinstance(layer_spec, AttentionSpec)
+                    else 0
+                )
+                remainder = (
+                    storage.nbytes() - tensor_blocks * page
+                    if tensor_blocks > 0 and page > 0
+                    else -1
+                )
+                if 0 <= remainder < page:
+                    block_stride = page
+                    storage_is_block_major = True
+                else:
+                    block_stride = 0
+                    storage_is_block_major = False
             else:
                 block_stride = cache.stride(0) * cache.element_size()
                 storage_is_block_major = (
@@ -1856,11 +1937,9 @@ class MooncakeConnectorWorker:
                     and cache.stride(2) == cache.shape[3]
                     and cache.stride(1) == cache.shape[2] * cache.shape[3]
                 )
-            # Follow NIXL packed pages: register each allocation once, but keep
-            # every layer view. Hetero PP aligns by layer name (#56033); a
-            # first-layer-only region silently matches nothing. Adjacent views
-            # are merged after alignment, and a full-row merge still coalesces
-            # consecutive blocks.
+            # Follow NIXL packed pages. Page-contiguous slices stay per layer so
+            # hetero PP can align by name (#56033). A non-contiguous row cannot
+            # name a sub-span, so it is one region anchored at the allocation.
             use_packed_row = (
                 not isinstance(layer_spec, (MambaSpec, KpoolTailSpec))
                 and storage_is_block_major
@@ -1868,32 +1947,52 @@ class MooncakeConnectorWorker:
                 and (is_mla_region or not hnc_contiguous)
             )
             if use_packed_row:
-                view_addr = cache.data_ptr()
-                if cache.ndim > 1 and cache[0].is_contiguous():
+                page_contiguous = (
+                    cache.ndim > 1
+                    and cache[0].is_contiguous()
+                    and 0 < cache[0].nbytes <= block_stride
+                )
+                if page_contiguous:
+                    view_addr = cache.data_ptr()
                     kv_block_len = cache[0].nbytes
                 else:
+                    # NIXL branch B: length is the row, base is the allocation.
+                    view_addr = storage_addr
                     kv_block_len = block_stride
-                if kv_block_len <= 0 or kv_block_len > block_stride:
-                    kv_block_len = block_stride
-                region_idx = packed_view_to_region.get(view_addr)
+                dedupe_key = (view_addr, block_stride, kv_block_len)
+                region_idx = packed_view_to_region.get(dedupe_key)
                 if region_idx is not None:
                     collapsed_views += 1
-                    # Follow NIXL: a later group on the same view marks it
-                    # shared (-1). Distinct slices keep their own group.
-                    if self.registered_group_indices[region_idx] != group_index:
+                    # -1 means these groups share the view. Flatten only them.
+                    groups = list(self.region_shared_groups[region_idx])
+                    if group_index not in groups:
+                        groups.append(group_index)
+                        self.region_shared_groups[region_idx] = tuple(groups)
+                    if len(self.region_shared_groups[region_idx]) > 1:
                         self.registered_group_indices[region_idx] = (
                             _SHARED_REGION_GROUP_ID
                         )
                     continue
+                if (
+                    not page_contiguous
+                    and self.pp_size > 1
+                    and storage_addr in packed_storage_to_region
+                ):
+                    raise RuntimeError(
+                        "Mooncake cannot align a non-page-contiguous packed "
+                        "allocation across pipeline-parallel stages "
+                        f"(layer {layer_name})."
+                    )
                 if storage_addr not in packed_storage_to_region:
                     packed_storage_to_region[storage_addr] = len(region_base_addresses)
-                packed_view_to_region[view_addr] = len(region_base_addresses)
+                packed_view_to_region[dedupe_key] = len(region_base_addresses)
                 region_base_addresses.append(view_addr)
                 self.block_len_per_layer.append(block_stride)
                 self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(group_index)
+                self.region_shared_groups.append((group_index,))
                 continue
 
             block_is_contiguous = is_non_overlapping_and_dense(cache[0])
@@ -1937,6 +2036,7 @@ class MooncakeConnectorWorker:
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(group_index)
+                self.region_shared_groups.append((group_index,))
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
@@ -2373,6 +2473,7 @@ class MooncakeConnectorWorker:
         layer_names: list[str],
         layer_indices: list[int],
         group_indices: list[int] | None = None,
+        shared_group_ids: list[tuple[int, ...]] | None = None,
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
@@ -2386,6 +2487,7 @@ class MooncakeConnectorWorker:
             layer_names=layer_names,
             layer_indices=layer_indices,
             group_indices=group_indices,
+            shared_group_ids=shared_group_ids,
         )
 
     def _get_sender_transfer_plan(

@@ -1340,35 +1340,30 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
                 and tensor1.stride(2) == tensor1.shape[3]
                 and tensor1.stride(1) == tensor1.shape[2] * tensor1.shape[3]
             )
-            # Block-major non-HNC FA (e.g. BHLNC) packs like NIXL: one memory
-            # registration per allocation, one metadata row per distinct view.
+            # Block-major non-HNC FA. Contiguous per-layer pages stay separate
+            # views. A non-contiguous row (BHLNC) is one allocation-anchored
+            # region, and its last block must stay inside the registered buffer.
             if storage_is_block_major and not hnc_contiguous:
                 packed_row = storage_nbytes // tensor_blocks
-                expected_ptrs = []
-                expected_kv = []
-                expected_names = []
-                seen_ptrs: set[int] = set()
-                for layer_name, cache in kv_caches.items():
-                    ptr = cache.data_ptr()
-                    if ptr in seen_ptrs:
-                        continue
-                    seen_ptrs.add(ptr)
-                    expected_ptrs.append(ptr)
-                    expected_names.append(layer_name)
-                    block = cache[0]
-                    kv_len = (
-                        block.nbytes
-                        if cache.ndim > 1 and block.is_contiguous()
-                        else packed_row
-                    )
-                    if kv_len <= 0 or kv_len > packed_row:
-                        kv_len = packed_row
-                    expected_kv.append(kv_len)
-                assert worker.kv_caches_base_addr == expected_ptrs
-                assert worker.block_len_per_layer == [packed_row] * len(expected_ptrs)
-                assert worker.kv_block_len_per_layer == expected_kv
-                assert worker.registered_layer_names == expected_names
-                assert worker.registered_group_indices == [0] * len(expected_ptrs)
+                storage_end = raw.data_ptr() + raw.nbytes
+                if tensor1.ndim > 1 and tensor1[0].is_contiguous():
+                    assert len(worker.registered_layer_names) == len(kv_caches)
+                    for base, stride, kv_len in zip(
+                        worker.kv_caches_base_addr,
+                        worker.block_len_per_layer,
+                        worker.kv_block_len_per_layer,
+                    ):
+                        assert stride == packed_row
+                        assert 0 < kv_len <= packed_row
+                        assert (
+                            base + (tensor_blocks - 1) * stride + kv_len <= storage_end
+                        )
+                else:
+                    assert worker.kv_caches_base_addr == [raw.data_ptr()]
+                    assert worker.block_len_per_layer == [packed_row]
+                    assert worker.kv_block_len_per_layer == [packed_row]
+                    assert worker.registered_layer_names == [layer_names[0]]
+                    assert raw.data_ptr() + tensor_blocks * packed_row <= storage_end
             elif not layout.is_block_compact:
                 expected_addrs = [
                     cache[:, head_idx].data_ptr()
@@ -1544,13 +1539,23 @@ def test_register_kv_caches_collapses_shared_mla_storage(
         assert worker.kv_block_len_per_layer == [packed_row]
         assert worker.registered_layer_names == ["model.layers.0.mla_attn"]
         assert worker.registered_group_indices == [expected_group_index]
+        if expected_group_index == _SHARED_REGION_GROUP_ID:
+            assert worker.region_shared_groups == [(0, 1)]
 
 
 def test_block_ids_for_region_flattens_shared_groups():
     ids = [[10, 11], [12]]
     assert _block_ids_for_region(ids, 0) == [10, 11]
     assert _block_ids_for_region(ids, 1) == [12]
-    assert _block_ids_for_region(ids, _SHARED_REGION_GROUP_ID) == [10, 11, 12]
+    assert _block_ids_for_region(ids, _SHARED_REGION_GROUP_ID, (0, 1)) == [
+        10,
+        11,
+        12,
+    ]
+    # A group that does not share the allocation stays out.
+    assert _block_ids_for_region(
+        [[10, 11], [12], [99]], _SHARED_REGION_GROUP_ID, (0, 1)
+    ) == [10, 11, 12]
 
 
 @pytest.mark.asyncio
@@ -1588,6 +1593,7 @@ async def test_build_transfer_params_sends_packed_region_once(
         block_len=block_len,
         kv_block_len=block_len,
         group_index=group_index,
+        shared_group_ids=(0, 1) if group_index == _SHARED_REGION_GROUP_ID else (),
     )
     transfer_id = "xfer-packed"
     send_meta = SendBlockMeta(
@@ -1628,6 +1634,36 @@ async def test_build_transfer_params_sends_packed_region_once(
     assert src_ptrs == [0x1000 + 10 * block_len]
     assert dst_ptrs == [0xA000 + 20 * block_len]
     assert lengths == [n_blocks * block_len]
+
+
+def test_coalesce_promotes_padding_only_for_a_full_row():
+    """A full-row merge includes the padding tail; a partial row does not."""
+    page = 1024
+    row = 2560
+
+    def region(base: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=0,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=page,
+        )
+
+    full_local, full_remote = _coalesce_contiguous_transfer_regions(
+        [region(0), region(page)],
+        [region(100), region(100 + page)],
+        promote_full_row=True,
+    )
+    assert len(full_local) == 1
+    assert full_local[0].kv_block_len == row
+    assert full_remote[0].kv_block_len == row
+
+    partial_local, _ = _coalesce_contiguous_transfer_regions(
+        [region(0), region(page)],
+        [region(100), region(100 + page)],
+    )
+    assert partial_local[0].kv_block_len == 2 * page
 
 
 def _layer_name(idx: int) -> str:
