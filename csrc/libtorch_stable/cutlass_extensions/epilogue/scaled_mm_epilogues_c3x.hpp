@@ -2,6 +2,8 @@
 
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_array_c3x.hpp"
+#include "cutlass/epilogue/thread/activation.h"
+#include "cutlass/epilogue/fusion/sm90_visitor_store_tma_warpspecialized.hpp"
 
 // This header is shared by both _C (unstable ABI) and _C_stable_libtorch
 // (stable ABI) targets. When compiled under the stable ABI target,
@@ -179,6 +181,132 @@ struct ScaledEpilogue
 
     typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
     return ArgumentType{a_args, evt0_args, {}};
+  }
+};
+
+// Experimental Gemma 4 FC1 epilogue. The weight/output channels are laid out
+// as adjacent [gate, up] pairs. Each pair is replaced by two copies of
+// GELU_tanh(gate) * up so the following quantizer can read one value per pair
+// without materializing and rereading separate gate/up halves.
+template <typename T>
+struct GeluPairDuplicate {
+  CUTLASS_HOST_DEVICE
+  T operator()(T const& value) const { return value; }
+};
+
+template <typename T, int N>
+struct GeluPairDuplicate<cutlass::Array<T, N>> {
+  static_assert(N % 2 == 0, "Gated epilogue fragments must contain pairs");
+
+  CUTLASS_HOST_DEVICE
+  cutlass::Array<T, N> operator()(cutlass::Array<T, N> const& input) const {
+    cutlass::Array<T, N> output;
+    cutlass::epilogue::thread::GELU_taylor<T> gelu;
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < N; i += 2) {
+      T const activated = gelu(input[i]) * input[i + 1];
+      output[i] = activated;
+      output[i + 1] = activated;
+    }
+    return output;
+  }
+};
+
+template <typename ElementAcc, typename ElementD, typename TileShape>
+struct ScaledGeluPairDuplicateEpilogue
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+
+  using MultiplyB = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using ScaledB = cutlass::epilogue::fusion::Sm90EVT<MultiplyB, ScaleB, Accum>;
+
+  using MultiplyA = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using ScaledAB =
+      cutlass::epilogue::fusion::Sm90EVT<MultiplyA, ScaleA, ScaledB>;
+
+  using PairActivation = cutlass::epilogue::fusion::Sm90Compute<
+      GeluPairDuplicate, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<PairActivation, ScaledAB>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(TensorType const& a_scales,
+                                   TensorType const& b_scales) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    typename ScaledB::Arguments scaled_b_args{b_args, {}, {}};
+    typename ScaledAB::Arguments scaled_ab_args{a_args, scaled_b_args, {}};
+    return ArgumentType{scaled_ab_args, {}};
+  }
+};
+
+template <typename T>
+struct MaximumAbsoluteValueReduction
+    : cutlass::maximum_absolute_value_reduction<T, true> {};
+
+template <typename T>
+struct MaximumReduction : cutlass::maximum<T, true> {};
+
+// Additive experiment: preserve the duplicated BF16 output while also
+// reducing its activated values to one FP32 maximum-absolute value per row.
+// The following quantizer can then skip its first full-row read/reduction.
+template <typename ElementAcc, typename ElementD, typename TileShape>
+struct ScaledGeluPairDuplicateAmaxEpilogue
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+
+  using MultiplyB = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using ScaledB = cutlass::epilogue::fusion::Sm90EVT<MultiplyB, ScaleB, Accum>;
+
+  using MultiplyA = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using ScaledAB =
+      cutlass::epilogue::fusion::Sm90EVT<MultiplyA, ScaleA, ScaledB>;
+
+  using PairActivation = cutlass::epilogue::fusion::Sm90Compute<
+      GeluPairDuplicate, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using Activated =
+      cutlass::epilogue::fusion::Sm90EVT<PairActivation, ScaledAB>;
+
+  using RowAmax = cutlass::epilogue::fusion::Sm90ColReduction<
+      MaximumAbsoluteValueReduction, MaximumReduction,
+      cutlass::atomic_maximum, 0, TileShape, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute = cutlass::epilogue::fusion::Sm90EVT<RowAmax, Activated>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(TensorType const& a_scales,
+                                   TensorType const& b_scales,
+                                   TensorType const& row_amax) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    typename ScaledB::Arguments scaled_b_args{b_args, {}, {}};
+    typename ScaledAB::Arguments scaled_ab_args{a_args, scaled_b_args, {}};
+    typename Activated::Arguments activated_args{scaled_ab_args, {}};
+    typename RowAmax::Arguments row_amax_args{
+        static_cast<float*>(row_amax.data_ptr()), 0.0f, {}};
+    return ArgumentType{activated_args, row_amax_args};
   }
 };
 
