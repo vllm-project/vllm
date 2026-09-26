@@ -516,7 +516,8 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self.load_config_file(file_path)
+        config_parser = self._get_config_parser(args)
+        config_args = self.load_config_file(file_path, config_parser=config_parser)
 
         # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (serve or snapshot create)
@@ -561,7 +562,31 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    def load_config_file(self, file_path: str) -> list[str]:
+    def _get_config_parser(self, args: list[str]) -> ArgumentParser:
+        """Return the parser selected by subcommands preceding ``--config``."""
+        parser: ArgumentParser = self
+        for arg in args:
+            if arg == "--config" or arg.startswith("--config="):
+                break
+
+            subparsers_action = next(
+                (
+                    action
+                    for action in parser._actions
+                    if isinstance(action, argparse._SubParsersAction)
+                ),
+                None,
+            )
+            if subparsers_action is not None and arg in subparsers_action.choices:
+                parser = subparsers_action.choices[arg]
+
+        return parser
+
+    def load_config_file(
+        self,
+        file_path: str,
+        config_parser: ArgumentParser | None = None,
+    ) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern.
 
@@ -596,6 +621,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Supports both flat configs and nested dicts
         processed_args: list[str] = []
+        option_string_actions = (config_parser or self)._option_string_actions
 
         config: dict[str, Any] = {}
         try:
@@ -612,7 +638,7 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
-                elif (no_key := f"--no-{key}") in self._option_string_actions:
+                elif (no_key := f"--no-{key}") in option_string_actions:
                     processed_args.append(no_key)
             elif isinstance(value, list):
                 if value:

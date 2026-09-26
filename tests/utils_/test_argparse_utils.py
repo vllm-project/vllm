@@ -401,6 +401,26 @@ def test_load_config_file_false_store_true_dropped(tmp_path):
     assert "--no-enable-feature" in processed_args
 
 
+def test_load_config_file_false_subparser_option(tmp_path):
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump({"enable-feature": False}, config_file)
+
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(required=True)
+    serve_parser = subparsers.add_parser("serve")
+    serve_parser.add_argument("model")
+    serve_parser.add_argument(
+        "--enable-feature",
+        action=BooleanOptionalAction,
+        default=True,
+    )
+
+    args = parser.parse_args(["serve", "test-model", "--config", str(config_file_path)])
+
+    assert args.enable_feature is False
+
+
 def test_load_config_file_nested(tmp_path):
     """Test that nested dicts in YAML config are converted to JSON strings."""
     config_data = {
