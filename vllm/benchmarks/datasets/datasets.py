@@ -4374,7 +4374,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> list[SampleRequest]:
         vocab_size = tokenizer.vocab_size
-        prompts_per_prefix = num_requests // num_prefixes
+        prompts_per_prefix, remainder = divmod(num_requests, num_prefixes)
         if prompts_per_prefix == 0:
             raise ValueError(
                 f"num_requests ({num_requests}) must be greater than or equal "
@@ -4397,11 +4397,11 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
         requests = []
         token_mismatch_total = 0
-        for _ in range(num_prefixes):
+        for prefix_index in range(num_prefixes):
             prefix_tokens, prefix_mismatch = _generate_exact_length_tokens(prefix_len)
             token_mismatch_total += prefix_mismatch
 
-            for _ in range(prompts_per_prefix):
+            for _ in range(prompts_per_prefix + (prefix_index < remainder)):
                 suffix_tokens, suffix_mismatch = _generate_exact_length_tokens(
                     suffix_len
                 )
