@@ -10,6 +10,10 @@ from typing import Any
 import regex as re
 import torch
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 def cuda_is_initialized() -> bool:
     """Check if CUDA is initialized."""
@@ -47,14 +51,80 @@ def is_pin_memory_available() -> bool:
     return current_platform.is_pin_memory_available()
 
 
-@cache
+_uva_available: bool | None = None
+
+
 def is_uva_available() -> bool:
     """Check if Unified Virtual Addressing (UVA) is available."""
-    # UVA requires pinned memory.
+    global _uva_available
+    if _uva_available is not None:
+        return _uva_available
+
     from vllm.platforms import current_platform
 
-    # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available() or current_platform.is_cpu()
+    if current_platform.is_cpu():
+        _uva_available = True
+    # UVA requires pinned memory.
+    elif not is_pin_memory_available():
+        _uva_available = False
+    elif _accelerator_is_initialized():
+        _uva_available = _uva_alias_is_coherent()
+    else:
+        # No accelerator context to probe with yet. Answer optimistically
+        # without caching; the worker-side call resolves it, and every consumer
+        # falls back safely if it says no.
+        return True
+    return _uva_available
+
+
+def _accelerator_is_initialized() -> bool:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        return xpu_is_initialized()
+    if current_platform.is_cuda_alike():
+        return cuda_is_initialized()
+    return False
+
+
+def _uva_alias_is_coherent() -> bool:
+    """Check that a device view of pinned host memory tracks later host writes.
+
+    Pinned memory is necessary but not sufficient. Under GPU Confidential
+    Computing `pin_memory=True` can silently yield an unpinned tensor, so the
+    device view is a detached copy rather than a live alias: host writes made
+    after the view is created never reach the device and kernels read stale
+    zeros. Fails closed, since the fallback paths are correct but slower.
+
+    Returns:
+        True if the device view reflects a host write made after its creation.
+
+    """
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    expected = torch.arange(1, 9, dtype=torch.int32, device="cpu")
+    try:
+        host = torch.zeros(
+            expected.shape, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        view = get_accelerator_view_from_cpu_tensor(host)
+        host.copy_(expected)
+        torch.accelerator.synchronize()
+        actual = view.cpu()
+    except Exception:
+        logger.exception("UVA coherence probe failed; treating UVA as unavailable.")
+        return False
+
+    if torch.equal(actual, expected):
+        return True
+    logger.warning(
+        "UVA reports available but the device view is not a live alias of host "
+        "memory: wrote %s, device read %s. Falling back to explicit copies. "
+        "This is expected under GPU Confidential Computing.",
+        expected.tolist(),
+        actual.tolist(),
+    )
+    return False
 
 
 @cache
