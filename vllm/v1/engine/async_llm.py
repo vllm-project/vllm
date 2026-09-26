@@ -935,7 +935,9 @@ class AsyncLLM(EngineClient):
                   :meth:`resume_generation`.
             wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
-                draining. Set to ``False`` to preserve cache for faster resume.
+                pausing. With ``mode="keep"``, in-flight requests are
+                preempted and rescheduled on resume. Set to ``False`` to
+                preserve cache for faster resume.
 
         """
         if wait_for_inflight_requests:
