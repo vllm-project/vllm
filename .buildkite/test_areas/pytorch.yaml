@@ -41,8 +41,7 @@ steps:
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   # However, find does not normally propagate error codes, so we combine it with xargs
   # (using -0 for proper path handling)
-  # test_dynamic_shapes_compilation.py runs in its own job below.
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -not -name 'test_dynamic_shapes_compilation.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
       label: ":amd: (MI300) PyTorch Compilation"
@@ -61,7 +60,7 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies: *pytorch-compilation-deps
   commands:
-  - pytest -s -v compile/test_dynamic_shapes_compilation.py
+  - pytest -s -v compile/dynamic_shapes/
   mirror:
     amd:
       label: ":amd: (MI300) PyTorch Compilation / Dynamic Shapes"

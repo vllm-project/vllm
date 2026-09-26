@@ -614,6 +614,7 @@ steps:
   - vllm/v1/
   commands:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  - pytest -s -v compile/dynamic_shapes/
 
 - label: ":amd: (MI300) Fusion E2E Config Sweep" # TBD
   timeout_in_minutes: 40
