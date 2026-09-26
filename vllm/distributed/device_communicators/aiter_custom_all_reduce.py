@@ -119,23 +119,3 @@ class AiterCustomAllreduce:
         Ref (old kernel): https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
         """
         return hasattr(self._impl, "_pool")
-
-    @staticmethod
-    def build_supports_per_group_quant() -> bool:
-        """True if the running AITER build exposes the per-group AR+RMS+quant
-        kernel (added in ROCm/aiter PR #2823).
-
-        The pattern registration in ``RocmAiterAllReduceFusionPass`` keys off
-        this so vLLM degrades to the AR+RMS-only fusion when run against an
-        older aiter that lacks the per-group launcher.
-        """
-        from aiter.dist.device_communicators.custom_all_reduce import (
-            CustomAllreduce as _AiterCustomAllreduce,
-        )
-
-        return hasattr(_AiterCustomAllreduce, "fused_ar_rms_per_group_quant")
-
-    # TODO(frida-andersson): drop once vLLM pins AITER >= 0.1.14 (ROCm/aiter#2823).
-    @property
-    def supports_per_group_quant(self) -> bool:
-        return self.build_supports_per_group_quant()

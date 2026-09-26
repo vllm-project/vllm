@@ -1240,6 +1240,77 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake(
     return quant_out, residual_out, scale_out, bf16_norm_out
 
 
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused AllReduce + add-RMSNorm + per-token FP8 quant.
+
+    Per-token analogue of
+    ``_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl`` (no
+    ``group_size``; the scale is per-token, shape ``[..., 1]``). Reuses the
+    identical 1-stage vs 2-stage AITER launcher eligibility logic.
+
+    Returns ``(fp8_out, residual_out, per_token_scale[..., 1])``.
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+    ca = aiter_ar.aiter_ca
+
+    total_bytes = input_.numel() * input_.element_size()
+    hidden_dim = input_.shape[-1]
+    token_num = input_.shape[0]
+    if input_.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // input_.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
+    token_ok = token_num <= 80
+    world_size = ca.world_size
+    full_nvlink = ca.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 256 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 128 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+
+    result = ca.fused_ar_rms(
+        input_,
+        residual,
+        w=weight,
+        eps=epsilon,
+        registered=torch.cuda.is_current_stream_capturing(),
+        use_1stage=use_1stage,
+        post_per_token_quant=True,
+    )
+    assert result is not None
+    return result[0], result[1], result[2]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    quant_out = torch.empty(input_.shape, dtype=FP8_DTYPE, device=input_.device)
+    residual_out = torch.empty_like(residual)
+    scale_out = torch.empty(
+        input_.shape[:-1] + (1,),
+        dtype=torch.float32,
+        device=input_.device,
+    )
+    return quant_out, residual_out, scale_out
+
+
 def _rocm_aiter_per_tensor_quant_impl(
     out: torch.Tensor,
     x: torch.Tensor,
@@ -2716,6 +2787,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant",
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_quant_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="fused_mla_dual_rms_norm",
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
@@ -2786,6 +2863,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group.default
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant.default
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501
