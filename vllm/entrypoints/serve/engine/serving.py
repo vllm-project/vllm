@@ -63,8 +63,12 @@ class BaseServing:
             ):
                 error_response = load_result
 
+        served_names = ", ".join(model.name for model in self.models.base_model_paths)
         return error_response or self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
+            message=(
+                f"The model `{request.model}` does not exist. "
+                f"Served models: {served_names}."
+            ),
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
             param="model",
