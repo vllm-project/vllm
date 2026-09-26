@@ -327,9 +327,12 @@ def compute_layout_strides(
     order = layout.stride_order
     padded_page_size = getattr(spec, "page_size_padded", None)
     if padded_page_size is not None:
-        assert kernel_block_size is None or kernel_block_size == spec.block_size, (
-            "Padded KV pages do not support kernel block splitting."
-        )
+        if kernel_block_size is not None and kernel_block_size != spec.block_size:
+            raise ValueError(
+                "Padded KV pages do not support kernel block splitting "
+                f"(block size {spec.block_size}, kernel block size "
+                f"{kernel_block_size})."
+            )
         page_grid_end = max(order.index(_DIM_L), order.index(_DIM_B)) + 1
         page_grid_shape = tuple(shape[dim] for dim in order[:page_grid_end])
         assert prod(page_grid_shape) == num_layers * num_blocks, (
@@ -369,9 +372,18 @@ def create_kv_cache_views(
     )
     ratio = shape_bytes[0] // num_blocks
     if ratio > 1:
+        # Padded manager pages cannot be represented as uniformly strided
+        # kernel blocks because the padding sits after the manager page content.
+        if getattr(spec, "page_size_padded", None) is not None:
+            raise ValueError(
+                "Padded KV pages do not support kernel block splitting. "
+                f"Reduce --block-size to {kernel_block_size} so the manager "
+                "and kernel block sizes match."
+            )
+
         # Kernel blocks subdivide a manager block into `ratio` equal pieces, so
-        # they sit a constant stride apart only if a block is one dense page: no
-        # padding at its end, and no other layer's page before the next block.
+        # they sit a constant stride apart only if a block is one dense page
+        # and no other layer's page precedes the next block.
         dense_page_size = prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
         if block_stride != dense_page_size:
             raise ValueError(

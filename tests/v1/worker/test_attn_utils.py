@@ -699,3 +699,56 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
     )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "layout",
+    [KVCacheLayout.LBHNC, KVCacheLayout.LBNHC],
+)
+def test_padded_kv_cache_rejects_kernel_block_splitting(layout: KVCacheLayout):
+    spec = FullAttentionSpec(
+        block_size=48,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=1024,
+    )
+    num_blocks = 3
+    raw = torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+
+    with pytest.raises(
+        ValueError,
+        match="Padded KV pages do not support kernel block splitting",
+    ):
+        dense_kv_cache_views(
+            raw,
+            spec,
+            num_blocks,
+            1,
+            layout,
+            kernel_block_size=16,
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_compute_layout_strides_rejects_padded_kernel_block_splitting():
+    spec = FullAttentionSpec(
+        block_size=48,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=1024,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Padded KV pages do not support kernel block splitting",
+    ):
+        compute_layout_strides(
+            spec,
+            num_blocks=3,
+            num_layers=1,
+            layout=KVCacheLayout.LBHNC,
+            kernel_block_size=16,
+        )
