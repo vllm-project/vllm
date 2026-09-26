@@ -41,6 +41,7 @@ from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4ViT,
     run_dp_sharded_vision_tower,
 )
+from vllm.models.deepseek_v4.common.vl_model import stream_language_model_first
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -312,12 +313,9 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
+        # The child finalizes fused expert weights in load_weights, so its
+        # weights must reach it as one contiguous group.
+        mapped = stream_language_model_first(self.hf_to_vllm_mapper.apply(weights))
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
         # The child's load_weights already ran its post-load finalization.
