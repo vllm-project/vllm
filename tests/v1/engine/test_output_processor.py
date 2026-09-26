@@ -226,6 +226,64 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
         assert request_output.num_cached_tokens == len(prompt_tokens) - 1
 
 
+@pytest.mark.parametrize(
+    "remote_value,expected",
+    [
+        (5, 5),  # in-range: passthrough
+        (9999, 8),  # beyond prompt_len: clamped to prompt_len
+        (-5, 0),  # negative: clamped to 0
+    ],
+)
+def test_remote_prefill_cached_tokens_override_clamped(
+    remote_value: int, expected: int
+):
+    """kv_transfer_params is client-reachable via the OpenAI API, so the
+    router-supplied count must be clamped to [0, prompt_len] before it
+    reaches prompt_tokens_details and request metrics.
+    """
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+
+    prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+    kv_transfer_params = {
+        "do_remote_prefill": True,
+        "remote_prefill_cached_tokens": remote_value,
+    }
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=prompt_tokens,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            extra_args={"kv_transfer_params": kv_transfer_params},
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=len(prompt_tokens),
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=len(prompt_tokens) - 1,
+    )
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[42],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+    request_output = processed.request_outputs[0]
+    assert request_output.num_cached_tokens == expected
+
+
 def test_request_stream_interval_raises_but_not_below_engine_default(
     dummy_test_vectors,
 ):
