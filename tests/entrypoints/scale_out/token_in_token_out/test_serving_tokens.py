@@ -113,6 +113,29 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
+async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
+    """Explicit null max_tokens must not skip the min_tokens bound."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": None, "min_tokens": 2147483648},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "min_tokens" in resp.json()["error"]["message"]
+
+    followup = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=followup)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",
