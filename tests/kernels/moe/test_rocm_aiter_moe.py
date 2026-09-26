@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -1216,3 +1216,252 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
         pass_rate=1.0,
         max_violation_factor=1.5,
     )
+
+
+# Weight alignment tests --------------------------------------------------
+#
+# AITER's CK 2stages MoE kernel rejects an intermediate size not divisible by
+# its tile width (64 at or below inter_dim 192, 128 above). Some model + TP
+# splits land on an unaligned size (e.g. 1792 / TP=8 = 224), so the AITER path
+# rounds the intermediate dim up in ``maybe_roundup_sizes`` and allocates the
+# weights at the padded size.
+
+ALIGNMENT_HIDDEN = 64
+ALIGNMENT_NUM_EXPERTS = 2
+
+
+def _make_alignment_moe_config(intermediate: int):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    return make_dummy_moe_config(
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_dim=ALIGNMENT_HIDDEN,
+        intermediate_size=intermediate,
+    )
+
+
+def _make_aiter_method(moe_config):
+    """Build the unquantized method with the backend pinned to AITER.
+
+    ``select_unquantized_moe_backend`` needs a real ROCm + AITER runtime, so
+    stub it out and set the backend directly.
+    """
+    from unittest.mock import patch
+
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
+        ".select_unquantized_moe_backend",
+        return_value=(UnquantizedMoeBackend.AITER, None),
+    ):
+        return UnquantizedFusedMoEMethod(moe_config)
+
+
+def _roundup(method, moe_config, intermediate):
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+
+    return method.maybe_roundup_sizes(
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=intermediate,
+        act_dtype=moe_config.in_dtype,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("intermediate", "expected_padded"),
+    [
+        (64, 64),  # already aligned, untouched
+        (96, 128),
+        (160, 192),
+        (192, 192),  # must stay 192: it is valid and has tuned configs
+        (224, 256),  # K2-Horizon-375B at TP=8
+        (256, 256),
+        (448, 512),  # K2-Horizon-375B at TP=4
+        (4096, 4096),
+    ],
+)
+def test_aiter_moe_roundup_pads_intermediate(
+    intermediate,
+    expected_padded,
+    default_vllm_config,
+):
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+
+    hidden, padded = _roundup(method, moe_config, intermediate)
+
+    assert padded == expected_padded
+    assert hidden == ALIGNMENT_HIDDEN
+    # Padding must not move a size across the <= 192 threshold, or the
+    # alignment we picked is not the one the kernel dispatches the padded
+    # shape to.
+    assert aiter_moe_intermediate_alignment(padded) == (
+        aiter_moe_intermediate_alignment(intermediate)
+    )
+
+
+@pytest.mark.parametrize("backend_name", ["TRITON", "FLASHINFER_CUTLASS"])
+def test_aiter_moe_roundup_is_not_applied_to_other_backends(
+    backend_name,
+    default_vllm_config,
+):
+    """Backends with no alignment requirement keep the unaligned size."""
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+
+    intermediate = 224
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+    method.unquantized_backend = UnquantizedMoeBackend[backend_name]
+
+    _, padded = _roundup(method, moe_config, intermediate)
+
+    assert padded == intermediate
+
+
+@pytest.mark.parametrize("intermediate", [224, 448])
+def test_aiter_moe_reload_zeroes_intermediate_padding(
+    intermediate,
+    monkeypatch,
+    default_vllm_config,
+):
+    """A reload must re-zero pad lanes left dirty in the weight storage.
+
+    The reload writes back only the logical slices, so the pad lanes hold
+    garbage (NaN here) that the AITER conversion must zero. Two passes also
+    cover reloading into storage that already holds a previous conversion.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+    assert padded != intermediate
+
+    moe_config = _make_alignment_moe_config(intermediate)
+    assert moe_config.is_act_and_mul
+    method = _make_aiter_method(moe_config)
+    # RoutedExperts records the rounded-up size after maybe_roundup_sizes.
+    moe_config.intermediate_size_per_partition = padded
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+
+    method.create_weights(
+        layer=layer,
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=padded,
+        params_dtype=torch.float32,
+    )
+
+    # Identity shuffle keeps pad lanes sliceable; both stubs need real ROCm.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized"
+        ".rocm_aiter_ops.shuffle_weights",
+        lambda w13, w2: (w13, w2),
+    )
+    monkeypatch.setattr(
+        method,
+        "_init_moe_kernel",
+        lambda _layer: setattr(method, "moe_kernel", MagicMock()),
+    )
+
+    up = padded  # up projection starts one padded block into the fused rows
+
+    for _ in range(2):
+        gate = torch.randn(ALIGNMENT_NUM_EXPERTS, intermediate, ALIGNMENT_HIDDEN)
+        up_proj = torch.randn(ALIGNMENT_NUM_EXPERTS, intermediate, ALIGNMENT_HIDDEN)
+        down = torch.randn(ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, intermediate)
+
+        # NaN the pads, then write only the logical slices like the loader.
+        layer.w13_weight.data.fill_(float("nan"))
+        layer.w2_weight.data.fill_(float("nan"))
+        layer.w13_weight.data[:, :intermediate].copy_(gate)
+        layer.w13_weight.data[:, up : up + intermediate].copy_(up_proj)
+        layer.w2_weight.data[:, :, :intermediate].copy_(down)
+
+        method.process_weights_after_loading(layer)
+
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        assert torch.equal(w13[:, :intermediate], gate)
+        assert torch.equal(w13[:, up : up + intermediate], up_proj)
+        assert torch.equal(w2[:, :, :intermediate], down)
+        assert torch.all(w13[:, intermediate:up] == 0)
+        assert torch.all(w13[:, up + intermediate :] == 0)
+        assert torch.all(w2[:, :, intermediate:] == 0)
+
+
+def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
+    """Run the real AITER CK MoE kernel and report whether it dispatched."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+
+    case = _make_moe_case(
+        num_tokens=num_tokens,
+        hidden_dim=1024,
+        intermediate_dim=intermediate,
+        num_experts=8,
+        topk=2,
+        seed=0,
+    )
+    try:
+        _run_fused_moe(
+            case["hidden_states"],
+            case["w1"],
+            case["w2"],
+            case["topk_weights"],
+            case["topk_ids"],
+            activation_method=int(ActivationMethod.SILU),
+            quant_method=int(QuantMethod.NO),
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not on_cdna(),
+    reason="CDNA ROCm only",
+)
+@pytest.mark.parametrize("intermediate", [192, 224, 256])
+# With topk=2 and 8 experts, these token counts select block_m 32 / 64 / 128
+# respectively (AITER's get_block_size_M, on both 256- and 304-CU parts).
+@pytest.mark.parametrize("num_tokens", [1024, 2560, 5120])
+def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens):
+    """The alignment rule must hold at every reachable ``block_m``.
+
+    Stage 1 checks ``NPerBlock`` and stage 2 ``KPerBlock``; both vary with
+    ``block_m``, so a size validated at one tile size says nothing about the
+    others.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    _assert_aiter_supported()
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+
+    assert _aiter_accepts_intermediate(intermediate, num_tokens) == (
+        intermediate % alignment == 0
+    )
+    assert _aiter_accepts_intermediate(padded, num_tokens)
