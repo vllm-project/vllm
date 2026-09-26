@@ -4135,6 +4135,57 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def mhc_fused_post_pre_delayed_rms_norm(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        residual_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """:meth:`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
+
+        Runs aiter's fused Triton kernel ``mhc_fused_post_pre_delayed_rmsnorm``;
+        the returned ``layer_input`` is already normalised with ``norm_weight`` /
+        ``norm_eps``.
+        """
+        from aiter.ops.triton.fusions.mhc_fused_post_pre_delayed_rmsnorm import (
+            mhc_fused_post_pre_delayed_rmsnorm,
+        )
+
+        _, post_mix, comb_mix, layer_input, next_pre_mix = (
+            mhc_fused_post_pre_delayed_rmsnorm(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                norm_weight,
+                norm_eps,
+                residual_out=residual_out,
+            )
+        )
+        return post_mix, comb_mix, layer_input, next_pre_mix
+
+    @staticmethod
     def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:
         """True when AITER's own heuristic favours separate post and pre.
 
