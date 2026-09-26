@@ -15,6 +15,7 @@ from vllm._custom_ops import (
     convert_weight_packed_scale_zp,
     cpu_fused_moe,
     cpu_fused_moe_int8,
+    cpu_gemm_wna16,
     cpu_has_amx_fp8,
     cpu_prepack_moe_weight,
     cpu_prepack_moe_weight_int8,
@@ -45,9 +46,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
     kMxfp4Static,
+    pack_quantized_values_into_int32,
+    unpack_quantized_values_into_int32,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.scalar_type import scalar_types
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -945,6 +949,120 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
         )
+
+
+def prepare_int4_moe_layer_for_cpu_vec(
+    w13_packed: torch.Tensor,
+    w2_packed: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Repack GPTQ INT4 weights for the vector W4A16 GEMM.
+
+    The checkpoint packs eight values along the input dimension. The GEMM
+    instead packs output channels in blocks of sixteen. Process one expert at
+    a time so the unpacked weights never occupy memory for every expert.
+    """
+
+    def repack(weights: torch.Tensor) -> torch.Tensor:
+        experts, packed_k, out_features = weights.shape
+        in_features = packed_k * 8
+        if in_features % 32 or out_features % 32:
+            raise ValueError("CPU vector INT4 GEMM requires dimensions divisible by 32")
+        result = torch.empty(
+            (experts, out_features // 16, in_features * 2),
+            dtype=torch.int32,
+            device=weights.device,
+        )
+        for expert in range(experts):
+            unpacked = unpack_quantized_values_into_int32(
+                weights[expert], scalar_types.uint4b8, 0
+            )
+            packed = pack_quantized_values_into_int32(unpacked, scalar_types.uint4b8, 1)
+            result[expert].copy_(
+                packed.view(in_features, -1, 2)
+                .permute(1, 0, 2)
+                .reshape(out_features // 16, in_features * 2)
+            )
+        return result
+
+    return repack(w13_packed), repack(w2_packed)
+
+
+class CPUExpertsInt4Vec(CPUExpertsInt4):
+    """GPTQ INT4 MoE fallback using the CPU vector W4A16 GEMM."""
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+        )
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        if apply_router_weight_on_input:
+            raise NotImplementedError(
+                "CPU vector INT4 MoE does not support router weight on input"
+            )
+        if expert_map is not None:
+            raise NotImplementedError("CPU vector INT4 MoE does not support expert_map")
+        if activation != MoEActivation.SILU:
+            raise NotImplementedError("CPU vector INT4 MoE requires SILU")
+
+        inputs = hidden_states.reshape(-1, hidden_states.size(-1))
+        ids = topk_ids.reshape(inputs.size(0), -1)
+        weights = topk_weights.reshape_as(ids)
+        result = torch.zeros(inputs.shape, dtype=torch.float32, device=inputs.device)
+        for expert in ids.unique().tolist():
+            rows, slots = torch.where(ids == expert)
+            expert_input = inputs.index_select(0, rows).contiguous()
+            gate_up = cpu_gemm_wna16(
+                expert_input,
+                w1[expert],
+                self.w1_scale[expert],
+                None,
+                self.quant_config.w1_bias[expert]
+                if self.quant_config.w1_bias is not None
+                else None,
+                8,
+                "vec",
+            )
+            gate, up = gate_up.chunk(2, dim=-1)
+            activated = (torch.nn.functional.silu(gate.float()) * up.float()).to(
+                inputs.dtype
+            )
+            down = cpu_gemm_wna16(
+                activated.contiguous(),
+                w2[expert],
+                self.w2_scale[expert],
+                None,
+                self.quant_config.w2_bias[expert]
+                if self.quant_config.w2_bias is not None
+                else None,
+                8,
+                "vec",
+            )
+            result.index_add_(
+                0,
+                rows,
+                down.float() * weights[rows, slots].float().unsqueeze(-1),
+            )
+        output.copy_(result.to(output.dtype).reshape_as(output))
 
 
 # ===========================================================================

@@ -105,12 +105,16 @@ class Dequantizer4b {
       scalar_vec_t output_vec_1(wb_1);
 
       // AMX needs to interleave K elements to pack as 32 bits
+#ifdef CPU_CAPABILITY_AMXBF16
       if constexpr (isa == ISA::AMX) {
         vec_op::interleave_save(output_vec_0, output_vec_1, curr_weight);
       } else {
+#endif
         output_vec_0.save(curr_weight);
         output_vec_1.save(curr_weight + 16);
+#ifdef CPU_CAPABILITY_AMXBF16
       }
+#endif
 
       // update
       curr_q_weight += 2;
@@ -208,7 +212,8 @@ void cpu_gemm_wna16_impl(
             q_weight + n_block_start_idx * q_weight_block_stride;
         scalar_t* __restrict__ curr_b_buffer = b_buffer;
         scalar_t* __restrict__ curr_scales = scales + n_start_idx;
-        int32_t* __restrict__ curr_zeros = zeros + n_start_idx / pack_factor;
+        int32_t* __restrict__ curr_zeros =
+            zeros ? zeros + n_start_idx / pack_factor : nullptr;
         for (int32_t block_idx = 0; block_idx < n_block_num; ++block_idx) {
           dequantizer_t::dequant(curr_q_weight, curr_b_buffer, curr_scales,
                                  curr_zeros, scales_group_stride,
@@ -223,7 +228,9 @@ void cpu_gemm_wna16_impl(
           curr_q_weight += q_weight_block_stride;
           curr_b_buffer += b_buffer_block_stride;
           curr_scales += n_block_size;
-          curr_zeros += zeros_block_stride;
+          if (zeros) {
+            curr_zeros += zeros_block_stride;
+          }
         }
       }
 
