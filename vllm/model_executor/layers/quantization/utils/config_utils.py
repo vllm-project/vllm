@@ -44,7 +44,12 @@ def get_quark_ocp_mx_group_size(
         return None
 
     assert weight_quant is not None
-    return int(weight_quant["group_size"])
+    group_size = weight_quant.get("group_size")
+    if group_size is None:
+        block_size = weight_quant.get("block_size")
+        if isinstance(block_size, list | tuple) and len(block_size) >= 2:
+            group_size = block_size[1]
+    return int(group_size) if group_size is not None else None
 
 
 def is_shared_expert_quant_fse_compatible(
