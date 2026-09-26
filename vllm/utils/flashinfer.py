@@ -11,12 +11,15 @@ import importlib
 import importlib.util
 import os
 import shutil
+import subprocess
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from typing import Any, NoReturn
 
+import regex as re
 import requests
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -91,9 +94,58 @@ def has_flashinfer_cubin() -> bool:
     return False
 
 
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/7b4545f5474d7ff433963182b56090c53d3ad048/flashinfer/jit/cpp_ext.py#L47-L64 # noqa: E501
+@functools.cache
+def get_cuda_path() -> str:
+    """Return the path to CUDA."""
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home is not None:
+        return cuda_home
+    nvcc_path = subprocess.run(["which", "nvcc"], capture_output=True)
+    if nvcc_path.returncode == 0:
+        cuda_home = os.path.dirname(
+            os.path.dirname(nvcc_path.stdout.decode("utf-8").strip())
+        )
+    else:
+        cuda_home = "/usr/local/cuda"
+        if not os.path.exists(cuda_home):
+            raise RuntimeError(
+                f"Could not find nvcc and default {cuda_home=} doesn't exist"
+            )
+    return cuda_home
+
+
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/7b4545f5474d7ff433963182b56090c53d3ad048/flashinfer/jit/cpp_ext.py#L68-L87 # noqa: E501
+@functools.cache
+def get_cuda_version() -> Version:
+    """Return version of CUDA toolkit."""
+    try:
+        cuda_home = get_cuda_path()
+        nvcc = os.path.join(cuda_home, "bin/nvcc")
+        txt = subprocess.check_output([nvcc, "--version"], text=True)
+        matches = re.findall(r"release (\d+\.\d+),", txt)
+        if not matches:
+            raise RuntimeError(
+                f"Could not parse CUDA version from nvcc --version output: {txt}"
+            )
+        return Version(matches[0])
+    except (RuntimeError, FileNotFoundError, subprocess.CalledProcessError) as e:
+        if torch.version.cuda is None:
+            raise RuntimeError(
+                "nvcc not found and PyTorch is not built with CUDA support. "
+                "Could not determine CUDA version."
+            ) from e
+        return Version(torch.version.cuda)
+
+
 @functools.cache
 def has_flashinfer() -> bool:
     """Return `True` if flashinfer-python package is available."""
+    if current_platform.is_cuda():
+        capability = current_platform.get_device_capability()
+        assert capability is not None, "CUDA capability can't be None"
+        if capability.major == 12 and get_cuda_version() < Version("12.9"):
+            return False
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     if importlib.util.find_spec("flashinfer") is None:
