@@ -928,7 +928,7 @@ class HfRunner:
             # shutdown. This is helpful in cases where the HfRunner is
             # initialized after significant GPU memory is already occupied,
             # e.g. in
-            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # tests/basic_correctness/models/test_basic_correctness.py::test_models_distributed
             # where vllm worker processes are still alive and holding GPU
             # memory when hf_runner.__exit__ is called.
             from tests.utils import record_gpu_memory_usage_stats
