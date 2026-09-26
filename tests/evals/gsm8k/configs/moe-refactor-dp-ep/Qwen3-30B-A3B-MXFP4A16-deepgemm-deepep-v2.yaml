@@ -1,0 +1,15 @@
+# DeepGemmFP4Experts (PaddedStandard) over DeepEP v2.
+# Same checkpoint as configs/Qwen3-30B-A3B-MXFP4A16.yaml. Qwen3-MoE is silu,
+# which DeepGemmFP4Experts._supports_activation requires; gpt-oss (swigluoai)
+# cannot drive this path.
+model_name: "nm-testing/Qwen3-30B-A3B-MXFP4A16"
+# Lower than the 0.88 W4A16 baseline because --moe-backend=deep_gemm forces
+# kFp8Dynamic128Sym activations. Measured 0.8196 at DP=4 + deepep_v2
+# (PaddedStandard) and 0.8059 for the same backend without EP, so the padded
+# path is not the source of the drop. Not yet re-measured at DP=8.
+accuracy_threshold: 0.79
+num_questions: 1319
+num_fewshot: 5
+# No --enforce-eager: DeepEP v2 only emits the worst-case padded decode layout
+# when cudagraphs are enabled.
+server_args: "--max-model-len 8192 --data-parallel-size 8 --enable-expert-parallel --all2all-backend deepep_v2 --moe-backend=deep_gemm"

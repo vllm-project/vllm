@@ -43,6 +43,11 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
     per_block_cast_to_fp8,
 )
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    lock_workspace,
+    unlock_workspace,
+)
 
 BLOCK_SIZE = [128, 128]
 
@@ -463,3 +468,173 @@ def test_deepgemm_fp4_vs_triton(
             f"DeepGEMM FP4 path was not executed during the test. "
             f"Call counter: {call_counter['cnt']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# FP4 padded-decode tests (DeepEP v2 decode/cudagraph path)
+# ---------------------------------------------------------------------------
+#
+# In its cudagraph/decode dispatch DeepEP v2 hands DeepGemmFP4Experts a
+# worst-case-sized recv buffer with no exact per-expert counts, so the permuted
+# activation buffer is padded far beyond the real tokens and the grouped GEMM
+# has to rely on the `-1` m_indices convention to keep that padding out of the
+# result. The standalone (non-EP) harness never produces that metadata, so
+# these tests drive the kernel with a crafted decode-style carrier.
+
+
+def _fp4_decode_supported() -> bool:
+    from vllm.platforms import current_platform
+
+    # SM100 is the only SM the nvfp4 grouped GEMM runs on in practice.
+    return is_deep_gemm_supported() and current_platform.is_device_capability_family(
+        100
+    )
+
+
+def _make_decode_meta(m: int, device: torch.device) -> mk.ExpertTokensMetadata:
+    """A DeepEP v2 cudagraph/decode carrier.
+
+    Exact per-expert counts are not synced in that mode, so both
+    expert_num_tokens fields are None and M_sum falls back to the worst-case
+    bound — which is what makes the padding this suite poisons appear.
+    psum_recv_per_rank is unread by the DeepGEMM path but is populated here to
+    match what the real dispatch emits.
+    """
+    return mk.ExpertTokensMetadata(
+        expert_num_tokens=None,
+        expert_num_tokens_cpu=None,
+        psum_recv_per_rank=torch.tensor([m], dtype=torch.int32, device=device),
+    )
+
+
+def _build_fp4_kernel(m, n, k, topk, num_experts):
+    """Build a DeepGemmFP4Experts kernel plus quantized-ready inputs."""
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+    from vllm.platforms import current_platform
+
+    tokens_bf16 = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * (k**-0.5)
+    w1, w2, w1_s, w2_s, w1_bf16, w2_bf16 = make_mxfp4_weights(num_experts, n, k)
+
+    router_logits = torch.randn(m, num_experts, device="cuda", dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+
+    _fp8_dtype = current_platform.fp8_dtype()
+    _block_shape = GroupShape(128, 128)
+    quant_config = FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
+        _a2=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_s, None, None, None),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_s, None, None, None),
+    )
+    moe_config = make_dummy_moe_config()
+    kernel = mk.FusedMoEKernel(
+        prepare_finalize=maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        fused_experts=DeepGemmFP4Experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        ),
+    )
+    return kernel, tokens_bf16, topk_weights, topk_ids, (w1, w2), (w1_bf16, w2_bf16)
+
+
+def _force_decode_meta(mp, kernel, m):
+    """Make prepare() hand back a DeepEP v2 decode-style carrier.
+
+    The standalone (non-EP) prepare/finalize always syncs exact per-expert
+    counts, so the worst-case padded sizing never appears and has to be
+    injected. Patching the prepare result is the smallest seam that produces it
+    while leaving the production apply path -- shape derivation, buffer
+    allocation, finalize -- running exactly as it does in deployment.
+    """
+    pf = kernel.prepare_finalize
+    assert not pf.supports_async(), "async prepare would bypass this patch"
+    orig_prepare = pf.prepare
+
+    def prepare_with_decode_meta(*args, **kwargs):
+        a1q, a1q_scale, _real_meta, tk_ids, tk_w = orig_prepare(*args, **kwargs)
+        return a1q, a1q_scale, _make_decode_meta(m, a1q.device), tk_ids, tk_w
+
+    mp.setattr(pf, "prepare", prepare_with_decode_meta)
+
+
+def _fill_workspace_arena(byte: int) -> None:
+    """Byte-fill every allocated workspace buffer.
+
+    The modular kernel carves its workspaces out of this arena and does not
+    zero them, so whatever is left here is exactly what a padding row the
+    scatter never writes will contain at kernel time. 0xFF is a NaN bit pattern
+    in every float dtype the workspaces can take (bf16/fp16/fp32/fp8-e4m3), so
+    it poisons without the test having to know the workspace dtype.
+
+    Reaches into the manager's buffer list because poisoning uninitialized
+    memory is inherently white-box; there is no public accessor.
+    """
+    for ws in current_workspace_manager()._current_workspaces:
+        if ws is not None:
+            ws.fill_(byte)
+
+
+@pytest.mark.parametrize(("m", "n", "k"), [(128, 4096, 4096)])
+@pytest.mark.parametrize("topk", FP4_TOPKS)
+@pytest.mark.parametrize("num_experts", FP4_NUM_EXPERTS)
+@pytest.mark.skipif(
+    not _fp4_decode_supported(), reason="Requires SM100 deep_gemm kernels"
+)
+def test_deepgemm_fp4_padded_decode_padding_robust(
+    m, n, k, topk, num_experts, monkeypatch, workspace_init
+):
+    """Output must be unaffected by garbage in the padding rows.
+
+    In decode mode the permuted activation buffer is sized to the worst-case
+    M_sum and only the real-token prefix of each expert slot is written by the
+    scatter; the alignment gaps and worst-case tail are left uninitialized.
+    Keeping them out of the result rests entirely on the `-1` m_indices
+    convention (pre-filled by deepgemm_moe_permute, left untouched by
+    ep_scatter) plus the unpermute reading only real rows back. Poisoning the
+    workspace arena with NaN reproduces that condition deterministically, and
+    the reduced output must stay finite and match the zero-padding run
+    bit-for-bit.
+    """
+    pytest.importorskip("deep_gemm.utils.math")
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_USE_DEEP_GEMM", "1")
+
+        kernel, tokens, tw, ti, (w1, w2), _ = _build_fp4_kernel(
+            m, n, k, topk, num_experts
+        )
+        _force_decode_meta(mp, kernel, m)
+
+        def run():
+            return kernel.apply(
+                hidden_states=tokens,
+                w1=w1,
+                w2=w2,
+                topk_weights=tw,
+                topk_ids=ti,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ).clone()
+
+        run()  # size the arena so the fills below are not dropped by a resize
+        lock_workspace()  # a resize now raises rather than silently un-poisoning
+        try:
+            _fill_workspace_arena(0x00)
+            out_clean = run()
+            _fill_workspace_arena(0xFF)
+            out_poison = run()
+        finally:
+            unlock_workspace()
+
+        assert torch.isfinite(out_poison).all(), "padding garbage leaked into output"
+        torch.testing.assert_close(out_poison, out_clean, rtol=0, atol=0)

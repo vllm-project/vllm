@@ -526,8 +526,8 @@ def deepgemm_moe_permute(
     if expert_tokens_meta is not None:
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
     if expert_num_tokens is None:
-        # A cudagraph-decode carrier may hold only psum_recv_per_rank and leave
-        # expert_num_tokens None; count locally as in the meta-absent case.
+        # A DeepEP v2 cudagraph-decode carrier leaves expert_num_tokens None
+        # (no CPU sync in that mode); count locally as in the meta-absent case.
         expert_num_tokens = count_expert_num_tokens(
             topk_ids, local_num_experts, expert_map
         )
