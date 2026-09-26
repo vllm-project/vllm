@@ -302,8 +302,10 @@ def _make_metadata_with_slice(
     # the attention backend selects the correct kernel for SWA layers.
     max_seq_len = max(int(seq_lens_cpu_upper_bound.max()), attn_metadata.max_seq_len)
 
-    num_requests = request_slice.stop - request_slice.start
-    num_actual_tokens = token_slice.stop - token_slice.start
+    num_requests = int(request_slice.stop) - int(request_slice.start)
+    # The last ubatch's bounds come from np.cumsum and are numpy ints; keep
+    # the metadata fields plain ints so builders can pass them to Triton.
+    num_actual_tokens = int(token_slice.stop) - int(token_slice.start)
     max_query_len = int(
         torch.max(torch.abs(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])).item()
     )
@@ -316,6 +318,10 @@ def _make_metadata_with_slice(
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
+    positions = attn_metadata.positions
+    if positions is not None:
+        positions = positions[token_slice]
+
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
@@ -326,6 +332,7 @@ def _make_metadata_with_slice(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        positions=positions,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
     )
 

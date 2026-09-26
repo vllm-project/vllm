@@ -3987,6 +3987,13 @@ class GPUModelRunner(
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
+            if current_platform.is_rocm() and cudagraph_mode == CUDAGraphMode.FULL:
+                # ROCm cannot capture ubatched graphs: hipBLASLt refuses to
+                # run on a capturing stream, and the ubatched graph capture
+                # runs both ubatch threads on the capture stream. Keep
+                # FULL-graph decode on the regular non-ubatched graph path;
+                # eager prefill steps still overlap via DBO.
+                allow_microbatching = False
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
@@ -6461,6 +6468,17 @@ class GPUModelRunner(
                         )
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
+
+        if current_platform.is_rocm() and self.parallel_config.use_ubatching:
+            # Size the shared (ubatch 0) workspace slot with a full-batch
+            # run; the ubatched profile run below sizes the per-ubatch
+            # slots. Either run alone leaves one slot undersized for its
+            # runtime path and trips the post-capture workspace lock.
+            self._dummy_run(
+                self.max_num_tokens,
+                is_profile=True,
+                allow_microbatching=False,
+            )
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(

@@ -2152,11 +2152,16 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in [
+            supported_backends = [
                 "deepep_low_latency",
                 "deepep_high_throughput",
                 "nixl_ep",
-            ], (
+            ]
+            if current_platform.is_rocm():
+                # The ROCm naive DP-EP prepare/finalize supports DBO by moving
+                # its all-gather/reduce-scatter onto the comm stream.
+                supported_backends.append("allgather_reducescatter")
+            assert a2a_backend in supported_backends, (
                 "Microbatching currently only supports the deepep_low_latency, "
                 "deepep_high_throughput, and nixl_ep all2all backends. "
                 f"{a2a_backend} is not supported. To fix use "
