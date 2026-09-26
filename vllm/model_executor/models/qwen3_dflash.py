@@ -3,6 +3,7 @@
 
 import io
 from collections.abc import Iterable
+from dataclasses import replace
 
 import regex as re
 import torch
@@ -37,7 +38,8 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, MultipleOf
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -81,6 +83,35 @@ def _add_global_draft_layer_exclusions(
         global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
         if global_exclusion != exclusion and global_exclusion not in exclusions:
             exclusions.append(global_exclusion)
+
+
+class _DFlashAttention(Attention):
+    kv_cache_block_size: int | None = None
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        block_size = self.kv_cache_block_size
+        if block_size is None or spec is None:
+            return spec
+        if not isinstance(spec, FullAttentionSpec):
+            raise NotImplementedError(
+                "Independent DFlash KV block size requires full attention."
+            )
+
+        supported_sizes = self.attn_backend.get_supported_kernel_block_sizes()
+        directly_supported = not supported_sizes or any(
+            block_size % size.base == 0
+            if isinstance(size, MultipleOf)
+            else block_size == size
+            for size in supported_sizes
+        )
+        if not directly_supported:
+            raise NotImplementedError(
+                f"{self.attn_backend.get_name()} cannot directly use the "
+                f"{block_size}-token KV block required by this DFlash draft. "
+                "Use attention_backend=FLASH_ATTN."
+            )
+        return replace(spec, block_size=block_size)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -254,7 +285,11 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.sliding_window = sliding_window
-        self.attn = Attention(
+        speculative_config = get_current_vllm_config().speculative_config
+        assert speculative_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        self.attn = _DFlashAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -265,6 +300,11 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
+        )
+        self.attn.kv_cache_block_size = getattr(
+            draft_model_config.hf_config,
+            "kv_cache_block_size",
+            None,
         )
         self.causal = causal
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
