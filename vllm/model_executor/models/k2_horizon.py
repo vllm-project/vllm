@@ -268,6 +268,7 @@ def fused_mova_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
+        per_out_ch_quant=per_channel_quant,
     )
 
     intermediate_cache1 = F.silu(intermediate_cache1)

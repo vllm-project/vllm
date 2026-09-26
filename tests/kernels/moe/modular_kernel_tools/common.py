@@ -431,8 +431,7 @@ class WeightTensors:
             in_dtype=config.dtype,
             quant_dtype=config.quant_dtype,
             block_shape=config.quant_block_shape,
-            # or config.is_per_out_ch_quant
-            per_out_ch_quant=config.is_per_act_token_quant,
+            per_out_ch_quant=config.is_per_out_ch_quant,
         )
         return WeightTensors(
             w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs

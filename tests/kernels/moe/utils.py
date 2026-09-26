@@ -436,6 +436,7 @@ def make_test_quant_config(
     in_dtype: torch.dtype,
     quant_dtype: torch.dtype | str | None = None,
     per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
     make_gate: bool = True,
     is_scale_swizzled: bool = True,
@@ -446,7 +447,7 @@ def make_test_quant_config(
         k,
         in_dtype,
         quant_dtype,
-        per_out_ch_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
         make_gate=make_gate,
     )
@@ -469,6 +470,7 @@ def make_test_quant_config(
         FusedMoEQuantConfig.make(
             quant_dtype,
             per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
             block_shape=block_shape,
             w1_scale=w1_s,
             w2_scale=w2_s,

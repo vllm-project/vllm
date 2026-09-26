@@ -15,9 +15,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
+    make_int8_moe_quant_config,
     select_int8_moe_backend,
+)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTensorSym,
@@ -63,6 +68,34 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
     )
 
 
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+def test_int8_quant_config_preserves_independent_scale_layouts(
+    per_act_token_quant: bool, per_out_ch_quant: bool
+) -> None:
+    w1_scale = torch.ones((2, 4))
+    w2_scale = torch.ones((2, 3))
+    a1_scale = torch.ones(1)
+    a2_scale = torch.ones(1)
+
+    quant_config = make_int8_moe_quant_config(
+        int8_backend=Int8MoeBackend.TRITON,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+    )
+
+    assert quant_config.per_act_token_quant is per_act_token_quant
+    assert quant_config.per_out_ch_quant is per_out_ch_quant
+    assert quant_config.w1_scale is w1_scale
+    assert quant_config.w2_scale is w2_scale
+    assert quant_config.a1_scale is a1_scale
+    assert quant_config.a2_scale is a2_scale
+
+
 @requires_int8_moe
 @pytest.mark.parametrize(
     "weight_key,activation_key",
@@ -77,16 +110,98 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
             kInt8DynamicTensorSym,
             id="per_tensor_weight-per_tensor_act",
         ),
+        pytest.param(
+            kInt8StaticChannelSym,
+            kInt8StaticTensorSym,
+            id="per_channel_weight-static_tensor_act",
+        ),
+        pytest.param(
+            kInt8StaticTensorSym,
+            kInt8StaticTensorSym,
+            id="per_tensor_weight-static_tensor_act",
+        ),
     ],
 )
-def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
-    """Both dynamic-activation INT8 MoE schemes select the Triton backend."""
+def test_int8_schemes_dispatch_to_triton(weight_key, activation_key):
+    """Supported dynamic and static INT8 schemes select Triton."""
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
         config, weight_key=weight_key, activation_key=activation_key
     )
     assert backend == Int8MoeBackend.TRITON
     assert experts_cls is not None
+
+
+@requires_int8_moe
+def test_static_int8_triton_rejects_lora():
+    """Static INT8 must not silently apply router weights to base only."""
+    config = _make_int8_moe_config(moe_backend="triton")
+    config.is_lora_enabled = True
+    with pytest.raises(
+        ValueError, match="static INT8 activation quantization with LoRA"
+    ):
+        select_int8_moe_backend(
+            config,
+            weight_key=kInt8StaticChannelSym,
+            activation_key=kInt8StaticTensorSym,
+        )
+
+
+def test_static_int8_triton_rejects_lora_before_xpu_return(monkeypatch):
+    """The common capability check rejects LoRA before its XPU return."""
+    config = _make_int8_moe_config()
+    config.is_lora_enabled = True
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: False)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+
+    supported, reason = TritonExperts.is_supported_config(
+        TritonExperts,
+        config,
+        kInt8StaticChannelSym,
+        kInt8StaticTensorSym,
+        TritonExperts.activation_format(),
+    )
+
+    assert not supported
+    assert reason == "static INT8 activation quantization with LoRA"
+
+
+@pytest.mark.parametrize(
+    ("weight_key", "expected_per_out_ch_quant"),
+    [
+        (kInt8StaticTensorSym, False),
+        (kInt8StaticChannelSym, True),
+    ],
+)
+def test_quark_static_int8_keeps_legacy_for_non_naive_dispatch(
+    weight_key, expected_per_out_ch_quant: bool
+):
+    """Backends without deferred input quantization stay on the legacy path."""
+    config = _make_int8_moe_config()
+    parallel = config.moe_parallel_config
+    parallel.dp_size = 2
+    parallel.ep_size = 2
+    parallel.use_ep = True
+    parallel.all2all_backend = "deepep_high_throughput"
+
+    method = QuarkW8A8Int8MoEMethod(config, weight_key, kInt8StaticTensorSym)
+
+    assert method.use_legacy_static_path
+    assert method.int8_backend is None
+    assert method.experts_cls is None
+
+    layer = torch.nn.Module()
+    layer.w13_weight_scale = torch.ones(8, 2)
+    layer.w2_weight_scale = torch.ones(8)
+    layer.w13_input_scale = torch.tensor(0.25)
+    layer.w2_input_scale = torch.tensor(0.125)
+    layer.w13_bias = None
+    layer.w2_bias = None
+
+    quant_config = method.get_fused_moe_quant_config(layer)
+    assert quant_config is not None
+    assert quant_config.per_act_token_quant is False
+    assert quant_config.per_out_ch_quant is expected_per_out_ch_quant
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU-only behaviour")
