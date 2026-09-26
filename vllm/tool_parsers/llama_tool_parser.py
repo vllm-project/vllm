@@ -70,6 +70,15 @@ class Llama3JsonToolParser(ToolParser):
         # "name"/"parameters"/"arguments" key once fully parsed) - the rest
         # of the stream is then passed through as plain content instead of
         # being silently dropped. See the "plain JSON answer" case in #58824.
+        #
+        # Known limitation: this latch is one-way and never resets. If a
+        # genuine tool call appears later in the same stream (e.g. a plain
+        # JSON answer followed by more text and then a real "{...}" call),
+        # it will also be streamed as content instead of being parsed as a
+        # tool call. This is the same class of streaming/non-streaming
+        # mismatch as "text before a call" (case 3 in #58824) and is left
+        # to the broader ParserEngine port in #51577 rather than fixed here
+        # - see the discussion on #58829 for why this tradeoff was accepted.
         self._content_passthrough: bool = False
         self.bot_token_id = self.vocab.get(self.bot_token)
         if self.bot_token_id is None:
