@@ -1241,22 +1241,61 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
+        # Truncate massive query tensors to avoid aten::new_empty integer overflow in the FlashMLA C++ wrapper
+        # during dummy runs where batch * seq_len can be 16k+.
+        # 16384 * 128 * 512 = 1.07e9 elements -> 2.14GB which overflows 32-bit int in some PyTorch versions
+        MAX_ELEMENTS = 1024 * 1024 * 128  # Safe threshold
+        elements_per_token = q.size(2) * 512
+        max_tokens = max(1, MAX_ELEMENTS // elements_per_token)
+
+        orig_q_size_0 = q.size(0)
+        orig_q_size_1 = q.size(1)
+
+        if q.size(0) * q.size(1) > max_tokens:
+            # During the eager dummy run, q.size(0) == 1 and q.size(1) is huge.
+            # We truncate seq_len and pad the output later, avoiding C++ memory overflow while profiling properly.
+            b_limit = min(q.size(0), max_tokens)
+            s_limit = min(q.size(1), max(1, max_tokens // b_limit))
+            
+            q_run = q[:b_limit, :s_limit]
+            topk_indices_run = topk_indices[:b_limit, :s_limit]
+            
+            bt_run = kernel_metadata.dummy_block_table[:b_limit]
+            cl_run = kernel_metadata.cache_lens[:b_limit]
+        else:
+            q_run = q
+            topk_indices_run = topk_indices
+            bt_run = kernel_metadata.dummy_block_table
+            cl_run = kernel_metadata.cache_lens
+
         out, lse = flash_mla_with_kvcache(
-            q=q,
+            q=q_run,
             k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-            block_table=kernel_metadata.dummy_block_table,
+            block_table=bt_run,
             head_dim_v=512,
-            cache_seqlens=kernel_metadata.cache_lens,
+            cache_seqlens=cl_run,
             tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
             is_fp8_kvcache=True,
-            indices=topk_indices,
+            indices=topk_indices_run,
             softmax_scale=self.softmax_scale,
         )
+
+        # Pad back to original size. new_zeros uses int64 size computation in python, avoiding the overflow.
+        if out.size(0) != orig_q_size_0 or out.size(1) != orig_q_size_1:
+            out_padded = out.new_zeros((orig_q_size_0, orig_q_size_1, out.size(2), out.size(3)))
+            out_padded[:out.size(0), :out.size(1)] = out
+            out = out_padded
+            
+            if lse is not None:
+                lse_padded = lse.new_zeros((orig_q_size_0, lse.size(1), orig_q_size_1))
+                lse_padded[:lse.size(0), :, :lse.size(2)] = lse
+                lse = lse_padded
 
         # Slice output and lse back to actual head count if we padded
         if actual_num_heads < padded_num_heads:
             out = out[:, :, :actual_num_heads, :]
-            lse = lse[:, :actual_num_heads, :]
+            if lse is not None:
+                lse = lse[:, :actual_num_heads, :]
 
         return out, lse
 
