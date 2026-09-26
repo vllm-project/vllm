@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+import vllm.utils.hashing as hashing
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
@@ -368,6 +369,20 @@ class CacheConfig:
                 str(cache_dtype),
             )
         return cache_dtype
+
+    @field_validator("prefix_caching_hash_algo", mode="after")
+    @classmethod
+    def _validate_prefix_caching_hash_algo(
+        cls, prefix_caching_hash_algo: PrefixCachingHashAlgo
+    ) -> PrefixCachingHashAlgo:
+        if prefix_caching_hash_algo in ("xxhash", "xxhash_cbor") and (
+            hashing._xxhash is None
+        ):
+            raise ModuleNotFoundError(
+                "xxhash is required for the 'xxhash' prefix caching hash "
+                "algorithms. Install it via `pip install xxhash`."
+            )
+        return prefix_caching_hash_algo
 
     def get_resolved_kv_cache_layout(self) -> KVCacheLayout:
         if self.kv_cache_layout is None:
