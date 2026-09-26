@@ -267,8 +267,7 @@ class ECCPUWorker:
         # so they are added up in uint64; signed arithmetic rejects them.
         src_base = np.uint64(src.view(-1).view(torch.uint8).data_ptr())
         dst_base = self._region.blocks.data_ptr()
-        # Entries are sized by placeholder count, which can exceed the number
-        # of embeddings, so blocks the output never reaches get no descriptor.
+        # Copy only the tensor bytes, excluding any block padding.
         n_used = -(-total_bytes // block_size)
         if n_used:
             slots, first_blocks, num_blocks = _coalesce_runs(block_ids[:n_used])
@@ -367,7 +366,7 @@ class ECCPUWorker:
         load_items = sorted(
             connector_metadata.loads.items(), key=lambda kv: kv[1][1][0]
         )
-        total_blocks = sum(len(block_ids) for _, (_, block_ids) in load_items)
+        total_blocks = sum(len(block_ids) for _, (_, block_ids, _) in load_items)
 
         stream = self._acquire_stream()
         compute_stream = current_platform.current_stream()
@@ -384,7 +383,7 @@ class ECCPUWorker:
 
             bufs = self._buf_pool.acquire(total_blocks)
             slots, first_blocks, num_blocks = _coalesce_runs(
-                list(chain.from_iterable(ids for _, (_, ids) in load_items))
+                list(chain.from_iterable(ids for _, (_, ids, _) in load_items))
             )
             bufs.add_copies(
                 0,
@@ -405,7 +404,7 @@ class ECCPUWorker:
                 Transfer(
                     start_event=start_event,
                     end_event=end_event,
-                    completions=[tid for _, (tid, _) in load_items],
+                    completions=[tid for _, (tid, _, _) in load_items],
                     bufs=bufs,
                     stream=stream,
                     num_bytes=total_blocks * block_size,
@@ -414,11 +413,10 @@ class ECCPUWorker:
 
             # Slice contiguous buffer into per-hash views.
             offset = 0
-            for mm_hash, (_, block_ids) in load_items:
+            for mm_hash, (_, block_ids, shape) in load_items:
                 n = len(block_ids)
-                encoder_cache[mm_hash] = (
-                    dst_buf[offset : offset + n].view(dtype).reshape(n, -1)
-                )
+                flat = dst_buf[offset : offset + n].view(dtype).reshape(-1)
+                encoder_cache[mm_hash] = flat[: shape[0] * shape[1]].view(shape)
                 offset += n
 
         current_platform.current_stream().wait_stream(stream)

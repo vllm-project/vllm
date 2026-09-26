@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,6 +25,9 @@ _N, _BS, _HID, _ES = 16, 64, 32, 2
 class _Pos:
     def __init__(self, offset, length):
         self.offset, self.length = offset, length
+
+    def get_num_embeds(self):
+        return self.length
 
 
 class _Feature:
@@ -101,10 +105,6 @@ def _consumer_sched(monkeypatch):
     s._transport = _FakeTransport()
     s._data = None
     s._compat_hash = "c"
-    # _setup_nixl normally computes these from model_config; set them
-    # directly since this helper builds gate-off then flips fields on.
-    s._hidden_dim = _HID
-    s._element_size = _ES
     s._metadata_resolver._cache["image"] = {"image_grid_thw"}
     return s
 
@@ -119,20 +119,37 @@ def _params(mm_hash, length):
     }
 
 
-def test_new_remote_read_defers_then_completes(monkeypatch):
+@pytest.mark.parametrize(
+    "omni, modality, width",
+    [(False, "image", 32), (True, "image", 128), (True, "audio", 32)],
+)
+def test_new_remote_read_defers_then_completes(monkeypatch, omni, modality, width):
     s = _consumer_sched(monkeypatch)
+    if omni:
+        s._vllm_config.model_config.hf_config = SimpleNamespace(
+            thinker_config=SimpleNamespace(
+                vision_config=SimpleNamespace(
+                    out_hidden_size=32, deepstack_visual_indexes=[8, 16, 24]
+                )
+            )
+        )
     fake = _FakeSession()
 
     # Route _start_xfer to our fake session instead of real ZMQ/NIXL, but
     # still reserve a real not-ready cache entry so mark_ready works.
     def _fake_start(mm_hash, info, size):
-        entry = s._cache.alloc(mm_hash, 1)
+        assert size == width * _ES
+        entry = s._cache.alloc(mm_hash, size // _BS)
         assert entry is not None
         fake.started.append(mm_hash)
         return True
 
     monkeypatch.setattr(s, "_start_xfer", _fake_start)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    feature = _Feature("h1", 1)
+    feature.modality = modality
+    params = _params("h1", 1)
+    params["h1"]["size_bytes"] = width * _ES
+    req = _Request([feature], params=params)
 
     # Step 1: unseen remote item -> read started, request deferred.
     assert s.ensure_cache_available(req, 0) is False
@@ -155,6 +172,7 @@ def test_new_remote_read_defers_then_completes(monkeypatch):
     s.update_state_after_alloc(req, 0)
     meta = s.build_connector_meta(scheduler_output=None)
     assert "h1" in meta.loads
+    assert meta.loads["h1"][2] == (1, width)
     assert "h1" not in s._step_completed  # cleared by promote
 
     # Step 3: still cached -> admitted directly, no new transfer.

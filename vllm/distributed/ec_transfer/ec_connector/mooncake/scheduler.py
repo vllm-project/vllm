@@ -85,9 +85,7 @@ class ECMooncakeScheduler:
         self._is_consumer = config.is_consumer
         self._control_addr = config.control_addr
         self._push_wait_timeout = config.push_wait_timeout_s
-        self._encoder_cache_hidden_dim = (
-            _get_encoder_cache_hidden_dim(vllm_config) if config.is_producer else None
-        )
+        self._vllm_config = vllm_config
         self._model_config = vllm_config.model_config
         self._control_client = ControlClient(config.control_timeout_ms)
         self._control_executor = ThreadPoolExecutor(
@@ -447,8 +445,10 @@ class ECMooncakeScheduler:
     def _encoder_output_spec(self, request: Any, index: int) -> TensorSpec:
         dtype = self._model_config.dtype
         assert isinstance(dtype, torch.dtype)
-        assert self._encoder_cache_hidden_dim is not None
-        shape = (request.get_num_encoder_embeds(index), self._encoder_cache_hidden_dim)
+        hidden_dim = _get_encoder_cache_hidden_dim(
+            self._vllm_config, request.mm_features[index].modality
+        )
+        shape = (request.get_num_encoder_embeds(index), hidden_dim)
         return TensorSpec(shape, str(dtype), math.prod(shape) * dtype.itemsize)
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:

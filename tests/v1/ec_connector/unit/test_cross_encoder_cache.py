@@ -45,6 +45,55 @@ KEY = (
 SPEC = TensorSpec((2, 2), "torch.float32", 16)
 
 
+@pytest.mark.parametrize("model_type", ["omni", "vl", "plain"])
+def test_push_and_store_shapes_follow_each_modality(monkeypatch, model_type):
+    """DeepStack expands visual embeddings, not the audio in the same request."""
+    from vllm.distributed.ec_transfer.ec_connector.mooncake import scheduler
+
+    monkeypatch.setattr(scheduler, "ensure_mooncake_available", lambda: None)
+    config = create_ec_vllm_config(ec_role="ec_producer", dtype=torch.bfloat16)
+    config.ec_transfer_config.ec_connector_extra_config["cross_encoder_cache"] = True
+    config.use_v2_model_runner = True
+    config.lora_config = None
+    config.model_config.multimodal_config = MultiModalConfig()
+    config.model_config.get_inputs_embeds_size.return_value = 2048
+    vision = SimpleNamespace(out_hidden_size=2048, deepstack_visual_indexes=[8, 16, 24])
+    hf_config = SimpleNamespace(vision_config=vision)
+    if model_type == "omni":
+        hf_config = SimpleNamespace(thinker_config=hf_config)
+    elif model_type == "plain":
+        hf_config = SimpleNamespace()
+    config.model_config.hf_config = hf_config
+    modalities = ["image", "audio", "video"]
+    request = SimpleNamespace(
+        request_id="mixed",
+        mm_features=[SimpleNamespace(identifier=m, modality=m) for m in modalities],
+        get_num_encoder_embeds=lambda index: 2,
+        ec_transfer_params={
+            "consumer_zmq": "tcp://consumer:1234",
+            "ec_items": [{"mm_hash": m, "transfer_id": m} for m in modalities],
+        },
+    )
+    instance = scheduler.ECMooncakeScheduler(config)
+    try:
+        for index in range(len(modalities)):
+            instance.update_state_after_alloc(request, index)
+        metadata = instance.build_connector_meta(
+            SimpleNamespace(free_encoder_mm_hashes=[], preempted_req_ids=set())
+        )
+        visual_width = 2048 if model_type == "plain" else 8192
+        for spec, width in zip(
+            metadata.pushes, [visual_width, 2048, visual_width], strict=True
+        ):
+            assert spec.shape == (2, width)
+            assert spec.nbytes == 2 * width * torch.bfloat16.itemsize
+        assert metadata.store_candidates["image"] == TensorSpec(
+            (2, visual_width), "torch.bfloat16", 2 * visual_width * 2
+        )
+    finally:
+        instance.close()
+
+
 def test_embedding_key_combines_namespace_and_identifier():
     config = create_ec_vllm_config(ec_role="ec_producer")
     config.ec_transfer_config.ec_connector_extra_config.update(

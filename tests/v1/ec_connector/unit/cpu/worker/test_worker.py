@@ -25,6 +25,7 @@ import logging
 import time
 import uuid
 from collections import deque
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -91,7 +92,9 @@ def _make_region() -> ECSharedRegion:
 
 
 def _vllm_config(rank: int = 0) -> Mock:
-    return create_ec_vllm_config(rank=rank, dtype=_DTYPE)
+    config = create_ec_vllm_config(rank=rank, dtype=_DTYPE)
+    config.model_config.get_inputs_embeds_size.return_value = _HIDDEN_DIM
+    return config
 
 
 def _meta(
@@ -105,7 +108,7 @@ def _meta(
     return ECCPUConnectorMetadata(
         saves=saves or {},
         loads={
-            mm_hash: (idx, block_ids)
+            mm_hash: (idx, block_ids, (len(block_ids), _HIDDEN_DIM))
             for idx, (mm_hash, block_ids) in enumerate((loads or {}).items())
         },
     )
@@ -883,7 +886,8 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
 
 @_requires_swap_blocks_batch
 @_requires_accelerator
-def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
+@pytest.mark.parametrize("modality, width", [("image", 32), ("audio", 8)])
+def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch, modality, width):
     """Full pipeline: scheduler allocates blocks, worker saves a GPU tensor to
     mmap via flush_saves, the worker's completion report marks the entry ready,
     the worker loads from mmap back to GPU, and the result matches the original.
@@ -904,26 +908,39 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     # Build scheduler sharing the same region.
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
-    scheduler = ECCPUScheduler(_vllm_config())
+    config = _vllm_config()
+    config.model_config.hf_config = SimpleNamespace(
+        thinker_config=SimpleNamespace(
+            vision_config=SimpleNamespace(
+                out_hidden_size=_HIDDEN_DIM, deepstack_visual_indexes=[8, 16, 24]
+            )
+        )
+    )
+    scheduler = ECCPUScheduler(config)
 
     # -- Step 1: scheduler allocates, worker saves --
-    n_blocks = 3
-    src = torch.arange(
-        n_blocks * _HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE
-    ).reshape(n_blocks, _HIDDEN_DIM)
+    n_tokens = 2
+    src = torch.arange(n_tokens * width, dtype=_DTYPE, device=DEVICE_TYPE).reshape(
+        n_tokens, width
+    )
 
     class _Pos:
         offset = 0
-        length = n_blocks
+        length = n_tokens
+
+        def get_num_embeds(self):
+            return self.length
 
     class _Feature:
         identifier = "img_001"
         mm_position = _Pos()
+        modality: str
 
     class _Request:
         request_id = "req_e2e"
         mm_features = [_Feature()]
 
+    _Request.mm_features[0].modality = modality
     scheduler.update_state_after_alloc(_Request(), 0)
     meta_save = scheduler.build_connector_meta(scheduler_output=None)
     assert "img_001" in meta_save.saves
@@ -948,8 +965,9 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     scheduler.update_state_after_alloc(_Request(), 0)
     meta_load = scheduler.build_connector_meta(scheduler_output=None)
     assert "img_001" in meta_load.loads
-    _, load_blocks = meta_load.loads["img_001"]
+    _, load_blocks, shape = meta_load.loads["img_001"]
     assert load_blocks == meta_save.saves["img_001"]
+    assert shape == tuple(src.shape)
 
     load_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(load_cache, meta_load)
