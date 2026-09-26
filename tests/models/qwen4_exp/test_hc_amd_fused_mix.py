@@ -164,6 +164,8 @@ def test_module_fused_and_unfused_agree(monkeypatch: pytest.MonkeyPatch) -> None
             torch.randn(4, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda") * 0.1
         )
 
+        from vllm.models.qwen4_exp.amd.ops import hc as hc_ops
+
         assert supports_fused_low_rank_mix(
             xn,
             module.input_mix_weight_down_block_inject.weight,
@@ -171,12 +173,63 @@ def test_module_fused_and_unfused_agree(monkeypatch: pytest.MonkeyPatch) -> None
         )
         fused_out, fused_inj = module._low_rank_mix(xn)
 
-        monkeypatch.setattr(hc_module, "supports_fused_low_rank_mix", lambda *a: False)
+        # The predicate lives in the ops now, so that is where it has to be
+        # stubbed to exercise the fallback.
+        monkeypatch.setattr(hc_ops, "supports_fused_low_rank_mix", lambda *a: False)
         unfused_out, unfused_inj = module._low_rank_mix(xn)
 
     torch.testing.assert_close(fused_out, unfused_out, atol=2e-2, rtol=2e-2)
     assert fused_inj.shape == unfused_inj.shape == (4, HC)
     torch.testing.assert_close(fused_inj, unfused_inj, atol=2e-2, rtol=2e-2)
+
+
+def test_fused_path_is_reached_without_recompiling() -> None:
+    """The width test has to live in the op, not in the compiled caller.
+
+    vLLM compiles this model ahead of time as a single graph spanning the
+    whole token range. A Python branch on the batch width in the caller is
+    therefore resolved once -- against the memory profile run, which is
+    thousands of tokens wide -- and frozen, and the recompilation that would
+    otherwise rescue such a branch never happens. An earlier revision of this
+    code had the branch in the caller and shipped a fused path that no served
+    request ever reached, while every eager test kept passing.
+
+    Encode that property directly: warm the graph at prefill widths, forbid
+    recompilation, then call at a decode width and require the fused kernels
+    to run anyway.
+    """
+    if not hasattr(torch.compiler, "set_stance"):
+        pytest.skip("torch.compiler.set_stance is unavailable")
+
+    from vllm.models.qwen4_exp.amd.ops import hc as hc_ops
+
+    _, w_down, w_up = _operands(1)
+
+    def mix(xn: torch.Tensor) -> torch.Tensor:
+        down = hc_ops.hc_down_silu(xn, w_down, LORA_RANK, HC)
+        return hc_ops.hc_up_gate_mix(down[:, :LORA_RANK], w_up, xn, HC)
+
+    compiled = torch.compile(mix, fullgraph=True, dynamic=True)
+    # Two widths so the batch dimension really is traced as dynamic rather
+    # than specialised to the first one.
+    for width in (64, 128):
+        compiled(
+            torch.randn(
+                width, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+            )
+            * 0.1
+        )
+
+    xn = torch.randn(4, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda") * 0.1
+    before = hc_ops.fused_call_count
+    with torch.compiler.set_stance("fail_on_recompile"):
+        out = compiled(xn)
+
+    assert hc_ops.fused_call_count > before, (
+        "the compiled graph never reached the fused kernels; the width test "
+        "has leaked back into the caller"
+    )
+    torch.testing.assert_close(out, mix(xn), atol=2e-2, rtol=2e-2)
 
 
 def test_full_chain_matches_reference() -> None:

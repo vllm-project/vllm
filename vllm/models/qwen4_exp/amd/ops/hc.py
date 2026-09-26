@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -215,8 +216,19 @@ def _hc_down_silu(
     M, K = x.shape
     N = weight.shape[0]
     assert weight.shape[1] == K
-    assert x.stride(1) == 1 and weight.stride(1) == 1
 
+    if not supports_fused_low_rank_mix(x, weight):
+        # The unfused route, by the same ops the caller used to run inline.
+        # All three HyperConnection projections are bias-free, unquantized and
+        # TP-disabled, so the raw GEMM is what the Linear module would have
+        # done. Only the low-rank columns take the activation; the injection
+        # logits and the alignment pad pass through.
+        out = rocm_unquantized_gemm_impl(x, weight, None)
+        out[:, :rank] = _hc_silu(out[:, :rank], hc_count)
+        return out
+
+    global fused_call_count
+    fused_call_count += 1
     out = x.new_empty((M, N))
     _hc_down_silu_kernel[(N,)](
         x,
@@ -304,8 +316,13 @@ def _hc_up_gate_mix(
     assert weight.shape[1] == rank
     assert xn.shape == (M, DIM)
     assert DIM % hc_count == 0
-    assert lora.stride(1) == 1 and weight.stride(1) == 1 and xn.stride(1) == 1
 
+    if not supports_fused_low_rank_mix(lora, weight, xn):
+        gate = rocm_unquantized_gemm_impl(lora, weight, None)
+        return _hc_gate_mix(xn, gate, hc_count)
+
+    global fused_call_count
+    fused_call_count += 1
     hc_dim = DIM // hc_count
     out = xn.new_empty((M, hc_dim))
     _hc_up_gate_mix_kernel[(hc_dim,)](
@@ -340,8 +357,25 @@ def _hc_up_gate_mix_fake(
 # they degrade quickly past it. Prefill must take the unfused path.
 HC_FUSED_MIX_MAX_TOKENS = 5
 
+# Incremented whenever a fused kernel is actually chosen. This exists so tests
+# can assert the fused path was *reached*, not merely that the result is right:
+# both paths compute the same thing, so numerics alone cannot tell them apart,
+# and an earlier revision of this code shipped a fused path that no served
+# request ever ran.
+fused_call_count = 0
+
 
 def supports_fused_low_rank_mix(xn: torch.Tensor, *weights: torch.Tensor) -> bool:
+    """Whether the fused kernels can handle this call.
+
+    Consulted from inside the ops, not by the caller. The caller is compiled
+    ahead of time as a single graph spanning the whole token range, so a
+    Python branch there is resolved once -- against the memory profile run,
+    which is thousands of tokens wide -- and baked in for every batch the
+    graph will ever serve. A `direct_register_custom_op` op is opaque to that
+    tracing and is re-entered on every execution, including once per captured
+    CUDA-graph size, so the decision made here is the one that runs.
+    """
     return (
         xn.dim() == 2
         and xn.shape[0] <= HC_FUSED_MIX_MAX_TOKENS
