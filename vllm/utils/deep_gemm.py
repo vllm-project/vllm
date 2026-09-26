@@ -597,6 +597,7 @@ def fp8_fp4_mqa_logits(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
     clean_logits: bool,
+    max_seqlen_k: int = 0,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
@@ -618,9 +619,14 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        max_seqlen_k: If > 0, allocate the logits `max_seqlen_k` columns wide
+            (must be >= N; requires `clean_logits=False`). The kernel still
+            computes only `[cu_seqlen_ks, cu_seqlen_ke)` per row. 0 keeps the
+            per-call width N.
 
     Returns:
-        Logits tensor of shape [M, N], dtype `torch.float32`.
+        Logits tensor of shape [M, N] (or [M, max_seqlen_k]), dtype
+        `torch.float32`.
 
     """
     _lazy_init()
@@ -633,6 +639,7 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ks,
         cu_seqlen_ke,
         clean_logits=clean_logits,
+        max_seqlen_k=max_seqlen_k,
     )
 
 

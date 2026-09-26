@@ -382,6 +382,9 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
+    # Column count the logits are allocated with (0 = the chunk's own kv
+    # length). Never below the chunk's kv length; see _split_indexer_prefill_chunks.
+    logits_width: int = 0
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -976,6 +979,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"(compress_ratio={self.compress_ratio})."
             )
 
+        # Fixed allocation width for the prefill logits (0 = the chunk's own kv
+        # length). Unset env: integrated (unified-memory) GPUs only, where the
+        # per-chunk sizes retained by the caching allocator come out of the
+        # host's share of memory.
+        use_fixed_width = envs.VLLM_SPARSE_INDEXER_FIXED_LOGITS_WIDTH
+        if use_fixed_width is None:
+            use_fixed_width = current_platform.is_integrated_gpu()
+        self.fixed_logits_width = 0
+        if use_fixed_width and self.dcp_world_size == 1:
+            max_model_len = self.vllm_config.model_config.max_model_len
+            self.fixed_logits_width = -(-max_model_len // max(1, self.compress_ratio))
+
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
             # compress_ratio > 1 (DeepseekV4)
@@ -1211,11 +1226,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        logits_width: int = 0,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
           workspace)
-        - Logits constraint: M * N * 4 <= max_logits_bytes
+        - Logits constraint: M * max(N, logits_width) * 4 <= max_logits_bytes
+
+        With ``logits_width > 0`` the logits are allocated ``logits_width``
+        columns wide regardless of the chunk's kv length, so the budget check
+        and the query sub-chunk size use that fixed width and every sub-chunk
+        of a long prefill requests an identically sized tensor.
 
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
@@ -1236,7 +1257,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
+                new_w = max(new_n, logits_width)
+                if new_n <= workspace_size and new_m * new_w <= max_logits_elems:
                     chunk_m, chunk_n = new_m, new_n
                     end += 1
                 else:
@@ -1252,8 +1274,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 end += 1
 
             req_slice = slice(start + request_offset, end + request_offset)
+            chunk_w = max(chunk_n, logits_width)
             max_q = (
-                max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
+                max(1, max_logits_elems // chunk_w) if chunk_w > 0 else max(1, chunk_m)
             )
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
@@ -1380,6 +1403,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    logits_width=self.fixed_logits_width,
                 )
 
             chunks = []
@@ -1413,6 +1437,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
+                    if self.fixed_logits_width:
+                        metadata.logits_width = max(
+                            metadata.total_seq_lens, self.fixed_logits_width
+                        )
                     chunks.append(metadata)
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,

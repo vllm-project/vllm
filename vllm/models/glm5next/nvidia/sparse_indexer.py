@@ -321,7 +321,11 @@ def sparse_attn_indexer_kpool(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
                 clean_logits=False,
+                max_seqlen_k=chunk.logits_width,
             )
+            # The storage may be wider than this chunk's kv length (fixed
+            # allocation width); keep the usual [M, N] view for the top-k.
+            logits = logits[:, : k_quant_cast.shape[0]]
             num_rows = logits.shape[0]
 
             # kpool: logits are pool-granular (compress_ratio == index_kpool),

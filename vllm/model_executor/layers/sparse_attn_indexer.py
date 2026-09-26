@@ -587,7 +587,12 @@ def sparse_attn_indexer(
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                         clean_logits=False,
+                        max_seqlen_k=chunk.logits_width,
                     )
+                    # The storage may be wider than this chunk's kv length
+                    # (fixed allocation width); the consumers below take the
+                    # usual [M, N] view and read strides from it.
+                    logits = logits[:, : k_quant_cast.shape[0]]
                 num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
