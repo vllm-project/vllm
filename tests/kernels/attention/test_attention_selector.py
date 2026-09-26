@@ -453,6 +453,31 @@ def test_per_head_quant_scales_backend_selection(
             assert backend_name in str(exc_info.value)
 
 
+@pytest.mark.skipif(
+    CudaPlatform is None, reason="CUDA platform is required for this test"
+)
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128, 192, 256])
+def test_int4_per_token_head_head_size_selection(head_size: int):
+    """INT4 per-token-head KV cache is selectable at any even head size.
+
+    The Hadamard rotation the INT4 write path applies is now defined for
+    non-power-of-two rows as well (it runs block-diagonally, see
+    ``fast_hadamard_transform``), so a model such as Phi-3 (head_size=96) must
+    keep selecting TRITON_ATTN instead of being rejected.
+    """
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        backend = get_attn_backend(
+            head_size=head_size,
+            dtype=torch.float16,
+            kv_cache_dtype="int4_per_token_head",
+        )
+        assert backend.get_name() == "TRITON_ATTN"
+
+
 @pytest.mark.parametrize(
     "backend_name,use_non_causal,should_succeed",
     [
