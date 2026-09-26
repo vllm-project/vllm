@@ -67,9 +67,17 @@ def plamo3_config(thinking: bool = True) -> ParserEngineConfig:
             (ParserState.REASONING, "THINK_START"): Transition(
                 ParserState.REASONING,
             ),
+            (ParserState.CONTENT, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_START,),
+            ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
+            ),
+            (ParserState.CONTENT, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (),
             ),
             (ParserState.REASONING, "TOOL_REQUESTS_START"): Transition(
                 ParserState.TOOL_PREAMBLE,

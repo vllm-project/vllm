@@ -125,6 +125,24 @@ def test_reasoning_mode(
     assert not result.tool_calls
 
 
+def test_duplicate_think_end_does_not_leak_into_content(
+    parser_cls, mock_tokenizer, mock_request
+):
+    output = END_THINK + "A" + END_THINK + "B"
+    reasoning, content, calls = parser_cls(mock_tokenizer).parse(output, mock_request)
+    assert (reasoning, content) == (None, "AB")
+    assert not calls
+
+
+def test_content_can_start_a_new_reasoning_block(
+    parser_cls, mock_tokenizer, mock_request
+):
+    output = END_THINK + "A" + BEGIN_THINK + "R" + END_THINK
+    reasoning, content, calls = parser_cls(mock_tokenizer).parse(output, mock_request)
+    assert (reasoning, content) == ("R", "A")
+    assert not calls
+
+
 @pytest.mark.parametrize("chunk_size", [1, 7, None])
 @pytest.mark.parametrize("finished_on_last", [False, True])
 @pytest.mark.parametrize(
