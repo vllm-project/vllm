@@ -452,5 +452,6 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 # stage above adds examples/ for testing only, so without this the published
 # vllm-openai-cpu image would not ship examples/*.jinja.
 COPY examples examples
+COPY tools/recipes tools/recipes
 
 ENTRYPOINT ["vllm", "serve"]
