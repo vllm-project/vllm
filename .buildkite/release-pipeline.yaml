@@ -697,24 +697,28 @@ steps:
           DOCKERHUB_USERNAME: "vllmbot"
 
   # =============================================================================
-  # ROCm Release Pipeline (x86_64 only)
+  # ROCm 7.2 (legacy) Release Pipeline (x86_64 only)
   # =============================================================================
+  #
+  # Legacy ROCm 7.2 stack (apt ROCm, torch/triton built from source), kept for
+  # a transition period. Publishes :nightly-rocm72 / :latest-rocm72 and the ROCm
+  # wheels; the default :nightly / :latest images come from ROCm 10.0 below.
   #
   # vLLM version is determined by the Buildkite checkout (like CUDA pipeline).
   # To build a specific version, trigger the build from that branch/tag.
   #
   # Environment variables for ROCm builds (set via Buildkite UI or schedule):
   #
-  # Note: ROCm version is determined by BASE_IMAGE in docker/Dockerfile.rocm_base
+  # Note: ROCm version is determined by BASE_IMAGE in docker/Dockerfile.rocm_72_base
   #
   # =============================================================================
 
-  - group: "Build ROCm Wheel / Image "
+  - group: "Build ROCm 7.2 Wheel / Image"
     key: "build-rocm-wheel-image"
     depends_on: ~
     steps:
       # ROCm Job 1: Build ROCm Base Wheels (with S3 caching)
-      - label: ":rocm: Build ROCm Base Image & Wheels"
+      - label: ":rocm: Build ROCm 7.2 Base Image & Wheels"
         id: build-rocm-base-wheels
         depends_on: ~
         agents:
@@ -776,7 +780,7 @@ steps:
               
               # Build full base image and push to ECR
               DOCKER_BUILDKIT=1 docker buildx build \
-                --file docker/Dockerfile.rocm_base \
+                --file docker/Dockerfile.rocm_72_base \
                 --tag "$${ECR_CACHE_TAG}" \
                 --build-arg USE_SCCACHE=1 \
                 --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
@@ -787,7 +791,7 @@ steps:
               
               # Build wheel extraction stage
               DOCKER_BUILDKIT=1 docker buildx build \
-                --file docker/Dockerfile.rocm_base \
+                --file docker/Dockerfile.rocm_72_base \
                 --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
                 --target debs_wheel_release \
                 --build-arg USE_SCCACHE=1 \
@@ -821,7 +825,7 @@ steps:
           S3_BUCKET: "vllm-wheels"
 
       # ROCm Job 2: Build vLLM ROCm Wheel
-      - label: ":python: Build vLLM ROCm Wheel - x86_64"
+      - label: ":python: Build vLLM ROCm 7.2 Wheel - x86_64"
         id: build-rocm-vllm-wheel
         depends_on:
           - step: build-rocm-base-wheels
@@ -892,7 +896,7 @@ steps:
 
             # Build vLLM wheel using local checkout (REMOTE_VLLM=0)
             DOCKER_BUILDKIT=1 docker build \
-              --file docker/Dockerfile.rocm \
+              --file docker/Dockerfile.rocm_72 \
               --target export_vllm_wheel_release \
               --output type=local,dest=rocm-dist \
               --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
@@ -955,10 +959,14 @@ steps:
 
       # ROCm Job 5: Generate Root Index for ROCm Wheels (for release only)
       # This is the job to create https://wheels.vllm.ai/rocm/ index allowing
-      # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`
+      # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`.
+      # The root index serves the default ROCm 10.0 (rocm100) wheels; ROCm 7.2 stays
+      # available at https://wheels.vllm.ai/rocm/<version>/rocm723/.
       - block: "Generate Root Index for ROCm Wheels for Release"
         key: block-generate-root-index-rocm-wheels
-        depends_on: upload-rocm-wheels
+        depends_on:
+          - upload-rocm-wheels
+          - upload-rocm100-wheels
 
       - label: ":package: Generate Root Index for ROCm Wheels for Release"
         depends_on: block-generate-root-index-rocm-wheels
@@ -969,10 +977,10 @@ steps:
           - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
         env:
           S3_BUCKET: "vllm-wheels"
-          VARIANT: "rocm723"
+          VARIANT: "rocm100"
 
       # ROCm Job 6: Build ROCm Release Docker Image
-      - label: ":docker: Build release image - x86_64 - ROCm"
+      - label: ":docker: Build release image - x86_64 - ROCm 7.2"
         id: build-rocm-release-image
         depends_on:
           - step: block-build-release-images
@@ -1026,7 +1034,7 @@ steps:
               --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm \
               --target vllm-openai \
               --progress plain \
-              -f docker/Dockerfile.rocm .
+              -f docker/Dockerfile.rocm_72 .
             
             # Push to ECR
             docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm
@@ -1056,17 +1064,17 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
-      - label: "Publish nightly ROCm image to DockerHub"
+      - label: "Publish nightly ROCm 7.2 image to DockerHub"
         depends_on:
           - build-rocm-release-image
         if: build.env("NIGHTLY") == "1"
         agents:
           queue: small_cpu_queue_release
         commands:
-          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh"
+          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh rocm rocm72"
           # Clean up old nightly builds (keep only last 14)
-          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-rocm"
-          - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly- vllm/vllm-openai-rocm"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly-rocm72- vllm/vllm-openai-rocm"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly-rocm72- vllm/vllm-openai-rocm"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
@@ -1076,24 +1084,24 @@ steps:
           DOCKERHUB_USERNAME: "vllmbot"
 
   # =============================================================================
-  # ROCk Release Pipeline (x86_64 only)
+  # ROCm 10.0 (default) Release Pipeline (x86_64 only)
   # =============================================================================
   #
-  # Same shape as the ROCm pipeline above (Jobs 1 and 6 only), but built from
-  # docker/Dockerfile.rock_base and docker/Dockerfile.rock, which install the
-  # ROCm SDK from TheRock wheels instead of the ROCm apt repos.
+  # Built from docker/Dockerfile.rocm_base and docker/Dockerfile.rocm, which
+  # install the ROCm SDK from TheRock wheels. Publishes :nightly-rocm100 and the
+  # default :nightly (and :latest-rocm100 / :latest on release).
   #
   # Note: ROCm SDK version is determined by ROCM_SDK_VERSION in
-  # docker/Dockerfile.rock_base
+  # docker/Dockerfile.rocm_base
   #
   # =============================================================================
 
-  - group: "Build ROCk Image"
+  - group: "Build ROCm 10.0 Image"
     key: "build-rock-image"
     depends_on: ~
     steps:
-      # ROCk Job 1: Build ROCk Base Image (with ECR caching)
-      - label: ":rocm: Build ROCk Base Image"
+      # ROCm 10.0 Job 1: Build ROCm 10.0 Base Image & Wheels (ECR + S3 caching)
+      - label: ":rocm: Build ROCm 10.0 Base Image & Wheels"
         id: build-rock-base-image
         depends_on: ~
         agents:
@@ -1105,11 +1113,11 @@ steps:
 
             # The SDK version, torch wheels and component branches all live in
             # the Dockerfile, so its hash is the cache key.
-            CACHE_KEY=$$(sha256sum docker/Dockerfile.rock_base | cut -c1-16)
+            CACHE_KEY=$$(sha256sum docker/Dockerfile.rocm_base | cut -c1-16)
             ECR_CACHE_TAG="public.ecr.aws/q9t5s3a7/vllm-release-repo:$${CACHE_KEY}-rock-base"
 
             echo "========================================"
-            echo "ROCk Base Build Configuration"
+            echo "ROCm 10.0 Base Build Configuration"
             echo "========================================"
             echo "  CACHE_KEY: $${CACHE_KEY}"
             echo "  ECR_CACHE_TAG: $${ECR_CACHE_TAG}"
@@ -1122,10 +1130,10 @@ steps:
             if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
               echo "ECR image cache HIT"
             else
-              echo "CACHE MISS - Building from scratch..."
+              echo "Image CACHE MISS - Building from scratch..."
 
               DOCKER_BUILDKIT=1 docker buildx build \
-                --file docker/Dockerfile.rock_base \
+                --file docker/Dockerfile.rocm_base \
                 --tag "$${ECR_CACHE_TAG}" \
                 --build-arg USE_SCCACHE=1 \
                 --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
@@ -1135,13 +1143,121 @@ steps:
                 .
             fi
 
+            # Base wheels for the rocm100 index are cached in S3 separately, keyed
+            # on the Dockerfile and the TheRock repack helper.
+            if [ "$$(.buildkite/scripts/cache-rocm-base-wheels.sh check)" = "hit" ]; then
+              echo "S3 wheels cache HIT"
+              .buildkite/scripts/cache-rocm-base-wheels.sh download
+            else
+              echo "Wheels CACHE MISS - Building debs_wheel_release..."
+              DOCKER_BUILDKIT=1 docker buildx build \
+                --file docker/Dockerfile.rocm_base \
+                --tag rocm100-base-debs:$${BUILDKITE_BUILD_NUMBER} \
+                --target debs_wheel_release \
+                --build-arg USE_SCCACHE=1 \
+                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+                --build-arg SCCACHE_REGION_NAME=us-west-2 \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --load \
+                .
+              mkdir -p "$${ROCM_BASE_WHEELS_DIR}"
+              cid=$$(docker create rocm100-base-debs:$${BUILDKITE_BUILD_NUMBER})
+              docker cp $${cid}:/app/debs/. "$${ROCM_BASE_WHEELS_DIR}/"
+              docker rm $${cid}
+              .buildkite/scripts/cache-rocm-base-wheels.sh upload
+            fi
+
             # Save ECR tag for downstream jobs
             buildkite-agent meta-data set "rock-base-image-tag" "$${ECR_CACHE_TAG}"
+        artifact_paths:
+          - "artifacts/rocm100-base-wheels/*.whl"
+        env:
+          DOCKER_BUILDKIT: "1"
+          S3_BUCKET: "vllm-wheels"
+          ROCM_WHEEL_CACHE_DOCKERFILE: "docker/Dockerfile.rocm_base"
+          ROCM_WHEEL_CACHE_INPUTS: "tools/vllm-rocm/therock_wheels.py"
+          ROCM_BASE_WHEELS_DIR: "artifacts/rocm100-base-wheels"
+
+      # ROCm 10.0 Job 2: Build vLLM ROCm 10.0 Wheel
+      - label: ":python: Build vLLM ROCm 10.0 Wheel - x86_64"
+        id: build-rocm100-vllm-wheel
+        depends_on:
+          - step: build-rock-base-image
+            allow_failure: false
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 180
+        commands:
+          - |
+            set -euo pipefail
+
+            # Buildkite's default fetch doesn't update moved tags; version detection needs them
+            git fetch --tags --force origin
+
+            buildkite-agent artifact download "artifacts/rocm100-base-wheels/*.whl" .
+
+            ECR_IMAGE_TAG="$$(buildkite-agent meta-data get rock-base-image-tag 2>/dev/null || echo '')"
+            if [ -z "$${ECR_IMAGE_TAG}" ]; then
+              echo "ERROR: rock-base-image-tag metadata not found"
+              echo "This should have been set by the build-rock-base-image job"
+              exit 1
+            fi
+
+            aws ecr-public get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+            docker pull "$${ECR_IMAGE_TAG}"
+
+            mkdir -p docker/context/base-wheels
+            touch docker/context/base-wheels/.keep
+            cp artifacts/rocm100-base-wheels/*.whl docker/context/base-wheels/
+            ls -lh docker/context/base-wheels/
+
+            DOCKER_BUILDKIT=1 docker build \
+              --file docker/Dockerfile.rocm \
+              --target export_vllm_wheel_release \
+              --output type=local,dest=rocm-dist \
+              --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
+              --build-arg REMOTE_VLLM=0 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+              --build-arg SCCACHE_REGION_NAME=us-west-2 \
+              --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+              .
+            mkdir -p artifacts/rocm100-vllm-wheel
+            cp rocm-dist/*.whl artifacts/rocm100-vllm-wheel/
+            ls -lh artifacts/rocm100-vllm-wheel/
+        artifact_paths:
+          - "artifacts/rocm100-vllm-wheel/*.whl"
         env:
           DOCKER_BUILDKIT: "1"
 
-      # ROCk Job 2: Build ROCk Release Docker Image
-      - label: ":docker: Build release image - x86_64 - ROCk"
+      # ROCm 10.0 Job 3: Upload wheels to S3 as the rocm100 index. TheRock's SDK,
+      # device kernels and torchvision/torchaudio are linked rather than hosted.
+      - label: ":s3: Upload ROCm 10.0 Wheels to S3"
+        id: upload-rocm100-wheels
+        depends_on:
+          - step: build-rocm100-vllm-wheel
+            allow_failure: false
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 60
+        commands:
+          - |
+            set -euo pipefail
+            buildkite-agent artifact download "artifacts/rocm100-base-wheels/*.whl" .
+            buildkite-agent artifact download "artifacts/rocm100-vllm-wheel/*.whl" .
+            python3 tools/vllm-rocm/therock_wheels.py external-links > therock-external-links.txt
+            cat therock-external-links.txt
+            ROCM_EXTERNAL_LINKS=therock-external-links.txt \
+              bash .buildkite/scripts/upload-rocm-wheels.sh
+        env:
+          S3_BUCKET: "vllm-wheels"
+          ROCM_WHEEL_DIRS: "artifacts/rocm100-base-wheels artifacts/rocm100-vllm-wheel"
+          ROCM_WHEEL_SUBDIR: "rocm100-wheels"
+
+      # ROCm 10.0 Job 4: Build ROCm 10.0 Release Docker Image
+      - label: ":docker: Build release image - x86_64 - ROCm 10.0"
         id: build-rock-release-image
         depends_on:
           - step: block-build-release-images
@@ -1172,7 +1288,7 @@ steps:
             buildkite-agent meta-data set "rock-base-ecr-tag" "$${ECR_IMAGE_TAG}"
 
             echo "========================================"
-            echo "Building vLLM ROCk release image with:"
+            echo "Building vLLM ROCm 10.0 release image with:"
             echo "  BASE_IMAGE: $${ECR_IMAGE_TAG}"
             echo "  BUILDKITE_COMMIT: $${BUILDKITE_COMMIT}"
             echo "========================================"
@@ -1188,23 +1304,25 @@ steps:
               --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rock \
               --target vllm-openai \
               --progress plain \
-              -f docker/Dockerfile.rock .
+              -f docker/Dockerfile.rocm .
 
             docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rock
         env:
           DOCKER_BUILDKIT: "1"
 
-      - label: "Publish nightly ROCk image to DockerHub"
+      - label: "Publish nightly ROCm 10.0 image to DockerHub"
         depends_on:
           - build-rock-release-image
         if: build.env("NIGHTLY") == "1"
         agents:
           queue: small_cpu_queue_release
         commands:
-          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh rock rocm100"
-          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh rock rocm100 --default"
+          # Clean up old nightly builds (keep only last 14 per tag family)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly-rocm100- vllm/vllm-openai-rocm"
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly-rocm100- vllm/vllm-openai-rocm"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-rocm nightly-rocm"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly- vllm/vllm-openai-rocm base-nightly-rocm"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
@@ -1226,6 +1344,7 @@ steps:
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
       - create-manifest-xpu
       - build-rocm-release-image
+      - build-rock-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
       # doesn't race the in-progress CPU build. allow_failure lets publish
@@ -1250,6 +1369,7 @@ steps:
       - "cuda-13-0-ubuntu-24-04"
       - "cuda-12-9-ubuntu-24-04"
       - "rocm"
+      - "rocm72"
       - "xpu"
       - "cpu"
     plugins:

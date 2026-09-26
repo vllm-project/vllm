@@ -280,8 +280,9 @@ COPY --from=fetch_vllm \
     ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
     requirements/
 
+# Use constraints file to protect triton, pybind11, and torch dependencies.
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r requirements/rocm.txt
+    uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt
 
 # Fetch only the pinned ROCm Triton kernels package. Keeping this before the
 # vLLM source COPYs makes the download reusable when native sources change.
@@ -322,8 +323,9 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+rocm.csrc.build"
 
 RUN --mount=type=bind,source=pyproject.toml,target=${COMMON_WORKDIR}/vllm/pyproject.toml \
     --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
-    grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
+    { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         cmake/external_projects/triton_kernels.cmake \
+        || echo "WARNING: Dockerfile.rocm ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && export CCACHE_BASEDIR="$PWD" \
     && echo "=== ccache stats before ROCm native build ===" \
     && (ccache --show-stats || true) \
@@ -366,7 +368,8 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools /tools
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/benchmark_helion_kernels.py /tools/benchmark_helion_kernels.py
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
@@ -386,7 +389,6 @@ ARG NIXL_BRANCH="231d56753047c989062a5cb2ac703a1ad761c7d2"
 ARG NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
 ARG UCX_BRANCH="96e58a16039f6d7d213bc967b8069238742c5194"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV NIXL_HOME=/usr/local/nixl
 
@@ -539,7 +541,7 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
     c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
     test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
     expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
-    actual="$(/opt/rocm/llvm/bin/llvm-objdump --offloading "${c_ops}" \
+    actual="$(llvm-objdump --offloading "${c_ops}" \
         | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
     if [ "${actual}" != "${expected}" ]; then \
         printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
@@ -547,32 +549,10 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
         exit 1; \
     fi
 
-# ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
-# invalidate the slow ROCShmem build.
-FROM base AS build_rocshmem
-ARG ROCSHMEM_BRANCH="f0acb0c6"
-ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-# DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
-# it can be linked against DeepEP without arch mismatches.
-ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
-ENV ROCM_PATH=/opt/rocm
-ENV ROCSHMEM_DIR=/opt/rocshmem
-
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO} \
- && cd rocm-systems \
- && git sparse-checkout set --cone projects/rocshmem \
- && git checkout ${ROCSHMEM_BRANCH} \
- && mkdir -p projects/rocshmem/build \
- && cd projects/rocshmem/build \
- && CC="ccache gcc" CXX="ccache g++" INSTALL_PREFIX=${ROCSHMEM_DIR} \
-    bash ../scripts/build_configs/all_backends \
-      -DROCM_PATH=${ROCM_PATH} \
-      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
-      -DUSE_EXTERNAL_MPI=OFF
-
-# DeepEP build stage - depends on ROCShmem, builds the HIP kernel wheel.
-FROM build_rocshmem AS build_deepep
+# DeepEP build stage. ROCShmem is provided by TheRock SDK
+# ROCSHMEM_DIR set to the SDK install path so DeepEP finds the headers, etc.
+FROM base AS build_deepep
+ENV ROCSHMEM_DIR=${ROCM_PATH}
 ARG DEEPEP_BRANCH="0f63d3e9"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
@@ -691,8 +671,9 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 
 # Install the packaging helpers before modifying requirements/rocm.txt.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
+    { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         vllm/cmake/external_projects/triton_kernels.cmake \
+        || echo "WARNING: Dockerfile.rocm ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && cd vllm \
     && uv pip install --system setuptools_scm regex
 
@@ -748,7 +729,8 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/requirements /requir
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
-COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools /tools
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/benchmark_helion_kernels.py /tools/benchmark_helion_kernels.py
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
@@ -793,9 +775,6 @@ RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
     uv pip install --system /nixl_install/*.whl /deep_install/*.whl
 
-# Copy ROCShmem runtime libraries.
-COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
-
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
 RUN timeout --kill-after=30s 5m apt-get update -q -y --error-on=any \
     -o Acquire::Retries=3 \
@@ -828,7 +807,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
+    uv pip install --system -c /etc/rocm-constraints.txt \
+        -r /tmp/ci-base-requirements/rocm.txt \
     && rm -rf /tmp/ci-base-requirements
 
 # Enable fast and less brittle model downloads in tests.
@@ -906,8 +886,6 @@ RUN mkdir src && mv vllm src/vllm
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
 
-# Run the structural smoke test inside BuildKit, where the test image layers
-# are already available. Export only a build-scoped success marker.
 FROM test AS test_smoke
 ARG ROCM_SMOKE_ID
 RUN --network=none \
@@ -951,13 +929,35 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system -c /etc/rocm-constraints.txt *.whl
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
+
+# Recompute the base's triton fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && ACTUAL=$(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && echo "triton sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')"
+
+# Recompute the base's pybind11 fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^PYBIND11_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && EXPECTED_ABI=$(grep '^PYBIND11_INTERNALS_VERSION: ' /app/versions.txt | cut -d' ' -f2) \
+    && INC=$(python3 -c 'import pybind11; print(pybind11.get_include())') \
+    && ACTUAL=$(find "${INC}" -type f -name '*.h' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && ACTUAL_ABI=$(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' "${INC}" | awk '{print $NF}') \
+    && echo "pybind11 $(pip show pybind11 | awk '/^Version:/ {print $2}')" \
+        "sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+        "internals expected=${EXPECTED_ABI} actual=${ACTUAL_ABI}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && test "${EXPECTED_ABI}" = "${ACTUAL_ABI}"
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE

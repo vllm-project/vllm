@@ -1,21 +1,30 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="669b31a" # release/internal/3.8.x as of 09/17
+ARG BASE_IMAGE=ubuntu:22.04
+ARG PYTHON_VERSION=3.12
+ARG TORCH_VERSION=2.12.0+rocm10.0.0
+ARG TORCHVISION_VERSION=0.27.0+rocm10.0.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
+ARG TRITON_BRANCH="c0a142ffcbb42f9a67a56bf791cad472be1d6425" # release/internal/3.8.x as of 9/21/2026
+ARG TRITON_VERSION=3.8.0+gitc0a142ff
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="733fca1" # release/2.13 as of 09/17
-ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
-ARG PYTORCH_VISION_BRANCH="v0.28.0"
-ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG PYTORCH_AUDIO_BRANCH="v2.11.0"
-ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.22.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
+ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
-ARG ROCM_RUNTIME_COMMIT="af70edc91f1dc5d228fd4c076df99e65e49c4521"
+ARG ROCM_RUNTIME_COMMIT="25e14349f2606a6b95c4ccd45eb92a1835646cf2"
+
+
+# TheRock configuration
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL="https://stable.repo.amd.com/rocm/whl-next/" # For pre-built GPU images, packages, etc.
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-next/" # For torch, triton, etc. wheels with latest fixes.
+ARG ROCM_SDK_VERSION=10.0.0
+
+# Build configuration
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+ARG AITER_ROCM_ARCH="gfx942;gfx950"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -25,46 +34,126 @@ ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
-
 FROM ${BASE_IMAGE} AS base
 
-ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ENV ROCM_PATH=/opt/rocm
-ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
+ARG PYTORCH_ROCM_ARCH
+ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
+ARG AITER_ROCM_ARCH
+ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
 
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
-ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV AITER_ROCM_ARCH=gfx942;gfx950
-# Note: Do not set MORI_GPU_ARCHS here, it is automatically inferred at runtime
+ARG SITE_PACKAGES
+ENV SITE_PACKAGES=${SITE_PACKAGES}
+ENV SDK_DEV="$SITE_PACKAGES/_rocm_sdk_devel" \
+    SDK_CORE="$SITE_PACKAGES/_rocm_sdk_core"
+ENV ROCM_PATH="$SDK_DEV" \
+    ROCM_HOME="$SDK_DEV" \
+    HIP_PATH="$SDK_DEV" \
+    HIP_CLANG_PATH="$SDK_DEV/lib/llvm/bin" \
+    HIP_DEVICE_LIB_PATH="$SDK_CORE/lib/llvm/amdgcn/bitcode"
+ENV LD_LIBRARY_PATH="$SDK_DEV/lib:$SDK_DEV/lib/rocm_sysdeps/lib:$SDK_CORE/lib:$SDK_CORE/lib/rocm_sysdeps/lib"
+ENV PATH="$SDK_DEV/bin:$SDK_DEV/lib/llvm/bin:$SDK_CORE/bin:$PATH"
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python and other dependencies (plus gcc-13, selected later in build_pytorch).
+# Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
+    && apt-get install -y software-properties-common build-essential git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config libdrm-dev libnuma-dev kmod \
     && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python${PYTHON_VERSION}-lib2to3 python-is-python3 gcc-13 g++-13 \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11==3.0.4 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
+
+# Install ROCm SDK via TheRock
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
+ARG ROCM_SDK_VERSION
+RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
+    && rocm-sdk init
+
+# Install PyTorch wheels (nightly for latest torch, release as fallback)
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCHVISION_VERSION
+RUN pip install \
+    --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    "torch==${TORCH_VERSION}" \
+    "torchaudio==${TORCHAUDIO_VERSION}" \
+    "torchvision==${TORCHVISION_VERSION}"
+
+# Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
+
+# Possible values that can be in PYTORCH_ROCM_ARCH:
+#
+# gfx90a (MI210/250), gfx942 (MI300), gfx950 (MI350), gfx1100 (7900XTX),
+# gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU)
+
+# For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
+# PyTorch needs to run on that specific chip.
+SHELL ["/bin/bash", "-c"]
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
+    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
+        echo "Installing device packages for ${arch}" \
+        && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+            --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+            amd-torch-device-${arch}==${TORCH_VER} \
+            rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
+    done
+
+# Remove gfx90a xnack kpacks (ASAN artifacts that cause hipErrorInvalidImage on MI250)
+RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
+         "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
+
+RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
+ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi
+
+# TheRock runtime fixes
+RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
+        sed -i 's/rtld_global: bool = True/rtld_global: bool = False/g' "${SITE_PACKAGES}/rocm_sdk/__init__.py"; \
+    fi \
+    && if [ -f "${SITE_PACKAGES}/_rocm_sdk_core/lib/librocm_smi64.so.1" ] \
+       && [ ! -e "${ROCM_PATH}/lib/librocm_smi64.so.7" ]; then \
+        ln -sfn "${SITE_PACKAGES}/_rocm_sdk_core/lib/librocm_smi64.so.1" "${ROCM_PATH}/lib/librocm_smi64.so.7"; \
+    fi \
+    && printf '%s\n%s\n' "${ROCM_PATH}/lib" "${SITE_PACKAGES}/_rocm_sdk_core/lib" > /etc/ld.so.conf.d/rocm-pip.conf \
+    && for f in ${SITE_PACKAGES}/_rocm_sdk_core/lib/libamdhip64.so*; do \
+        bn=$(basename "$f"); \
+        if [ -f "${ROCM_PATH}/lib/${bn}" ] && [ -f "$f" ] && [ ! -L "$f" ]; then \
+            rm -f "$f"; \
+            ln -sfn "${ROCM_PATH}/lib/${bn}" "$f"; \
+        fi; \
+    done \
+    && for f in librocprofiler-sdk.so.1 librocprofiler-register.so.0 \
+              librocprofiler-sdk-roctx.so.1; do \
+        if [ -e "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}" ] \
+           && [ -e "${SITE_PACKAGES}/_rocm_sdk_devel/lib/${f}" ]; then \
+            rm -f "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}"; \
+            ln -sfn "${SITE_PACKAGES}/_rocm_sdk_devel/lib/${f}" \
+                "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}"; \
+        fi; \
+    done \
+    && ldconfig
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
@@ -94,123 +183,17 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Setting up sccache wrappers for HIP compilation..." \
         && mkdir -p /opt/sccache-wrappers \
-        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang++ "$@"\n' > /opt/sccache-wrappers/clang++ \
+        && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang++ "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang++ \
         && chmod +x /opt/sccache-wrappers/clang++ \
-        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang "$@"\n' > /opt/sccache-wrappers/clang \
+        && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang \
         && chmod +x /opt/sccache-wrappers/clang \
         && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
 
-# Set sccache environment variables only when USE_SCCACHE=1
-# This prevents S3 config from leaking into images when sccache is not used
-ARG USE_SCCACHE
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
-
-
-###
-### Triton Build
-###
-FROM base AS build_triton
-ARG TRITON_BRANCH
-ARG TRITON_REPO
-RUN git clone ${TRITON_REPO}
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && MAX_JOBS=16 python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
-
-
-###
-### AMD SMI Build
-###
-FROM base AS build_amdsmi
-RUN cd /opt/rocm/share/amd_smi \
-    && pip wheel . --wheel-dir=dist
-RUN mkdir -p /app/install && cp /opt/rocm/share/amd_smi/dist/*.whl /app/install
-
-
-###
-### Pytorch build
-###
-FROM base AS build_pytorch
-ARG PYTORCH_BRANCH
-ARG PYTORCH_REPO
-ARG USE_SCCACHE
-
-RUN apt-get update && apt-get install -y pkg-config liblzma-dev
-# torch 2.12 emits float->__bf16 libcalls (__truncsfbf2) absent from gcc-11 libgcc; build with gcc-13.
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
-RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
-RUN cd pytorch \
-    && pip install -r requirements.txt && git submodule update --init --recursive
-RUN cd pytorch && python3 tools/amd_build/build_amd.py \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && sccache --show-stats; \
-       fi \
-    && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
-RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
-
-
-###
-### Shared PyTorch runtime for dependent builds
-###
-FROM base AS build_pytorch_runtime
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install,ro \
-    pip install /install/*.whl
-
-
-###
-### TorchVision build
-###
-FROM build_pytorch_runtime AS build_torchvision
-ARG PYTORCH_VISION_BRANCH
-ARG PYTORCH_VISION_REPO
-ARG USE_SCCACHE
-
-RUN git clone ${PYTORCH_VISION_REPO} vision
-RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
-RUN mkdir -p /app/install && cp /app/vision/dist/*.whl /app/install
-
-
-###
-### TorchAudio build
-###
-FROM build_pytorch_runtime AS build_torchaudio
-ARG PYTORCH_AUDIO_BRANCH
-ARG PYTORCH_AUDIO_REPO
-ARG USE_SCCACHE
-
-RUN git clone ${PYTORCH_AUDIO_REPO} audio
-RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
-    && git submodule update --init --recursive
-RUN cd audio && pip install -r requirements.txt
-RUN cd audio \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
-RUN mkdir -p /app/install && cp /app/audio/dist/*.whl /app/install
 
 
 ###
@@ -219,15 +202,14 @@ RUN mkdir -p /app/install && cp /app/audio/dist/*.whl /app/install
 FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
 RUN git clone ${MORI_REPO}
 RUN cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
+    && ln -sfn ${ROCM_PATH} /opt/rocm \
+    && mkdir -p /usr/lib64 && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
-
 
 ###
 ### FlashAttention Build
@@ -236,8 +218,6 @@ FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
 RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
@@ -258,12 +238,12 @@ FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG USE_SCCACHE
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
 RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
+# AITER_USE_SYSTEM_TRITON keeps setup.py from resolving its own triton, which would
+# displace the pinned one already installed in base.
 RUN pip install pyyaml && cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
@@ -276,58 +256,30 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
-### Final Build
+### Triton Build
 ###
+FROM base AS build_triton
+ARG TRITON_BRANCH
+ARG TRITON_REPO
+RUN git clone ${TRITON_REPO}
+RUN cd triton \
+    && git checkout ${TRITON_BRANCH} \
+    && if [ ! -f setup.py ]; then cd python; fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && mkdir -p /app/install && cp dist/*.whl /app/install
 
-# Wheel release stage - 
-# only includes dependencies used by wheel release pipeline
-FROM base AS debs_wheel_release
-RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_torchvision,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_torchaudio,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-
-# Full debs stage - includes Mori (used by Docker releases)
-FROM base AS debs
-RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_torchvision,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_torchaudio,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 
 ###
 ### ROCr + CLR build
 ###
-# Pull in updates to ROCr + clr from ROCm 7.2.4 and beyond.
+# Brings in multi-stream perf improvements; drop after these arrive in an official release
 FROM base AS build_rocm_runtime
 ARG ROCM_SYSTEMS_REPO
 ARG ROCM_RUNTIME_COMMIT
+# libgl-dev: rocclr does find_package(OpenGL REQUIRED) unconditionally and the wheel image has
+# no GL headers. The link must not pick up a libGL DT_NEEDED, which is asserted after the build.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends g++ \
-       libelf-dev libdrm-dev libnuma-dev libdw-dev xxd \
+    && apt-get install -y --no-install-recommends g++ libdw-dev xxd libgl-dev libglx-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir CppHeaderParser
 RUN git init -q /src && cd /src \
@@ -339,20 +291,17 @@ RUN git init -q /src && cd /src \
     && git sparse-checkout set projects/rocr-runtime projects/clr projects/hip shared cmake \
     && git fetch --filter=blob:none --depth 1 origin ${ROCM_RUNTIME_COMMIT} \
     && git checkout -q FETCH_HEAD
-# ROCr's trap_handler and blit_shaders call find_package(Clang/LLVM REQUIRED) only to get
-# IMPORTED executables. The ROCm dev image ships the binaries but no CMake package config, so
-# supply one pointing at them.
-RUN mkdir -p /opt/rocm-cmake-shim \
-    && printf 'if(NOT TARGET clang)\n  add_executable(clang IMPORTED GLOBAL)\n  set_target_properties(clang PROPERTIES IMPORTED_LOCATION "/opt/rocm/llvm/bin/clang")\nendif()\nset(Clang_PACKAGE_VERSION "rocm-image-shim")\n' > /opt/rocm-cmake-shim/ClangConfig.cmake \
-    && printf 'if(NOT TARGET llvm-objcopy)\n  add_executable(llvm-objcopy IMPORTED GLOBAL)\n  set_target_properties(llvm-objcopy PROPERTIES IMPORTED_LOCATION "/opt/rocm/llvm/bin/llvm-objcopy")\nendif()\nset(LLVM_FOUND TRUE)\nset(LLVM_PACKAGE_VERSION "rocm-image-shim")\n' > /opt/rocm-cmake-shim/LLVMConfig.cmake
-# ROCr first, and installed into /opt/rocm, because the clr build below needs its headers
+# libelf is taken from the SDK's own vendored sysdeps rather than apt -- the wheel image has no
+# /usr/include/libelf.h -- so ROCr links against the copy the wheel itself was built against.
+ENV SYSDEPS="$SDK_DEV/lib/rocm_sysdeps"
+# ROCr first, and installed into $SDK_DEV, because the clr build below needs its headers.
 RUN cd /src/projects/rocr-runtime \
     && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH=/opt/rocm \
-        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
-        -DClang_DIR=/opt/rocm-cmake-shim \
-        -DLLVM_DIR=/opt/rocm-cmake-shim \
+        -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
+        -DCMAKE_INSTALL_PREFIX="$SDK_DEV" \
+        -DLIBELF_INCLUDE_DIRS="$SYSDEPS/include" \
+        -DLIBELF_LIBRARIES="$SYSDEPS/lib/libelf.so" \
     && cmake --build build --parallel 16 \
     && cmake --install build \
     && cmake --install build --prefix /rocr-install --strip
@@ -361,12 +310,12 @@ RUN cd /src/projects/clr \
         -DCMAKE_BUILD_TYPE=Release \
         -DCLR_BUILD_HIP=ON \
         -DCLR_BUILD_OCL=OFF \
+        -DROCM_KPACK_ENABLED=ON \
         -DHIP_COMMON_DIR=/src/projects/hip \
-        -DROCM_PATH=/opt/rocm \
-        -DCMAKE_PREFIX_PATH=/opt/rocm \
-        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
-        -DLLVM_DIR=/opt/rocm-cmake-shim \
-        -DHIP_LLVM_ROOT=/opt/rocm/llvm \
+        -DROCM_PATH="$SDK_DEV" \
+        -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
+        -DCMAKE_INSTALL_PREFIX="$SDK_DEV" \
+        -DHIP_LLVM_ROOT="$SDK_DEV/lib/llvm" \
     && cmake --build build --parallel 16 \
     && cmake --install build --prefix /clr-install --strip
 RUN mkdir -p /staging/lib \
@@ -374,82 +323,112 @@ RUN mkdir -p /staging/lib \
     && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
     && ls -l /staging/lib
 
-# rocprofiler-sdk 1.3.2 fixes torch 2.12 profiler on ROCm 7.2.3
-FROM base AS build_rocprofiler_sdk
-ARG ROCM_SYSTEMS_REPO
-ARG ROCPROFILER_SDK_COMMIT
-ARG USE_SCCACHE
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libdw-dev libelf-dev libsqlite3-dev libzstd-dev \
-    && rm -rf /var/lib/apt/lists/*
-RUN git init -q /src && cd /src \
-    && git remote add origin ${ROCM_SYSTEMS_REPO} \
-    && git config core.sparseCheckout true \
-    && git config remote.origin.promisor true \
-    && git config remote.origin.partialclonefilter blob:none \
-    && git sparse-checkout init --cone \
-    && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
-    && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
-    && git checkout -q FETCH_HEAD
-# Patch the ROCm 7.2.3 build of rocprofiler-sdk to include queue-interposition fixes that are
-# absent from the pinned 7.14 build. This resolves hangs on torch.profiler on ROCm.
-# TODO: Drop these once ${ROCPROFILER_SDK_COMMIT} is bumped to a build that already 
-# contains them, such as ROCm 10.0. See https://github.com/vllm-project/vllm/issues/54087.
-ARG ROCPROFILER_SDK_PR_7796=fae7fd57ffb8a76e811d6410b8a0cee1e94d710a
-ARG ROCPROFILER_SDK_PR_7924=f8db22adbe17686a9b05ae03367dd1ec73011653
-RUN cd /src \
-    && HSA_PATHS='projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/hsa/*' \
-    && curl -fsSL -o /tmp/qi-7796.patch "${ROCM_SYSTEMS_REPO%.git}/commit/${ROCPROFILER_SDK_PR_7796}.patch" \
-    && curl -fsSL -o /tmp/qi-7924.patch "${ROCM_SYSTEMS_REPO%.git}/commit/${ROCPROFILER_SDK_PR_7924}.patch" \
-    && git apply -p1 --include="$HSA_PATHS" --verbose /tmp/qi-7796.patch \
-    && git apply -p1 --include="$HSA_PATHS" --verbose /tmp/qi-7924.patch
-RUN cd /src/projects/rocprofiler-sdk \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && cmake -B build -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH=/opt/rocm \
-        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
-        -DROCPROFILER_BUILD_TESTS=OFF \
-        -DROCPROFILER_BUILD_SAMPLES=OFF \
-        -DROCPROFILER_BUILD_DOCS=OFF \
-    && cmake --build build --parallel "$(nproc)" \
-    && cmake --install build --prefix /staging --strip
+
+###
+### Final Build
+###
+
+# Wheel release stage -
+# only includes dependencies used by wheel release pipeline
+FROM base AS debs_wheel_release
+RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+# The wheel index also serves a torch repacked to require our triton instead of
+# the one TheRock built it with, and amdsmi, which TheRock ships only as sources
+# inside rocm-sdk-core.
+ARG TORCH_VERSION
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
+COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
+RUN pip download --no-deps --dest /tmp/torch-dl \
+        --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+        --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+        "torch==${TORCH_VERSION}" \
+    && TRITON_VER=$(basename /app/debs/triton-*.whl | cut -d- -f2) \
+    && python3 /tmp/therock_wheels.py repack-torch /tmp/torch-dl/torch-*.whl \
+        --triton-version "${TRITON_VER}" --out-dir /app/debs \
+    && python3 /tmp/therock_wheels.py patch-amdsmi "${SDK_CORE}/share/amd_smi" \
+        --out-dir /tmp/amd_smi \
+    && pip wheel --no-deps --wheel-dir /app/debs /tmp/amd_smi \
+    && rm -rf /tmp/torch-dl /tmp/amd_smi /tmp/therock_wheels.py \
+    && ls -l /app/debs
+
+FROM base AS debs
+RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 
 FROM base AS final
-RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install /install/*.whl
+ARG TRITON_VERSION
 
-COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
+# torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
+# teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
 ENV ROCPROFILER_QUEUE_INTERPOSITION=0
 
-COPY --from=build_rocm_runtime /staging/ /opt/rocm/
-# Hard link the patched library onto every stock file name so that both the
-# SONAME lookup and the hard coded paths resolve to it.
+COPY --from=build_rocm_runtime /staging/lib/ ${SDK_DEV}/lib/
+# Hard link the patched library onto every stock file name, in both SDK trees, so that the
+# SONAME lookup and the hard coded paths all resolve to it. Hard links rather than symlinks
+# because ldconfig rewrites SONAME symlinks but cannot re-point an inode. $SDK_CORE keeps its
+# own libhsa-runtime64 copy, which is on LD_LIBRARY_PATH and in ld.so.conf; relinking it is
+# belt and braces rather than strictly required, but it leaves no stock ROCr in the image.
 RUN set -eux; \
-    cd /opt/rocm/lib; \
+    cd "$SDK_DEV/lib"; \
     ours_hsa="$(readlink -f libhsa-runtime64.so.1)"; \
     ours_hip="$(readlink -f libamdhip64.so.7)"; \
-    for f in libhsa-runtime64.so.1.*; do \
-        [ "$f" = "${ours_hsa##*/}" ] || ln -f "$ours_hsa" "$f"; \
-    done; \
-    for f in libamdhip64.so.7.*; do \
-        [ "$f" = "${ours_hip##*/}" ] || ln -f "$ours_hip" "$f"; \
+    for f in "$SDK_DEV"/lib/libhsa-runtime64.so.1* "$SDK_CORE"/lib/libhsa-runtime64.so.1* \
+             "$SDK_DEV"/lib/libamdhip64.so.7* "$SDK_CORE"/lib/libamdhip64.so.7*; do \
+        [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+        case "${f##*/}" in libhsa*) ours="$ours_hsa";; *) ours="$ours_hip";; esac; \
+        [ "$f" -ef "$ours" ] || ln -f "$ours" "$f"; \
     done
 
 RUN ldconfig
 
+# This is to prevent resolvers from checking METADATA and RECORD and clobbering
+# the Triton source build we installed. Constraints files are unable to help
+# with this. However, these entries are optional and can be blanked which
+# solves the problem.
+RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
+    && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
+    && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
+    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
+
+RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
+    pip install /install/*.whl \
+    && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
+    && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
+    # Create a constraints file to protect the versions we need, especially
+    # triton, requirements will try to reinstall repeatedly.
+    && pip list --format=freeze \
+        | grep -E '^(torch|triton|torchaudio|torchvision|pybind11)==' > /etc/rocm-constraints.txt \
+    && echo "ROCm constraints:" && cat /etc/rocm-constraints.txt \
+    && test "$(wc -l < /etc/rocm-constraints.txt)" -eq 5 \
+    && grep -q '^pybind11==3\.0\.' /etc/rocm-constraints.txt \
+    && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
+    && python3 -c "import triton; print(f'triton={triton.__version__}')" \
+    && pip list 2>/dev/null | grep -iE '^(torch|triton) '
+
 ARG BASE_IMAGE
+ARG PYTHON_VERSION
+ARG ROCM_SDK_VERSION
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCHVISION_VERSION
+ARG PYTORCH_ROCM_ARCH
+ARG AITER_ROCM_ARCH
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-ARG PYTORCH_BRANCH
-ARG PYTORCH_VISION_BRANCH
-ARG PYTORCH_REPO
-ARG PYTORCH_VISION_REPO
-ARG PYTORCH_AUDIO_BRANCH
-ARG PYTORCH_AUDIO_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
@@ -457,23 +436,36 @@ ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCM_SYSTEMS_REPO
-ARG ROCPROFILER_SDK_COMMIT
 ARG ROCM_RUNTIME_COMMIT
+ARG TRITON_VERSION
+# Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
-    && echo "ROCM_SYSTEMS_REPO: ${ROCM_SYSTEMS_REPO}" >> /app/versions.txt \
-    && echo "ROCPROFILER_SDK_COMMIT: ${ROCPROFILER_SDK_COMMIT}" >> /app/versions.txt \
-    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
+    && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
+    && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
+    && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
+    && echo "TORCHAUDIO_VERSION: ${TORCHAUDIO_VERSION}" >> /app/versions.txt \
+    && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
+    && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
+    && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
-    && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \
-    && echo "PYTORCH_VISION_BRANCH: ${PYTORCH_VISION_BRANCH}" >> /app/versions.txt \
-    && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
-    && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
-    && echo "PYTORCH_AUDIO_BRANCH: ${PYTORCH_AUDIO_BRANCH}" >> /app/versions.txt \
-    && echo "PYTORCH_AUDIO_REPO: ${PYTORCH_AUDIO_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
-    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
+    && echo "ROCM_SYSTEMS_REPO: ${ROCM_SYSTEMS_REPO}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
+    # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
+    && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
+    && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" \
+        >> /app/versions.txt \
+    && echo "PYBIND11_VERSION: $(pip show pybind11 | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
+    && echo "PYBIND11_INTERNALS_VERSION: $(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' \
+        $(python3 -c 'import pybind11; print(pybind11.get_include())') | awk '{print $NF}')" \
+        >> /app/versions.txt \
+    && echo "PYBIND11_SHA256: $(find $(python3 -c 'import pybind11; print(pybind11.get_include())') \
+        -type f -name '*.h' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" \
+        >> /app/versions.txt

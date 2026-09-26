@@ -643,8 +643,12 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def rocm_version_to_variant(rocm_version: str) -> str:
-        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723."""
-        return "rocm" + rocm_version.replace(".", "")
+        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723.
+
+        Truncated to three digits to match the wheel's local version suffix
+        (see get_vllm_version), e.g. 10.0.0 -> rocm100.
+        """
+        return "rocm" + rocm_version.replace(".", "")[:3]
 
     @staticmethod
     def detect_system_rocm_variant() -> str | None:
@@ -1364,6 +1368,29 @@ def get_requirements() -> list[str]:
     return requirements
 
 
+def get_rocm_device_extras() -> dict[str, list[str]]:
+    """Per-GPU extras for TheRock builds, e.g. ``vllm[device-gfx942]``.
+
+    TheRock ships GPU kernels as separate per-arch wheels selected through
+    ``[device-<arch>]`` extras on torch, torchvision and rocm. Mirror that for
+    the arches this wheel was compiled for, plus ``device-all``.
+    """
+    if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
+        return {}
+    arches = [a for a in os.getenv("PYTORCH_ROCM_ARCH", "").split(";") if a]
+    extras = {
+        f"device-{arch}": [
+            f"torch[device-{arch}]",
+            f"torchvision[device-{arch}]",
+            f"rocm[device-{arch}]",
+        ]
+        for arch in arches
+    }
+    if extras:
+        extras["device-all"] = [req for reqs in extras.values() for req in reqs]
+    return extras
+
+
 ext_modules = []
 
 if _is_cuda() or _is_hip():
@@ -1564,6 +1591,7 @@ setup(
         ],
         # extra quantization plugin
         "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
+        **get_rocm_device_extras(),
     },
     cmdclass=cmdclass,
     package_data=package_data,
