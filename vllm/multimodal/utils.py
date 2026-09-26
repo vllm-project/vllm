@@ -210,39 +210,108 @@ def _batch_mm_items(
     }
 
 
+def _mm_feature_end(f: MultiModalFeatureSpec) -> int:
+    return f.mm_position.offset + f.mm_position.length
+
+
+def _is_covered_mm_feature(f: MultiModalFeatureSpec, num_computed_tokens: int) -> bool:
+    return _mm_feature_end(f) <= num_computed_tokens
+
+
+def _strip_one_covered_mm_feature(
+    f: MultiModalFeatureSpec, uses_mrope: bool
+) -> MultiModalFeatureSpec:
+    """Return a payload-stripped copy of a covered feature.
+
+    The stripped form never changes once computed, so it is memoized on ``f``.
+    The scheduler-side feature is not mutated.
+    """
+    if f.data is None or "address" in f.data:
+        # SHM address items must reach the worker so it can acknowledge
+        # the sender's reference count before the item is evicted. This
+        # mirrors how the SHM receiver identifies them ("address" in item).
+        return f
+
+    cached = getattr(f, "_stripped_covered", None)
+    if cached is not None:
+        cached_mrope, stripped = cached
+        if cached_mrope == uses_mrope:
+            return stripped
+
+    data = None
+    if uses_mrope:
+        data = MultiModalKwargsItem(
+            {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
+        )
+    stripped = replace(f, data=data)
+    f._stripped_covered = (uses_mrope, stripped)
+    return stripped
+
+
+def _strip_covered_mm_data_full(
+    mm_features: list[MultiModalFeatureSpec],
+    num_computed_tokens: int,
+    uses_mrope: bool,
+) -> list[MultiModalFeatureSpec]:
+    return [
+        (
+            _strip_one_covered_mm_feature(f, uses_mrope)
+            if _is_covered_mm_feature(f, num_computed_tokens)
+            else f
+        )
+        for f in mm_features
+    ]
+
+
 def strip_covered_mm_data(
     mm_features: list[MultiModalFeatureSpec],
     num_computed_tokens: int,
     uses_mrope: bool = False,
+    stripped_prefix: list[MultiModalFeatureSpec] | None = None,
 ) -> list[MultiModalFeatureSpec]:
     """Drop the tensor data of mm items whose placeholder span is fully inside
     a prefix-cache-covered region: no encoder run can be scheduled for them,
     so the workers never consume the payload fields. M-RoPE models keep
     CPU-side metadata fields used to compute positions. SHM address items
     are also kept so workers can balance the sender's reference count. The
-    scheduler-side ``Request`` keeps the full features."""
+    scheduler-side ``Request`` keeps the full features.
+
+    Covered features only grow as ``num_computed_tokens`` grows. Stripped
+    copies are memoized on each feature. If ``stripped_prefix`` is provided
+    (the scheduler-side Request cache) it is the already-stripped covered
+    prefix, updated in place; later calls only examine features after that
+    prefix. ``mm_features`` are ordered by offset and non-overlapping, so
+    that prefix is O(new features) per step rather than O(all features).
+    """
     if not mm_features or num_computed_tokens == 0:
+        if stripped_prefix is not None:
+            stripped_prefix.clear()
         return mm_features
 
-    def maybe_strip(f: MultiModalFeatureSpec) -> MultiModalFeatureSpec:
-        if (
-            f.data is None
-            # SHM address items must reach the worker so it can acknowledge
-            # the sender's reference count before the item is evicted. This
-            # mirrors how the SHM receiver identifies them ("address" in item).
-            or "address" in f.data
-            or (f.mm_position.offset + f.mm_position.length > num_computed_tokens)
-        ):
-            return f
+    if stripped_prefix is None:
+        return _strip_covered_mm_data_full(mm_features, num_computed_tokens, uses_mrope)
 
-        data = None
-        if uses_mrope:
-            data = MultiModalKwargsItem(
-                {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
-            )
-        return replace(f, data=data)
+    if len(stripped_prefix) > len(mm_features):
+        stripped_prefix.clear()
+    elif stripped_prefix:
+        keep = bisect.bisect_left(
+            stripped_prefix,
+            num_computed_tokens + 1,
+            key=_mm_feature_end,
+        )
+        if keep < len(stripped_prefix):
+            del stripped_prefix[keep:]
 
-    return [maybe_strip(f) for f in mm_features]
+    i = len(stripped_prefix)
+    n = len(mm_features)
+    while i < n and _is_covered_mm_feature(mm_features[i], num_computed_tokens):
+        stripped_prefix.append(
+            _strip_one_covered_mm_feature(mm_features[i], uses_mrope)
+        )
+        i += 1
+    if i == 0:
+        return list(mm_features)
+    return stripped_prefix + mm_features[i:]
 
 
 def group_and_batch_mm_items(
