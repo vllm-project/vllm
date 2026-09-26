@@ -6,7 +6,7 @@ use std::time::Instant;
 use futures::StreamExt;
 
 use super::streaming::{StreamedResponseHandler, trim_bytes};
-use super::{ChatChunk, RequestFuncInput, RequestFuncOutput, build_headers};
+use super::{ChatChunk, RequestFuncInput, RequestFuncOutput, build_headers, update_server_metrics};
 use crate::error::Result;
 
 /// Backend for OpenAI Chat Completions API (/v1/chat/completions).
@@ -106,6 +106,8 @@ impl OpenAIChatBackend {
                                 Ok(d) => d,
                                 Err(_) => continue,
                             };
+
+                            update_server_metrics(&mut output, data.metrics.as_ref());
 
                             if !data.choices.is_empty() {
                                 let content = data.choices[0]

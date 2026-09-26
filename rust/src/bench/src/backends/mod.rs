@@ -21,6 +21,7 @@ pub struct CompletionChunk {
     #[serde(default)]
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<ChunkUsage>,
+    pub metrics: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +35,7 @@ pub struct ChatChunk {
     #[serde(default)]
     pub choices: Vec<ChatChoice>,
     pub usage: Option<ChunkUsage>,
+    pub metrics: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +103,8 @@ pub struct RequestFuncOutput {
     pub prompt_len: usize,
     pub error: String,
     pub start_time: f64,
+    pub server_queue_time: Option<f64>,
+    pub server_ttft: Option<f64>,
     pub num_input_sequences: usize,
 }
 
@@ -117,9 +121,27 @@ impl Default for RequestFuncOutput {
             prompt_len: 0,
             error: String::new(),
             start_time: 0.0,
+            server_queue_time: None,
+            server_ttft: None,
             num_input_sequences: 1,
         }
     }
+}
+
+fn update_server_metrics(output: &mut RequestFuncOutput, metrics: Option<&serde_json::Value>) {
+    let Some(metrics) = metrics.and_then(serde_json::Value::as_object) else {
+        return;
+    };
+
+    let to_seconds = |name| {
+        metrics
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value / 1000.0)
+    };
+
+    output.server_queue_time = to_seconds("queue_time_ms");
+    output.server_ttft = to_seconds("time_to_first_token_ms");
 }
 
 impl Default for RequestFuncInput {
@@ -212,4 +234,55 @@ pub fn build_headers(
     }
 
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_server_metrics_converts_ms_to_seconds() {
+        let chunk: CompletionChunk = serde_json::from_value(serde_json::json!({
+            "metrics": {
+                "queue_time_ms": 0.0,
+                "time_to_first_token_ms": 1250.0,
+            }
+        }))
+        .unwrap();
+        let mut output = RequestFuncOutput::default();
+
+        update_server_metrics(&mut output, chunk.metrics.as_ref());
+
+        assert_eq!(output.server_queue_time, Some(0.0));
+        assert_eq!(output.server_ttft, Some(1.25));
+    }
+
+    #[test]
+    fn test_update_server_metrics_tolerates_unavailable_values() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"metrics": null}),
+            serde_json::json!({"metrics": "invalid"}),
+            serde_json::json!({"metrics": {"queue_time_ms": null}}),
+        ] {
+            let chunk: ChatChunk = serde_json::from_value(value).unwrap();
+            let mut output = RequestFuncOutput::default();
+
+            update_server_metrics(&mut output, chunk.metrics.as_ref());
+
+            assert_eq!(output.server_queue_time, None);
+            assert_eq!(output.server_ttft, None);
+        }
+    }
+
+    #[test]
+    fn test_update_server_metrics_handles_partial_metrics() {
+        let metrics = serde_json::json!({"time_to_first_token_ms": 500.0});
+        let mut output = RequestFuncOutput::default();
+
+        update_server_metrics(&mut output, Some(&metrics));
+
+        assert_eq!(output.server_queue_time, None);
+        assert_eq!(output.server_ttft, Some(0.5));
+    }
 }
