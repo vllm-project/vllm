@@ -5,7 +5,12 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, WebSearchTool
+from openai.types.responses import (
+    CustomTool,
+    FunctionTool,
+    ToolChoiceCustom,
+    WebSearchTool,
+)
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -13,8 +18,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
+    custom_tool_parameters,
     find_tool_properties,
     get_json_schema_from_tools,
+    iter_response_function_tool_dicts,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -394,3 +401,48 @@ class TestNonFunctionToolsSkipped:
         any_of = schema["items"]["anyOf"]
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+
+
+class TestCustomToolShim:
+    """``custom`` tools are shown to the model as a single-string function."""
+
+    def test_rendered_as_single_string_function(self):
+        tool = CustomTool(
+            type="custom", name="apply_patch", description="Apply a patch."
+        )
+        [tool_dict] = iter_response_function_tool_dicts([tool])
+        assert tool_dict["type"] == "function"
+        assert tool_dict["name"] == "apply_patch"
+        assert tool_dict["description"] == "Apply a patch."
+        assert tool_dict["parameters"] == custom_tool_parameters()
+        assert tool_dict["parameters"]["required"] == ["input"]
+
+    def test_grammar_format_is_described(self):
+        tool = CustomTool(
+            type="custom",
+            name="apply_patch",
+            format={
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": 'start: "*** Begin Patch"',
+            },
+        )
+        [tool_dict] = iter_response_function_tool_dicts([tool])
+        assert tool_dict["description"].endswith(
+            'lark grammar:\nstart: "*** Begin Patch"'
+        )
+
+    def test_forced_tool_choice_sees_custom_tool(self):
+        tools = [CustomTool(type="custom", name="apply_patch"), FUNCTION_TOOL]
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+        names = [e["properties"]["name"]["enum"] for e in schema["items"]["anyOf"]]
+        assert names == [["apply_patch"], ["get_weather"]]
+        named = get_json_schema_from_tools(
+            tools=tools,
+            tool_choice=ToolChoiceCustom(type="custom", name="apply_patch"),
+        )
+        assert named == custom_tool_parameters()
+        assert (
+            find_tool_properties(tools, "apply_patch")
+            == custom_tool_parameters()["properties"]
+        )

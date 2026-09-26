@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses import CustomTool, NamespaceTool
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -16,13 +18,20 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
+    build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    construct_tool_dicts,
+    decode_custom_tool_input,
+    decode_custom_tool_input_prefix,
+    extract_custom_tool_names,
     should_continue_final_message,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.tool_parsers.utils import build_responses_tool_call_name_map
 
 
 def _single_chat_message(item):
@@ -117,6 +126,188 @@ def make_function_call_output(
 
 class TestResponsesUtils:
     """Tests for Responses API utils."""
+
+    def test_construct_custom_tool_dict_has_no_duplicate(self):
+        namespace = NamespaceTool(
+            type="namespace",
+            name="editing",
+            description="Editing tools.",
+            tools=[{"type": "custom", "name": "apply_patch"}],
+        )
+        custom_tool = namespace.tools[0]
+
+        result = construct_tool_dicts([custom_tool], "auto")
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "apply_patch"
+        assert result[0]["function"]["parameters"]["required"] == ["input"]
+
+    def test_construct_namespaced_custom_tool_dict(self):
+        namespace = NamespaceTool(
+            type="namespace",
+            name="editing",
+            description="Editing tools.",
+            tools=[{"type": "custom", "name": "apply_patch"}],
+        )
+
+        result = construct_tool_dicts([namespace], "auto")
+        name_map = build_responses_tool_call_name_map([namespace])
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "editing__apply_patch"
+        assert extract_custom_tool_names([namespace]) == {
+            "editing__apply_patch"
+        }
+        assert name_map["editing__apply_patch"].name == "apply_patch"
+        assert name_map["editing__apply_patch"].namespace == "editing"
+
+        output = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[
+                FunctionCall(
+                    name="editing__apply_patch",
+                    arguments='{"input":"patch text"}',
+                    id="call_1",
+                )
+            ],
+            tools=[namespace],
+        )[0]
+        assert output.type == "custom_tool_call"
+        assert output.name == "apply_patch"
+        assert output.namespace == "editing"
+        assert output.input == "patch text"
+
+    def test_namespaced_custom_tool_history_is_flattened(self):
+        message = _single_chat_message(
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_1",
+                "name": "apply_patch",
+                "namespace": "editing",
+                "input": "patch text",
+            }
+        )
+
+        tool_call = message["tool_calls"][0]
+        assert tool_call["function"]["name"] == "editing__apply_patch"
+        assert tool_call["function"]["arguments"] == (
+            '{"input": "patch text"}'
+        )
+
+    def test_construct_tool_dicts_none_excludes_custom_tools(self):
+        tool = CustomTool(type="custom", name="apply_patch")
+        assert construct_tool_dicts([tool], "none") is not None
+        assert (
+            construct_tool_dicts(
+                [tool], "none", exclude_tools_when_tool_choice_none=True
+            )
+            is None
+        )
+
+    def test_custom_grammar_is_described_in_shim(self):
+        tool = CustomTool(
+            type="custom",
+            name="apply_patch",
+            description="Apply a patch",
+            format={
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": 'start: "*** Begin Patch"',
+            },
+        )
+        result = construct_tool_dicts([tool], "auto")
+        assert result is not None
+        description = result[0]["function"]["description"]
+        assert description.startswith("Apply a patch")
+        assert description.endswith('lark grammar:\nstart: "*** Begin Patch"')
+
+    def test_function_tool_stays_function_call(self):
+        tools = [
+            CustomTool(type="custom", name="apply_patch"),
+            NamespaceTool(
+                type="namespace",
+                name="math",
+                description="Math tools.",
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "add",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+            ),
+        ]
+        custom, function = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[
+                FunctionCall(
+                    name="apply_patch",
+                    arguments='{"input": "*** Begin Patch"}',
+                    id="call_1",
+                ),
+                FunctionCall(
+                    name="math__add",
+                    arguments='{"a": 1}',
+                    id="call_2",
+                ),
+            ],
+            tools=tools,
+        )
+        assert custom.type == "custom_tool_call"
+        assert custom.input == "*** Begin Patch"
+        assert custom.id.startswith("ctc_")
+        assert function.type == "function_call"
+        assert function.arguments == '{"a": 1}'
+
+    def test_custom_tool_history_round_trip(self):
+        messages = construct_chat_messages_with_tool_call(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_exec",
+                    "name": "apply_patch",
+                    "input": '*** Begin Patch\n*** Add File: a.py\n+print("hi")\n',
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_exec",
+                    "output": "Success",
+                },
+                {"role": "user", "content": "Continue"},
+            ]
+        )
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["tool_calls"][0]["function"]["name"] == "apply_patch"
+        assert json.loads(messages[0]["tool_calls"][0]["function"]["arguments"]) == {
+            "input": '*** Begin Patch\n*** Add File: a.py\n+print("hi")\n'
+        }
+        assert messages[1] == {
+            "role": "tool",
+            "content": "Success",
+            "tool_call_id": "call_exec",
+        }
+        assert messages[2]["role"] == "user"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ('{"input": "pwd"}', "pwd"),
+            ('{"cmd": "pwd"}', "pwd"),
+            ("pwd", "pwd"),
+            ('{"input": "line\\nquote\\""}', 'line\nquote"'),
+        ],
+    )
+    def test_decode_custom_tool_input(self, raw: str, expected: str):
+        assert decode_custom_tool_input(raw) == expected
+
+    def test_decode_custom_tool_input_prefix_partial(self):
+        assert decode_custom_tool_input_prefix('{"inp') == ""
+        assert decode_custom_tool_input_prefix('{"input": "ls \\"dir') == 'ls "dir'
 
     def test_construct_chat_messages_with_tool_call(self):
         """Test construction of chat messages with tool calls."""
