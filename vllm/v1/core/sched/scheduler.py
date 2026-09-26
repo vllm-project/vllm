@@ -1248,10 +1248,20 @@ class Scheduler(SchedulerInterface):
                         self.connector_prefix_cache_stats is not None
                         and connector_prefix_cache_queries != 0
                     ):
+                        preempted = request.num_preemptions > 0
                         self.connector_prefix_cache_stats.record(
                             num_tokens=connector_prefix_cache_queries,
                             num_hits=connector_prefix_cache_hits,
-                            preempted=request.num_preemptions > 0,
+                            preempted=preempted,
+                            # The connector knows the tier only after the load
+                            # plan above exists.
+                            hits_by_source=(
+                                self.connector.get_external_cache_hit_sources(
+                                    request, connector_prefix_cache_hits
+                                )
+                                if connector_prefix_cache_hits and not preempted
+                                else None
+                            ),
                         )
 
                 # Record at admission so unscheduled lookups are not counted.

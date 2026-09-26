@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+    CacheHitSource,
+)
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
+    PrefixCacheStats,
     PromptTokenStats,
     RequestStateStats,
     SchedulerIterationDetails,
@@ -43,6 +50,79 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_cached_tokens_by_source():
+    by_source = CachedTokensBySource()
+    by_source.add(CacheHitSource.HOST, 3)
+    by_source.add("host", 2)
+    by_source.add(CacheHitSource.DISK, 4)
+    by_source.add(CacheHitSource.P2P, 0)
+    by_source.merge(CachedTokensBySource(disk=1, p2p=5))
+
+    assert by_source == CachedTokensBySource(host=5, disk=5, p2p=5)
+    assert by_source.total == 15
+    assert by_source.items() == [("host", 5), ("p2p", 5), ("disk", 5)]
+    with pytest.raises(ValueError):
+        by_source.add("gpu", 1)  # type: ignore[arg-type]
+
+
+def test_prefix_cache_stats_record_hits_by_source():
+    stats = PrefixCacheStats()
+    stats.record(num_tokens=32, num_hits=16, preempted=False)
+    stats.record(
+        num_tokens=32,
+        num_hits=24,
+        preempted=False,
+        hits_by_source=CachedTokensBySource(host=16, disk=8),
+    )
+    # Preempted re-admissions never contribute to hits or the split.
+    stats.record(
+        num_tokens=32,
+        num_hits=32,
+        preempted=True,
+        hits_by_source=CachedTokensBySource(p2p=32),
+    )
+    # A connector miscount is reported as unspecified, not dropped or raised.
+    stats.record(
+        num_tokens=8,
+        num_hits=8,
+        preempted=False,
+        hits_by_source=CachedTokensBySource(host=4),
+    )
+
+    assert stats.requests == 3
+    assert stats.hits == 48
+    assert stats.preempted_hits == 32
+    assert stats.hits_by_source == CachedTokensBySource(
+        host=16, disk=8, external_unspecified=8
+    )
+    assert stats.hits_by_source.total == 48 - 16
+
+
+def test_prefix_cache_stats_hits_by_source_serialization():
+    connector_stats = PrefixCacheStats()
+    connector_stats.record(
+        num_tokens=16,
+        num_hits=8,
+        preempted=False,
+        hits_by_source=CachedTokensBySource(p2p=4, host=4),
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            connector_prefix_cache_stats=connector_stats,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.connector_prefix_cache_stats is not None
+    assert (
+        decoded.scheduler_stats.connector_prefix_cache_stats.hits_by_source
+        == CachedTokensBySource(p2p=4, host=4)
+    )
 
 
 def test_compute_iteration_details_includes_encoder_stats():

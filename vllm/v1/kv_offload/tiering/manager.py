@@ -27,6 +27,7 @@ from typing import NamedTuple
 import numpy as np
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -232,6 +233,11 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
+        # Preserve the original tier for this request's cache-hit metrics,
+        # even after its KV blocks are promoted into host memory
+        # (otherwise a disk or P2P hit would be mislabeled as a host hit).
+        self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
+
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
             tier: _SecondaryTierFacingParent(self, tier_idx)
@@ -292,6 +298,13 @@ class TieringOffloadingManager(OffloadingManager):
         else:
             successful_keys = ()
             failed_keys = transfer_job.keys
+
+        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
+        if load_sources is not None:
+            source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
+            for key in failed_keys:
+                if load_sources.get(key) == source:
+                    del load_sources[key]
 
         if successful_keys:
             self.primary_tier.complete_write(
@@ -464,6 +477,15 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.RETRY
         return LookupResult.MISS
 
+    @override
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        load_sources = self._request_load_sources.get(req_context.req_id)
+        if load_sources is not None and key in load_sources:
+            return load_sources[key]
+        return self.primary_tier.get_load_source(key, req_context)
+
     def _initiate_promotion(
         self,
         tier_idx: int,
@@ -501,6 +523,10 @@ class TieringOffloadingManager(OffloadingManager):
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
+        load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
+        source = self.secondary_tiers[tier_idx].cache_hit_source
+        for promoted_key in primary_write_result.keys_to_store:
+            load_sources[promoted_key] = source
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's chunks are submitted as one batched job per tier.
         tier_pending = self._pending_load_submissions.setdefault(tier_idx, {})
@@ -848,6 +874,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             tier.on_request_finished(state.req_context)
         self._metrics.on_request_finished(state.req_context)
+        self._request_load_sources.pop(req_id, None)
         del self._req_state[req_id]
 
     @override
@@ -930,6 +957,7 @@ class TieringOffloadingManager(OffloadingManager):
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        self._request_load_sources.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []

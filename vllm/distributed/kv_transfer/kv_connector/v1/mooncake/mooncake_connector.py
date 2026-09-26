@@ -21,6 +21,7 @@ from huggingface_hub.utils import httpx
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -483,6 +484,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    _cache_hit_source = CacheHitSource.P2P
+
     def __init__(
         self,
         vllm_config: VllmConfig,

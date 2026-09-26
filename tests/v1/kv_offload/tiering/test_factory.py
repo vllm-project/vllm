@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -43,12 +44,22 @@ def _make_mock_args():
 
 def test_pre_registered_tiers_can_be_imported():
     """CI sentinel: registered tiers import and yield SecondaryTierManager."""
+    # Derived from each tier's ``medium``; P2P has none and sets its own.
+    expected_sources = {
+        "example": CacheHitSource.HOST,
+        "fs": CacheHitSource.DISK,
+        "obj": CacheHitSource.DISK,
+        "p2p": CacheHitSource.P2P,
+    }
     for tier_type in SecondaryTierFactory._registry:
         # KVCR is an optional external dependency and may not be installed.
         if tier_type == "kvcr" and find_spec("kvcr") is None:
             continue
         cls = SecondaryTierFactory._registry[tier_type]()
         assert issubclass(cls, SecondaryTierManager)
+        assert cls.cache_hit_source == expected_sources.get(
+            tier_type, CacheHitSource.EXTERNAL_UNSPECIFIED
+        )
 
 
 def test_example_tier_registered():
@@ -95,7 +106,8 @@ def test_create_multiple_tiers():
     assert all(isinstance(tier, ExampleSecondaryTierManager) for tier in tiers)
 
 
-def test_register_new_tier_type():
+@pytest.mark.parametrize("tier_type", ["custom_tier", "cpu", "nvme"])
+def test_register_new_tier_type(tier_type):
     """Verify that new tier types can be registered and created.
 
     This is how external projects add custom secondary tiers
@@ -103,20 +115,22 @@ def test_register_new_tier_type():
     """
     # Register a new tier type (reuse example manager for simplicity)
     SecondaryTierFactory.register_tier(
-        "custom_tier",
+        tier_type,
         "vllm.v1.kv_offload.tiering.example.manager",
         "ExampleSecondaryTierManager",
     )
 
     primary_kv_view, offloading_spec = _make_mock_args()
     tier = SecondaryTierFactory.create_secondary_tier(
-        {"type": "custom_tier", "custom_param": 99},
+        {"type": tier_type, "custom_param": 99},
         primary_kv_view,
         offloading_spec,
     )
 
-    assert tier.tier_type == "custom_tier"
+    assert tier.tier_type == tier_type
     assert isinstance(tier, ExampleSecondaryTierManager)
+    # Attribution follows the tier's medium, never its registration name.
+    assert tier.cache_hit_source is CacheHitSource.HOST
 
 
 # ---------------------------------------------------------------------------

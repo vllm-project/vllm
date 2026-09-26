@@ -8,6 +8,10 @@ from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+    CacheHitSource,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -378,6 +382,11 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # Keys selected for this load, for cache-hit attribution. Full-attention
+    # keys supply their own token range; sparse-group (SWA, recurrent) keys
+    # are needed to reuse the whole prefix.
+    load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
+    sparse_load_keys: list[OffloadKey] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -590,8 +599,9 @@ class OffloadingConnectorScheduler:
         sliding_window_groups.sort(key=_sliding_window_sort_key, reverse=True)
 
         # used by _lookup
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
-        self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
@@ -1093,6 +1103,46 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens, bool(num_hit_tokens)
 
+    def get_external_cache_hit_sources(
+        self,
+        request: Request,
+        num_external_tokens: int,
+    ) -> CachedTokensBySource:
+        """Split the accepted external hit by the tier each loaded key came from.
+
+        A token needs every group's KV, so when groups disagree the outermost
+        tier is reported. Tokens no loaded key covers are
+        ``external_unspecified``.
+        """
+        sources = CachedTokensBySource()
+        if num_external_tokens == 0:
+            return sources
+        req_status = self._req_status[request.request_id]
+        start = req_status.num_locally_computed_tokens
+        end = start + num_external_tokens
+
+        def tier(key: OffloadKey) -> CacheHitSource:
+            return CacheHitSource(
+                self.manager.get_load_source(key, req_status.req_context)
+            )
+
+        sparse_tiers = [tier(key) for key in req_status.sparse_load_keys]
+        ranges = [
+            (max(start, lo), min(end, hi), tier(key))
+            for lo, hi, key in req_status.load_key_ranges
+            if max(start, lo) < min(end, hi)
+        ]
+        bounds = sorted({start, end, *(b for lo, hi, _ in ranges for b in (lo, hi))})
+        for lo, hi in zip(bounds, bounds[1:]):
+            tiers = sparse_tiers + [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
+            sources.add(
+                CacheHitSource.outermost(tiers)
+                if tiers
+                else CacheHitSource.EXTERNAL_UNSPECIFIED,
+                hi - lo,
+            )
+        return sources
+
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
@@ -1108,6 +1158,8 @@ class OffloadingConnectorScheduler:
             assert partial_tail_boundary == num_cached_tokens
 
         keys_to_load: list[OffloadKey] = []
+        req_status.load_key_ranges.clear()
+        req_status.sparse_load_keys.clear()
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1160,9 +1212,9 @@ class OffloadingConnectorScheduler:
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
                 assert len(offload_keys) >= end_chunk_idx
-                keys_to_load.extend(offload_keys[start_chunk_idx:end_chunk_idx])
+                group_keys_to_load = offload_keys[start_chunk_idx:end_chunk_idx]
                 if partial_tail_boundary is not None:
-                    keys_to_load.append(
+                    group_keys_to_load.append(
                         self._make_boundary_key(
                             request,
                             group_config.group_idx,
@@ -1170,6 +1222,21 @@ class OffloadingConnectorScheduler:
                             req_status.req_context,
                         )
                     )
+                keys_to_load.extend(group_keys_to_load)
+                if group_config.sliding_window_size_in_chunks is not None:
+                    req_status.sparse_load_keys.extend(group_keys_to_load)
+                else:
+                    for chunk_idx, key in enumerate(
+                        group_keys_to_load, start_chunk_idx
+                    ):
+                        range_start = max(
+                            load_start_gpu_block_idx * tokens_per_block,
+                            chunk_idx * tokens_per_chunk,
+                        )
+                        range_end = min(
+                            num_cached_tokens, (chunk_idx + 1) * tokens_per_chunk
+                        )
+                        req_status.load_key_ranges.append((range_start, range_end, key))
 
             dst_block_ids.extend(
                 block.block_id

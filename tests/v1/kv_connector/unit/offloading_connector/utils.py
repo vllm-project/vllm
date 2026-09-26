@@ -19,6 +19,7 @@ from vllm.config import (
     KVTransferConfig,
     set_current_vllm_config,
 )
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -129,6 +130,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL_UNSPECIFIED
         self.manager.get_stats.return_value = None
         self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingWorker()

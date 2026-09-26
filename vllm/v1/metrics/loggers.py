@@ -15,6 +15,7 @@ from vllm.distributed.ec_transfer.ec_connector.metrics import (
     ECConnectorLogging,
     ECConnectorProm,
 )
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorProm,
@@ -716,6 +717,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prompt_tokens_cached, per_engine_labelvalues
         )
 
+        self.counter_prompt_tokens_cached_by_source = self._counter_cls(
+            name="vllm:prompt_tokens_cached_by_source",
+            documentation=(
+                "Prefix-cache hit tokens by the cache tier that supplied them: "
+                "device (local HBM), host (offloaded to DRAM), disk, p2p "
+                "(transferred from another vLLM instance) or "
+                "external_unspecified. Counted at admission; sums to "
+                "vllm:prefix_cache_hits + vllm:external_prefix_cache_hits."
+            ),
+            labelnames=labelnames + ["source"],
+        )
+        for source in CacheHitSource:
+            for labelvalues in per_engine_labelvalues.values():
+                self.counter_prompt_tokens_cached_by_source.labels(
+                    *labelvalues, source.value
+                )
+
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
@@ -1056,13 +1074,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.prefix_cache_stats.hits
             )
 
-            if scheduler_stats.connector_prefix_cache_stats is not None:
+            labelvalues = self.per_engine_labelvalues[engine_idx]
+            self.counter_prompt_tokens_cached_by_source.labels(
+                *labelvalues, CacheHitSource.DEVICE.value
+            ).inc(scheduler_stats.prefix_cache_stats.hits)
+
+            connector_stats = scheduler_stats.connector_prefix_cache_stats
+            if connector_stats is not None:
                 self.counter_connector_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.queries
+                    connector_stats.queries
                 )
                 self.counter_connector_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.hits
+                    connector_stats.hits
                 )
+                for source, num_tokens in connector_stats.hits_by_source.items():
+                    self.counter_prompt_tokens_cached_by_source.labels(
+                        *labelvalues, source
+                    ).inc(num_tokens)
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(

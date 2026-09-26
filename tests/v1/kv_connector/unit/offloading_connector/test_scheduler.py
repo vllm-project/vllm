@@ -19,6 +19,10 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+    CacheHitSource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -197,7 +201,9 @@ def test_swa_offload_window_covers_unaligned_hit(
     manager.complete_load(job.keys, state.req_context)
 
 
-def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
+def _make_partial_tail_scheduler(
+    recurrent_only: bool = False,
+) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = 4
     vllm_config.speculative_config = None
@@ -205,6 +211,8 @@ def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
         enable_kv_cache_events=True, publisher="null"
     )
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    if recurrent_only:
+        kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
@@ -574,6 +582,245 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     # not a load destination. Before the fix the boundary collapsed to 0.
     assert 41 not in loaded
     assert 42 in loaded
+
+
+@pytest.mark.parametrize(
+    ("recurrent_source", "expected"),
+    [
+        ("host", CachedTokensBySource(p2p=16, host=12)),
+        ("p2p", CachedTokensBySource(p2p=28)),
+        (None, CachedTokensBySource(p2p=16, host=12)),
+    ],
+)
+def test_external_cache_hit_sources_preserve_partial_tail_origin(
+    recurrent_source, expected
+):
+    """Recurrent state covers the whole prefix; the outermost tier wins."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(req_status) == 28
+
+    def get_load_source(key, req_context):
+        if get_offload_group_idx(key) == 1:
+            assert recurrent_source is not None
+            return recurrent_source
+        block_hash = get_offload_block_hash(key)
+        return "p2p" if block_hash == b"h3" else "host"
+
+    scheduler.manager.get_load_source.side_effect = get_load_source
+
+    recurrent_block = KVCacheBlock(41)
+    if recurrent_source is None:
+        recurrent_block.set_block_hash(
+            make_block_hash_with_group_id(BlockHash(b"cached"), 1), 12
+        )
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), recurrent_block],
+            )
+        ),
+        num_external_tokens=28,
+    )
+    assert req_status.partial_tail_boundary is None
+    assert scheduler.get_external_cache_hit_sources(request, 28) == expected
+
+
+@pytest.mark.parametrize(
+    ("second_source", "expected"),
+    [
+        ("host", CachedTokensBySource(host=4, disk=4)),
+        ("p2p", CachedTokensBySource(p2p=4, disk=4)),
+    ],
+)
+def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
+    request_runner,
+    second_source,
+    expected,
+):
+    """Groups with different chunk sizes overlap; the outermost tier wins."""
+    block_size = 4
+    groups = [
+        KVCacheGroupSpec(
+            [f"layer{group_idx}"],
+            FullAttentionSpec(
+                block_size=block_size * (group_idx + 1),
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        )
+        for group_idx in range(2)
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=groups,
+    )
+    scheduler = runner.connector_scheduler
+    request = MagicMock(request_id="mixed")
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=request,
+        req_context=ReqContext(req_id=request.request_id),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.CHUNK_LEVEL),
+    )
+    for group_idx, group_state in enumerate(req_status.group_states):
+        group_state.offload_keys = [
+            make_offload_key(f"h{chunk_idx}".encode(), group_idx)
+            for chunk_idx in range(2 // (group_idx + 1))
+        ]
+    scheduler._req_status[request.request_id] = req_status
+    runner.manager.get_load_source.side_effect = lambda key, req_context: (
+        ("host" if get_offload_block_hash(key) == b"h0" else "disk")
+        if get_offload_group_idx(key) == 0
+        else second_source
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(([KVCacheBlock(1), KVCacheBlock(2)], [KVCacheBlock(3)])),
+        2 * block_size,
+    )
+
+    assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == expected
+
+
+@pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
+def test_external_cache_hit_sources_recurrent_only_state(source):
+    scheduler = _make_partial_tail_scheduler(recurrent_only=True)
+    request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = request.num_tokens = 64
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(16)]
+    request.all_token_ids = list(range(64))
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(state) == 48
+    scheduler.manager.get_load_source.return_value = source
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(41),
+                ],
+            )
+        ),
+        48,
+    )
+    expected = CachedTokensBySource()
+    expected.add(source, 48)
+    assert scheduler.get_external_cache_hit_sources(request, 48) == expected
+    scheduler.manager.get_load_source.assert_called_once()
+
+
+@pytest.mark.parametrize("sparse_kind", ["sliding", "chunked_local"])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+@pytest.mark.parametrize("local_tokens", [0, 4])
+@pytest.mark.parametrize("full_attention", [False, True])
+@pytest.mark.parametrize(
+    "sparse_source", ["host", "disk", "p2p", "external_unspecified", "mixed"]
+)
+def test_external_cache_hit_sources_use_required_sparse_state(
+    sparse_kind,
+    blocks_per_chunk,
+    local_tokens,
+    full_attention,
+    sparse_source,
+):
+    """Skipped keys do not participate. Sparse state covers the whole prefix,
+    so each token range reports the outermost of its sources."""
+    block_size = 4
+    chunk_size = block_size * blocks_per_chunk
+    spec_kwargs = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    sparse_spec = (
+        SlidingWindowSpec(**spec_kwargs, sliding_window=2 * chunk_size)
+        if sparse_kind == "sliding"
+        else ChunkedLocalAttentionSpec(
+            **spec_kwargs, attention_chunk_size=2 * chunk_size
+        )
+    )
+    groups = [KVCacheGroupSpec(["sparse"], sparse_spec)]
+    if full_attention:
+        groups.insert(0, KVCacheGroupSpec(["full"], FullAttentionSpec(**spec_kwargs)))
+    vllm_config = _make_vllm_config(extra_config={"block_size": chunk_size})
+    vllm_config.cache_config.block_size = block_size
+    vllm_config.speculative_config = None
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    request = MagicMock(request_id="sparse")
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=request,
+        req_context=ReqContext(req_id=request.request_id),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.CHUNK_LEVEL),
+        num_locally_computed_tokens=local_tokens,
+    )
+    scheduler._req_status[request.request_id] = req_status
+    block_groups = []
+    for group_idx, state in enumerate(req_status.group_states):
+        state.offload_keys = [
+            make_offload_key(str(i).encode(), group_idx) for i in range(4)
+        ]
+        block_groups.append(
+            [
+                KVCacheBlock(
+                    0
+                    if group_idx == len(groups) - 1 and i < 2 * blocks_per_chunk
+                    else 1 + group_idx * 100 + i,
+                    is_null=group_idx == len(groups) - 1 and i < 2 * blocks_per_chunk,
+                )
+                for i in range(4 * blocks_per_chunk)
+            ]
+        )
+
+    def get_load_source(key, req_context):
+        chunk_idx = int(get_offload_block_hash(key))
+        if get_offload_group_idx(key) == len(groups) - 1:
+            assert chunk_idx >= 2  # Earlier sparse keys were not loaded.
+            if sparse_source == "mixed":
+                return "host" if chunk_idx == 2 else "disk"
+            return sparse_source
+        return "host" if chunk_idx < 2 else "disk"
+
+    scheduler.manager.get_load_source.side_effect = get_load_source
+    count = 4 * chunk_size - local_tokens
+    scheduler.update_state_after_alloc(
+        request, KVCacheBlocks(tuple(block_groups)), count
+    )
+    sparse_tiers = ["host", "disk"] if sparse_source == "mixed" else [sparse_source]
+
+    def outermost(*tiers):
+        return CacheHitSource.outermost(map(CacheHitSource, tiers))
+
+    expected = CachedTokensBySource()
+    if full_attention:
+        expected.add(outermost("host", *sparse_tiers), 2 * chunk_size - local_tokens)
+        expected.add(outermost("disk", *sparse_tiers), 2 * chunk_size)
+    else:
+        expected.add(outermost(*sparse_tiers), count)
+    result = scheduler.get_external_cache_hit_sources(request, count)
+    assert result == expected
+    assert result.total == count
+    assert scheduler.get_external_cache_hit_sources(request, 0) == (
+        CachedTokensBySource()
+    )
 
 
 def test_partial_lookup_requires_every_cache_group():
@@ -1400,7 +1647,6 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         #   are within the window → loads blocks 1,2
         expected_loaded=((0, 0), (0, 1), (0, 2), (1, 1), (1, 2)),
     )
-
     runner.manager.touch.assert_not_called()
 
     # 3 blocks are hit on GPU [0, 1, 2]

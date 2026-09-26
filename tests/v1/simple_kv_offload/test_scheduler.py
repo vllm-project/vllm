@@ -20,6 +20,11 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+    CacheHitSource,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
@@ -208,6 +213,38 @@ class SchedulerFixture:
     vllm_config: VllmConfig
     kv_cache_config: KVCacheConfig
     num_groups: int = 1
+
+
+@pytest.mark.parametrize(
+    ("backend", "source"),
+    [("cpu", CacheHitSource.HOST), ("disk", CacheHitSource.DISK)],
+)
+def test_connector_reports_configured_cache_source(
+    tmp_path, backend: str, source: CacheHitSource
+):
+    kv_cache_config = _make_kv_cache_config(num_blocks=4)
+    vllm_config = _make_vllm_config()
+    extra_config = {
+        "cpu_bytes_to_use_per_rank": _BYTES_PER_BLOCK * 4,
+        "kv_offload_backend": backend,
+    }
+    if backend == "disk":
+        extra_config.update(
+            disk_path=str(tmp_path / "kv-offload.bin"),
+            disk_capacity_bytes=_BYTES_PER_BLOCK * 4,
+        )
+    vllm_config.kv_transfer_config.kv_connector_extra_config = extra_config
+
+    connector = SimpleCPUOffloadConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        kv_cache_config,
+    )
+
+    expected = CachedTokensBySource()
+    expected.add(source, 32)
+    assert connector.get_external_cache_hit_sources(None, 32) == expected  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(None, 0) == CachedTokensBySource()  # type: ignore[arg-type]
 
 
 def make_scheduler(

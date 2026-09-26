@@ -13,6 +13,9 @@ import torch
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -199,6 +202,18 @@ def mc() -> MultiConnector:
     )
 
     return mc
+
+
+def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
+    request = MagicMock(request_id="request")
+    mc._requests_to_connector[request.request_id] = 1
+    sources = CachedTokensBySource(disk=32)
+    mc._connectors[1].get_external_cache_hit_sources.return_value = sources
+
+    assert mc.get_external_cache_hit_sources(request, 32) is sources
+    mc._connectors[1].get_external_cache_hit_sources.assert_called_once_with(
+        request, 32
+    )
 
 
 # Helper function to compare directories recursively

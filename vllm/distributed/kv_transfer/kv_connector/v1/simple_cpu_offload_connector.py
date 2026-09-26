@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -99,6 +100,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
         disk_mode = kv_offload_backend == "disk"
+        self._cache_hit_source = (
+            CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+        )
 
         disk_path = extra_config.get("disk_path", None) or None
         disk_capacity_bytes = int(

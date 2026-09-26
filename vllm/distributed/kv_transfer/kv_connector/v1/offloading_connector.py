@@ -8,6 +8,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -178,6 +181,16 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         )
         bound = min(per_group_hits[group_id] for group_id in self._bounding_group_ids)
         return max(0, bound - num_computed_tokens)
+
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> CachedTokensBySource:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_external_cache_hit_sources(
+            request, num_external_tokens
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

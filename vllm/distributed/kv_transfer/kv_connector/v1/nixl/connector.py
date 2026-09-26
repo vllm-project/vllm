@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -76,6 +77,8 @@ logger = init_logger(__name__)
 
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
+
+    _cache_hit_source = CacheHitSource.P2P
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:

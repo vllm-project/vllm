@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -141,6 +142,17 @@ class SecondaryTierManager(ABC):
     """
 
     medium: ClassVar[Medium | None] = None
+    # Cache tier reported for hits served from this tier. Derived from
+    # ``medium`` unless a subclass sets it; ``None`` medium means unknown.
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "cache_hit_source" not in cls.__dict__ and cls.medium is not None:
+            cls.cache_hit_source = {
+                Medium.CPU: CacheHitSource.HOST,
+                Medium.STORAGE: CacheHitSource.DISK,
+            }[cls.medium]
 
     def __init__(
         self,
