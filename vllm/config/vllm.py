@@ -70,6 +70,13 @@ else:
 
 logger = init_logger(__name__)
 
+# Architectures whose GDN (and PLE) layers run RecoverSSM under --use-replayssm.
+_QWEN4EXP_RECOVERSSM_ARCHS = (
+    "Qwen4ExpForCausalLM",
+    "Qwen4ExpForConditionalGeneration",
+    "Qwen4ExpMTP",
+)
+
 # TODO(rocm): These models are either unsupported by MRV2 or slower with
 # MRV2 on AMD GPUs.
 ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
@@ -3420,21 +3427,35 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
-            self.cache_config.use_kda_recoverssm = False
+            self.cache_config.use_recoverssm = False
             return self
-        self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+        self.cache_config.use_recoverssm = self.num_speculative_tokens > 0
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
-        if self.cache_config.use_kda_recoverssm:
+        if (
+            self.model_config is not None
+            and self.model_config.architecture in _QWEN4EXP_RECOVERSSM_ARCHS
+            and not self.cache_config.use_recoverssm
+        ):
+            # Qwen4Exp's GDN and PLE layers have no plain ReplaySSM path; with them the
+            # flag selects RecoverSSM, which needs speculative decoding.
+            raise ValueError(
+                "--use-replayssm on Qwen4Exp selects GDN RecoverSSM and requires "
+                "speculative decoding (num_speculative_tokens > 0)"
+            )
+        if self.cache_config.use_recoverssm:
             if self.model_config is not None and self.model_config.architecture not in (
                 "KimiLinearForCausalLM",
                 "KimiK3ForConditionalGeneration",
+                *_QWEN4EXP_RECOVERSSM_ARCHS,
             ):
-                raise ValueError("RecoverSSM is only supported for Kimi-K3 KDA")
+                raise ValueError(
+                    "RecoverSSM is only supported for Kimi-K3 KDA and Qwen4Exp GDN"
+                )
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "

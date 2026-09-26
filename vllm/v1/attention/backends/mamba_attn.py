@@ -112,7 +112,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
-        self.use_replayssm = vllm_config.cache_config.use_replayssm
+        # RecoverSSM also rides on --use-replayssm but keeps its own metadata; the
+        # Mamba2 ReplaySSM ring-buffer workspaces below are not used then.
+        self.use_replayssm = (
+            vllm_config.cache_config.use_replayssm
+            and not vllm_config.cache_config.use_recoverssm
+        )
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
         self.use_flashinfer_replayssm = (
             self.use_replayssm
