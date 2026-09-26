@@ -79,9 +79,10 @@ def chunk_kda_prefill(
         checkpoint_offsets: per-sequence token offset to snapshot at, ``0``
             for none.
         checkpoint_state_indices: optional per-sequence destination row.
-        state_cache: the paged recurrent state. When given, the fused backend
-            reads and writes it in place and neither a gather nor a scatter is
-            needed around this call; the returned final state is ``None``.
+        state_cache: the paged recurrent state. The fused backend addresses an
+            FP32 cache directly. Other cache dtypes are gathered into the FP32
+            accumulator format and cast back after the walk. The returned final
+            state is ``None`` in either case.
         state_indices: per-sequence cache row.
         has_initial_state: per-sequence flag; false starts from a zero state.
 
@@ -116,11 +117,11 @@ def chunk_kda_prefill(
         if state_indices is None or has_initial_state is None:
             raise ValueError("state_cache needs state_indices and has_initial_state")
 
-    # Only the fused walk addresses the paged rows directly. The Triton path
-    # gathers the rows it needs and scatters the results back here, so callers
-    # pass the cache the same way for either backend.
+    # Only the fused walk addresses FP32 paged rows directly. The Triton path
+    # and lower-precision persistent caches gather the active rows and scatter
+    # the final state back here, so callers use one cache API for every backend.
     scatter_to: torch.Tensor | None = None
-    if state_cache is not None and not fused:
+    if state_cache is not None and (not fused or state_cache.dtype != torch.float32):
         initial_state = gather_initial_states(
             state_cache, state_indices, has_initial_state
         )
@@ -131,6 +132,11 @@ def chunk_kda_prefill(
         # Restated for the type checker; `fused` already implies all three.
         assert cu_seqlens is not None and lower_bound is not None
         assert g_bias is not None
+        # The fused HIP prefill kernel accumulates recurrent state in FP32.
+        # Convert only active rows; the persistent cache keeps its configured
+        # dtype and receives a cast-back below.
+        if initial_state is not None and initial_state.dtype != torch.float32:
+            initial_state = initial_state.to(torch.float32)
         logger.info_once(
             "Kimi-K3 KDA prefill: dispatching the fused ROCm chunk kernel."
         )
@@ -147,7 +153,7 @@ def chunk_kda_prefill(
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-        return fused_kda_chunk(
+        o, final_state = fused_kda_chunk(
             qg=ws["qg"],
             w=ws["w"],
             u=ws["u"],
@@ -168,6 +174,12 @@ def chunk_kda_prefill(
             state_indices=state_indices,
             has_initial_state=has_initial_state,
         )
+        if scatter_to is not None:
+            assert state_indices is not None
+            assert final_state is not None
+            scatter_to[state_indices.long()] = final_state.to(scatter_to.dtype)
+            return o, None
+        return o, final_state
 
     o, final_state = chunk_kda_with_fused_gate(
         q=q,
@@ -191,6 +203,7 @@ def chunk_kda_prefill(
         o = out
     if scatter_to is not None:
         assert state_indices is not None
-        scatter_to[state_indices.long()] = final_state
+        assert final_state is not None
+        scatter_to[state_indices.long()] = final_state.to(scatter_to.dtype)
         return o, None
     return o, final_state
