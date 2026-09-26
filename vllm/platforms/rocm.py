@@ -220,6 +220,7 @@ _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
+_ON_GFX1201 = "gfx1201" in _GCN_ARCH
 
 _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
 # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
@@ -320,6 +321,10 @@ def on_gfx12x() -> bool:
 
 def on_gfx1250() -> bool:
     return _ON_GFX1250
+
+
+def on_gfx1201() -> bool:
+    return _ON_GFX1201
 
 
 def on_rdna4() -> bool:
