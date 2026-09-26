@@ -6,6 +6,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
@@ -51,10 +52,16 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+if rocm_aiter_ops.is_enabled():
+    from aiter.ops.triton.attention.kda import (
+        fused_recurrent_kda_packed_decode as aiter_kda_packed_decode,
+    )
 
 logger = init_logger(__name__)
 
@@ -155,16 +162,21 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
         conv_state_dtype, _ = self.get_state_dtype()
-        decode_conv1d_weight = None
-        if is_fused_kda_decode_supported(
+        self.use_aiter_decode = rocm_aiter_ops.is_enabled() and (
+            on_gfx950() or on_gfx1250()
+        )
+        use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
-        ):
+        )
+        if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
+        decode_conv1d_weight = None
+        if use_hip_decode or self.use_aiter_decode:
             decode_conv1d_weight = torch.empty(
                 3,
                 self.conv_size,
@@ -229,7 +241,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
-        if decode_conv1d_weight is not None:
+        if use_hip_decode:
             # Upcast once at load time; a BF16 norm weight slows the fused
             # decode kernel's epilogue.
             decode_norm_weight = torch.empty(
@@ -349,6 +361,31 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        if (
+            self.use_aiter_decode
+            and spec_sequence_masks is None
+            and m.num_prefills == 0
+            and m.num_decodes > 0
+        ):
+            assert non_spec_state_indices_tensor is not None
+            aiter_kda_packed_decode(
+                mixed_qkv=mixed_qkv,
+                g=g1[0],
+                beta=beta[0],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                lower_bound=self.gate_lower_bound,
+                initial_state=recurrent_state,
+                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                out_gate=g2[:num_actual_tokens],
+                norm_weight=self.o_norm.weight,
+                norm_eps=self.o_norm.eps,
+                out=core_attn_out[0, :num_actual_tokens],
+            )
+            return
 
         if (
             self.decode_conv1d_weight is not None
