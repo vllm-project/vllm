@@ -530,6 +530,10 @@ _MULTIMODAL_MODELS = {
     "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
     "MossAudioModel": ("moss_audio", "MossAudioModel"),
     "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
+    "MusicFlamingoForConditionalGeneration": (
+        "musicflamingo",
+        "MusicFlamingoForConditionalGeneration",
+    ),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
@@ -822,7 +826,6 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "TarsierForConditionalGeneration": "0.24.0",
     "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
     "MantisForConditionalGeneration": "0.24.0",
-    "MusicFlamingoForConditionalGeneration": "0.24.0",
     "AyaVisionForConditionalGeneration": "0.24.0",
     "TeleChatForCausalLM": "0.25.0",
     "PersimmonForCausalLM": "0.25.0",
