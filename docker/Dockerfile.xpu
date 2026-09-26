@@ -283,3 +283,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
       "intel-pti==1.1.0"
 
 ENTRYPOINT ["vllm", "serve"]
+
+FROM vllm-openai AS export_vllm_wheel_release
+
+ENTRYPOINT []
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
