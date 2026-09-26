@@ -39,13 +39,27 @@ from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.worker.workspace import current_workspace_manager
 
-if current_platform.is_rocm():
-    from vllm.models.glm5next.amd.ops.third_party.kda import (
+if current_platform.is_cpu():
+    from vllm.models.glm5next.cpu.kda import (  # type: ignore[assignment]
+        causal_conv1d_update_cpu as causal_conv1d_update,
+    )
+    from vllm.models.glm5next.cpu.kda import (
+        chunk_kda_with_fused_gate,
+        fused_recurrent_kda,
+    )
+    from vllm.models.glm5next.cpu.kda import (
+        gather_initial_states_cpu as gather_initial_states,
+    )
+    from vllm.models.glm5next.cpu.kda import (
+        scatter_states_cpu as scatter_states,
+    )
+elif current_platform.is_rocm():
+    from vllm.models.glm5next.amd.ops.third_party.kda import (  # type: ignore[assignment]
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
 else:
-    from vllm.models.glm5next.nvidia.ops.third_party.kda import (
+    from vllm.models.glm5next.nvidia.ops.third_party.kda import (  # type: ignore[assignment]
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
@@ -133,6 +147,13 @@ def _resolve_kda_prefill_backend(
     ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if current_platform.is_cpu():
+        if backend != "auto":
+            raise ValueError(
+                f"KDA prefill backend '{backend}' is not available on CPU; "
+                "use 'auto' for the PyTorch CPU backend."
+            )
+        return "cpu"
     capability = current_platform.get_device_capability()
     supported = (
         current_platform.is_cuda()
@@ -204,12 +225,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         _, recurrent_state_shape = self.get_state_shape()
         _, recurrent_state_dtype = self.get_state_dtype()
-        scatter_states.register_warmup(
-            state_shape=recurrent_state_shape,
-            state_dtype=recurrent_state_dtype,
-            indices_dtype=torch.int32,
-            max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
-        )
+        if not current_platform.is_cpu():
+            scatter_states.register_warmup(
+                state_shape=recurrent_state_shape,
+                state_dtype=recurrent_state_dtype,
+                indices_dtype=torch.int32,
+                max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+            )
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
