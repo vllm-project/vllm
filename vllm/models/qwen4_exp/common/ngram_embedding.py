@@ -58,7 +58,7 @@ logger = init_logger(__name__)
 
 
 class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
-    """ETP-sharded PLE table shared by device and pinned-host backends."""
+    """PLE table base shared by the device, pinned-host, and file-gather backends."""
 
     supports_prefetch: ClassVar[bool] = False
 
@@ -167,9 +167,9 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
 
 
 class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
-    """Quantization interface shared by resident and pinned PLE tables."""
+    """Quantization interface shared by device, pinned, and file-gather PLE tables."""
 
-    # PLE post-load processing only validates scales in their current storage.
+    # PLE post-load processing validates scales in place and binds host file shards.
     requires_device_loading: bool = False
 
     @staticmethod
@@ -270,6 +270,12 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             BLOCK_D=layer._block_d,
         )
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Bind host-file-gather tables once every checkpoint shard is loaded."""
+        bind = getattr(layer, "bind_file_shards", None)
+        if bind is not None:
+            bind()
+
     @abstractmethod
     def dequantize(
         self,
@@ -359,6 +365,7 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
+        super().process_weights_after_loading(layer)
 
     def dequantize(
         self,
