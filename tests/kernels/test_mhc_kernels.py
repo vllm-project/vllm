@@ -32,6 +32,8 @@ from vllm.model_executor.layers.mhc import (
     MHCFusedPostPreOp,
     MHCPreDelayedOp,
     MHCPreOp,
+    hc_contract,
+    hc_expand,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
@@ -1647,3 +1649,31 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (8, 4096),  # rank-2, the layout upstream assumed
+        (1, 8, 4096),  # rank-3, e.g. a bucketed model runner
+        (2, 1, 8, 4096),  # rank-4
+    ],
+)
+@pytest.mark.parametrize("hc_mult", [4])
+def test_hc_expand_contract_rank_agnostic(shape, hc_mult):
+    """hc_expand inserts the mHC axis second-to-last regardless of input rank.
+
+    hc_pre/hc_post read shape[-2:] as (hc_mult, hidden_size) and treat anything
+    before it as outer dims, so the helpers must place the axis accordingly for
+    any rank. The earlier unsqueeze(1).expand(-1, n, -1) only worked for rank-2.
+    """
+    set_random_seed(0)
+    x = torch.randn(*shape)
+
+    expanded = hc_expand(x, hc_mult)
+    assert expanded.shape == (*x.shape[:-1], hc_mult, x.shape[-1])
+
+    # hc_expand replicates, so contracting by the mean must recover the input.
+    contracted = hc_contract(expanded, hc_mult)
+    assert contracted.shape == x.shape
+    torch.testing.assert_close(contracted, x)
