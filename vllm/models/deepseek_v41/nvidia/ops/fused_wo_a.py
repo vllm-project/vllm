@@ -53,6 +53,26 @@ def _ue8m0_rp(value, *, loc=None, ip=None):
     return Uint32(result)
 
 
+@dsl_user_op
+def _rope_fma(value, cos, other, sin, *, subtract=False, loc=None, ip=None):
+    """Preserve multiply/FMA rounding when RoPE loads are hoisted."""
+    result = llvm.inline_asm(
+        Float32.mlir_type,
+        [v.ir_value(loc=loc, ip=ip) for v in (value, cos, other, sin)],
+        "{ .reg .f32 product; mul.rn.f32 product, $3, $4; "
+        + (
+            "neg.f32 product, product; fma.rn.f32 $0, $1, $2, product; }"
+            if subtract
+            else "fma.rn.f32 $0, $1, $2, product; }"
+        ),
+        "=f,f,f,f,f",
+        has_side_effects=False,
+        loc=loc,
+        ip=ip,
+    )
+    return Float32(result)
+
+
 @cute.jit
 def _scale(amax: Float32):
     exponent = _ue8m0_rp(amax * Float32(1.0 / 448.0))
@@ -216,6 +236,36 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                         x[token, group * heads_per_group + split, None], (4,), (qid,)
                     )
                     cute.copy(copy_x, x_src, x_bf16[None, iteration])
+            # Overlap the RoPE loads across tokens before consuming any of them.
+            cos_reg = cute.make_rmem_tensor((2, n_iters), Float32)
+            sin_reg = cute.make_rmem_tensor((2, n_iters), Float32)
+            copy_rope = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=32
+            )
+            if cutlass.const_expr(n_iters > 1):  # noqa: SIM102
+                if k >= nope_dim:
+                    for iteration in cutlass.range_constexpr(n_iters):
+                        token = iteration * tokens_per_iter + tid // threads_per_token
+                        if (
+                            cutlass.const_expr(tokens % tokens_per_iter == 0)
+                            or token < tokens
+                        ):
+                            pos = positions[token]
+                            freq = (k - nope_dim) // 2
+                            cute.copy(
+                                copy_rope,
+                                cute.local_tile(rope[pos, None], (2,), (freq // 2,)),
+                                cos_reg[None, iteration],
+                            )
+                            cute.copy(
+                                copy_rope,
+                                cute.local_tile(
+                                    rope[pos, None],
+                                    (2,),
+                                    ((freq + _ROPE_DIM // 2) // 2,),
+                                ),
+                                sin_reg[None, iteration],
+                            )
             for iteration in cutlass.range_constexpr(n_iters):
                 token = iteration * tokens_per_iter + tid // threads_per_token
                 if cutlass.const_expr(tokens % tokens_per_iter == 0) or token < tokens:
@@ -224,14 +274,20 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                     if k >= nope_dim:
                         # Inverse RoPE on the interleaved pairs (k, k+1) and
                         # (k+2, k+3); each rope row is cos || sin.
-                        pos = positions[token]
                         for pair in cutlass.range_constexpr(2):
-                            freq = (k - nope_dim) // 2 + pair
-                            cos = Float32(rope[pos, freq])
-                            sin = Float32(rope[pos, freq + _ROPE_DIM // 2])
+                            if cutlass.const_expr(n_iters > 1):
+                                cos = cos_reg[pair, iteration]
+                                sin = sin_reg[pair, iteration]
+                            else:
+                                pos = positions[token]
+                                freq = (k - nope_dim) // 2 + pair
+                                cos = Float32(rope[pos, freq])
+                                sin = Float32(rope[pos, freq + _ROPE_DIM // 2])
                             even, odd = x_f32[2 * pair], x_f32[2 * pair + 1]
-                            x_f32[2 * pair] = even * cos + odd * sin
-                            x_f32[2 * pair + 1] = odd * cos - even * sin
+                            x_f32[2 * pair] = _rope_fma(even, cos, odd, sin)
+                            x_f32[2 * pair + 1] = _rope_fma(
+                                odd, cos, even, sin, subtract=True
+                            )
                     amax = cute.arch.fmax(
                         cute.arch.fmax(cute.abs(x_f32[0]), cute.abs(x_f32[1])),
                         cute.arch.fmax(cute.abs(x_f32[2]), cute.abs(x_f32[3])),
@@ -303,11 +359,10 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                             stage > 0 or kk > 0,
                         )
                 _tcgen05.commit(mbar_done)
-                # Only the MMA warp waits; the CTA barrier releases the rest.
+                # Only the MMA warp waits; barrier 2 releases the TMEM readers.
                 cute.arch.mbarrier_wait(mbar_done, 0)
-            cute.arch.sync_threads()
-            base = cute.make_tensor(taddr, cute.make_layout(1))[0]
-            _tcgen05.fence_after_thread_sync()
+            if tid < tile_n:
+                cute.arch.barrier(barrier_id=2, number_of_threads=tile_n)
             # Tokens t with t % heads_per_group == split arrive from every peer
             # (this CTA included), tile_n Float32 rows each.
             if tid == 0:
@@ -322,6 +377,8 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             # after the dynamic path above; bind them so the regions join.
             amax, exponent, inv = Float32(0), Uint32(0), Float32(0)
             if tid < tile_n:
+                base = cute.make_tensor(taddr, cute.make_layout(1))[0]
+                _tcgen05.fence_after_thread_sync()
                 acc = cute.make_rmem_tensor(acc_cols, Float32)
                 if cutlass.const_expr(tokens == 1):
                     acc[0] = _tcgen05.ld(warp * 32, base, "32x32b", 1)
@@ -359,7 +416,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                             for peer in cutlass.range_constexpr(heads_per_group):
                                 value += partial[tid, i, peer]
                             value = Float32(BFloat16(value))
-                            amax = cute.arch.warp_reduction_max(cute.abs(value))
+                            amax = cute.arch.warp_redux_sync(value, "max", abs=True)
                             exponent, inv = _scale(amax)
                             q[token, tile * tile_n + tid] = Float8E4M3FN(value * inv)
                             if lane == 0:
@@ -372,10 +429,16 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                         qs[tile * 512 + offset] = Uint8(0)
             # Each receiver drained all writes into its own inbox. Only local
             # TMEM readers must finish before deallocation; no peer reads SMEM.
-            cute.arch.sync_threads()
+            if tid < tile_n:
+                cute.arch.barrier(barrier_id=2, number_of_threads=tile_n)
             if warp == 0:
                 cute.arch.dealloc_tmem(
-                    cute.make_ptr(Float32, base, cute.AddressSpace.tmem), tmem_cols
+                    cute.make_ptr(
+                        Float32,
+                        cute.make_tensor(taddr, cute.make_layout(1))[0],
+                        cute.AddressSpace.tmem,
+                    ),
+                    tmem_cols,
                 )
 
         @cute.jit
