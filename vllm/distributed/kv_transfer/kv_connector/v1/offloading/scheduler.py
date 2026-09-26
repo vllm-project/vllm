@@ -184,6 +184,10 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    # Full-attention block size in tokens. A partial tail lies inside the block
+    # that follows the last complete chunk hit. 0 when partial tails are
+    # unsupported.
+    partial_tail_window: int = 0
 
     @classmethod
     def from_spec(
@@ -293,26 +297,50 @@ class SchedulerOffloadConfig(NamedTuple):
                 )
             )
         kv_group_configs = tuple(kv_group_configs_list)
-        group_block_sizes = {config.tokens_per_block for config in kv_group_configs}
         has_partial_recurrent_group = any(
             config.requires_cow_source
             and config.tokens_per_block > spec.tokens_per_hash
             for config in kv_group_configs
         )
-        # Partial tails currently require one physical block per offload chunk
-        # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE and DCP need additional hand-off semantics.
+        # Partial tails require one physical block per offload chunk and only
+        # full-attention or recurrent (cow-source) groups, so that a single
+        # boundary identifies every group's source block. Group block sizes may
+        # differ -- under DCP the full-attention offload block is dcp x the
+        # attention block while recurrent blocks stay unsharded -- as long as
+        # every recurrent block divides the full-attention block. The
+        # tokens_per_hash % dcp check is conservative: store and load copy
+        # whole physical blocks per rank, so it is not required by the copy
+        # path, but it keeps every hash boundary on a whole number of tokens
+        # per rank and is the only shape validated on hardware. EAGLE needs
+        # additional hand-off semantics for its volatile draft tail.
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        full_attention_block_sizes = {
+            config.tokens_per_block
+            for config in kv_group_configs
+            if config.sliding_window_size_in_chunks is None
+        }
+        # tokens_per_block of an attention group is already scaled by DCP, so
+        # this is the full-attention offload chunk size.
+        partial_tail_window = (
+            next(iter(full_attention_block_sizes))
+            if len(full_attention_block_sizes) == 1
+            else None
+        )
         supports_partial_tail = (
             spec.blocks_per_chunk == 1
-            and len(group_block_sizes) == 1
+            and partial_tail_window is not None
             and has_partial_recurrent_group
             and all(
                 config.sliding_window_size_in_chunks is None
-                or config.requires_cow_source
+                or (
+                    config.requires_cow_source
+                    and partial_tail_window % config.tokens_per_block == 0
+                    and config.tokens_per_block % spec.tokens_per_hash == 0
+                )
                 for config in kv_group_configs
             )
             and not any(config.is_eagle_group for config in kv_group_configs)
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and spec.tokens_per_hash % dcp_world_size == 0
         )
 
         if retention_interval is not None:
@@ -341,7 +369,12 @@ class SchedulerOffloadConfig(NamedTuple):
             supports_partial_tail=supports_partial_tail,
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
-            dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_world_size=dcp_world_size,
+            partial_tail_window=(
+                partial_tail_window
+                if supports_partial_tail and partial_tail_window is not None
+                else 0
+            ),
         )
 
 
@@ -591,15 +624,12 @@ class OffloadingConnectorScheduler:
 
         # used by _lookup
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
-        self._partial_tail_block_size = (
-            self.config.kv_group_configs[0].tokens_per_block
-            if self.config.supports_partial_tail
-            else 0
-        )
+        self._partial_tail_window = self.config.partial_tail_window
         self._cow_source_groups = frozenset(
             config.group_idx
             for config in self.config.kv_group_configs
@@ -960,6 +990,51 @@ class OffloadingConnectorScheduler:
         req_context.set_offload_key_position(key, boundary_tokens)
         return key
 
+    def _full_attention_complete_hit(
+        self, req_status: RequestOffloadState, max_hit_size_tokens: int
+    ) -> int | None:
+        """Tokens beyond num_locally_computed_tokens covered by complete chunks
+        of every full-attention group, ignoring recurrent groups.
+
+        A recurrent (cow-source) group keeps one state per producer request, at
+        that prompt's tail, so it rarely has a state at a full-attention chunk
+        boundary; requiring one there would hide every partial tail beyond the
+        first recurrent block. The partial-tail search is therefore anchored on
+        the full-attention prefix alone and checks the recurrent groups only at
+        the candidate boundary. Returns None if a lookup was deferred or a hit
+        chunk is still being loaded.
+        """
+        num_computed_tokens = req_status.num_locally_computed_tokens
+        for group_idx in self._full_attention_groups:
+            group_config = self.config.kv_group_configs[group_idx]
+            group_state = req_status.group_states[group_idx]
+            tokens_per_chunk = group_config.tokens_per_chunk
+            num_chunks = min(
+                cdiv(max_hit_size_tokens, tokens_per_chunk),
+                len(group_state.offload_keys),
+            )
+            start_chunk_idx = num_computed_tokens // tokens_per_chunk
+            offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
+            num_hit_chunks = self._maximal_prefix_lookup(
+                offload_keys,
+                req_status.req_context,
+                req_status.req,
+                group_config,
+                start_chunk_idx,
+            )
+            if num_hit_chunks is None:
+                return None
+            if self._chunks_being_loaded and any(
+                key in self._chunks_being_loaded
+                for key in offload_keys[:num_hit_chunks]
+            ):
+                return None
+            max_hit_size_tokens = min(
+                max_hit_size_tokens,
+                tokens_per_chunk * (start_chunk_idx + num_hit_chunks),
+            )
+        return max(0, max_hit_size_tokens - num_computed_tokens)
+
     def _lookup(
         self,
         req_status: RequestOffloadState,
@@ -971,9 +1046,25 @@ class OffloadingConnectorScheduler:
             return complete_hit
 
         local_tokens = req_status.num_locally_computed_tokens
-        complete_boundary = local_tokens + complete_hit
+        max_hit_size_tokens = req_status.req.num_prompt_tokens
+        if max_num_new_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens, local_tokens + max_num_new_tokens
+            )
+        if req_status.max_load_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens, local_tokens + req_status.max_load_tokens
+            )
+        full_attention_hit = self._full_attention_complete_hit(
+            req_status, max_hit_size_tokens
+        )
+        if full_attention_hit is None:
+            return None if complete_hit == 0 else complete_hit
+        anchor_hit = max(complete_hit, full_attention_hit)
+
+        complete_boundary = local_tokens + anchor_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_end = complete_boundary + self._partial_tail_block_size
+        block_end = complete_boundary + self._partial_tail_window
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -1347,103 +1438,148 @@ class OffloadingConnectorScheduler:
 
         for req_id, entries in handoffs.items():
             entries = [
-                entry
-                for entry in entries
-                if entry[2] % self._partial_tail_block_size != 0
+                (group_idx, block_id, boundary)
+                for group_idx, block_id, boundary in entries
+                if boundary % self._partial_tail_window != 0
             ]
             if not entries:
                 continue
             req_status = self._req_status.get(req_id)
             assert req_status is not None
-            boundaries = {boundary for _, _, boundary in entries}
-            assert len(boundaries) == 1
-            boundary = boundaries.pop()
-            req = req_status.req
-            group_states = {
-                group.group_idx: state
-                for group, state in zip(
-                    self.config.kv_group_configs, req_status.group_states
+            # The hand-off list is per request, per step, and drains every
+            # recurrent "align" manager, so it can legally carry more than one
+            # boundary: a shared-prefix junction next to the replay boundary, or
+            # one per retained segment under a non-zero
+            # prefix_cache_retention_interval. Store each of them — the KV cache
+            # manager already decided these are the reachable ones, and dropping
+            # the shorter ones would discard exactly the cross-request junctions
+            # sparse retention kept. Longest first, the order a consumer's
+            # descending probe reads them in.
+            boundaries = sorted({boundary for _, _, boundary in entries}, reverse=True)
+            for boundary in boundaries:
+                self._build_partial_tail_store_job(
+                    req_status,
+                    boundary,
+                    [entry for entry in entries if entry[2] == boundary],
+                    store_jobs,
                 )
-            }
-            max_boundary = min(
-                req.num_prompt_tokens,
-                req_status.max_offload_tokens or req.num_prompt_tokens,
-            )
-            assert boundary > 0
-            assert boundary % self.config.tokens_per_hash == 0
-            assert boundary <= max_boundary
-
-            cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
-            assert self._cow_source_groups.issubset(cow_blocks)
-
-            assert boundary % self._partial_tail_block_size != 0
-            block_idx = boundary // self._partial_tail_block_size
-            if any(
-                group.group_idx not in self._cow_source_groups
-                and block_idx >= len(group_states[group.group_idx].block_ids)
-                for group in self.config.kv_group_configs
-            ):
-                continue
-            keys = [
-                self._make_boundary_key(
-                    req, group.group_idx, boundary, req_status.req_context
-                )
-                for group in self.config.kv_group_configs
-            ]
-            block_ids = [
-                cow_blocks[group.group_idx]
-                if group.group_idx in self._cow_source_groups
-                else group_states[group.group_idx].block_ids[block_idx]
-                for group in self.config.kv_group_configs
-            ]
-            assert all(block_id != 0 for block_id in block_ids)
-
-            store_output = self.manager.prepare_store(keys, req_status.req_context)
-            if store_output is None:
-                self._connector_stats.increase_counter(
-                    _ConnectorMetricName.ALLOCATION_FAILURE
-                )
-                continue
-            if not store_output.keys_to_store:
-                continue
-
-            for group_config, key in zip(self.config.kv_group_configs, keys):
-                if key in store_output.keys_to_store:
-                    self._events_tracker.record_partial_store(
-                        req, group_config, boundary, key
-                    )
-
-            group_by_key = {key: idx for idx, key in enumerate(keys)}
-            accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
-            group_sizes = [0] * len(self.config.kv_group_configs)
-            block_indices = [0] * len(self.config.kv_group_configs)
-            for group_idx in accepted_groups:
-                group_sizes[group_idx] = 1
-                block_indices[group_idx] = block_idx
-            source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
-
-            job_id = self._generate_job_id()
-            req_status.transfer_jobs.add(job_id)
-            for block_id in source_blocks:
-                self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
-            self._jobs[job_id] = TransferJobStatus(
-                req_id=req_id,
-                pending_count=self.config.num_workers,
-                keys=set(store_output.keys_to_store),
-                is_store=True,
-                fenced_block_ids=source_blocks,
-            )
-            store_jobs[job_id] = TransferJob(
-                req_id=req_id,
-                src_spec=GPULoadStoreSpec(
-                    source_blocks,
-                    group_sizes=group_sizes,
-                    block_indices=block_indices,
-                ),
-                dst_spec=store_output.store_spec,
-            )
 
         return store_jobs
+
+    def _build_partial_tail_store_job(
+        self,
+        req_status: RequestOffloadState,
+        boundary: int,
+        entries: list[tuple[int, int, int]],
+        store_jobs: dict[int, TransferJob],
+    ) -> None:
+        """Store one partial-tail boundary: the sub-block state every group holds
+        at ``boundary``, under that boundary's hash key.
+
+        ``entries`` are this boundary's ``(group_idx, block_id, boundary)``
+        hand-offs. Adds at most one job to ``store_jobs``; returns silently when
+        the boundary is not storable, since one unusable boundary must not cost
+        the request its other tails or abort the scheduler step.
+        """
+        req = req_status.req
+        req_id = req.request_id
+        group_states = {
+            group.group_idx: state
+            for group, state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            )
+        }
+        max_boundary = min(
+            req.num_prompt_tokens,
+            req_status.max_offload_tokens or req.num_prompt_tokens,
+        )
+        assert boundary > 0
+        assert boundary % self.config.tokens_per_hash == 0
+        assert boundary <= max_boundary
+        assert boundary % self._partial_tail_window != 0
+
+        cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
+        if not self._cow_source_groups.issubset(cow_blocks):
+            # A boundary is only restorable when every recurrent group has its
+            # state there — the lookup commits a boundary only if all groups hit
+            # — so an incomplete hand-off is skipped, not stored half-formed.
+            return
+
+        # The block holding the state that ends at `boundary`, in each group's
+        # own block size; recurrent groups supply the CoW block from the
+        # hand-off. A boundary landing exactly on a group's block edge ends the
+        # previous block, not the next one.
+        group_block_idx = [
+            (boundary - 1) // group.tokens_per_block
+            for group in self.config.kv_group_configs
+        ]
+        if any(
+            group.group_idx not in self._cow_source_groups
+            and group_block_idx[config_idx]
+            >= len(group_states[group.group_idx].block_ids)
+            for config_idx, group in enumerate(self.config.kv_group_configs)
+        ):
+            return
+        keys = [
+            self._make_boundary_key(
+                req, group.group_idx, boundary, req_status.req_context
+            )
+            for group in self.config.kv_group_configs
+        ]
+        block_ids = [
+            cow_blocks[group.group_idx]
+            if group.group_idx in self._cow_source_groups
+            else group_states[group.group_idx].block_ids[group_block_idx[config_idx]]
+            for config_idx, group in enumerate(self.config.kv_group_configs)
+        ]
+        if any(block_id == 0 for block_id in block_ids):
+            # Null or staled-out source block; the aligned path skips these too.
+            return
+
+        store_output = self.manager.prepare_store(keys, req_status.req_context)
+        if store_output is None:
+            self._connector_stats.increase_counter(
+                _ConnectorMetricName.ALLOCATION_FAILURE
+            )
+            return
+        if not store_output.keys_to_store:
+            return
+
+        for group_config, key in zip(self.config.kv_group_configs, keys):
+            if key in store_output.keys_to_store:
+                self._events_tracker.record_partial_store(
+                    req, group_config, boundary, key
+                )
+
+        group_by_key = {key: idx for idx, key in enumerate(keys)}
+        accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
+        group_sizes = [0] * len(self.config.kv_group_configs)
+        block_indices = [0] * len(self.config.kv_group_configs)
+        for config_idx in accepted_groups:
+            group_sizes[config_idx] = 1
+            block_indices[config_idx] = group_block_idx[config_idx]
+        source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
+
+        job_id = self._generate_job_id()
+        req_status.transfer_jobs.add(job_id)
+        for block_id in source_blocks:
+            self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
+        self._jobs[job_id] = TransferJobStatus(
+            req_id=req_id,
+            pending_count=self.config.num_workers,
+            keys=set(store_output.keys_to_store),
+            is_store=True,
+            fenced_block_ids=source_blocks,
+        )
+        store_jobs[job_id] = TransferJob(
+            req_id=req_id,
+            src_spec=GPULoadStoreSpec(
+                source_blocks,
+                group_sizes=group_sizes,
+                block_indices=block_indices,
+            ),
+            dst_spec=store_output.store_spec,
+        )
 
     def _reachable_store_block_mask(
         self,
