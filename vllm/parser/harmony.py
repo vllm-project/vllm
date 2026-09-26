@@ -382,8 +382,10 @@ class HarmonyParser(DelegatingParser):
         count = 0
         for token_id in token_ids:
             parser.process(token_id)
-            recipient = self._normalize_recipient(parser.current_recipient)
-            if self._is_reasoning_token(token_id, parser.current_channel, recipient):
+            channel, recipient = self._normalize_header(
+                parser.current_channel, parser.current_recipient
+            )
+            if self._is_reasoning_token(token_id, channel, recipient):
                 count += 1
         return count
 
