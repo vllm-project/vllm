@@ -1,6 +1,7 @@
 #pragma once
 
 #include "custom_collective_common.cuh"
+#include "core/batch_invariant.hpp"
 
 namespace vllm {
 
@@ -283,6 +284,22 @@ class CustomAllreduce {
             "Invalid VLLM_CUSTOM_ALLREDUCE_ALGO: " + std::string(env_algo) +
             ". Valid values: 1stage, oneshot, 2stage, twoshot");
       }
+    }
+
+    if (vllm::vllm_is_batch_invariant()) {
+      if (force_2stage) {
+        throw std::runtime_error(
+            "VLLM_CUSTOM_ALLREDUCE_ALGO=2stage is incompatible with "
+            "VLLM_BATCH_INVARIANT=1: cross_device_reduce_2stage partitions the "
+            "message by size and accumulates in a rank-rotated order, so an "
+            "element's summation order changes with message size (i.e. with "
+            "batch composition) and differs across owning ranks.");
+      }
+      // cross_device_reduce_1stage sums every element over absolute rank
+      // indices with no address reordering (see the kernel's own comment), so
+      // its accumulation order is identical on every rank and independent of
+      // message size. It is the only batch-invariant path here.
+      force_1stage = true;
     }
 
 #define KL(ngpus, name)                                                       \

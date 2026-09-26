@@ -597,6 +597,7 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_tp_allreduce_batch_invariance.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
 
 - label: ":nvidia: (H100) Batch Invariance"
