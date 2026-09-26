@@ -675,7 +675,7 @@ Runs the benchmark once per value, then prints a summary table comparing through
 | `--multi-turn` | `false` | Enable multi-turn conversation mode (requires `--backend openai-chat`) |
 | `--multi-turn-num-turns` | `3` | Turns per conversation (synthetic mode) |
 | `--multi-turn-min-turns` | `0` | Minimum turns per conversation (0 = use `--multi-turn-num-turns`) |
-| `--multi-turn-max-turns` | `0` | Maximum turns per conversation (0 = `--multi-turn-num-turns` synthetic / uncapped ShareGPT) |
+| `--multi-turn-max-turns` | `0` | Maximum turns per conversation (0 = `--multi-turn-num-turns` synthetic / uncapped ShareGPT and HF) |
 | `--multi-turn-concurrency` | — | Concurrent conversations (defaults to `--max-concurrency` or `--num-prompts`) |
 | `--multi-turn-delay-ms` | `0` | Delay between turns in ms (simulates user think time) |
 | `--per-turn-input-len` | `0` | Input token length for turns 1+ (0 = use `--random-input-len` for all turns) |
@@ -694,7 +694,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 - `--dataset-name random` — synthetic conversations with controllable per-turn token lengths. Auto-sets `min_tokens` to enforce output length without `ignore_eos`.
 - `--dataset-name sharegpt` — loads all turns (not just the first two); filters for entries with ≥ 2 real turns.
-- `--dataset-name hf` — downloads a ShareGPT-format HuggingFace config, then loads it like `sharegpt`.
+- `--dataset-name hf` — downloads a ShareGPT-format HuggingFace config, then loads it like `sharegpt`. Both honor `--no-oversample` and `--disable-shuffle`.
 
 **Prefix sharing** (random dataset): when `--multi-turn-prefix-global-ratio` or `--multi-turn-prefix-conversation-ratio` is > 0, each turn sends a fixed-length message (no history accumulation) composed of a global prefix + per-conversation prefix + unique suffix. The two ratios must sum to < 1.0.
 
