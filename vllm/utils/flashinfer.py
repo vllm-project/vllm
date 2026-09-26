@@ -79,6 +79,29 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
 
+_DEFAULT_CUDA_HOME = "/usr/local/cuda"
+
+
+def _flashinfer_nvcc_path() -> str | None:
+    """Return the nvcc that FlashInfer's JIT would run, or None if missing.
+
+    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` (``$CUDA_HOME``, then
+    ``$CUDA_PATH``, then nvcc on ``$PATH``, then ``/usr/local/cuda``) and the
+    ``$FLASHINFER_NVCC`` override, without importing FlashInfer, whose import
+    initializes CUDA.
+    """
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        if nvcc is not None:
+            cuda_home = os.path.dirname(os.path.dirname(nvcc))
+        elif os.path.exists(_DEFAULT_CUDA_HOME):
+            cuda_home = _DEFAULT_CUDA_HOME
+        else:
+            return None
+    nvcc = os.environ.get("FLASHINFER_NVCC") or os.path.join(cuda_home, "bin", "nvcc")
+    return shutil.which(nvcc)
+
 
 @functools.cache
 def has_flashinfer_cubin() -> bool:
@@ -99,12 +122,16 @@ def has_flashinfer() -> bool:
     if importlib.util.find_spec("flashinfer") is None:
         logger.debug_once("FlashInfer unavailable since package was not found")
         return False
-    # When not using flashinfer cubin,
-    # Also check if nvcc is available since it's required to JIT compile flashinfer
-    if not has_flashinfer_cubin() and shutil.which("nvcc") is None:
-        logger.debug_once(
-            "FlashInfer unavailable since nvcc was not found "
-            "and not using pre-downloaded cubins"
+    # FlashInfer's JIT runs nvcc and `ninja` (from PATH).
+    if not has_flashinfer_cubin() and (
+        _flashinfer_nvcc_path() is None or shutil.which("ninja") is None
+    ):
+        logger.warning_once(
+            "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
+            "and nvcc (via CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or "
+            "ninja (via PATH) is missing, so slower fallbacks such as Triton MoE "
+            "are used. Set CUDA_HOME to a CUDA toolkit, or install "
+            "flashinfer-cubin and flashinfer-jit-cache."
         )
         return False
     return True
