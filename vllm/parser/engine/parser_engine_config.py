@@ -33,6 +33,7 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+    FENCED = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,7 @@ class ParserEngineConfig:
             ParserState.REASONING: EventType.REASONING_CHUNK,
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            ParserState.FENCED: EventType.TEXT_CHUNK,
         },
     )
 
