@@ -15,11 +15,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 
 
-def test_download_weights_from_hf():
+def test_download_weights_from_hf(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         # assert LocalEntryNotFoundError error is thrown
         # if offline is set and model is not cached
-        huggingface_hub.constants.HF_HUB_OFFLINE = True
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
         with pytest.raises(LocalEntryNotFoundError):
             download_weights_from_hf(
                 "facebook/opt-125m",
@@ -28,7 +28,7 @@ def test_download_weights_from_hf():
             )
 
         # download the model
-        huggingface_hub.constants.HF_HUB_OFFLINE = False
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", False)
         download_weights_from_hf(
             "facebook/opt-125m",
             allow_patterns=["*.safetensors", "*.bin"],
@@ -36,7 +36,7 @@ def test_download_weights_from_hf():
         )
 
         # now it should work offline
-        huggingface_hub.constants.HF_HUB_OFFLINE = True
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
         assert (
             download_weights_from_hf(
                 "facebook/opt-125m",
@@ -308,4 +308,4 @@ def test_drop_checkpoint_cache_releases_local_weight_files(
 
 
 if __name__ == "__main__":
-    test_download_weights_from_hf()
+    test_download_weights_from_hf(pytest.MonkeyPatch())
