@@ -2539,16 +2539,26 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     "Non-causal multi-token MLA requires an explicitly supported "
                     "attention group."
                 )
-            query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-            num_active_reqs = int(torch.count_nonzero(query_lens > 0))
-            uniform_active_queries = num_active_reqs > 0 and bool(
-                torch.all(query_lens[:num_active_reqs] == query_lens[0])
+            # query_start_loc_cpu is host-side and holds one entry per
+            # request, so this check costs more in tensor dispatch than in
+            # the work it does. Read it out once and validate on Python ints:
+            # the block runs on every build, between decode steps.
+            qsl = query_start_loc_cpu.tolist()
+            query_lens = [qsl[i + 1] - qsl[i] for i in range(len(qsl) - 1)]
+            num_active_reqs = 0
+            for qlen in query_lens:
+                if qlen > 0:
+                    num_active_reqs += 1
+            uniform_active_queries = num_active_reqs > 0 and all(
+                qlen == query_lens[0] for qlen in query_lens[:num_active_reqs]
             )
-            trailing_graph_padding = bool(torch.all(query_lens[num_active_reqs:] == 0))
+            trailing_graph_padding = all(
+                qlen == 0 for qlen in query_lens[num_active_reqs:]
+            )
             if not (uniform_active_queries and trailing_graph_padding):
                 raise ValueError(
                     "Non-causal MLA requires a uniform query block; got query "
-                    f"lengths {query_lens.tolist()}."
+                    f"lengths {query_lens}."
                 )
             # Use exact GPU sequence lengths instead of the prefill path's CPU
             # context-length upper bounds.

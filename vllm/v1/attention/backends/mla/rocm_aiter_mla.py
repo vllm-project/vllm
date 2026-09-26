@@ -475,8 +475,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # query_start_loc flat for dummy requests. Only synthesize dummy rows
         # when every padded request maps to the same qlen and the q buffer has
         # exactly that many rows.
-        if num_decode_tokens <= int(qo_len.sum().item()):
-            return 0
         if num_decode_tokens % num_reqs != 0:
             return 0
 
@@ -484,19 +482,34 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if uniform_qo_len <= 1:
             return 0
 
-        positive_qo_len = qo_len[qo_len > 0]
-        if positive_qo_len.numel() == qo_len.numel():
+        # qo_len is derived from query_start_loc_cpu, so it is already
+        # host-side and tiny (one entry per request). Reading it out once and
+        # deciding on Python ints avoids eight separate tensor dispatches --
+        # sum/item, boolean-mask index, all, eq, nonzero, item, any -- on the
+        # metadata-build path, which runs between decode steps while the GPUs
+        # are idle.
+        lens = qo_len.tolist()
+        if num_decode_tokens <= sum(lens):
             return 0
-        if positive_qo_len.numel() > 0:
+
+        first_zero = -1
+        num_positive = 0
+        for i, qlen in enumerate(lens):
+            if qlen > 0:
+                num_positive += 1
+                # A positive entry after a zero breaks the contiguous live
+                # prefix that the padded layout requires.
+                if first_zero >= 0:
+                    return 0
+            elif first_zero < 0:
+                first_zero = i
+
+        if num_positive == num_reqs:
+            return 0
+        if num_positive > 0:
             if max_qo_len != uniform_qo_len:
                 return 0
-            if not torch.all(positive_qo_len == uniform_qo_len):
-                return 0
-
-        zero_positions = torch.nonzero(qo_len == 0, as_tuple=False).flatten()
-        if zero_positions.numel() > 0:
-            first_zero = int(zero_positions[0].item())
-            if torch.any(qo_len[first_zero:] > 0):
+            if any(qlen != uniform_qo_len for qlen in lens if qlen > 0):
                 return 0
 
         return uniform_qo_len
