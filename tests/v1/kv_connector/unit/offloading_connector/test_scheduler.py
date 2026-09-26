@@ -457,6 +457,42 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert req_status.partial_tail_boundary is None
 
 
+def test_update_state_after_alloc_records_gpu_local_prefix_access():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status[request.request_id]
+    req_status.num_locally_computed_tokens = 16
+    req_status.update_offload_keys()
+    req_status.update_num_hit_chunks(16)
+
+    scheduler.update_state_after_alloc(request, None, num_external_tokens=0)
+    scheduler.update_state_after_alloc(request, None, num_external_tokens=0)
+
+    expected = []
+    for group_config, group_state in zip(
+        scheduler.config.kv_group_configs, req_status.group_states
+    ):
+        num_local_chunks = min(
+            len(group_state.offload_keys),
+            req_status.num_locally_computed_tokens // group_config.tokens_per_chunk,
+        )
+        local_start = max(
+            0,
+            num_local_chunks
+            - (group_config.sliding_window_size_in_chunks or num_local_chunks),
+        )
+        if local_start < num_local_chunks:
+            expected.append(group_state.offload_keys[local_start:num_local_chunks])
+
+    actual = [call.args[0] for call in scheduler.manager.record_access.call_args_list]
+    assert actual == expected
+    assert all(
+        call.args[1] is req_status.req_context
+        for call in scheduler.manager.record_access.call_args_list
+    )
+    assert req_status.gpu_prefix_access_recorded
+
+
 def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)

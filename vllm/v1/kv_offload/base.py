@@ -185,11 +185,12 @@ The class provides the following primitives:
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
         information required for performing the load.
-    touch() - marks the give blocks as recently used. Can be used
-        to track block's LRU. This function is separated from the
-        prepare_load function to allow setting block recency even
-        for blocks which do not need reading from the cache, such as
-        blocks that are cached by the GPU prefix cache.
+    record_access() - records a request-scoped access to ready offloaded
+        blocks without pinning or transferring them. This is used for blocks
+        that are already cached by the GPU prefix cache.
+    touch() - marks the given blocks as recently used immediately. This is
+        retained for policy-level callers that do not have request lifetime
+        information.
     complete_load() - mark blocks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
     prepare_store() - prepare the given blocks to be written.
@@ -277,6 +278,22 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+
+        """
+        return
+
+    def record_access(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        """Record a request-scoped access without pinning or transferring.
+
+        Managers should ignore keys that are not ready in the offload cache.
+        The access is finalized by :meth:`on_request_finished`, together with
+        accesses observed through ``prepare_load`` and ``prepare_store``.
+
+        Args:
+            keys: Candidate keys observed in the GPU-local prefix.
+            req_context: Per-request context.
 
         """
         return
