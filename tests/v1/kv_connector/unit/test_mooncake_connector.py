@@ -15,6 +15,7 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
@@ -26,7 +27,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _block_ids_for_region,
+    _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
+    _has_opaque_packed_row,
+    _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
@@ -40,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    MLAAttentionSpec,
 )
 from vllm.v1.request import RequestStatus
 
@@ -153,6 +159,34 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
                 ),
             )
         ],
+    )
+
+
+def _make_packed_mla_kv_cache_config(
+    num_blocks: int, *, num_groups: int = 1
+) -> KVCacheConfig:
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.uint8,
+    )
+    if num_groups == 1:
+        groups = [
+            KVCacheGroupSpec(
+                ["model.layers.0.mla_attn", "model.layers.1.indexer"],
+                spec,
+            )
+        ]
+    else:
+        groups = [
+            KVCacheGroupSpec(["model.layers.0.mla_attn"], spec),
+            KVCacheGroupSpec(["model.layers.1.indexer"], spec),
+        ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
     )
 
 
@@ -1295,7 +1329,44 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
             assert registered_ptrs == [raw.data_ptr()]
             assert registered_lens == [raw.nbytes]
 
-            if not layout.is_block_compact:
+            tensor_blocks = tensor1.shape[0] if tensor1.ndim > 1 else 0
+            block_stride = (
+                tensor1.stride(0) * tensor1.element_size() if tensor1.ndim > 1 else 0
+            )
+            storage_nbytes = tensor1.untyped_storage().nbytes()
+            storage_is_block_major = (
+                tensor_blocks > 0 and tensor_blocks * block_stride == storage_nbytes
+            )
+            hnc_contiguous = (
+                tensor1.ndim == 4
+                and tensor1.stride(2) == tensor1.shape[3]
+                and tensor1.stride(1) == tensor1.shape[2] * tensor1.shape[3]
+            )
+            # Block-major non-HNC FA. Contiguous per-layer pages stay separate
+            # views. A non-contiguous row (BHLNC) is one allocation-anchored
+            # region, and its last block must stay inside the registered buffer.
+            if storage_is_block_major and not hnc_contiguous:
+                packed_row = storage_nbytes // tensor_blocks
+                storage_end = raw.data_ptr() + raw.nbytes
+                if tensor1.ndim > 1 and tensor1[0].is_contiguous():
+                    assert len(worker.registered_layer_names) == len(kv_caches)
+                    for base, stride, kv_len in zip(
+                        worker.kv_caches_base_addr,
+                        worker.block_len_per_layer,
+                        worker.kv_block_len_per_layer,
+                    ):
+                        assert stride == packed_row
+                        assert 0 < kv_len <= packed_row
+                        assert (
+                            base + (tensor_blocks - 1) * stride + kv_len <= storage_end
+                        )
+                else:
+                    assert worker.kv_caches_base_addr == [raw.data_ptr()]
+                    assert worker.block_len_per_layer == [packed_row]
+                    assert worker.kv_block_len_per_layer == [packed_row]
+                    assert worker.registered_layer_names == [layer_names[0]]
+                    assert raw.data_ptr() + tensor_blocks * packed_row <= storage_end
+            elif not layout.is_block_compact:
                 expected_addrs = [
                     cache[:, head_idx].data_ptr()
                     for cache in (tensor1, tensor2)
@@ -1321,6 +1392,54 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
                 assert worker.kv_block_len_per_layer == [spec.page_size_bytes] * 2
                 assert worker.registered_layer_names == list(kv_caches)
                 assert worker.registered_layer_indices == [0, 1]
+
+
+def test_register_noncontiguous_packed_allows_matching_pp():
+    """Same PP on both sides can still register a non-contiguous packed row.
+
+    A remote PP mismatch is rejected at send time, once the peer PP size is
+    known. Rejecting every local PP>1 layout at startup is too strict.
+    """
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        worker = connector.connector_worker
+        worker.pp_size = 2
+        mock_thread.return_value.is_alive.return_value = False
+        spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=64,
+            dtype=torch.float16,
+        )
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        for layer_name in layer_names:
+            worker._layer_specs[layer_name] = spec
+        raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+        tensor1, tensor2 = dense_kv_cache_views(raw, spec, 2, 2, KVCacheLayout.BHLNC)
+        assert not tensor1[0].is_contiguous()
+        with patch.object(worker.engine, "batch_register_memory", return_value=0):
+            connector.register_kv_caches(dict(zip(layer_names, (tensor1, tensor2))))
+        assert worker.kv_caches_base_addr == [raw.data_ptr()]
+        assert worker.region_row_offsets == [0]
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
@@ -1378,6 +1497,635 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
             "model.layers.1.eagle_attn",
         ]
         assert worker.registered_layer_indices == [0, 1]
+        assert len(worker.kv_caches_base_addr) == 2
+
+
+def test_packed_and_unpacked_region_lengths_fail_homogeneous_tp_handshake():
+    packed = TransferRegion(
+        layer_name="model.layers.0.mla_attn",
+        layer_index=0,
+        base_addr=0x1000,
+        block_len=2048,
+        kv_block_len=2048,
+        group_index=0,
+    )
+    unpacked = TransferRegion(
+        layer_name="model.layers.0.mla_attn",
+        layer_index=0,
+        base_addr=0x1000,
+        block_len=64,
+        kv_block_len=64,
+        group_index=0,
+    )
+    err = _validate_asymmetric_region_lengths(
+        local_regions=[packed],
+        remote_regions=[unpacked],
+        local_tp_size=1,
+        remote_tp_size=1,
+        producer_cache_replicated=False,
+    )
+    assert err is not None
+    assert "length mismatch" in err
+
+    count_err = _validate_asymmetric_region_lengths(
+        local_regions=[packed],
+        remote_regions=[unpacked, unpacked],
+        local_tp_size=1,
+        remote_tp_size=1,
+        producer_cache_replicated=False,
+    )
+    assert count_err is not None
+    assert "region counts" in count_err
+
+
+@pytest.mark.parametrize(
+    ("num_groups", "expected_group_index"),
+    [(1, 0), (2, _SHARED_REGION_GROUP_ID)],
+)
+def test_register_kv_caches_collapses_shared_mla_storage(
+    num_groups, expected_group_index
+):
+    """Shared backing collapses to one packed region; two groups mark it -1."""
+    num_blocks = 4
+    packed_row = 256
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_packed_mla_kv_cache_config(num_blocks, num_groups=num_groups),
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        backing = torch.zeros((num_blocks, packed_row), dtype=torch.uint8)
+        kv_caches = {
+            "model.layers.0.mla_attn": backing,
+            "model.layers.1.indexer": backing,
+        }
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as mock_batch_register:
+            connector.register_kv_caches(kv_caches)
+
+        mock_batch_register.assert_called_once()
+        registered_ptrs, registered_lens = mock_batch_register.call_args[0]
+        assert registered_ptrs == [backing.data_ptr()]
+        assert registered_lens == [backing.untyped_storage().nbytes()]
+        assert worker.kv_caches_base_addr == [backing.data_ptr()]
+        assert worker.block_len_per_layer == [packed_row]
+        assert worker.kv_block_len_per_layer == [packed_row]
+        assert worker.registered_layer_names == ["model.layers.0.mla_attn"]
+        assert worker.registered_group_indices == [expected_group_index]
+        if expected_group_index == _SHARED_REGION_GROUP_ID:
+            assert worker.region_shared_groups == [(0, 1)]
+
+
+def test_block_ids_for_region_flattens_shared_groups():
+    ids = [[10, 11], [12]]
+    assert _block_ids_for_region(ids, 0) == [10, 11]
+    assert _block_ids_for_region(ids, 1) == [12]
+    assert _block_ids_for_region(ids, _SHARED_REGION_GROUP_ID, (0, 1)) == [
+        10,
+        11,
+        12,
+    ]
+    # A group that does not share the allocation stays out.
+    assert _block_ids_for_region(
+        [[10, 11], [12], [99]], _SHARED_REGION_GROUP_ID, (0, 1)
+    ) == [10, 11, 12]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("group_index", "local_ids", "remote_ids", "n_blocks"),
+    [
+        (0, [[10, 11]], [[20, 21]], 2),
+        (_SHARED_REGION_GROUP_ID, [[10, 11], [12]], [[20, 21], [22]], 3),
+    ],
+)
+async def test_build_transfer_params_sends_packed_region_once(
+    group_index, local_ids, remote_ids, n_blocks
+):
+    """Packed region coalesces contiguous blocks, including shared-group flatten."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = True
+    worker.kv_cache_config = _make_packed_mla_kv_cache_config(
+        num_blocks=4, num_groups=len(local_ids)
+    )
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=1,
+    )
+
+    block_len = 256
+    region_kw = dict(
+        layer_name="model.layers.0.mla_attn",
+        layer_index=0,
+        block_len=block_len,
+        kv_block_len=block_len,
+        group_index=group_index,
+        shared_group_ids=(0, 1) if group_index == _SHARED_REGION_GROUP_ID else (),
+    )
+    transfer_id = "xfer-packed"
+    send_meta = SendBlockMeta(
+        p_req_id="p-packed",
+        transfer_id=transfer_id,
+        local_block_ids=local_ids,
+        ready=asyncio.Event(),
+    )
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d-packed": (transfer_id, remote_ids)},
+        kv_caches_base_addr=[0xA000],
+        block_lens=[block_len],
+        kv_block_lens=[block_len],
+        registered_layer_names=["model.layers.0.mla_attn"],
+        registered_layer_indices=[0],
+        registered_group_indices=[group_index],
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-packed", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=[TransferRegion(base_addr=0x1000, **region_kw)],
+        remote_regions=[TransferRegion(base_addr=0xA000, **region_kw)],
+    )
+
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [0x1000 + 10 * block_len]
+    assert dst_ptrs == [0xA000 + 20 * block_len]
+    assert lengths == [n_blocks * block_len]
+
+
+def test_coalesce_promotes_padding_only_for_a_full_row():
+    """A full-row merge includes the padding tail; a partial row does not."""
+    page = 1024
+    row = 2560
+
+    def region(base: int, row_offset: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=0,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=page,
+            row_offset=row_offset,
+        )
+
+    full_local, full_remote = _coalesce_contiguous_transfer_regions(
+        [region(0, 0), region(page, page)],
+        [region(100, 0), region(100 + page, page)],
+        promote_full_row=True,
+    )
+    assert len(full_local) == 1
+    assert full_local[0].kv_block_len == row
+    assert full_remote[0].kv_block_len == row
+
+    partial_local, _ = _coalesce_contiguous_transfer_regions(
+        [region(0, 0), region(page, page)],
+        [region(100, 0), region(100 + page, page)],
+    )
+    assert partial_local[0].kv_block_len == 2 * page
+
+
+def test_coalesce_spans_padding_between_pages():
+    """Unpadded payloads with a padded-page gap still merge inside the row."""
+    row = 2560
+
+    def region(base: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=0,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=1000,
+        )
+
+    merged, _ = _coalesce_contiguous_transfer_regions(
+        [region(0), region(1024)],
+        [region(5000), region(6024)],
+        promote_full_row=True,
+    )
+    assert len(merged) == 1
+    assert merged[0].kv_block_len == row
+
+
+def test_coalesce_promotes_each_group_that_starts_at_row_zero():
+    """Groups overlay one row, so each row-start run is its own full-row copy."""
+    page = 1000
+    gap = 1024
+    row = 4096
+
+    def region(base: int, group: int, row_offset: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name=f"group-{group}",
+            layer_index=group,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=page,
+            group_index=group,
+            row_offset=row_offset,
+        )
+
+    # Group 1's addresses jump back to the start of the same row.
+    local = [
+        region(0, 0, 0),
+        region(gap, 0, gap),
+        region(0, 1, 0),
+        region(gap, 1, gap),
+    ]
+    remote = [
+        region(8000, 0, 0),
+        region(8000 + gap, 0, gap),
+        region(8000, 1, 0),
+        region(8000 + gap, 1, gap),
+    ]
+    merged_local, merged_remote = _coalesce_contiguous_transfer_regions(
+        local, remote, promote_full_row=True
+    )
+    assert [region.group_index for region in merged_local] == [0, 1]
+    assert [region.kv_block_len for region in merged_local] == [row, row]
+    assert [region.kv_block_len for region in merged_remote] == [row, row]
+    assert merged_local[1].base_addr == 0
+    assert merged_remote[1].base_addr == 8000
+
+
+def test_coalesce_does_not_promote_a_mid_row_run():
+    """A matched PP slice that does not start at row offset 0 stays partial."""
+    page = 1000
+    row = 4096
+
+    def region(base: int, row_offset: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=2,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=page,
+            row_offset=row_offset,
+        )
+
+    merged, _ = _coalesce_contiguous_transfer_regions(
+        [region(1024, 1024), region(2048, 2048)],
+        [region(9000 + 1024, 1024), region(9000 + 2048, 2048)],
+        promote_full_row=True,
+    )
+    assert len(merged) == 1
+    assert merged[0].row_offset == 1024
+    assert merged[0].kv_block_len == 1024 + page
+
+
+def test_opaque_packed_row_is_full_stride_at_offset_zero():
+    """Branch B is row-sized at offset 0. A page view at offset 0 is not."""
+    assert _has_opaque_packed_row([0], [4096], [4096])
+    assert not _has_opaque_packed_row([0, 1024], [1000, 1000], [4096, 4096])
+    assert not _has_opaque_packed_row([], [4096], [4096])
+
+
+def test_pp_mismatch_rejects_opaque_row_in_both_directions():
+    """The smaller PP side can be either the producer or the consumer."""
+    page_view = dict(
+        remote_row_offsets=[0, 1024],
+        remote_kv_block_lens=[1000, 1000],
+        remote_block_lens=[4096, 4096],
+    )
+    opaque_row = dict(
+        remote_row_offsets=[0],
+        remote_kv_block_lens=[4096],
+        remote_block_lens=[4096],
+    )
+    # P pp=2, D pp=1, local row is opaque.
+    assert _pp_mismatch_hides_packed_layers(
+        2, 1, local_has_opaque_row=True, **page_view
+    )
+    # P pp=1, D pp=2, remote row is opaque.
+    assert _pp_mismatch_hides_packed_layers(
+        1, 2, local_has_opaque_row=False, **opaque_row
+    )
+    # Matching PP still aligns by the shared first layer name.
+    assert not _pp_mismatch_hides_packed_layers(
+        2, 2, local_has_opaque_row=True, **opaque_row
+    )
+    # Hetero PP with page-contiguous views is not this rejection.
+    assert not _pp_mismatch_hides_packed_layers(
+        2, 1, local_has_opaque_row=False, **page_view
+    )
+
+
+def test_prepare_transfer_regions_reuses_success_and_error():
+    """A peer layout is built once. Re-registering drops the cache."""
+    worker, _, _, _ = _register_sliced_packed_mla([0, 1])
+    meta = MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=1,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        req_blocks={},
+        kv_caches_base_addr=list(worker.kv_caches_base_addr),
+        block_lens=list(worker.block_len_per_layer),
+        kv_block_lens=list(worker.kv_block_len_per_layer),
+        registered_layer_names=list(worker.registered_layer_names),
+        registered_layer_indices=list(worker.registered_layer_indices),
+        registered_group_indices=list(worker.registered_group_indices),
+        registered_shared_group_ids=[
+            list(groups) for groups in worker.region_shared_groups
+        ],
+        registered_row_offsets=list(worker.region_row_offsets),
+    )
+    calls = 0
+    original = worker._get_transfer_regions
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    worker._get_transfer_regions = counting
+    prepared = worker._prepare_transfer_regions(meta)
+    assert prepared[2] is None
+    assert calls == 2
+    assert worker._prepare_transfer_regions(meta) == prepared
+    assert calls == 2
+
+    mismatch = MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=2,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        req_blocks={},
+        kv_caches_base_addr=[0x2000],
+        block_lens=[1024],
+        kv_block_lens=[1024],
+        registered_layer_names=["model.layers.9.mla_attn"],
+        registered_layer_indices=[9],
+        registered_group_indices=[0],
+        registered_row_offsets=[0],
+    )
+    failed = worker._prepare_transfer_regions(mismatch)
+    assert failed[2] is not None
+    assert calls == 4
+    assert worker._prepare_transfer_regions(mismatch)[2] == failed[2]
+    assert calls == 4
+
+    page = 1024
+    backing = torch.zeros((4, page * 2), dtype=torch.uint8)
+    kv_caches = {
+        "model.layers.0.mla_attn": backing[:, :page],
+        "model.layers.1.mla_attn": backing[:, page:],
+    }
+    worker.is_kv_consumer = True
+    with patch.object(worker.engine, "batch_register_memory", return_value=0):
+        worker.register_kv_caches(kv_caches)
+    assert worker._prepared_transfer_regions == {}
+    worker._prepare_transfer_regions(meta)
+    assert calls == 6
+
+
+def test_coalesce_keeps_a_run_inside_its_starting_row():
+    """The row bound is the run start, not the previous slice."""
+    row = 2500
+
+    def region(base: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=0,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=1000,
+            row_offset=base,
+        )
+
+    # The third slice ends at 3000. Checking it against the previous slice
+    # (base 1000) would allow it; the run start at 0 does not.
+    slices = [region(0), region(1000), region(2000)]
+    merged, _ = _coalesce_contiguous_transfer_regions(slices, slices)
+    assert len(merged) == 2
+    assert merged[0].kv_block_len == 2000
+    assert merged[1].base_addr == 2000
+    assert merged[1].kv_block_len == 1000
+
+
+def _layer_name(idx: int) -> str:
+    return f"model.layers.{idx}.mla_attn"
+
+
+def _register_sliced_packed_mla(
+    layer_idxs: list[int], *, page: int = 1024, num_blocks: int = 4
+):
+    """Register column slices of one MLA packed row. Returns worker fields."""
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.uint8,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([_layer_name(i) for i in layer_idxs], spec),
+        ],
+    )
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    backing = torch.zeros((num_blocks, page * len(layer_idxs)), dtype=torch.uint8)
+    kv_caches = {
+        _layer_name(idx): backing[:, i * page : (i + 1) * page]
+        for i, idx in enumerate(layer_idxs)
+    }
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as reg:
+            connector.register_kv_caches(kv_caches)
+        reg.assert_called_once()
+        assert reg.call_args[0][0] == [backing.data_ptr()]
+        assert worker.region_row_offsets == [i * page for i in range(len(layer_idxs))]
+        regions = worker._get_transfer_regions(
+            worker.kv_caches_base_addr,
+            worker.block_len_per_layer,
+            worker.kv_block_len_per_layer,
+            worker.registered_layer_names,
+            worker.registered_layer_indices,
+            worker.registered_group_indices,
+            row_offsets=worker.region_row_offsets,
+        )
+        return worker, kv_cache_config, regions, backing.data_ptr()
+
+
+@pytest.mark.asyncio
+async def test_packed_hetero_pp_keeps_shared_layers():
+    """P-PP4/D-PP2 must align the shared MLA slices, not drop them silently."""
+    page = 1024
+    p_worker, p_config, p_regions, p_base = _register_sliced_packed_mla(
+        [2, 3], page=page
+    )
+    _, _, d_regions, d_base = _register_sliced_packed_mla([0, 1, 2, 3], page=page)
+
+    assert [r.layer_index for r in p_regions] == [2, 3]
+    assert [r.layer_index for r in d_regions] == [0, 1, 2, 3]
+    assert [r.kv_block_len for r in p_regions] == [page, page]
+    assert p_regions[0].block_len == 2 * page
+    assert d_regions[0].block_len == 4 * page
+
+    aligned_p, aligned_d, err = _align_transfer_regions(
+        p_regions, d_regions, allow_partial_layers=True
+    )
+    assert err is None
+    assert [r.layer_index for r in aligned_p] == [2, 3]
+    coalesced_p, coalesced_d = _coalesce_contiguous_transfer_regions(
+        aligned_p, aligned_d
+    )
+    assert len(coalesced_p) == 1
+    assert coalesced_p[0].kv_block_len == 2 * page
+    assert coalesced_d[0].kv_block_len == 2 * page
+    assert coalesced_d[0].base_addr == d_base + 2 * page
+
+    # D's row is wider than the matched span, so blocks stay separate copies.
+    block_ids = [[10, 11]]
+    transfer_id = "xfer-pp"
+    send_meta = SendBlockMeta(
+        p_req_id="p-pp",
+        transfer_id=transfer_id,
+        local_block_ids=block_ids,
+        ready=asyncio.Event(),
+    )
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d-pp": (transfer_id, block_ids)},
+        kv_caches_base_addr=[r.base_addr for r in coalesced_d],
+        block_lens=[r.block_len for r in coalesced_d],
+        kv_block_lens=[r.kv_block_len for r in coalesced_d],
+        registered_layer_names=[r.layer_name for r in coalesced_d],
+        registered_layer_indices=[r.layer_index for r in coalesced_d],
+        registered_group_indices=[r.group_index for r in coalesced_d],
+    )
+    p_worker.kv_cache_config = p_config
+    src, dst, lengths, err_reqs, err_msg = await p_worker._build_transfer_params(
+        ready_reqs=[("d-pp", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=coalesced_p,
+        remote_regions=coalesced_d,
+    )
+    assert err_reqs == []
+    assert err_msg is None
+    assert lengths == [2 * page, 2 * page]
+    assert src == [p_base + 10 * (2 * page), p_base + 11 * (2 * page)]
+    assert dst == [
+        d_base + 2 * page + 10 * (4 * page),
+        d_base + 2 * page + 11 * (4 * page),
+    ]
+
+    # No shared layers: hetero PP still no-ops without an error.
+    _, _, early_d, _ = _register_sliced_packed_mla([0, 1], page=page)
+    none_p, none_d, none_err = _align_transfer_regions(
+        p_regions, early_d, allow_partial_layers=True
+    )
+    assert none_err is None
+    assert none_p == [] and none_d == []
+
+    # Same PP size must fail closed when the layer sets differ.
+    _, _, mismatch_err = _align_transfer_regions(
+        p_regions, early_d, allow_partial_layers=False
+    )
+    assert mismatch_err is not None
+
+
+@pytest.mark.asyncio
+async def test_packed_matching_layers_coalesce_to_one_copy():
+    """Identical packed layer sets still emit one copy for contiguous blocks."""
+    page = 1024
+    worker, config, regions, base = _register_sliced_packed_mla([0, 1], page=page)
+    aligned_l, aligned_r, err = _align_transfer_regions(regions, regions)
+    assert err is None
+    coalesced_l, coalesced_r = _coalesce_contiguous_transfer_regions(
+        aligned_l, aligned_r
+    )
+    assert len(coalesced_l) == 1
+    assert coalesced_l[0].kv_block_len == coalesced_l[0].block_len == 2 * page
+
+    block_len = 2 * page
+    transfer_id = "xfer-full"
+    send_meta = SendBlockMeta(
+        p_req_id="p-full",
+        transfer_id=transfer_id,
+        local_block_ids=[[10, 11]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d-full": (transfer_id, [[20, 21]])},
+        kv_caches_base_addr=[base],
+        block_lens=[block_len],
+        kv_block_lens=[block_len],
+        registered_layer_names=[regions[0].layer_name],
+        registered_layer_indices=[0],
+        registered_group_indices=[0],
+    )
+    worker.kv_cache_config = config
+    src, dst, lengths, err_reqs, err_msg = await worker._build_transfer_params(
+        ready_reqs=[("d-full", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=coalesced_l,
+        remote_regions=coalesced_r,
+    )
+    assert err_reqs == []
+    assert err_msg is None
+    assert src == [base + 10 * block_len]
+    assert dst == [base + 20 * block_len]
+    assert lengths == [2 * block_len]
 
 
 @pytest.mark.asyncio
