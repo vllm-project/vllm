@@ -229,6 +229,19 @@ hardware and configuration.
 MLA decode backends are selected using the standard
 `-ac.backend=<BACKEND>` argument (e.g., `FLASHMLA`, `TRITON_MLA`).
 
+For `FLASHINFER_MLA`, select FlashInfer's CuTe DSL decode kernel explicitly with:
+
+```bash
+vllm serve MODEL --attention-backend FLASHINFER_MLA \
+    --attention-config.flashinfer_mla_decode_backend cute-dsl
+```
+
+The default `auto` preserves automatic kernel selection, including the CuTe DSL
+fallback for unsupported TRTLLM query-head counts. Native decode context
+parallelism always selects CuTe DSL. Explicit selection delegates hardware and
+shape validation to FlashInfer; benchmark your workload before choosing a kernel.
+This setting does not change MLA prefill or MoE kernels.
+
 --8<-- "gen:table-mla-decode"
 
 ### DeepSeek V4 Decode Backends
