@@ -167,11 +167,12 @@ def inkling_config() -> ParserEngineConfig:
             (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
     }
-    # Block-end terminals behave identically regardless of label. A
-    # closed tool block returns to CONTENT (Inkling has no section wrapper;
+    # A closed tool block returns to CONTENT (Inkling has no section wrapper;
     # blocks of any kind may follow), which also keeps the block-kind
     # and role tokens out of the engine's tool-terminal set so the
     # skip_tool_parsing reasoning pass still classifies reasoning.
+    # In a reasoning block, THINK_END defers REASONING_END to the next block
+    # opener so the function-name header is not emitted as content.
     for end in ("THINK_END", "END_SAMPLING"):
         transitions[(ParserState.CONTENT, end)] = Transition(
             ParserState.CONTENT,
@@ -179,7 +180,7 @@ def inkling_config() -> ParserEngineConfig:
         )
         transitions[(ParserState.REASONING, end)] = Transition(
             ParserState.CONTENT,
-            (EventType.REASONING_END,),
+            () if end == "THINK_END" else (EventType.REASONING_END,),
         )
         transitions[(ParserState.TOOL_ARGS, end)] = Transition(
             ParserState.CONTENT,
