@@ -40,6 +40,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -281,8 +282,60 @@ class TestAllReduceGemmaRMSNormStaticQuantFP8Model(
         self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
         for norm in self.norm:
             norm.weight.requires_grad_(False)
+            norm.weight.data.normal_(mean=0.0, std=0.1)
 
     def ops_in_model_before(self):
+        return super().ops_in_model_before()
+
+
+class TestAllReduceGemmaRMSNormSharedQuantFP8Model(
+    TestAllReduceGemmaRMSNormStaticQuantFP8Model
+):
+    """One quantized norm result feeds two independently scaled GEMMs."""
+
+    share_quant = True
+
+    class Pair(torch.nn.Module):
+        def __init__(self, first, hidden_size, dtype, share_quant):
+            super().__init__()
+            self.first = first
+            self.share_quant = share_quant
+            self.second = TestFP8Layer(
+                weight_shape=(hidden_size, hidden_size),
+                activation_quant_key=kFp8StaticTensorSym,
+                weight_quant_key=kFp8StaticTensorSym,
+                input_dtype=dtype,
+                force_kernel=type(first.kernel),
+            )
+            self.second.input_scale.copy_(
+                first.input_scale if share_quant else first.input_scale * 2
+            )
+
+        def is_quant_fp8_enabled(self):
+            return self.first.is_quant_fp8_enabled()
+
+        def forward(self, x):
+            if not self.share_quant:
+                return self.first(x) + self.second(x)
+            data, scale = self.first.kernel.quant_fp8(x, self.first.input_scale)
+            qa = QuantizedActivation(data, scale, x.dtype, x.shape, kFp8StaticTensorSym)
+            return self.first(qa) + self.second(qa)
+
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6, dtype=torch.bfloat16):
+        super().__init__(hidden_size, token_num, eps, dtype)
+        self.fp8_linear_layers = [
+            self.Pair(linear, hidden_size, dtype, self.share_quant)
+            for linear in self.fp8_linear_layers
+        ]
+
+
+class TestAllReduceGemmaRMSNormUnequalQuantFP8Model(
+    TestAllReduceGemmaRMSNormSharedQuantFP8Model
+):
+    share_quant = False
+
+    def ops_in_model_before(self):
+        # Both quantizations must survive, while AR/norm can still fuse.
         return [torch.ops.vllm.all_reduce.default]
 
 
@@ -473,6 +526,36 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
                 current_platform.is_rocm(),
                 reason="Not supported on ROCm platform",
             ),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+            False,
+            False,
+            marks=pytest.mark.skipif(current_platform.is_rocm(), reason="CUDA only"),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormSharedQuantFP8Model,
+            True,
+            False,
+            marks=pytest.mark.skipif(current_platform.is_rocm(), reason="CUDA only"),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormSharedQuantFP8Model,
+            False,
+            False,
+            marks=pytest.mark.skipif(current_platform.is_rocm(), reason="CUDA only"),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormUnequalQuantFP8Model,
+            True,
+            False,
+            marks=pytest.mark.skipif(current_platform.is_rocm(), reason="CUDA only"),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormUnequalQuantFP8Model,
+            False,
+            False,
+            marks=pytest.mark.skipif(current_platform.is_rocm(), reason="CUDA only"),
         ),
         pytest.param(
             TestAllReduceRMSNormStaticQuantFP8Model,
@@ -670,11 +753,21 @@ def all_reduce_fusion_pass_on_test_model(
         if test_model_cls in (
             TestAllReduceGemmaRMSNormModel,
             TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+            TestAllReduceGemmaRMSNormSharedQuantFP8Model,
+            TestAllReduceGemmaRMSNormUnequalQuantFP8Model,
         ):
             fused_op = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
             fused_nodes = list(find_op_nodes(fused_op, backend.graph_post_pass))
             assert fused_nodes
             assert all(n.kwargs.get("weight_bias") == 1.0 for n in fused_nodes)
+            if isinstance(model, TestAllReduceGemmaRMSNormStaticQuantFP8Model):
+                from flashinfer.comm import AllReduceFusionPattern
+
+                assert sum(
+                    n.kwargs["pattern_code"]
+                    == AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                    for n in fused_nodes
+                ) == (3 if getattr(model, "share_quant", True) else 0)
         del all_reduce_fusion_pass
 
 
