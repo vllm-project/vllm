@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     multi_thread_safetensors_weights_iterator,
     np_cache_weights_iterator,
     pt_weights_iterator,
+    release_checkpoint_page_cache,
     resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
 )
@@ -81,6 +82,9 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        # Checkpoint files handed to the weight iterators, for the optional
+        # page cache release after loading.
+        self._weight_files: list[str] = []
         # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
         self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
         self._encoder_only_weights_mapper: WeightsMapper | None = None
@@ -283,6 +287,7 @@ class DefaultModelLoader(BaseModelLoader):
                     f"`{source.model_or_path}`; check language_model prefixes "
                     f"{self._encoder_only_lm_prefixes}"
                 )
+        self._weight_files.extend(hf_weights_files)
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -485,6 +490,8 @@ class DefaultModelLoader(BaseModelLoader):
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
+        if self.load_config.release_weight_page_cache:
+            release_checkpoint_page_cache(self._weight_files)
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.
         default_enable_weights_track = (

@@ -800,6 +800,7 @@ class EngineArgs:
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+    release_weight_page_cache: bool = LoadConfig.release_weight_page_cache
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
@@ -1049,6 +1050,10 @@ class EngineArgs:
         )
         load_group.add_argument("--ignore-patterns", **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
+        load_group.add_argument(
+            "--release-weight-page-cache",
+            **load_kwargs["release_weight_page_cache"],
+        )
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
         )
@@ -2012,6 +2017,7 @@ class EngineArgs:
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
+            release_weight_page_cache=self.release_weight_page_cache,
             pt_load_map_location=self.pt_load_map_location,
         )
 
