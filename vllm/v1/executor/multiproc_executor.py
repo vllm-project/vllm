@@ -369,7 +369,9 @@ class MultiprocExecutor(Executor):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         return self.collective_rpc(
-            "take_draft_token_ids", unique_reply_rank=self.output_rank
+            "take_draft_token_ids",
+            unique_reply_rank=self.output_rank,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
     def collective_rpc(  # type: ignore[override]
