@@ -65,8 +65,15 @@ class Internlm2ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         if "<|action_start|>" not in current_text:
+            marker = "<|action_start|>"
+            for i in range(1, len(marker)):
+                if current_text.endswith(marker[:i]):
+                    return None
+            delta_content = current_text[self.position:]
             self.position = len(current_text)
-            return DeltaMessage(content=delta_text)
+            if delta_content:
+                return DeltaMessage(content=delta_content)
+            return None
         # if the tool call is sent, return an empty delta message
         # to make sure the finish_reason will be sent correctly.
         if self.current_tool_id > 0:
