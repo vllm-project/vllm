@@ -408,7 +408,7 @@ class NgramHashState(nn.Module):
         tokenizer = AutoTokenizer.from_pretrained(
             model_config.tokenizer,
             trust_remote_code=model_config.trust_remote_code,
-            revision=model_config.revision,
+            revision=model_config.tokenizer_revision,
         )
         token_map, vocab_size = build_compressed_token_map(tokenizer)
         if vocab_size != layout.compressed_vocab_size:

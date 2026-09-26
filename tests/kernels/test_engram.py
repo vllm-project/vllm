@@ -155,6 +155,63 @@ def _hash_state(use_slot_cache: bool) -> NgramHashState:
     return state
 
 
+@pytest.mark.parametrize(
+    "model_revision,tokenizer_revision",
+    [
+        ("model-rev", "tokenizer-rev"),
+        (None, "tokenizer-rev"),
+        ("model-rev", "model-rev"),
+    ],
+)
+def test_engram_uses_tokenizer_revision(
+    model_revision, tokenizer_revision, monkeypatch
+):
+    """Equal vocabulary sizes must not hide a different token-to-hash mapping."""
+    from tokenizers import Tokenizer, models
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    def tokenizer(words):
+        return PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(models.WordLevel(dict(zip(words, range(4)))))
+        )
+
+    model_tokenizer = tokenizer(["[PAD]", "The", "the", "cat"])
+    tokenizers = {
+        None: model_tokenizer,
+        "model-rev": model_tokenizer,
+        "tokenizer-rev": tokenizer(["[PAD]", "The", "cat", "CAT"]),
+    }
+    monkeypatch.setattr(
+        AutoTokenizer,
+        "from_pretrained",
+        lambda *args, revision, **kwargs: tokenizers[revision],
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            tokenizer="test-tokenizer",
+            revision=model_revision,
+            tokenizer_revision=tokenizer_revision,
+            trust_remote_code=False,
+        ),
+    )
+    layout = SimpleNamespace(
+        max_ngram_size=2,
+        compressed_vocab_size=3,
+        pad_token_id=0,
+        layer_ids=(1,),
+        primes=(((5,),),),
+        offsets=torch.zeros((1, 1), dtype=torch.int64),
+    )
+    cache = torch.nn.Module()
+    cache.block_size = 64
+
+    state = NgramHashState(config, layout, cache)
+
+    expected, _ = engram_ops.build_compressed_token_map(tokenizers[tokenizer_revision])
+    assert state.token_map.tolist() == expected
+
+
 @pytest.mark.parametrize("num_tokens", [0, 7])
 def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
     """Dummy forwards have no valid table IDs and do not alter cached history."""
