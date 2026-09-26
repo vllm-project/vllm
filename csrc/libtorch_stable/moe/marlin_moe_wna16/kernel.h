@@ -20,7 +20,8 @@
       const int32_t *__restrict__ num_tokens_past_padded_ptr,                \
       const float *__restrict__ topk_weights_ptr, int top_k,                 \
       bool mul_topk_weights, int prob_m, int prob_n, int prob_k, int *locks, \
-      bool has_bias, bool use_atomic_add, bool use_fp32_reduce
+      bool has_bias, bool use_atomic_add, bool use_fp32_reduce,              \
+      bool use_full_k
 
 namespace MARLIN_NAMESPACE_NAME {
 template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
