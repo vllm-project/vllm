@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, get_type_hints, overload
 
 import torch
 from typing_extensions import TypeVar
@@ -42,46 +42,129 @@ else:
 
 logger = init_logger(__name__)
 
-# HuggingFace processors accept nested ``images_kwargs`` / ``videos_kwargs`` /
-# ``audio_kwargs`` in addition to a shared flat namespace. vLLM's token-budget
-# and dummy-input code only reads the flat keys, so scoped overrides have to
-# be overlaid per modality.
-_HF_MODALITY_PROCESSOR_KWARGS = {
-    "image": "images_kwargs",
-    "video": "videos_kwargs",
-    "audio": "audio_kwargs",
-}
+# HuggingFace processors accept a shared flat namespace in addition to the
+# nested processor kwarg scopes ``text_kwargs`` / ``images_kwargs`` /
+# ``videos_kwargs`` / ``audio_kwargs``. vLLM recognizes these scopes when
+# resolving ``mm_processor_kwargs``.
+_HF_PROCESSOR_KWARG_SCOPES = (
+    "text_kwargs",
+    "images_kwargs",
+    "videos_kwargs",
+    "audio_kwargs",
+)
 
 
-def overlay_modality_mm_kwargs(
-    kwargs: Mapping[str, object],
-    modality: str | None,
-) -> dict[str, Any]:
-    """Overlay HF-style nested processor kwargs onto the flat namespace.
+def _merge_scoped_mm_processor_value(
+    flat_value: object,
+    scoped_value: object,
+) -> object:
+    """Merge a flat value with an existing, more specific scoped value.
 
-    Overlay only the requested modality so a video ``size`` bump does not leak
-    into the image budget. Flat keys keep their current shared-namespace
-    behavior when no scoped dict is present.
-
-    Args:
-        kwargs: Merged multi-modal processor kwargs.
-        modality: Target modality (``image``, ``video``, or ``audio``).
-            When ``None``, ``kwargs`` is copied without overlay.
-
-    Returns:
-        A new dict with the modality-scoped keys overlaid when present.
-
+    Mappings are merged recursively; otherwise the scoped value replaces the
+    flat value.
     """
-    merged = dict(kwargs)
-    if modality is None:
+    if isinstance(flat_value, Mapping) and isinstance(scoped_value, Mapping):
+        # Merge recursively so scoped leaves override matching flat leaves
+        # without dropping unrelated flat entries.
+        merged = dict(flat_value)
+        for key, value in scoped_value.items():
+            if key in merged:
+                merged[key] = _merge_scoped_mm_processor_value(merged[key], value)
+            else:
+                merged[key] = value
         return merged
-    scoped_key = _HF_MODALITY_PROCESSOR_KWARGS.get(modality)
-    if scoped_key is None:
-        return merged
-    scoped = merged.get(scoped_key)
-    if not isinstance(scoped, Mapping):
-        return merged
-    return merged | dict(scoped)
+    return scoped_value
+
+
+def _resolve_mm_processor_kwargs(
+    kwargs: Mapping[str, object],
+    supported_mm_processor_kwargs: Mapping[str, set[str]] | None = None,
+) -> dict[str, object]:
+    """Resolve flat processor kwargs into HuggingFace processor kwarg scopes.
+
+    With ``supported_mm_processor_kwargs``, each scope lists the flat keys it
+    supports. Matching flat keys are routed to every scope that supports them,
+    existing scoped values take precedence, and keys not supported by any scope
+    remain flat.
+
+    Without ``supported_mm_processor_kwargs``, flat keys already represented in
+    at least one existing mapping-valued scope are removed from the shared flat
+    namespace; all other flat keys are left unchanged because there is no
+    information to determine which scopes should receive them.
+    """
+    resolved = dict(kwargs)
+
+    # Without ``supported_mm_processor_kwargs``, remove flat entries already
+    # represented in at least one existing mapping-valued scope. There is no
+    # information to route the remaining flat entries.
+    if supported_mm_processor_kwargs is None:
+        # Collect all keys represented in existing mapping-valued scopes.
+        # Non-mapping scope values do not contain scoped kwargs and are left
+        # untouched.
+        represented_scoped_keys: set[str] = set()
+        for scoped_key in _HF_PROCESSOR_KWARG_SCOPES:
+            scoped_kwargs = resolved.get(scoped_key)
+            if isinstance(scoped_kwargs, Mapping):
+                represented_scoped_keys.update(scoped_kwargs)
+
+        # Remove flat entries for keys already represented in a scope.
+        for key in represented_scoped_keys:
+            if key not in _HF_PROCESSOR_KWARG_SCOPES:
+                resolved.pop(key, None)
+        return resolved
+
+    # With ``supported_mm_processor_kwargs``, collect the flat kwargs before
+    # routing each one to the processor kwarg scopes that support it.
+    flat_kwargs = {
+        key: value
+        for key, value in resolved.items()
+        if key not in _HF_PROCESSOR_KWARG_SCOPES
+    }
+
+    for key, flat_value in flat_kwargs.items():
+        # Find every processor kwarg scope that supports this flat key. If none
+        # supports it, keep the key in the shared flat namespace.
+        supported_scopes = [
+            scoped_key
+            for scoped_key in _HF_PROCESSOR_KWARG_SCOPES
+            if key in supported_mm_processor_kwargs.get(scoped_key, set())
+        ]
+        if not supported_scopes:
+            continue
+
+        # Add the flat value to each supported destination scope.
+        for scoped_key in supported_scopes:
+            # Start from a copy of the existing scoped kwargs, or an empty scope
+            # if absent.
+            if scoped_key in resolved:
+                scoped_kwargs = resolved[scoped_key]
+                # A scope must be a mapping before keys can be added to it. Do
+                # not replace an explicit non-mapping value.
+                if not isinstance(scoped_kwargs, Mapping):
+                    raise TypeError(f"`{scoped_key}` must be a mapping")
+                scoped_kwargs = dict(scoped_kwargs)
+            else:
+                scoped_kwargs = {}
+
+            # Add the flat value to this scope. Existing scoped values take
+            # precedence.
+            if key in scoped_kwargs:
+                scoped_kwargs[key] = _merge_scoped_mm_processor_value(
+                    flat_value, scoped_kwargs[key]
+                )
+            else:
+                # Assign the flat value to this scope. For mappings, assign a
+                # copy so the same mapping object is not shared between the flat
+                # value and multiple scopes.
+                scoped_kwargs[key] = (
+                    dict(flat_value) if isinstance(flat_value, Mapping) else flat_value
+                )
+            resolved[scoped_key] = scoped_kwargs
+
+        # After routing to every destination, remove the flat copy.
+        resolved.pop(key)
+
+    return resolved
 
 
 @dataclass
@@ -294,19 +377,27 @@ class InputProcessingContext:
         self,
         kwargs: Mapping[str, object],
         *,
-        modality: str | None = None,
+        supported_mm_processor_kwargs: Mapping[str, set[str]] | None = None,
     ) -> dict[str, Any]:
         """Merge configured and request ``mm_processor_kwargs``.
 
-        When ``modality`` is set, HF-style nested
-        ``images_kwargs`` / ``videos_kwargs`` / ``audio_kwargs`` are overlaid
-        onto the flat namespace for vLLM-side reads (token budgets, dummy
-        inputs). Processor construction and HF ``__call__`` should omit
-        ``modality`` so the nested dicts still reach the HF processor.
+        When ``supported_mm_processor_kwargs`` is provided, flat keys are matched
+        against the keys supported by each HuggingFace processor kwarg scope.
+        Matching flat keys are routed to every scope that supports them and
+        removed from the shared flat namespace; keys not supported by any scope
+        remain flat.
+
+        Without ``supported_mm_processor_kwargs``, flat keys already represented
+        in at least one existing mapping-valued scope are removed from the shared
+        flat namespace; all other flat keys are left unchanged because there is
+        no information to determine which scopes should receive them.
         """
         mm_config = self.model_config.get_multimodal_config()
         merged = mm_config.merge_mm_processor_kwargs(kwargs)
-        return overlay_modality_mm_kwargs(merged, modality)
+        return _resolve_mm_processor_kwargs(
+            merged,
+            supported_mm_processor_kwargs=supported_mm_processor_kwargs,
+        )
 
     def call_hf_processor(
         self,
@@ -379,6 +470,49 @@ class BaseProcessingInfo:
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
+
+    def get_supported_mm_processor_kwargs(self) -> dict[str, set[str]]:
+        """Return supported kwarg names for each HF processor kwargs scope."""
+        processor = self.get_hf_processor()
+        processor_kwargs = get_type_hints(processor.valid_processor_kwargs)
+
+        supported = {
+            "text_kwargs": set(processor_kwargs["text_kwargs"].__annotations__),
+        }
+        if "image" in self.supported_mm_limits:
+            supported["images_kwargs"] = set(
+                processor.image_processor.valid_kwargs.__annotations__
+            )
+        if "video" in self.supported_mm_limits:
+            supported["videos_kwargs"] = set(
+                processor.video_processor.valid_kwargs.__annotations__
+            )
+        if "audio" in self.supported_mm_limits:
+            supported["audio_kwargs"] = set(
+                processor_kwargs["audio_kwargs"].__annotations__
+            )
+
+        return supported
+
+    @cached_property
+    def supported_mm_processor_kwargs(self) -> dict[str, set[str]]:
+        """Supported kwarg names for each HF processor kwargs scope."""
+        return self.get_supported_mm_processor_kwargs()
+
+    def _merge_and_resolve_mm_processor_kwargs(
+        self,
+        mm_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Merge configured and request ``mm_processor_kwargs``.
+
+        Flat kwargs are routed into the HuggingFace processor kwarg scopes that
+        support them after the configured/request merge. When a routed flat value
+        conflicts with an existing scoped value, the scoped value takes precedence.
+        """
+        return self.ctx.get_merged_mm_kwargs(
+            mm_kwargs,
+            supported_mm_processor_kwargs=self.supported_mm_processor_kwargs,
+        )
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""

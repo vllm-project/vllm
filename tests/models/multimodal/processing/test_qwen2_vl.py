@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -8,14 +10,236 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.config.multimodal import MultiModalConfig
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.multimodal.processing.context import InputProcessingContext
 from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+@pytest.mark.parametrize(
+    ("mm_kwargs", "expected"),
+    [
+        (
+            {"size": {"shortest_edge": 64, "longest_edge": 1024}},
+            {
+                "size": {"shortest_edge": 64, "longest_edge": 1024},
+                "min_pixels": 64,
+                "max_pixels": 1024,
+            },
+        ),
+        (
+            {"min_pixels": 64, "max_pixels": 1024},
+            {
+                "min_pixels": 64,
+                "max_pixels": 1024,
+                "size": {"shortest_edge": 64, "longest_edge": 1024},
+            },
+        ),
+        (
+            {
+                "size": {"shortest_edge": 64, "longest_edge": 1024},
+                "min_pixels": 128,
+                "max_pixels": 2048,
+            },
+            {
+                "size": {"shortest_edge": 64, "longest_edge": 1024},
+                "min_pixels": 128,
+                "max_pixels": 2048,
+            },
+        ),
+        (
+            {
+                "min_pixels": None,
+                "size": {"shortest_edge": 0},
+                "images_kwargs": {"max_pixels": 4096},
+                "videos_kwargs": {"size": {"longest_edge": 8192}},
+            },
+            {
+                "min_pixels": None,
+                "size": {"shortest_edge": 0},
+                "images_kwargs": {
+                    "max_pixels": 4096,
+                    "size": {"longest_edge": 4096},
+                },
+                "videos_kwargs": {
+                    "size": {"longest_edge": 8192},
+                    "max_pixels": 8192,
+                },
+            },
+        ),
+        (
+            {"min_pixels": 0},
+            {"min_pixels": 0, "size": {"shortest_edge": 0}},
+        ),
+        (
+            {"size": None, "min_pixels": 64},
+            {"size": {"shortest_edge": 64}, "min_pixels": 64},
+        ),
+    ],
+)
+def test_complete_mm_processor_size_aliases(
+    mm_kwargs: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    original = deepcopy(mm_kwargs)
+
+    actual = Qwen2VLProcessingInfo._complete_mm_processor_size_aliases(mm_kwargs)
+
+    assert actual == expected
+    assert mm_kwargs == original
+
+
+def test_merge_and_resolve_mm_processor_kwargs_preserves_request_alias_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={
+            "images_kwargs": {"min_pixels": 64},
+        },
+        mm_device_do_normalize=False,
+    )
+    model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
+    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    info = Qwen2VLProcessingInfo(ctx)
+    monkeypatch.setattr(
+        info,
+        "get_supported_mm_processor_kwargs",
+        lambda: {"images_kwargs": {"size", "min_pixels"}},
+    )
+
+    assert info._merge_and_resolve_mm_processor_kwargs(
+        {"size": {"shortest_edge": 128}}
+    ) == {
+        "images_kwargs": {
+            "size": {"shortest_edge": 128},
+            "min_pixels": 128,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("mm_kwargs", "default_size", "expected"),
+    [
+        (
+            {},
+            {"shortest_edge": 32, "longest_edge": 1024},
+            {"shortest_edge": 32, "longest_edge": 1024},
+        ),
+        (
+            {"size": {"shortest_edge": 64}},
+            {"shortest_edge": 32, "longest_edge": 1024},
+            {"shortest_edge": 64, "longest_edge": 1024},
+        ),
+        (
+            {
+                "size": {"shortest_edge": 64, "longest_edge": 2048},
+                "min_pixels": 128,
+                "max_pixels": 4096,
+            },
+            {"shortest_edge": 32, "longest_edge": 1024},
+            {"shortest_edge": 128, "longest_edge": 4096},
+        ),
+        (
+            {
+                "size": {"shortest_edge": 64},
+                "max_pixels": 4096,
+            },
+            None,
+            {"shortest_edge": 64, "longest_edge": 4096},
+        ),
+        (
+            {
+                "size": {"shortest_edge": 64, "longest_edge": 2048},
+                "min_pixels": None,
+                "max_pixels": 0,
+            },
+            {"shortest_edge": 32, "longest_edge": 1024},
+            {"shortest_edge": 64, "longest_edge": 0},
+        ),
+    ],
+)
+def test_get_vision_size(
+    mm_kwargs: dict[str, object],
+    default_size: dict[str, object] | None,
+    expected: dict[str, object],
+) -> None:
+    original_mm_kwargs = {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in mm_kwargs.items()
+    }
+    original_default_size = dict(default_size) if default_size is not None else None
+
+    actual = Qwen2VLProcessingInfo._get_vision_size(
+        mm_kwargs,
+        default_size=default_size,
+    )
+
+    assert actual == expected
+    assert mm_kwargs == original_mm_kwargs
+    assert default_size == original_default_size
+
+
+@pytest.mark.parametrize(
+    ("modality", "scope"),
+    [
+        ("image", "images_kwargs"),
+        ("video", "videos_kwargs"),
+    ],
+)
+def test_get_vision_info_reads_merged_modality_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    modality: str,
+    scope: str,
+) -> None:
+    vision_config = SimpleNamespace(
+        patch_size=14,
+        spatial_merge_size=2,
+        temporal_patch_size=2,
+    )
+    ctx = SimpleNamespace(
+        get_hf_config=lambda *_: SimpleNamespace(vision_config=vision_config)
+    )
+    info = Qwen2VLProcessingInfo(ctx)
+    merged = {
+        "images_kwargs": {"size": {"shortest_edge": 111}},
+        "videos_kwargs": {"size": {"shortest_edge": 222}},
+    }
+    monkeypatch.setattr(
+        info,
+        "_merge_and_resolve_mm_processor_kwargs",
+        lambda _: merged,
+    )
+
+    seen: list[dict[str, object]] = []
+
+    def get_size(
+        mm_kwargs: dict[str, object],
+        default_size: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        seen.append(mm_kwargs)
+        return dict(default_size or {})
+
+    monkeypatch.setattr(info, "_get_vision_size", get_size)
+    image_processor = SimpleNamespace(size={"shortest_edge": 32, "longest_edge": 1024})
+
+    info._get_vision_info(
+        image_width=28,
+        image_height=28,
+        num_frames=2,
+        do_resize=False,
+        image_processor=image_processor,
+        mm_kwargs={},
+        modality=modality,  # type: ignore[arg-type]
+    )
+
+    assert seen == [merged[scope]]
 
 
 def test_jina_vl_processing_order() -> None:

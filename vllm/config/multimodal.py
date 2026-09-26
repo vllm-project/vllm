@@ -27,6 +27,186 @@ logger = init_logger(__name__)
 
 _T = TypeVar("_T")
 
+# HuggingFace processors accept a shared flat namespace in addition to the
+# nested processor kwarg scopes ``text_kwargs`` / ``images_kwargs`` /
+# ``videos_kwargs`` / ``audio_kwargs``. vLLM recognizes these scopes when
+# resolving ``mm_processor_kwargs``.
+_HF_PROCESSOR_KWARG_SCOPES = (
+    "text_kwargs",
+    "images_kwargs",
+    "videos_kwargs",
+    "audio_kwargs",
+)
+
+
+def _recursively_merge_mm_processor_kwargs(
+    defaults: Mapping[str, object],
+    overrides: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge two mappings recursively, with ``overrides`` taking precedence.
+
+    Nested values are merged only when both values are mappings; otherwise the
+    override replaces the existing value.
+    """
+    merged = dict(defaults)
+
+    for key, value in overrides.items():
+        default_value = merged.get(key)
+        if isinstance(default_value, Mapping) and isinstance(value, Mapping):
+            merged[key] = _recursively_merge_mm_processor_kwargs(default_value, value)
+        else:
+            merged[key] = value
+
+    return merged
+
+
+def _merge_mm_processor_scope(
+    config_flat: Mapping[str, object],
+    config_scoped: Mapping[str, object],
+    inference_flat: Mapping[str, object],
+    inference_scoped: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge kwargs for one existing HuggingFace processor kwarg scope.
+
+    Flat kwargs contribute only to keys present in either the configured or
+    inference-time scope. For those keys, precedence is:
+    configured flat < configured scoped < inference flat < inference scoped.
+
+    Nested mappings are merged recursively; otherwise the higher-priority value
+    replaces the lower-priority value.
+    """
+    # Flat kwargs contribute only to keys present in this scope in either input.
+    scoped_keys = config_scoped.keys() | inference_scoped.keys()
+    config_flat_for_scope = {
+        key: value for key, value in config_flat.items() if key in scoped_keys
+    }
+    inference_flat_for_scope = {
+        key: value for key, value in inference_flat.items() if key in scoped_keys
+    }
+
+    # Merge from lowest to highest priority:
+    # configured flat -> configured scoped -> inference flat -> inference scoped.
+    merged = _recursively_merge_mm_processor_kwargs(
+        config_flat_for_scope, config_scoped
+    )
+    merged = _recursively_merge_mm_processor_kwargs(merged, inference_flat_for_scope)
+    merged = _recursively_merge_mm_processor_kwargs(merged, inference_scoped)
+    return merged
+
+
+def _merge_mm_processor_kwargs(
+    config_kwargs: Mapping[str, object],
+    inference_kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge configured and inference-time multi-modal processor kwargs.
+
+    The merge is performed in two parts:
+
+    1. The shared flat kwargs are merged recursively, with inference-time values
+       taking precedence.
+    2. Each existing HuggingFace processor kwarg scope is merged separately.
+       For keys present in either the configured or inference-time scope,
+       precedence is:
+       configured flat < configured scoped < inference flat < inference scoped.
+
+    For example:
+
+        configured = {
+            "size": {"shortest_edge": 256},
+            "videos_kwargs": {
+                "size": {"longest_edge": 1024},
+                "num_frames": 16,
+            },
+        }
+        inference = {
+            "size": {"shortest_edge": 512},
+            "videos_kwargs": {"fps": 4},
+        }
+
+    produces:
+
+        {
+            "size": {"shortest_edge": 512},
+            "videos_kwargs": {
+                "size": {
+                    "shortest_edge": 512,
+                    "longest_edge": 1024,
+                },
+                "num_frames": 16,
+                "fps": 4,
+            },
+        }
+
+    Scoped values do not modify the shared flat kwargs or sibling scopes.
+    Missing scopes, None-valued scopes, and empty scope mappings are treated as
+    absent and do not create a scope.
+    """
+    # Merge the shared flat kwargs first; nested scopes are handled separately
+    # below.
+    config_flat = {
+        key: value
+        for key, value in config_kwargs.items()
+        if key not in _HF_PROCESSOR_KWARG_SCOPES
+    }
+    inference_flat = {
+        key: value
+        for key, value in inference_kwargs.items()
+        if key not in _HF_PROCESSOR_KWARG_SCOPES
+    }
+    merged = _recursively_merge_mm_processor_kwargs(config_flat, inference_flat)
+
+    # Merge each nested processor kwarg scope present in either input.
+    for scoped_key in _HF_PROCESSOR_KWARG_SCOPES:
+        config_scope_value = config_kwargs.get(scoped_key)
+        inference_scope_value = inference_kwargs.get(scoped_key)
+
+        # Treat missing scopes, None-valued scopes, and empty scope mappings as
+        # absent.
+        if isinstance(config_scope_value, Mapping) and not config_scope_value:
+            config_scope_value = None
+        if isinstance(inference_scope_value, Mapping) and not inference_scope_value:
+            inference_scope_value = None
+
+        # Skip adding the scope to the merged result when it is absent from both
+        # sources.
+        if config_scope_value is None and inference_scope_value is None:
+            continue
+
+        # Handle the inference scope first because it has higher precedence; only
+        # mapping-valued scopes participate in the recursive scoped merge.
+        inference_scope_kwargs: Mapping[str, object]
+        if inference_scope_value is None:
+            inference_scope_kwargs = {}
+        elif not isinstance(inference_scope_value, Mapping):
+            # Non-mapping scopes cannot participate in the recursive scoped merge;
+            # the higher-priority inference value replaces the configured scope.
+            merged[scoped_key] = inference_scope_value
+            continue
+        else:
+            inference_scope_kwargs = inference_scope_value
+
+        # Handle the configured scope next because it has lower precedence; only
+        # mapping-valued scopes participate in the recursive scoped merge.
+        if isinstance(config_scope_value, Mapping):
+            config_scope_kwargs = config_scope_value
+        elif inference_scope_value is None:
+            # Non-mapping scopes cannot participate in the recursive scoped merge;
+            # preserve the configured value when inference contributes nothing.
+            merged[scoped_key] = config_scope_value
+            continue
+        else:
+            config_scope_kwargs = {}
+
+        # Merge this scope together with the matching flat kwargs.
+        merged[scoped_key] = _merge_mm_processor_scope(
+            config_flat,
+            config_scope_kwargs,
+            inference_flat,
+            inference_scope_kwargs,
+        )
+
+    return merged
+
 
 @dataclass
 class BaseDummyOptions:
@@ -533,8 +713,14 @@ class MultiModalConfig:
     ) -> dict[str, object]:
         """Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
+
+        Nested mappings are merged recursively, with inference-time values taking
+        precedence over configured values.
         """
-        merged = dict(self.mm_processor_kwargs or {}) | dict(inference_kwargs)
+        merged = _merge_mm_processor_kwargs(
+            self.mm_processor_kwargs or {},
+            inference_kwargs,
+        )
         if self.mm_device_do_normalize:
             # The model expects raw pixels and normalises on device;
             # overriding these per request would silently double-normalise.
