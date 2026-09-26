@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
+import os
 import socket
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -266,6 +268,34 @@ def test_normal_completion(api_server_args):
         time.sleep(0.2)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux REUSEPORT semantics")
+def test_listener_bind_failure_stops_started_workers():
+    from vllm.entrypoints.launchers.launcher import create_server_socket
+    from vllm.v1.utils import shutdown
+
+    with (
+        create_server_socket(("127.0.0.1", 0), reuse_port=True) as sock,
+        patch("vllm.entrypoints.launchers.launcher.create_server_socket") as bind,
+        patch("vllm.v1.utils.shutdown", wraps=shutdown) as cleanup,
+    ):
+        first = create_server_socket(sock.getsockname(), reuse_port=True)
+        bind.side_effect = [first, OSError("bind failed")]
+        with pytest.raises(OSError, match="bind failed"):
+            APIServerProcessManager(
+                "http://localhost",
+                sock,
+                None,
+                2,
+                ["in"] * 2,
+                ["out"] * 2,
+                target_server_fn=exit_before_report_worker,
+            )
+        cleanup.assert_called_once()
+        assert len(cleanup.call_args.args[0]) == 1
+        assert all(not p.is_alive() for p in cleanup.call_args.args[0])
+        assert first.fileno() == -1
+
+
 @pytest.mark.timeout(30)
 def test_external_process_monitoring(api_server_args):
     """Test that wait_for_completion_or_failure handles additional processes."""
@@ -489,3 +519,50 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     assert hf_token not in message
     assert api_key not in message
     assert '"hf_token": "***"' in message
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux REUSEPORT semantics")
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+@pytest.mark.parametrize("num_servers,reuse_port", [(3, True), (1, True), (3, False)])
+def test_reuseport_workers_have_independent_accept_queues(
+    host, num_servers, reuse_port
+):
+    """Duplicating one fd must not defeat kernel REUSEPORT load distribution."""
+    from tests.entrypoints.launchers.api_server._api_server_spawn_workers import (
+        report_listener_worker,
+    )
+    from vllm.entrypoints.launchers.launcher import create_server_socket
+
+    if host == "::1":
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+                probe.bind((host, 0))
+        except OSError:
+            pytest.skip("IPv6 loopback unavailable")
+    with create_server_socket((host, 0), reuse_port=reuse_port) as sock:
+        address = sock.getsockname()
+        parent_inode = os.fstat(sock.fileno()).st_ino
+        manager = APIServerProcessManager(
+            listen_address=f"http://{address[0]}:{address[1]}",
+            sock=sock,
+            args=None,
+            num_servers=num_servers,
+            input_addresses=["tcp://127.0.0.1:0"] * num_servers,
+            output_addresses=["tcp://127.0.0.1:0"] * num_servers,
+            target_server_fn=report_listener_worker,
+        )
+        try:
+            listeners = []
+            for pipe in manager._address_pipes:
+                assert pipe.poll(30), "Worker did not report its listener"
+                listeners.append(pipe.recv())
+            assert all(bound_address == address for bound_address, _ in listeners)
+            inodes = {inode for _, inode in listeners}
+            if num_servers > 1 and reuse_port:
+                assert len(inodes) == num_servers
+                assert parent_inode not in inodes
+                assert not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            else:
+                assert inodes == {parent_inode}
+        finally:
+            manager.shutdown()
