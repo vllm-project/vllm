@@ -56,24 +56,33 @@ DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
     f"<{_DSML}tool>",
 )
 
+_ESCAPED_DSML = re.escape(_DSML)
+# A parameter value ends at the first DSML tag, in every dialect. The sigil is
+# rendered from special tokens the model cannot emit as content, so whatever
+# `</｜DSML｜...>` follows the value is its closer, well-formed or not
+# (`</｜DSML｜>` is the common production shape); running on to the next
+# well-formed closer instead swallows every parameter in between. A
+# `<｜DSML｜...` opener closes the value implicitly and is left for the next
+# match.
+_PARAM_VALUE = rf"((?:(?!</?{_ESCAPED_DSML}).)*)"
+_PARAM_END = rf"(?:</{_ESCAPED_DSML}[^<>]*>?|(?=<{_ESCAPED_DSML}))"
 
-def _param_patterns(
-    param_start: str, param_close: str
-) -> tuple[re.Pattern, re.Pattern]:
+
+def _param_patterns(param_start: str) -> tuple[re.Pattern, re.Pattern]:
     """Complete and trailing-partial parameter regexes for one DSML dialect.
 
     The ``string`` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
     """
-    start, close = re.escape(param_start), re.escape(param_close)
+    start = re.escape(param_start)
     head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
     return (
-        re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
-        re.compile(rf"{head}(.*)$", re.DOTALL),
+        re.compile(rf"{head}{_PARAM_VALUE}{_PARAM_END}", re.DOTALL),
+        re.compile(rf"{head}{_PARAM_VALUE}", re.DOTALL),
     )
 
 
-_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
+_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START)
 
 
 def _dsml_arg_converter(
