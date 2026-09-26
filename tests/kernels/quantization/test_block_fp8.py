@@ -163,17 +163,28 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
 @pytest.mark.parametrize(
-    # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
-    # threshold (m <= 64); 1026 crosses multiple 128-row SF atoms.
-    "M",
-    [32, 65, 66, 67, 1026],
+    # Keep each case targeted: cover packed/aligned scales on the swap path,
+    # the M=64/65 dispatch boundary, all nonzero packed M%4 residues, and a
+    # larger aligned input spanning multiple 128-row scale-factor atoms.
+    "M,tma_aligned_scales",
+    [
+        (13, False),
+        (13, True),
+        (64, True),
+        (65, False),
+        (65, True),
+        (66, False),
+        (67, False),
+        (1026, True),
+    ],
 )
 @torch.inference_mode()
-def test_w8a8_block_fp8_cutlass_matmul(M):
-    # Test simple case where weight.shape % 128 != 0,
-    # like in DSV3 kv_a_proj_with_mqa
-    N = 576
-    K = 7168
+def test_w8a8_block_fp8_cutlass_matmul(M, tma_aligned_scales):
+    # Keep the correctness reference small while retaining a non-128-aligned
+    # weight dimension and multiple K scale groups. Model-sized shapes belong
+    # in the performance benchmark rather than this unit test.
+    N = 144
+    K = 256
     block_size = [128, 128]
     out_dtype = torch.bfloat16
     seed = 0
@@ -199,8 +210,16 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
     )
     # CUTLASS uses column-major format for scales
     A_fp8_cutlass, As_cutlass = per_token_group_quant_fp8(
-        A_fp32, block_size[1], column_major_scales=True
+        A_fp32,
+        block_size[1],
+        column_major_scales=True,
+        tma_aligned_scales=tma_aligned_scales,
     )
+    assert As_cutlass.stride(-2) == 1
+    if tma_aligned_scales:
+        assert As_cutlass.stride(-1) % 4 == 0
+    else:
+        assert As_cutlass.stride(-1) == M
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
     out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs, block_size, out_dtype)
