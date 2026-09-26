@@ -370,6 +370,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
+        gdn_precomputed_metadata: object | None = None,
     ) -> KimiK3KDAMetadata:
         m = common_attn_metadata
         query_start_loc = m.query_start_loc
