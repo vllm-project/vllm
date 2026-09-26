@@ -180,6 +180,13 @@ from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 logger = init_logger(__name__)
 
 
+def _validate_custom_sampler_sampling_mask(
+    custom_sampler: tuple[Any, Any] | None, return_sampling_mask: bool
+) -> None:
+    if custom_sampler and return_sampling_mask:
+        raise ValueError("return_sampling_mask is not supported with custom samplers")
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -481,6 +488,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:
+                _validate_custom_sampler_sampling_mask(
+                    custom, self.model_config.return_sampling_mask
+                )
                 self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
@@ -1530,13 +1540,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         sampler_output: SamplerOutput | None
+        sampling_mask_width = None
+        if shard_metadata is not None and self.model_config.return_sampling_mask:
+            assert self.sampler is not None
+            sampling_mask_width = self.sampler.get_sampling_mask_width(
+                global_input_batch.idx_mapping_np
+            )
         if input_batch.num_reqs == 0:
             # This rank owns no requests this step. It contributes an
             # all-padding block to the gather below.
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            if sampling_mask_width is None:
+                sampler_output = self.sampler(logits, input_batch)
+            else:
+                sampler_output = self.sampler(
+                    logits,
+                    input_batch,
+                    sampling_mask_width=sampling_mask_width,
+                )
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
@@ -1566,6 +1589,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         global_input_batch.num_draft_tokens == 0
                         or self.rejection_sampler is None
                     ),
+                ),
+                sampling_mask_dims=(
+                    (self.vocab_size, sampling_mask_width)
+                    if sampling_mask_width is not None
+                    else None
                 ),
             )
 
