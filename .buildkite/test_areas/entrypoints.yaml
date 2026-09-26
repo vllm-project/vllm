@@ -308,6 +308,8 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling/basic entrypoints/pooling/classify entrypoints/pooling/reward entrypoints/pooling/token_classify entrypoints/pooling/token_embed
+  - "find entrypoints/pooling -maxdepth 1 -name 'test_*.py' | xargs -r pytest -v -s"
+  - "find entrypoints/pooling/scoring -maxdepth 1 -name 'test_*.py' | xargs -r pytest -v -s"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling Basic, Classify, Reward and Token)"
