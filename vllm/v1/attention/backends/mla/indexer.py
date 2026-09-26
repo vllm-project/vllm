@@ -274,8 +274,19 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
         return "DEEPSEEK_V41_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec=None,
+    ) -> list[int | MultipleOf]:
+        # Support SM90 (Hopper), SM120/GB10, and SM121 (Blackwell variants).
+        # DeepGEMM requires block_size 64 for ratio-1 layers on these
+        # architectures.
+        if current_platform.is_device_capability_family(90):
+            return [64]
+        if current_platform.is_device_capability_family(
+            120
+        ) or current_platform.is_device_capability_family(121):
+            return [64, 128]
+        return [128]
 
 
 @dataclass(frozen=True)
@@ -977,15 +988,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
 
         # Pre-allocate buffers for CUDA graph compatibility when
+        # compress_ratio > 1 (DeepSeek-V4/V4.1 compressed layers).
         if self.compress_ratio > 1:
-            # compress_ratio > 1 (DeepseekV4)
-            # Compressed slot mapping output buffer
             self.compressed_slot_mapping_buffer = torch.zeros(
                 (scheduler_config.max_num_batched_tokens,),
                 dtype=torch.int64,
                 device=self.device,
             )
-            # Buffer for compressed seq_lens in decode path
             self.expanded_seq_lens_buffer = torch.zeros(
                 (scheduler_config.max_num_batched_tokens,),
                 dtype=torch.int32,
@@ -1289,15 +1298,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         compressed_slot_mapping = slot_mapping
         indexer_block_table = block_table
+        kernel_block_size = self.kernel_block_size or self.kv_cache_spec.block_size
+        if self.kv_cache_spec.block_size % kernel_block_size != 0:
+            raise ValueError(
+                "Indexer kernel block size must divide the storage block size: "
+                f"storage={self.kv_cache_spec.block_size}, "
+                f"kernel={kernel_block_size}."
+            )
+        block_factor = self.kv_cache_spec.block_size // kernel_block_size
+        if block_factor > 1:
+            # Layouts with packed/strided pages (like BLHNC/BLNHC) do not support
+            # virtual block splitting. Each KV group must select its spec size.
+            raise ValueError(
+                f"Virtual block splitting (block_factor={block_factor}) is "
+                f"unsupported for layout {self.supported_kv_cache_layouts()} "
+                f"(storage={self.kv_cache_spec.block_size}, "
+                f"kernel={kernel_block_size}). Ensure supported kernel block sizes "
+                "match storage block size directly."
+            )
+
         if self.compress_ratio > 1:
-            kernel_block_size = self.kernel_block_size
-            if (
-                kernel_block_size is not None
-                and self.kv_cache_spec.block_size != kernel_block_size
-                and self.kv_cache_spec.block_size % kernel_block_size == 0
-            ):
-                factor = self.kv_cache_spec.block_size // kernel_block_size
-                indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
             padded_num_tokens = num_tokens
             local_slot_mapping = slot_mapping
             if self.use_pcp:
@@ -1314,7 +1334,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
                 seq_lens,
                 indexer_block_table,
-                self.kv_cache_spec.num_states,
+                self.kv_cache_spec.get_num_kernel_states(kernel_block_size),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
@@ -1594,7 +1614,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
-                    self.kv_cache_spec.num_states,
+                    self.kv_cache_spec.get_num_kernel_states(kernel_block_size),
                     self.num_sms,
                     indices=decode_indices,
                 )
