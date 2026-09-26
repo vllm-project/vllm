@@ -1093,11 +1093,11 @@ class VllmConfig:
             "Dynamic speculative decoding is not supported with data "
             "parallelism because data-parallel ranks can select different "
             "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
+            "Disabling speculative_token_schedule and falling back "
             "to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
-        speculative_config.num_speculative_tokens_per_batch_size = None
+        speculative_config.speculative_token_schedule = None
 
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
@@ -2473,9 +2473,7 @@ class VllmConfig:
                             build_dynamic_sd_schedule_lookup,
                         )
 
-                        schedule = (
-                            speculative_config.num_speculative_tokens_per_batch_size
-                        )
+                        schedule = speculative_config.speculative_token_schedule
                         assert schedule is not None
                         # Read the tiers off the dense lookup the scheduler
                         # runs on, so the clamp against num_speculative_tokens
@@ -2483,7 +2481,7 @@ class VllmConfig:
                         # cannot drift from it. Validation lives elsewhere; an
                         # invalid schedule keeps the single-tier default.
                         try:
-                            dense_schedule = build_dynamic_sd_schedule_lookup(
+                            schedule_lookup = build_dynamic_sd_schedule_lookup(
                                 schedule,
                                 vllm_max_batch_size=max_num_seqs,
                                 vllm_num_speculative_tokens=self.num_speculative_tokens,
@@ -2494,10 +2492,11 @@ class VllmConfig:
                             # Ascending batch size, so the last write per
                             # query length is the widest batch running at it.
                             widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
+                            for batch_size, row in enumerate(
+                                schedule_lookup.dense[1:], start=1
                             ):
-                                widest_batch[num_spec + 1] = batch_size
+                                for num_spec in row:
+                                    widest_batch[num_spec + 1] = batch_size
                             decode_tiers = list(widest_batch.items())
 
                     uniform_decode_sizes = sorted(
