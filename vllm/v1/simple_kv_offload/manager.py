@@ -27,13 +27,13 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     ExternalBlockHash,
-    dcp_world_size_for_kv_cache_spec,
     generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
+    resolve_dcp_kv_block_size,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -302,11 +302,7 @@ class SimpleCPUOffloadScheduler:
         target = 0
         for g in kv_cache_config.prefix_cacheable_groups:
             spec = g.kv_cache_spec
-            # Only full attention is sharded across DCP ranks; replicated specs
-            # (mamba, sliding window, chunked-local) keep their own block size.
-            block_size = spec.block_size * dcp_world_size_for_kv_cache_spec(
-                spec, cp_world_size
-            )
+            block_size = resolve_dcp_kv_block_size(spec, cp_world_size)
             if isinstance(spec, MambaSpec):
                 target += 2
             elif isinstance(spec, SlidingWindowSpec):

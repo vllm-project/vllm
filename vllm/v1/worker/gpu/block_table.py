@@ -27,6 +27,7 @@ class BlockTables:
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
@@ -44,6 +45,10 @@ class BlockTables:
             slot_mapping_enabled = [True] * self.num_kv_cache_groups
         assert len(slot_mapping_enabled) == self.num_kv_cache_groups
         self._slot_mapping_enabled = slot_mapping_enabled
+        if dcp_sharded is None:
+            dcp_sharded = [True] * self.num_kv_cache_groups
+        assert len(dcp_sharded) == self.num_kv_cache_groups
+        self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -210,6 +215,7 @@ class BlockTables:
             self.block_sizes_tensor,
             self.kernel_block_sizes_tensor,
             self.slot_mapping_enabled,
+            self.dcp_sharded,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
@@ -283,6 +289,7 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mapping_enabled,  # [num_kv_cache_groups]
+    dcp_sharded,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
@@ -312,6 +319,8 @@ def _compute_slot_mappings_kernel(
     kv_block_size = tl.load(block_sizes + group_id)
     kernel_block_size = tl.load(kernel_block_sizes + group_id)
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
+    if CP_SIZE != 1:
+        sharded = tl.load(dcp_sharded + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
     # idx_mapping == -1 marks a dummy (or CUDA-graph padding) request that owns
@@ -337,6 +346,8 @@ def _compute_slot_mappings_kernel(
             remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
             local_positions = virtual_block_indices * kv_block_size + local_offsets
+            local_positions = tl.where(sharded, local_positions, positions)
+            is_local = ~sharded | is_local
 
         block_indices = tl.where(
             mapping_enabled, local_positions // kernel_block_size, 0

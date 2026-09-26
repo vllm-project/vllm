@@ -1,10 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.cp_utils import should_skip_dcp_context_attention
+
+
+def test_cp_checks_allow_a_replicated_draft_backend_without_dcp(monkeypatch):
+    from vllm.v1.worker import cp_utils
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=4,
+            cp_kv_cache_interleave_size=16,
+        ),
+        speculative_config=object(),
+    )
+    target = SimpleNamespace(
+        impl=SimpleNamespace(
+            dcp_world_size=4,
+            supports_mtp_with_cp_non_trivial_interleave_size=True,
+            need_to_return_lse_for_decode=True,
+        )
+    )
+    draft = SimpleNamespace(
+        impl=SimpleNamespace(
+            dcp_world_size=1,
+            supports_mtp_with_cp_non_trivial_interleave_size=False,
+            need_to_return_lse_for_decode=False,
+        )
+    )
+    layers = {"target": target, "draft": draft}
+    monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *args: layers)
+    cp_utils.check_attention_cp_compatibility(config, target_layer_names={"target"})
+    with pytest.raises(AssertionError, match="MTP with cp_kv_cache_interleave_size"):
+        cp_utils.check_attention_cp_compatibility(config)
 
 
 def test_skip_gate_only_for_zero_context():
