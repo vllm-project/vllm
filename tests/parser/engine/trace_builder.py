@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tests.parser.engine.replay_harness import (
@@ -35,6 +35,7 @@ from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
     Glm47MoeParser,
     GraniteParser,
+    GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
     MinimaxM2Parser,
@@ -594,6 +595,30 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
+    """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
+    content after ``</think>``."""
+    sample = _build_qwen3(
+        scenario,
+        name="granite_thinking_parser",
+        parser_cls=GraniteThinkingParser,
+        strip_trailing_ws=True,
+        validate=False,
+    )
+    sample = replace(
+        sample,
+        expected_content=(
+            sample.expected_content.lstrip("\n")
+            if sample.expected_content
+            else sample.expected_content
+        ),
+        content_lstrip="\n",
+    )
+    if validate:
+        _validate_sample(sample, GraniteThinkingParser)
+    return sample
+
+
 # ── Seed-OSS (Qwen3 XML grammar with Seed wrapper tokens) ────────────
 
 _SEED_OSS_VOCAB: dict[str, int] = {
@@ -1136,6 +1161,7 @@ _BUILDERS: dict[str, Any] = {
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
