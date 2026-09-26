@@ -201,6 +201,15 @@ pub struct BenchConfig {
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
     pub hf_text_column: Option<String>,
+    /// Fire each request at its trace-recorded timestamp instead of a
+    /// synthetic --request-rate schedule. Only timed_trace can set this.
+    pub self_timed: bool,
+    pub timed_trace_chunk_hash_size: usize,
+    pub timed_trace_sec_multiplier: f64,
+    pub timed_trace_label_timestamp: String,
+    pub timed_trace_label_input_length: String,
+    pub timed_trace_label_output_length: String,
+    pub timed_trace_label_hash_ids: String,
     pub reset_prefix_cache: bool,
     pub prompt_token_ids: bool,
     // --- Random multimodal dataset ---
@@ -371,6 +380,79 @@ impl BenchConfig {
         let mut multi_turn_min_turns = args.multi_turn_num_turns;
         let mut multi_turn_max_turns = args.multi_turn_num_turns;
 
+        let self_timed = if args.dataset_name == DatasetName::TimedTrace {
+            if !matches!(args.backend, BackendKind::Vllm | BackendKind::Openai) {
+                return Err(BenchError::Config(
+                    "timed_trace passes pre-tokenized prompts (list[int]) and requires \
+                     a completions backend ('vllm' or 'openai')"
+                        .into(),
+                ));
+            }
+            if args.dataset_path.is_none() {
+                return Err(BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                ));
+            }
+            // A zero, negative or non-finite scale turns trace timestamps into
+            // offsets the scheduler cannot sleep on.
+            if !(args.timed_trace_sec_multiplier.is_finite()
+                && args.timed_trace_sec_multiplier > 0.0)
+            {
+                return Err(BenchError::Config(format!(
+                    "--timed-trace-sec-multiplier must be finite and positive, got {}",
+                    args.timed_trace_sec_multiplier
+                )));
+            }
+            let self_timed = !args.no_self_timed;
+            if self_timed {
+                // Flags that shape a synthetic schedule are unreachable once
+                // the trace supplies arrival times. Accepting them silently
+                // would still stamp the result JSON and its filename with a
+                // request rate that never ran.
+                let mut unused: Vec<&str> = Vec::new();
+                if args.request_rate.is_finite() {
+                    unused.push("--request-rate");
+                }
+                if args.burstiness != 1.0 {
+                    unused.push("--burstiness");
+                }
+                if args.ramp_up_strategy.is_some() {
+                    unused.push("--ramp-up-strategy");
+                }
+                if args.sweep_request_rate.is_some() {
+                    unused.push("--sweep-request-rate");
+                }
+                // A per-point num_prompts truncates the trace to a different
+                // number of rows, so each sweep point replays a different span.
+                if args.sweep_max_concurrency.is_some() && args.sweep_num_prompts_factor.is_some() {
+                    return Err(BenchError::Config(
+                        "--sweep-num-prompts-factor truncates the trace to a different \
+                         number of rows per sweep point, so each point replays a \
+                         different span; drop it to sweep concurrency over the whole trace"
+                            .into(),
+                    ));
+                }
+                if !unused.is_empty() {
+                    return Err(BenchError::Config(format!(
+                        "{} {} no effect under trace-driven timing; pass --no-self-timed \
+                         to schedule timed_trace by --request-rate instead",
+                        unused.join(" / "),
+                        if unused.len() == 1 { "has" } else { "have" },
+                    )));
+                }
+            }
+            self_timed
+        } else {
+            if args.self_timed || args.no_self_timed {
+                return Err(BenchError::Config(
+                    "--self-timed/--no-self-timed is only supported with \
+                     --dataset-name timed_trace"
+                        .into(),
+                ));
+            }
+            false
+        };
+
         // For random datasets with openai-compatible backends, default to ignore_eos.
         // Exception: multi-turn mode, where ignore_eos causes unbounded context growth
         // across turns. Multi-turn uses min_tokens instead for output length control.
@@ -379,6 +461,8 @@ impl BenchConfig {
             false
         } else {
             args.ignore_eos
+                // timed_trace: generation must run to the trace's output_length
+                || args.dataset_name == DatasetName::TimedTrace
                 || ((args.dataset_name == DatasetName::Random
                     || args.dataset_name == DatasetName::RandomMm)
                     && args.backend.is_openai_compatible()
@@ -744,6 +828,13 @@ impl BenchConfig {
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.hf_output_len,
             hf_text_column: args.hf_text_column.clone(),
+            self_timed,
+            timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
+            timed_trace_sec_multiplier: args.timed_trace_sec_multiplier,
+            timed_trace_label_timestamp: args.timed_trace_label_timestamp.clone(),
+            timed_trace_label_input_length: args.timed_trace_label_input_length.clone(),
+            timed_trace_label_output_length: args.timed_trace_label_output_length.clone(),
+            timed_trace_label_hash_ids: args.timed_trace_label_hash_ids.clone(),
             reset_prefix_cache: args.reset_prefix_cache,
             prompt_token_ids: args.prompt_token_ids,
             random_mm_base_items_per_request: args.random_mm_base_items_per_request,
@@ -881,6 +972,98 @@ mod tests {
         T: Into<std::ffi::OsString> + Clone,
     {
         TestCli::parse_from(args).args
+    }
+
+    fn base_timed_trace_args() -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "timed_trace",
+            "--dataset-path",
+            "trace.jsonl",
+        ]
+    }
+
+    #[test]
+    fn test_timed_trace_defaults_to_self_timed() {
+        let config = BenchConfig::from_args(&parse_args(base_timed_trace_args())).unwrap();
+        assert!(config.self_timed);
+        assert!(config.ignore_eos);
+    }
+
+    #[test]
+    fn test_no_self_timed_restores_rate_scheduling() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--no-self-timed", "--request-rate", "10"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert!(!config.self_timed);
+        assert_eq!(config.request_rate, 10.0);
+    }
+
+    /// Rate/burstiness/ramp-up shape a synthetic schedule the trace replaces;
+    /// accepting them would mislabel the result JSON with a rate that never ran.
+    #[test]
+    fn test_self_timed_rejects_synthetic_schedule_flags() {
+        for flag in [
+            vec!["--request-rate", "10"],
+            vec!["--burstiness", "0.5"],
+            vec!["--sweep-request-rate", "1,5,10"],
+        ] {
+            let mut args = base_timed_trace_args();
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("self-timed replay should reject synthetic schedule flags")
+                .to_string();
+            assert!(
+                msg.contains(flag[0]) && msg.contains("--no-self-timed"),
+                "{flag:?}: {msg}"
+            );
+        }
+    }
+
+    /// A per-point num_prompts truncates the trace differently at every sweep
+    /// point, so the replayed span stops being comparable across them.
+    #[test]
+    fn test_self_timed_rejects_sweep_num_prompts_factor() {
+        let mut args = base_timed_trace_args();
+        args.extend([
+            "--sweep-max-concurrency",
+            "8,16",
+            "--sweep-num-prompts-factor",
+            "4",
+        ]);
+        let err = BenchConfig::from_args(&parse_args(args)).expect_err("should reject the factor");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--sweep-num-prompts-factor") && msg.contains("different span"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_self_timed_allows_concurrency_sweep_over_full_trace() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--sweep-max-concurrency", "8,16"]);
+        assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
+    }
+
+    #[test]
+    fn test_non_positive_sec_multiplier_fails() {
+        // `=` form: clap reads a bare "-0.001" as a flag.
+        for value in [
+            "--timed-trace-sec-multiplier=0",
+            "--timed-trace-sec-multiplier=-0.001",
+            "--timed-trace-sec-multiplier=inf",
+            "--timed-trace-sec-multiplier=nan",
+        ] {
+            let mut args = base_timed_trace_args();
+            args.push(value);
+            let err = BenchConfig::from_args(&parse_args(args))
+                .expect_err("should reject a multiplier that cannot scale timestamps");
+            assert!(err.to_string().contains("--timed-trace-sec-multiplier"));
+        }
     }
 
     fn base_multi_turn_args() -> Vec<&'static str> {

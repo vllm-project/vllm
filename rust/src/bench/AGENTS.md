@@ -51,12 +51,13 @@ cargo test -p vllm-bench -- --ignored
 - `src/datasets/speed_bench.rs` — NVIDIA SPEED-Bench loader (HF datasets-server API, 6 configs, 11 categories, local cache)
 - `src/datasets/hf_dataset.rs` — Generic HuggingFace dataset loader (parquet shards via hf-hub into the standard HF hub cache; datasets-server for config/split discovery; native main-branch parquet/JSON fallback for private datasets; column auto-detection)
 - `src/datasets/custom.rs` — Custom JSONL dataset (`{"prompt": ..., "output_tokens": ...}` per line; `--custom-output-len -1` uses per-line output_tokens; prompts always sent raw — no client-side chat template)
+- `src/datasets/timed_trace.rs` — Mooncake-style replay trace (`{timestamp, input_length, output_length, hash_ids}` JSONL; `hash_ids` expand to memoized token chunks so prefix sharing reproduces; `--self-timed` fires each request at its recorded offset instead of `--request-rate`; mirrors Python `TimedTrace`)
 - `src/datasets/prefix_repetition.rs` — Prefix repetition dataset (N shared prefixes × fresh random suffixes, standard prefix-cache stress; mirrors Python `PrefixRepetitionRandomDataset`)
 - `src/datasets/random_rerank.rs` — Random rerank dataset (one query + batched documents per request for `vllm-rerank`; `--no-reranker` for embedding-based scoring; mirrors Python `RandomDatasetForReranking`)
 - `src/datasets/multi_turn.rs` — Multi-turn synthetic generator + ShareGPT multi-turn loader (3-tier prefix sharing: global/conversation/unique-suffix; `per_turn_input_len`)
 - `src/metrics/mod.rs` — `BenchmarkMetrics` and `MultiTurnMetrics` structs
 - `src/metrics/calculator.rs` — TTFT/TPOT/ITL/E2EL/throughput stats, goodput SLO checking, peak concurrency, `calculate_multi_turn_metrics`
-- `src/metrics/steady_state.rs` — Steady-state window detection (in-flight concurrency plateau via two-pointer start/end merge) + plateau throughput/TTFT/TPOT; gated on `--max-concurrency` set + `--request-rate inf` (closed-loop)
+- `src/metrics/steady_state.rs` — Steady-state window detection (in-flight concurrency plateau via two-pointer start/end merge) + plateau throughput/TTFT/TPOT; gated on `--max-concurrency` set + `--request-rate inf` and off under `--self-timed` (closed-loop only)
 - `src/output/console.rs` — Terminal output matching Python format + multi-turn per-turn breakdown
 - `src/output/json.rs` — JSON result file (compatible with Python schema) + multi-turn JSON with `per_turn_metrics`
 
