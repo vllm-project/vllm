@@ -281,6 +281,12 @@ class SchedulerConfig:
         # Their shapes are captured in compiled graphs.
         factors.append(self.max_num_seqs)
 
+        # Unifying hybrid kv cache specs rewrites every layer's KVCacheSpec,
+        # which changes KV group splitting, page size and the attention
+        # backend/kernel selected for each group. Normalized because the field
+        # defaults to None, which means the same thing as False.
+        factors.append(bool(self.disable_hybrid_kv_cache_manager))
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
