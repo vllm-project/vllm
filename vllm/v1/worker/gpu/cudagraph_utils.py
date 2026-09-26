@@ -266,10 +266,17 @@ class CudaGraphManager:
         # When using Dynamic SD, num_speculative_tokens is the max number of
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
+        #
+        # Draft-decode managers are constructed with decode_query_len=1 (one
+        # token per draft step). Expanding dynamic-SD tiers from that value
+        # yields non-positive lengths and ZeroDivisionError in round_up.
+        # Keep [1] for that path; target-model managers still expand (they
+        # use decode_query_len = k + 1).
         speculative_config = self.vllm_config.speculative_config
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
+            and self.decode_query_len > 1
         ):
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
             # _per_step. Recover num_new_sampled_tokens_per_step
@@ -286,8 +293,11 @@ class CudaGraphManager:
                 {
                     num_spec + num_new_sampled_tokens_per_step
                     for num_spec in dense_schedule[1:]
+                    if num_spec + num_new_sampled_tokens_per_step > 0
                 }
             )
+            if not decode_query_lens:
+                decode_query_lens = [self.decode_query_len]
         else:
             decode_query_lens = [self.decode_query_len]
 
@@ -312,6 +322,10 @@ class CudaGraphManager:
             #  (i.e. separate decode routine)
             elif separate_decode_routine and decode_mode and not self.varlen_decode:
                 for decode_query_len in decode_query_lens:
+                    # Guard: non-positive lengths would ZeroDivisionError in
+                    # round_up / produce nonsense capture sizes.
+                    if decode_query_len <= 0:
+                        continue
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
                     rounded_num_reqs = rounded_num_tokens // decode_query_len
 
