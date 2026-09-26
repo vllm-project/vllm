@@ -292,6 +292,11 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
     metadata_cls = FlashInferMLASparseSM90Metadata
 
+    @staticmethod
+    def _plan_dtype(spec_dtype: torch.dtype) -> torch.dtype:
+        """fp8 KV is stored as uint8, but plan() needs float8_e4m3fn."""
+        return torch.float8_e4m3fn if spec_dtype == torch.uint8 else spec_dtype
+
     def __init__(
         self,
         kv_cache_spec: "AttentionSpec",
@@ -315,7 +320,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         self.state = _SM90State(
             device,
             impl.num_heads,
-            kv_cache_spec.dtype,
+            self._plan_dtype(kv_cache_spec.dtype),
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,

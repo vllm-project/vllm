@@ -879,8 +879,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_pcp = self.pcp_world_size > 1
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        # KV compression (DeepseekV4). Default to 1 for no compression.
+        self.compress_ratio = 1
+        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
+            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
-        self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
+        # In compressed rows, like the chunker's seq_lens and the workspace.
+        self.max_prefill_buffer_size = (
+            get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
+        )
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config
@@ -962,14 +970,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
-        # KV compression. Default to 1 for no compression.
-        self.compress_ratio = 1
-        # Get compress_ratio for DeepseekV4 support
-        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-            # MLA compression is a whole number of tokens per state (fractions
-            # are whisper block pooling and never reach MLA).
-            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
-            self.compress_ratio = self.kv_cache_spec.tokens_per_state
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
                 "DCP is not supported with sparse indexer KV compression "
