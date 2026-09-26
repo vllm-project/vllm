@@ -1172,6 +1172,50 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
+@pytest.mark.parametrize(
+    ("spec"),
+    [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
+    ids=["swa", "compressed-mla"],
+)
+def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
+    def _get_offloading_config(canonical: bool):
+        config = _make_vllm_config(
+            tensor_parallel_size=2,
+            extra_config={"canonical_layout": True} if canonical else None,
+        )
+        config.model_config.use_mla = True
+
+        PAGE = spec.page_size_bytes
+        kv_config = KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=PAGE * 4,
+                    layers=["layer"],
+                    layer_stride=PAGE * 4,
+                    block_stride=PAGE,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer"], spec),
+            ],
+        )
+
+        kv_config.all_groups_are_tp_replicated = _all_kv_groups_tp_replicated(
+            kv_config.kv_cache_groups, config
+        )
+
+        return build_offloading_config(config, kv_config)
+
+    offload_config = _get_offloading_config(canonical=False)
+    assert offload_config.replicated_layout
+    assert not offload_config.parallel.is_parallelism_agnostic
+
+    canon_offload_config = _get_offloading_config(canonical=True)
+    assert not canon_offload_config.replicated_layout
+    assert not canon_offload_config.parallel.is_parallelism_agnostic
+
+
 def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner
