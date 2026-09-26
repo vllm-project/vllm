@@ -35,7 +35,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.config import is_rope_parameters_nested
+from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -337,10 +337,4 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     # Dynamic rope scaling is not compatible with torch.compile
-    rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
-    if rope_parameters:
-        # Nest rope_parameters if not nested already to simplify logic
-        if not is_rope_parameters_nested(rope_parameters):
-            rope_parameters = {"": rope_parameters}
-        return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
-    return True
+    return all(rp["rope_type"] != "dynamic" for rp in iter_rope_parameters(text_config))
