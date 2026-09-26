@@ -363,7 +363,10 @@ class FrontendArgs(BaseFrontendArgs):
     """
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
-    Can significantly improve late-interaction scoring performance."""
+    Can significantly improve late-interaction scoring performance.
+    When disabled, the setting is also propagated to the engine's
+    `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
+    path instead of the fused Triton kernel."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -498,3 +501,20 @@ def create_parser_for_docs() -> FlexibleArgumentParser:
         prog="-m vllm.entrypoints.launchers.api_server.entry"
     )
     return make_arg_parser(parser_for_docs)
+
+
+def propagate_flash_late_interaction(args, engine_args) -> None:
+    """Propagate `--no-enable-flash-late-interaction` into the engine config.
+
+    The frontend flag alone only disables the API-server scoring path;
+    mirroring it into `PoolerConfig.enable_flash_late_interaction` lets the
+    engine-side scorer fall back to the reference MaxSim path too.
+    """
+    if getattr(args, "enable_flash_late_interaction", True):
+        return
+    from vllm.config.pooler import PoolerConfig
+
+    if engine_args.pooler_config is None:
+        engine_args.pooler_config = PoolerConfig(enable_flash_late_interaction=False)
+    else:
+        engine_args.pooler_config.enable_flash_late_interaction = False
