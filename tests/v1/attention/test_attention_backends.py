@@ -1613,6 +1613,55 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
     )
 
 
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("adaptive", "fa_version", "expected_always"),
+    [
+        (True, 4, True),
+        (False, 4, False),
+        (None, 4, False),
+        (True, 2, False),
+    ],
+)
+def test_flash_attn_adaptive_varlen_cudagraph_support(
+    monkeypatch: pytest.MonkeyPatch,
+    adaptive: bool | None,
+    fa_version: int,
+    expected_always: bool,
+):
+    from vllm.v1.attention.backends import flash_attn as flash_attn_backend
+
+    monkeypatch.setattr(
+        flash_attn_backend, "get_flash_attn_version", lambda **_kwargs: fa_version
+    )
+
+    config = SimpleNamespace(
+        speculative_config=(
+            None
+            if adaptive is None
+            else SimpleNamespace(enable_adaptive_verification=adaptive)
+        ),
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+
+    support = flash_attn_backend.FlashAttentionMetadataBuilder.get_cudagraph_support(
+        config, kv_cache_spec
+    )
+    if expected_always:
+        assert support == AttentionCGSupport.ALWAYS
+    else:
+        assert (
+            support
+            == flash_attn_backend.FlashAttentionMetadataBuilder._cudagraph_support
+        )
+
+
 if current_platform.is_rocm():
     # FLASH_ATTN is not supported on ROCm
     SLIDING_WINDOW_BACKENDS_TO_TEST = [

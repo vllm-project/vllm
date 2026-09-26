@@ -290,3 +290,125 @@ def test_fa4_hd256_paged_call_shape(
         sliding_window=sliding_window,
     )
     torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="FA4 adaptive varlen CUDA graph replay requires CUDA",
+)
+@pytest.mark.parametrize("q_dtype", [None, torch.float8_e4m3fn])
+@torch.inference_mode()
+def test_fa4_cudagraph_replay_with_device_varlen_query_lens(
+    q_dtype: torch.dtype | None,
+) -> None:
+    """One captured graph must follow changing device-side query boundaries."""
+    if not is_fa_version_supported(4):
+        pytest.skip(f'FA4 unsupported: "{fa_version_unsupported_reason(4)}"')
+    if q_dtype is not None and not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 FP8 inputs require SM100")
+
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    query_len_patterns = ([4, 4, 4, 4], [8, 1, 1, 6], [1, 8, 5, 2])
+    context_lens = [32, 64, 96, 128]
+    num_tokens = sum(query_len_patterns[0])
+    num_query_heads, num_kv_heads, head_size = 8, 2, 128
+    block_size, num_blocks = 16, 64
+    max_query_len = 8
+    max_kv_len = max(context_lens) + max_query_len
+    scale = head_size**-0.5
+
+    query = torch.randn(num_tokens, num_query_heads, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.randint(
+        0,
+        num_blocks,
+        (len(context_lens), (max_kv_len + block_size - 1) // block_size),
+        dtype=torch.int32,
+    )
+
+    kernel_query = query if q_dtype is None else query.to(q_dtype)
+    kernel_key_cache = key_cache if q_dtype is None else key_cache.to(q_dtype)
+    kernel_value_cache = value_cache if q_dtype is None else value_cache.to(q_dtype)
+    descale = (
+        None
+        if q_dtype is None
+        else torch.ones(len(context_lens), num_kv_heads, dtype=torch.float32)
+    )
+
+    cu_query_lens = torch.empty(len(context_lens) + 1, dtype=torch.int32)
+    kv_lens = torch.empty(len(context_lens), dtype=torch.int32)
+    output = torch.empty_like(query)
+
+    def update_lengths(query_lens: list[int] | tuple[int, ...]) -> None:
+        cu_query_lens.copy_(
+            torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(dim=0)
+        )
+        kv_lens.copy_(
+            torch.tensor(
+                [
+                    context_len + query_len
+                    for context_len, query_len in zip(context_lens, query_lens)
+                ],
+                dtype=torch.int32,
+            )
+        )
+
+    def run_attention() -> None:
+        flash_attn_varlen_func(
+            q=kernel_query,
+            k=kernel_key_cache,
+            v=kernel_value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=kv_lens,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            fa_version=4,
+            q_descale=descale,
+            k_descale=descale,
+            v_descale=descale,
+        )
+
+    update_lengths(query_len_patterns[0])
+    run_attention()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_attention()
+
+    reference_query = kernel_query.to(torch.bfloat16)
+    reference_key_cache = kernel_key_cache.to(torch.bfloat16)
+    reference_value_cache = kernel_value_cache.to(torch.bfloat16)
+    atol, rtol = (1.5e-2, 1e-2) if q_dtype is None else (1.5e-1, 1.5e-1)
+
+    for query_lens in query_len_patterns[1:] + query_len_patterns[:1]:
+        update_lengths(query_lens)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        reference = ref_paged_attn(
+            query=reference_query.clone(),
+            key_cache=reference_key_cache,
+            value_cache=reference_value_cache,
+            query_lens=list(query_lens),
+            kv_lens=[
+                context_len + query_len
+                for context_len, query_len in zip(context_lens, query_lens)
+            ],
+            block_tables=block_tables,
+            scale=scale,
+        )
+        torch.testing.assert_close(output, reference, atol=atol, rtol=rtol)

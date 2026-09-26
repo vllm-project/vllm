@@ -627,6 +627,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
+        speculative_config = vllm_config.speculative_config
+        if (
+            get_flash_attn_version() == 4
+            and speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
+            return AttentionCGSupport.ALWAYS
         return cls._cudagraph_support
 
     def _get_scheduler_metadata(
