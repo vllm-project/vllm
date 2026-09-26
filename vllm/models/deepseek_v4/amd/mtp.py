@@ -32,6 +32,7 @@ from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.attention_sink import load_padded_attn_sink
 from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
@@ -454,9 +455,12 @@ class DeepSeekV4MTP(nn.Module):
                             break
                     continue
                 elif "attn_sink" in name:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
+                    load_padded_attn_sink(
+                        params_dict[name],
+                        loaded_weight,
+                        head_rank_start,
+                        head_rank_end,
+                    )
                     loaded_params.add(name)
                     continue
                 else:
