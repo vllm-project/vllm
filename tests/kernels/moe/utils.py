@@ -108,6 +108,7 @@ def triton_moe(
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -138,6 +139,7 @@ def batched_moe(
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -192,6 +194,7 @@ def naive_batched_moe(
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -469,6 +472,7 @@ def make_test_quant_config(
         FusedMoEQuantConfig.make(
             quant_dtype,
             per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_act_token_quant,
             block_shape=block_shape,
             w1_scale=w1_s,
             w2_scale=w2_s,

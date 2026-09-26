@@ -266,6 +266,7 @@ def fused_mova_impl(
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
         per_channel_quant=per_channel_quant,
+        per_out_ch_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
     )
