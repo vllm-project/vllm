@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor import multiproc_executor as multiproc_executor_module
 from vllm.v1.executor.abstract import Executor
@@ -25,6 +27,91 @@ from vllm.v1.executor.uniproc_executor import (
 
 
 class Mock: ...
+
+
+class _SleepExecutor(Executor):
+    """Exercise executor transitions with worker RPCs as the failure boundary."""
+
+    def _init_executor(self) -> None:
+        self.worker_rpc = MagicMock(return_value=[None])
+
+    def collective_rpc(
+        self,
+        method: str | Callable,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+    ) -> Any:
+        return self.worker_rpc(method, timeout, args, kwargs, non_block)
+
+    def check_health(self) -> None:
+        pass
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("level", [1, 2])
+@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_failed_sleep_can_restore_before_resuming(
+    level: int, error_type: type[Exception], deferred: bool
+) -> None:
+    """Retain sleep state on failure; resume only after a successful restore."""
+    executor = _SleepExecutor(MagicMock())
+    failure = error_type("injected sleep failure after unmapping")
+    executor.worker_rpc.side_effect = failure
+    core = object.__new__(EngineCore)
+    core.model_executor = executor
+    pause_future: Future[None] = Future()
+    core.pause_scheduler = MagicMock(return_value=pause_future if deferred else None)
+    core.resume_scheduler = MagicMock()
+
+    if deferred:
+        result = core.sleep(level=level)
+        assert isinstance(result, Future)
+        pause_future.set_result(None)
+    with pytest.raises(error_type) as raised:
+        if deferred:
+            result.result()
+        else:
+            core.sleep(level=level)
+    assert raised.value is failure
+    assert executor.is_sleeping
+
+    assert core.wake_up(tags=["scheduling"]) is False
+    core.resume_scheduler.assert_not_called()
+
+    executor.worker_rpc.side_effect = RuntimeError("incomplete restore")
+    with pytest.raises(RuntimeError, match="incomplete restore"):
+        core.wake_up()
+    assert executor.is_sleeping
+    core.resume_scheduler.assert_not_called()
+
+    executor.worker_rpc.reset_mock()
+    executor.worker_rpc.side_effect = None
+    assert core.wake_up() is True
+    assert not executor.is_sleeping
+    core.resume_scheduler.assert_called_once_with()
+    executor.worker_rpc.assert_called_once()
+    assert executor.worker_rpc.call_args.args[0] == "wake_up"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("level", [1, 2])
+def test_successful_sleep_allows_partial_wake(level: int) -> None:
+    """Successful transitions still resume only after every tag is restored."""
+    executor = _SleepExecutor(MagicMock())
+    core = object.__new__(EngineCore)
+    core.model_executor = executor
+    core.pause_scheduler = MagicMock(return_value=None)
+    core.resume_scheduler = MagicMock()
+
+    core.sleep(level=level)
+    assert core.wake_up(tags=["weights"]) is False
+    core.resume_scheduler.assert_not_called()
+    assert core.wake_up(tags=["kv_cache"]) is True
+    assert not executor.is_sleeping
+    core.resume_scheduler.assert_called_once_with()
 
 
 def test_supports_async_scheduling_base_executor():

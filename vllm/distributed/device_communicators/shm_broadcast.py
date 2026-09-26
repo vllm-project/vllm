@@ -897,6 +897,7 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
+            deadline = None if timeout is None else time.monotonic() + timeout
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
@@ -910,6 +911,9 @@ class MessageQueue:
                         all_buffers.append(buf[buf_offset:offset])
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
+                timeout = (
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
+                )
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
             obj = MessageQueue.recv(self.remote_socket, timeout)

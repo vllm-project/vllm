@@ -1439,12 +1439,18 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
-            if signal_callback is not None:
-                signal_callback.stop()
-            if engine_core is not None:
-                engine_core.shutdown()
+            # Keep worker cleanup alive until it finishes or the process manager
+            # enforces its deadline by killing the entire process tree.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                if signal_callback is not None:
+                    signal_callback.stop()
+                if engine_core is not None:
+                    engine_core.shutdown()
+            finally:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
             if clean_shutdown:
                 from vllm.platforms import current_platform
 
