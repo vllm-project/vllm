@@ -224,6 +224,9 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
     request = dict(
         model="claude-3-7-sonnet-latest",
         max_tokens=1,
+        # Anthropic SDK 1.x removed temperature from messages.create() (issue
+        # #58246); it is still accepted by the HTTP API via extra_body, as
+        # documented in the SDK's MIGRATION.md.
         extra_body={"temperature": 0.0},
         messages=[
             {
