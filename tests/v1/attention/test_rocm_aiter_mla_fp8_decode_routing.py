@@ -96,12 +96,28 @@ def test_dcp_multitoken_verify_never_uses_gluon(
 
 
 def test_segmented_dcp_verify_does_not_depend_on_gluon(monkeypatch):
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
 
     assert rocm_aiter_mla._segmented_dcp_verify_supported(8, 1)
     # Round-robin interleaving other than 1 is not served by this route.
     assert not rocm_aiter_mla._segmented_dcp_verify_supported(8, 4)
+
+
+def test_gfx942_does_not_claim_segmented_dcp_verify(monkeypatch):
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
+    assert not rocm_aiter_mla._segmented_dcp_verify_supported(8, 1)
+
+
+def test_gfx942_triton_dcp_verify_gate(monkeypatch):
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    assert rocm_aiter_mla._triton_dcp_verify_supported(8, 1)
+    assert not rocm_aiter_mla._triton_dcp_verify_supported(1, 1)
+    assert not rocm_aiter_mla._triton_dcp_verify_supported(8, 4)
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: False)
+    assert not rocm_aiter_mla._triton_dcp_verify_supported(8, 1)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
