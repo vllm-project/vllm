@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-import pytest
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -222,33 +221,6 @@ def test_uniform_decode_predicate():
     assert get_uniform_decode_token_count(2, 16, 8, True) is None
     # 12 tokens over 2 requests is no shared query length.
     assert get_uniform_decode_token_count(2, 12, 8, False) is None
-
-
-@pytest.mark.parametrize("model", ["target", "draft"])
-@pytest.mark.parametrize("kind", ["is_hybrid", "is_attention_free"])
-@pytest.mark.parametrize("computed", [0, 4095])
-@pytest.mark.parametrize("resumed", [False, True])
-def test_recurrent_prompt_tail_requires_context(model, kind, computed, resumed):
-    runner = _make_runner({"tail": (computed, computed + 1)}, decode_query_len=4)
-    runner.pcp_manager = None
-    runner.model_config = SimpleNamespace(is_hybrid=False, is_attention_free=False)
-    draft = SimpleNamespace(is_hybrid=False, is_attention_free=False)
-    runner.speculative_config = SimpleNamespace(draft_model_config=draft)
-    setattr(runner.model_config if model == "target" else draft, kind, True)
-    output = SimpleNamespace(
-        num_scheduled_tokens={"tail": 4},
-        total_num_scheduled_tokens=4,
-        scheduled_spec_decode_tokens={"tail": [-1] * 3},
-        scheduled_new_reqs=[]
-        if resumed
-        else [SimpleNamespace(num_computed_tokens=computed)],
-        scheduled_cached_reqs=SimpleNamespace(
-            num_computed_tokens=[computed] if resumed else []
-        ),
-    )
-    state, uniform = runner.gather_batch_req_state(output, False)
-    assert state.has_prefill
-    assert uniform == (4 if computed else None)
 
 
 def test_no_speculator_dispatches_on_query_length_alone():

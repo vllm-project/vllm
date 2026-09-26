@@ -1278,23 +1278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             return False
 
-        # Uncached recurrent prompts still need prefill state initialization.
-        if any(
-            config.is_hybrid or config.is_attention_free
-            for config in (
-                self.model_config,
-                self.speculative_config.draft_model_config,
-            )
-        ) and (
-            any(
-                req.num_computed_tokens == 0
-                for req in scheduler_output.scheduled_new_reqs
-            )
-            or 0 in scheduler_output.scheduled_cached_reqs.num_computed_tokens
-        ):
-            return False
-
-        # Prefilling rows get draft slots only for the final-token padding.
+        # The scheduler pads only final prompt tokens with computed context.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         return all(
             n == self.decode_query_len and len(draft_tokens.get(req_id, ())) == n - 1
