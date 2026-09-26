@@ -166,6 +166,7 @@ def init_pooling_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        trust_request_mm_kwargs=args.trust_request_mm_kwargs,
     )
 
     state.serving_pooling = (
