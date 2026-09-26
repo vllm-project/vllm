@@ -40,10 +40,17 @@ def _reference_eagle_step_slot_mapping(
         block_numbers.long(),
     ].long()
     slot_mapping = block_ids * block_size + (clamped_positions % block_size)
+    is_padding = seq_lens == 0
+    clamped_positions = torch.where(
+        is_padding, torch.zeros_like(clamped_positions), clamped_positions
+    )
     slot_mapping = torch.where(
-        exceeds_max, torch.full_like(slot_mapping, PADDING_SLOT_ID), slot_mapping
+        exceeds_max | is_padding,
+        torch.full_like(slot_mapping, PADDING_SLOT_ID),
+        slot_mapping,
     )
     new_seq_lens = torch.where(exceeds_max, torch.ones_like(seq_lens), seq_lens + 1)
+    new_seq_lens = torch.where(is_padding, seq_lens, new_seq_lens)
     new_seq_lens = new_seq_lens.clamp(max=max_model_len)
     return clamped_positions, slot_mapping, new_seq_lens
 
@@ -176,3 +183,44 @@ def test_eagle_step_slot_mapping_kernel_cudagraph_padding():
     # Padding slots should be PADDING_SLOT_ID
     for i in range(batch_size, input_batch_size):
         assert out_slot[i].item() == PADDING_SLOT_ID
+
+
+def test_eagle_step_slot_mapping_kernel_zero_seq_len_padding_row():
+    """Rows with seq_len 0 should not read block_table[-1]."""
+    device = torch.device(DEVICE_TYPE)
+    block_size = 16
+    max_model_len = 128
+
+    positions_1d = torch.tensor([10, 20, 30], dtype=torch.int64, device=device)
+    block_table_tensor = torch.tensor(
+        [[7, 8], [-1, -1], [11, 12]], dtype=torch.int32, device=device
+    )
+    seq_lens = torch.tensor([11, 0, 31], dtype=torch.int32, device=device)
+
+    ref_clamped, ref_slot, ref_seq_lens = _reference_eagle_step_slot_mapping(
+        positions_1d.clone(),
+        block_table_tensor,
+        seq_lens.clone(),
+        block_size,
+        max_model_len,
+    )
+
+    out_clamped = torch.full_like(positions_1d, -1)
+    out_slot = torch.full((3,), -999, dtype=torch.int64, device=device)
+    seq_lens_copy = seq_lens.clone()
+    eagle_step_update_slot_mapping_and_metadata(
+        positions_1d=positions_1d,
+        block_table_tensor=block_table_tensor,
+        seq_lens=seq_lens_copy,
+        block_size=block_size,
+        max_model_len=max_model_len,
+        out_clamped_positions=out_clamped,
+        out_slot_mapping=out_slot,
+    )
+
+    assert torch.equal(out_clamped, ref_clamped)
+    assert torch.equal(out_slot, ref_slot)
+    assert torch.equal(seq_lens_copy, ref_seq_lens)
+    assert out_clamped[1].item() == 0
+    assert out_slot[1].item() == PADDING_SLOT_ID
+    assert seq_lens_copy[1].item() == 0
