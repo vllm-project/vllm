@@ -26,6 +26,9 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_amd,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    fused_recurrent_kda_fwd as fused_recurrent_kda_fwd_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
@@ -74,6 +77,10 @@ PACKED_DECODE_IMPLS = {
 SPEC_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_nvidia,
     "amd": fused_recurrent_kda_amd,
+}
+SPEC_DECODE_FWD_IMPLS = {
+    "nvidia": fused_recurrent_kda_fwd,
+    "amd": fused_recurrent_kda_fwd_amd,
 }
 
 
@@ -653,6 +660,124 @@ def test_kda_spec_decode_correctness(
         err_atol=3e-3,
     )
     assert torch.isnan(output_storage[..., H * D :]).all()
+
+
+@pytest.mark.parametrize("impl", SPEC_DECODE_FWD_IMPLS.keys())
+@pytest.mark.parametrize("num_accepted", [0, 4])
+@torch.inference_mode()
+def test_kda_spec_invalid_accepted_count_is_fail_closed(
+    impl: str,
+    num_accepted: int,
+):
+    """Invalid accepted counts must not select an adjacent KDA state row."""
+    H, D, T = 2, 128, 3
+    torch.manual_seed(2026)
+
+    q = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    gate = -torch.rand_like(q)
+    beta = torch.rand(1, T, H, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor([0, T], dtype=torch.int32, device=DEVICE)
+
+    state_indices_storage = torch.zeros(3, T, dtype=torch.int32, device=DEVICE)
+    state_indices_storage[1] = torch.arange(1, T + 1, dtype=torch.int32, device=DEVICE)
+    # Keep the old out-of-row accesses inside allocated storage so this test
+    # is a deterministic semantic regression rather than an illegal-address probe.
+    state_indices_storage[0, -1] = 4
+    state_indices_storage[2, 0] = 5
+    state_indices = state_indices_storage[1:2]
+
+    state = torch.randn(T + 3, H, D, D, dtype=torch.float32, device=DEVICE)
+    state_before = state.clone()
+    output = torch.full_like(v, torch.nan)
+    accepted = torch.tensor([num_accepted], dtype=torch.int32, device=DEVICE)
+
+    actual, actual_state = SPEC_DECODE_FWD_IMPLS[impl](
+        q=q,
+        k=k,
+        v=v,
+        g=gate,
+        beta=beta,
+        initial_state=state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=accepted,
+        out=output,
+    )
+
+    assert actual.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(actual, torch.zeros_like(actual))
+    torch.testing.assert_close(actual_state, state_before)
+
+
+@pytest.mark.parametrize(
+    ("impl", "uniform_sequence_length"),
+    [
+        pytest.param("nvidia", None, id="nvidia"),
+        pytest.param("amd", None, id="amd-dynamic-length"),
+        pytest.param("amd", 3, id="amd-static-length"),
+    ],
+)
+@pytest.mark.parametrize(("invalid_seq", "num_accepted"), [(0, 4), (1, 0)])
+@torch.inference_mode()
+def test_kda_spec_invalid_accepted_count_spares_neighbor(
+    impl: str,
+    uniform_sequence_length: int | None,
+    invalid_seq: int,
+    num_accepted: int,
+):
+    """An invalid count fails closed for its own sequence and spares the other."""
+    H, D, L = 2, 128, 3
+    T = 2 * L
+    torch.manual_seed(2026)
+
+    q = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    gate = -torch.rand_like(q)
+    beta = torch.rand(1, T, H, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor([0, L, T], dtype=torch.int32, device=DEVICE)
+    # Unbounded, (0, 4) loads state_indices[1, 0] and (1, 0) loads
+    # state_indices[0, -1]: the other sequence's state, inside allocated storage.
+    state_indices = torch.arange(1, T + 1, dtype=torch.int32, device=DEVICE)
+    state_indices = state_indices.view(2, L)
+    state = torch.randn(T + 1, H, D, D, dtype=torch.float32, device=DEVICE)
+    extra_args = (
+        {"uniform_sequence_length": uniform_sequence_length}
+        if uniform_sequence_length is not None
+        else {}
+    )
+
+    def run(accepted: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        return SPEC_DECODE_FWD_IMPLS[impl](
+            q=q,
+            k=k,
+            v=v,
+            g=gate,
+            beta=beta,
+            initial_state=state.clone(),
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=state_indices,
+            num_accepted_tokens=torch.tensor(
+                accepted, dtype=torch.int32, device=DEVICE
+            ),
+            out=torch.full_like(v, torch.nan),
+            **extra_args,
+        )
+
+    reference, reference_state = run([2, 2])
+    accepted = [2, 2]
+    accepted[invalid_seq] = num_accepted
+    actual, actual_state = run(accepted)
+
+    expected = reference.clone()
+    expected[:, invalid_seq * L : (invalid_seq + 1) * L] = 0
+    expected_state = reference_state.clone()
+    own_rows = state_indices[invalid_seq].long()
+    expected_state[own_rows] = state[own_rows]
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_state, expected_state)
 
 
 @pytest.mark.parametrize(
