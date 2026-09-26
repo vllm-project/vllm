@@ -1439,6 +1439,16 @@ class VllmConfig:
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
 
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            raise ValueError(
+                "NGram GPU speculative decoding is not supported with pipeline "
+                "parallelism (PP > 1)."
+            )
+
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)

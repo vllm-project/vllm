@@ -1851,6 +1851,30 @@ def test_dflash_allows_async_scheduling(tmp_path: Path):
 
 
 @pytest.mark.skip_global_cleanup
+def test_ngram_gpu_pipeline_parallelism_validation():
+    def make_config(pp_size: int) -> VllmConfig:
+        parallel_config = ParallelConfig(pipeline_parallel_size=pp_size)
+        speculative_config = SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=3,
+            target_parallel_config=parallel_config,
+        )
+        return VllmConfig(
+            device_config=DeviceConfig("cpu"),
+            parallel_config=parallel_config,
+            speculative_config=speculative_config,
+        )
+
+    assert make_config(1).parallel_config.pipeline_parallel_size == 1
+
+    with pytest.raises(
+        ValueError,
+        match="NGram GPU speculative decoding is not supported with pipeline",
+    ):
+        make_config(2)
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
 @pytest.mark.parametrize(
