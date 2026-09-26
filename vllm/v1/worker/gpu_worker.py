@@ -9,6 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
+from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -567,6 +568,164 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
+    def _profile_attention_for_pinned_kv(self) -> None:
+        """Extend the profile with attention, for a pinned KV size only.
+
+        ``profile_run`` forwards with ``skip_attn=True``: there is no KV cache
+        yet, so the attention kernels never run and neither their activations
+        nor the device memory their first launch takes reach the profile. Under
+        ``gpu_memory_utilization`` that is harmless -- what the profile missed
+        lands in the slice the utilization fraction left unallocated. A pinned
+        ``kv_cache_memory_bytes`` has no such slice, so the same bytes are
+        spent twice and the rank OOMs in the middle of a request.
+
+        Build the same minimal KV cache the CUDA graph profiling uses and run a
+        ladder of batch widths through it, so the surrounding
+        ``memory_profiling`` block sees the attention path. The ladder is not
+        redundant with its widest rung: the caching allocator keeps whole
+        segments per size class, so a served mix of widths costs more than the
+        widest one alone.
+
+        Best effort -- a backend that cannot serve a dummy attention forward
+        leaves the estimate where it was, which is no worse than skipping this
+        entirely.
+        """
+        max_tokens = self.model_runner.max_num_tokens
+        # Widest first, so a backend that refuses the narrow shapes still
+        # contributes the rung that dominates the peak.
+        widths = sorted(
+            {max(1, max_tokens * n // 8) for n in range(1, 9)} | {1}, reverse=True
+        )
+        runner = cast(Any, self.model_runner)
+        build_kv_cache: Callable[[], None]
+        teardown: Callable[[], None]
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.gpu.cudagraph_utils import (
+                _init_minimal_kv_cache_for_profiling,
+                _teardown_profiling_state,
+            )
+
+            build_kv_cache = partial(_init_minimal_kv_cache_for_profiling, runner)
+            teardown = partial(_teardown_profiling_state, runner)
+        else:
+            build_kv_cache = runner._init_minimal_kv_cache_for_profiling
+            teardown = runner._cleanup_profiling_kv_cache
+
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                build_kv_cache()
+        except Exception:
+            logger.warning(
+                "Could not build a profiling KV cache to forward attention "
+                "against, so the profile keeps excluding the attention path. "
+                "The pinned kv_cache_memory_bytes is checked against an "
+                "estimate that is known to be low; leave headroom for it.",
+                exc_info=True,
+            )
+            return
+
+        # Serving rebuilds the allocator pool from scratch: the profiling run's
+        # segments are released before the KV cache is allocated, and what the
+        # pool then has to re-reserve for the same shapes is what this measures.
+        # Against the warm pool profile_run leaves, it would report none of it.
+        gc.collect()
+        torch.accelerator.empty_cache()
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+        allocated_before = torch.accelerator.memory_allocated(self.device)
+        torch.accelerator.reset_peak_memory_stats(self.device)
+        try:
+            for num_tokens in widths:
+                try:
+                    runner._dummy_run(num_tokens, is_profile=True)
+                except Exception:
+                    logger.warning(
+                        "Attention profiling forward at %d tokens failed; "
+                        "continuing with the other widths.",
+                        num_tokens,
+                        exc_info=True,
+                    )
+            # What the allocator had to hold, not just what was live at once.
+            # ``memory_profiling`` accounts for the live peak alone, which is
+            # the right call where the utilization slice absorbs the difference.
+            self._pinned_allocator_overhead_bytes = max(
+                0,
+                (torch.accelerator.max_memory_reserved(self.device) - reserved_before)
+                - (
+                    torch.accelerator.max_memory_allocated(self.device)
+                    - allocated_before
+                ),
+            )
+        finally:
+            teardown()
+
+    def _apply_pinned_kv_cache_memory(
+        self,
+        kv_cache_memory_bytes: int,
+        profile_result: Any,
+        cudagraph_memory_estimate_applied: int,
+    ) -> int:
+        """Check a pinned KV size against the profile and report it."""
+        allocator_overhead = getattr(self, "_pinned_allocator_overhead_bytes", 0)
+        # Manual control deliberately ignores gpu_memory_utilization, so the
+        # budget is the whole free device, not the utilization slice.
+        fits_kv_cache_memory_bytes = (
+            self.init_snapshot.free_memory
+            - profile_result.non_kv_cache_memory
+            - cudagraph_memory_estimate_applied
+            - allocator_overhead
+        )
+        if kv_cache_memory_bytes > fits_kv_cache_memory_bytes:
+            # Refuse rather than quietly serve a smaller cache: a pinned size is
+            # an explicit capacity decision, and halving it behind the
+            # operator's back hides the one number this option exists to
+            # control. Starting anyway is worse -- the bytes are spent either
+            # way, and the rank OOMs once traffic reaches the peak just
+            # measured.
+            raise ValueError(
+                f"kv_cache_memory_bytes={kv_cache_memory_bytes} "
+                f"({format_gib(kv_cache_memory_bytes)} GiB) does not fit on "
+                f"this rank. Of {format_gib(self.init_snapshot.free_memory)} "
+                f"GiB free at startup the model needs "
+                f"{format_gib(profile_result.non_kv_cache_memory)} GiB for "
+                f"weights, workspaces and its activation peak"
+                + (
+                    f", {format_gib(cudagraph_memory_estimate_applied)} GiB for "
+                    f"CUDA graphs"
+                    if cudagraph_memory_estimate_applied
+                    else ""
+                )
+                + (
+                    f" and {format_gib(allocator_overhead)} GiB the caching "
+                    f"allocator holds beyond that peak"
+                    if allocator_overhead
+                    else ""
+                )
+                + f", leaving {format_gib(fits_kv_cache_memory_bytes)} GiB. Set "
+                f"--kv-cache-memory-bytes={int(fits_kv_cache_memory_bytes)} or "
+                f"lower, or give this rank more room (fewer layers on it, a "
+                f"smaller max_num_batched_tokens or max_model_len). That figure "
+                f"is an upper bound, not a safe setting: the profile runs "
+                f"against a minimal KV cache, so peaks that scale with context "
+                f"length are not in it. Leave headroom below it."
+            )
+
+        self.available_kv_cache_memory_bytes = kv_cache_memory_bytes
+        logger.info(
+            "Initial free memory %s GiB, reserved %s GiB for KV Cache as "
+            "specified by kv_cache_memory_bytes config (profiled non-KV usage "
+            "%s GiB, %s GiB left unused). This does not respect the "
+            "gpu_memory_utilization config.",
+            format_gib(self.init_snapshot.free_memory),
+            format_gib(kv_cache_memory_bytes),
+            format_gib(profile_result.non_kv_cache_memory),
+            format_gib(fits_kv_cache_memory_bytes - kv_cache_memory_bytes),
+        )
+        return reserve_mm_ipc_gpu_memory(
+            kv_cache_memory_bytes,
+            self.model_config.multimodal_config,
+            getattr(self.parallel_config, "_api_process_count", 1),
+        )
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -583,29 +742,14 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
-        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            # still need a profile run which compiles the model for
-            # max_num_batched_tokens
-            self.model_runner.profile_run()
-
-            msg = (
-                f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
-                f"GiB, reserved {format_gib(kv_cache_memory_bytes)} GiB memory for "
-                "KV Cache as specified by kv_cache_memory_bytes config and "
-                "skipped memory profiling. This does not respect the "
-                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
-                "config when you want manual control of KV cache memory "
-                "size. If OOM'ed, check the difference of initial free "
-                "memory between the current run and the previous run "
-                "where kv_cache_memory_bytes is suggested and update it "
-                "correspondingly."
-            )
-            logger.info(msg)
-            return reserve_mm_ipc_gpu_memory(
-                kv_cache_memory_bytes,
-                self.model_config.multimodal_config,
-                getattr(self.parallel_config, "_api_process_count", 1),
-            )
+        # Pinning the KV size decides how much memory the cache takes, not how
+        # much the rest of the model needs: weights, workspaces and the
+        # activation peak are still there, and the profiling run below is what
+        # measures them. So it runs either way and kv_cache_memory_bytes is
+        # checked against the result, rather than trusted blind -- skipping the
+        # profile left the operator with no number to size the pin against, and
+        # a pin that does not fit surfaces much later as an OOM mid-request.
+        kv_cache_memory_bytes = self.cache_config.kv_cache_memory_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -624,6 +768,8 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.profile_run()
+            if kv_cache_memory_bytes:
+                self._profile_attention_for_pinned_kv()
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -675,6 +821,13 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
+
+        if kv_cache_memory_bytes:
+            return self._apply_pinned_kv_cache_memory(
+                kv_cache_memory_bytes,
+                profile_result,
+                cudagraph_memory_estimate_applied,
+            )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
