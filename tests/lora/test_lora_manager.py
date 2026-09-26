@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -702,6 +703,79 @@ def test_set_adapter_mapping_refreshes_after_slot_reassignment(
     manager.remove_all_adapters()
     assert manager._last_mapping is None
     assert manager._last_slot_layout is None
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_layer_active_lora_tracks_batch_and_loaded_weights(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    model = dummy_model
+    adapter_a = create_lora(1, model, ["dense1"], device=device)
+    adapter_b = create_lora(2, model, ["dense2"], device=device)
+    adapter_c = create_lora(3, model, ["dense2"], device=device)
+    manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=3,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+        ),
+        device=device,
+        vllm_config=default_vllm_config,
+    )
+    for adapter in (adapter_a, adapter_b, adapter_c):
+        assert manager.add_adapter(adapter)
+    assert manager.activate_adapter(1)
+    assert manager.activate_adapter(2)
+
+    dense1 = manager.modules["dense1"]
+    dense2 = manager.modules["dense2"]
+    dense1.set_runtime_lora_skip_enabled(True)
+    dense2.set_runtime_lora_skip_enabled(True)
+
+    manager.set_adapter_mapping(LoRAMapping((), ()))
+    assert dense1.should_skip_lora()
+    assert dense2.should_skip_lora()
+
+    manager.set_adapter_mapping(LoRAMapping((1,), (1,)))
+    assert dense1.has_active_lora()
+    assert not dense1.should_skip_lora()
+    assert not dense2.has_active_lora()
+    assert dense2.should_skip_lora()
+    dense2.set_runtime_lora_skip_enabled(False)
+    assert not dense2.should_skip_lora()
+    dense2.set_runtime_lora_skip_enabled(True)
+
+    manager.set_adapter_mapping(LoRAMapping((1, 2), (1, 2)))
+    assert dense1.has_active_lora()
+    assert dense2.has_active_lora()
+
+    manager.set_adapter_mapping(LoRAMapping((1,), (2,)))
+    assert dense1.has_active_lora()
+    assert not dense1.has_active_lora(for_logits=True)
+    assert not dense2.has_active_lora()
+    assert dense2.has_active_lora(for_logits=True)
+
+    manager.set_adapter_mapping(LoRAMapping((1,), (1,)))
+    x = torch.zeros((1, dense2.input_size), device=device)
+    output = torch.zeros((1, dense2.output_size), device=device)
+    with patch.object(dense2.punica_wrapper, "add_lora_linear") as add_lora:
+        assert dense2._apply_lora_to_output(x, output) is output
+        add_lora.assert_not_called()
+
+    assert manager.deactivate_adapter(1)
+    assert manager.activate_adapter(3)
+    assert manager.lora_index_to_id[0] == 3
+    assert 0 not in dense1._enabled_lora_slots
+    assert 0 in dense2._enabled_lora_slots
+
+    manager.set_adapter_mapping(LoRAMapping((3,), (3,)))
+    assert dense1.should_skip_lora()
+    assert dense2.has_active_lora()
 
 
 @pytest.mark.parametrize("device", DEVICES)
