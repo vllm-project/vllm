@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.model_executor.models.interfaces import VerboseTranscriptionToken
 from vllm.model_executor.models.moss_transcribe_diarize import (
     MossTranscribeDiarizeForConditionalGeneration,
 )
@@ -32,6 +33,40 @@ def test_parse_diarized_transcript_preserves_overlapping_segments():
         (0.0, 2.0, "S01", "First speaker"),
         (1.0, 3.0, "S02", "Second speaker"),
     ]
+
+
+def test_parse_verbose_transcript_preserves_generated_token_metadata():
+    text = "[0][S01]First[1][1][S02]Second[2]"
+    segments = MossTranscribeDiarizeForConditionalGeneration.parse_verbose_transcript(
+        text,
+        (
+            VerboseTranscriptionToken(10, "[0][S01]First[1][", -0.1),
+            VerboseTranscriptionToken(11, "1][S02]Second[2]", -0.3),
+        ),
+    )
+
+    assert [
+        (
+            segment.start,
+            segment.end,
+            segment.text,
+            segment.token_ids,
+            segment.avg_logprob,
+        )
+        for segment in segments
+    ] == [
+        (0.0, 1.0, "[S01]First", (10,), -0.1),
+        (1.0, 2.0, "[S02]Second", (11,), -0.3),
+    ]
+
+
+def test_parse_verbose_transcript_fails_closed_for_mismatched_token_text():
+    segments = MossTranscribeDiarizeForConditionalGeneration.parse_verbose_transcript(
+        "[0][S01]First[1]",
+        (VerboseTranscriptionToken(10, "different", -0.1),),
+    )
+
+    assert segments == []
 
 
 def test_parse_diarized_transcript_preserves_numeric_text_markers():
