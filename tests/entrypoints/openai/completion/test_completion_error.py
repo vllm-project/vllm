@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -111,9 +113,11 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
 
 def _build_minimal_metrics_serving_completion(
     enable_per_request_metrics: bool,
+    enable_prompt_tokens_details: bool = False,
 ) -> OpenAIServingCompletion:
     serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
-    serving.enable_prompt_tokens_details = False
+    serving.enable_prompt_tokens_details = enable_prompt_tokens_details
+    serving.enable_force_include_usage = False
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
     return serving
@@ -140,6 +144,13 @@ def _make_metrics_request_output(
         finished=True,
         metrics=metrics,
     )
+
+
+async def _stream_request_outputs(
+    *request_outputs: tuple[int, RequestOutput],
+) -> AsyncIterator[tuple[int, RequestOutput]]:
+    for request_output in request_outputs:
+        yield request_output
 
 
 def _build_renderer(model_config: MockModelConfig):
@@ -199,6 +210,75 @@ def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
         RequestResponseMetadata(request_id="cmpl-test-id"),
     )
     assert response.metrics is None
+
+
+def test_completion_cached_tokens_sum_prompts():
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False,
+        enable_prompt_tokens_details=True,
+    )
+    first = _make_metrics_request_output(metrics=None)
+    first.num_cached_tokens = 16
+    second = _make_metrics_request_output(metrics=None)
+    second.num_cached_tokens = 32
+
+    response = serving.request_output_to_completion_response(
+        [first, second],
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["First prompt", "Second prompt"],
+            max_tokens=10,
+        ),
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+
+    assert response.usage.prompt_tokens_details is not None
+    assert response.usage.prompt_tokens_details.cached_tokens == 48
+
+
+@pytest.mark.asyncio
+async def test_completion_stream_cached_tokens_sum_prompts():
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False,
+        enable_prompt_tokens_details=True,
+    )
+    first = _make_metrics_request_output(metrics=None)
+    first.num_cached_tokens = 32
+    first.outputs[0].finish_reason = None
+    first_followup = _make_metrics_request_output(metrics=None)
+    first_followup.num_cached_tokens = 32
+    second = _make_metrics_request_output(metrics=None)
+    second.num_cached_tokens = 16
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["First prompt", "Second prompt"],
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.completion_stream_generator(
+        request,
+        [MagicMock(), MagicMock()],
+        _stream_request_outputs((1, first), (0, second), (1, first_followup)),
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        2,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
+    assert usage_chunks[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 48}
 
 
 def _spec_decode_metrics() -> RequestSpecDecodeMetrics:
