@@ -244,7 +244,7 @@ steps:
   - pytest -v -s entrypoints/pooling
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling) Shard %N"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
