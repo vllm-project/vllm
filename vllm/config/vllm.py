@@ -1407,6 +1407,9 @@ class VllmConfig:
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
+        if self.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance:
+            self.observability_config.enable_detect_nans_in_logits = True
+
         if self.model_config is not None and self.model_config.is_submodel_config:
             # with_hf_config() view: the parent config was already validated,
             # and this view's empty architecture list makes the model-dependent checks

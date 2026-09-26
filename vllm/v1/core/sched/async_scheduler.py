@@ -70,8 +70,13 @@ class AsyncScheduler(Scheduler):
             request.num_output_placeholders -= len(new_token_ids)
             assert request.num_output_placeholders >= 0
 
-        # Cache the new tokens. Preempted requests should be skipped.
-        if status_before_update == RequestStatus.RUNNING:
+        # Fault tolerance publishes blocks in the base scheduler only after
+        # validating this output. Preserve the normal async caching path when
+        # fault tolerance is disabled.
+        if (
+            status_before_update == RequestStatus.RUNNING
+            and not self.enable_nan_fault_tolerance
+        ):
             self.kv_cache_manager.cache_blocks(
                 request, request.num_computed_tokens - request.num_output_placeholders
             )

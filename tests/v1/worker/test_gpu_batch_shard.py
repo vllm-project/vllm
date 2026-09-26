@@ -16,6 +16,7 @@ import torch
 
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.metrics.logits import aggregate_num_nans_per_request
 from vllm.v1.worker.gpu.sample import batch_shard
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
@@ -33,6 +34,25 @@ requires_cuda = pytest.mark.skipif(
 
 def _np(t: torch.Tensor) -> np.ndarray:
     return t.cpu().numpy()
+
+
+@requires_cuda
+def test_aggregate_num_nans_per_speculative_request():
+    per_row = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32, device=DEVICE)
+    cumulative_row_ends = torch.tensor([2, 3, 5], dtype=torch.int32, device=DEVICE)
+
+    result = aggregate_num_nans_per_request(per_row, cumulative_row_ends)
+
+    assert result.tolist() == [3, 3, 9]
+
+    # The total number of rows can equal the request count even when rows are
+    # distributed unevenly (for example, diffusion has no bonus token).
+    same_size_ends = torch.tensor([2, 2, 3], dtype=torch.int32, device=DEVICE)
+    assert aggregate_num_nans_per_request(per_row[:3], same_size_ends).tolist() == [
+        3,
+        0,
+        3,
+    ]
 
 
 def _make_batch(
@@ -518,7 +538,13 @@ def test_gather_sampler_output_logprobs_and_nans():
         ids = rows[:, None] * 10 + torch.arange(local_cols)[None, :]
         logprobs = ids.float() * 0.5
         ranks_t = rows + 7
-        nans = (rows % 4).to(torch.int32)
+        nans = torch.tensor(
+            [
+                int((rows[(rows >= int(cu[j])) & (rows < int(cu[j + 1]))] % 4).sum())
+                for j in owned
+            ],
+            dtype=torch.int32,
+        )
         local_outputs.append(
             SamplerOutput(
                 sampled_token_ids=torch.zeros(
@@ -543,9 +569,8 @@ def test_gather_sampler_output_logprobs_and_nans():
         expected_ids[rows, :copy_cols] = ids[:, :copy_cols]
         expected_logprobs[rows, :copy_cols] = logprobs[:, :copy_cols]
         expected_ranks[rows] = ranks_t
-        for j in owned:
-            in_req = (rows >= int(cu[j])) & (rows < int(cu[j + 1]))
-            expected_nans[j] = int(nans[in_req].sum())
+        for local_idx, j in enumerate(owned):
+            expected_nans[j] = nans[local_idx]
 
     recorded: dict[int, list[torch.Tensor]] = {}
     gathered_full: list[torch.Tensor] = []
