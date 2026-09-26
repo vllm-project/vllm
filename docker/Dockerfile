@@ -512,6 +512,7 @@ WORKDIR /workspace
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+COPY tools/ep_kernels/deepep_nvshmem_rc_qp.patch /tmp/deepep_nvshmem_rc_qp.patch
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
 ARG DEEPEP_COMMIT_HASH=d4f41e4e93
 ARG NVSHMEM_VER

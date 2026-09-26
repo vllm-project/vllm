@@ -8,6 +8,7 @@ set -ex
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # Pinned in full: an abbreviated hash is not a ref, so a consumer that
 # fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
@@ -68,6 +69,20 @@ done
 if [[ ! "$NVSHMEM_VER" =~ ^[a-zA-Z0-9.-]+$ ]]; then
     echo "Error: NVSHMEM_VER contains invalid characters. Only alphanumeric, dots, and hyphens are allowed." >&2
     exit 1
+fi
+
+if [[ ! "$NVSHMEM_VER" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9]+)?$ ]]; then
+    echo "Error: NVSHMEM_VER must be a three-part version, optionally followed by a release number." >&2
+    exit 1
+fi
+NVSHMEM_MAJOR=$((10#${BASH_REMATCH[1]}))
+NVSHMEM_MINOR=$((10#${BASH_REMATCH[2]}))
+NVSHMEM_PATCH=$((10#${BASH_REMATCH[3]}))
+NVSHMEM_NEEDS_RC_QP_PATCH=false
+if (( NVSHMEM_MAJOR > 3 ||
+      (NVSHMEM_MAJOR == 3 && NVSHMEM_MINOR > 5) ||
+      (NVSHMEM_MAJOR == 3 && NVSHMEM_MINOR == 5 && NVSHMEM_PATCH >= 19) )); then
+    NVSHMEM_NEEDS_RC_QP_PATCH=true
 fi
 
 mkdir -p "$WORKSPACE"
@@ -197,6 +212,19 @@ do_build() {
 #endif\
 #endif\
 #endif' csrc/kernels/backend/symmetric.hpp
+    fi
+
+    if [[ "$name" == "DeepEP" && "$NVSHMEM_NEEDS_RC_QP_PATCH" == true ]]; then
+        # Temporary copy of https://github.com/deepseek-ai/DeepEP/pull/696.
+        local rc_qp_patch="$SCRIPT_DIR/deepep_nvshmem_rc_qp.patch"
+        if git apply --reverse --check "$rc_qp_patch" >/dev/null 2>&1; then
+            echo "DeepEP RC QP patch already applied"
+        elif git apply --check "$rc_qp_patch"; then
+            git apply "$rc_qp_patch"
+        else
+            echo "DeepEP RC QP patch does not apply to $DEEPEP_COMMIT_HASH" >&2
+            exit 1
+        fi
     fi
 
     if [[ "$name" == "DeepEP" ]]; then
