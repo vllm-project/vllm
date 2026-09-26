@@ -6,15 +6,12 @@ from functools import partial
 import numpy as np
 import torch
 
-from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
-
-logger = init_logger(__name__)
 
 # Default round-robin depth for the UVA buffer pools. Must be >= the number of
 # concurrent in-flight steps (engine batch_queue_size).
@@ -26,44 +23,38 @@ def set_default_max_concurrency(n: int) -> None:
     _DEFAULT_MAX_CONCURRENCY = max(2, n)
 
 
+def async_copy_to_gpu(
+    x: torch.Tensor | np.ndarray,
+    out: torch.Tensor | None = None,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    if isinstance(x, np.ndarray):
+        x = torch.from_numpy(x)
+    assert x.is_cpu
+
+    if out is None:
+        assert device is not None
+        out = torch.empty_like(x, device=device)
+
+    # pin_memory() is no-op if the memory is already pinned.
+    pinned = x.pin_memory()
+    return out.copy_(pinned, non_blocking=True)
+
+
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        if not is_uva_available():
-            raise RuntimeError("UVA is not available")
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self.np = self.cpu.numpy()
-        self._uva = get_accelerator_view_from_cpu_tensor(self.cpu)
-
-    def uva(self, n: int | None = None) -> torch.Tensor:
-        return self._uva[:n] if n is not None else self._uva
-
-
-class NonUvaBuffer:
-    """Explicit-copy fallback for platforms without pinned memory."""
-
-    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        from vllm.platforms import current_platform
-
-        logger.warning_once(
-            "Pinned memory is not available on this platform; falling back "
-            "to device memory for UVA buffers."
-        )
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
-        self.np = self.cpu.numpy()
-        self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
-
-    def uva(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self._uva.copy_(self.cpu)
-        return self._uva[:n].copy_(self.cpu[:n])
-
+        self._uva_available = is_uva_available()
+        if self._uva_available:
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self.np = self.cpu.numpy()
+            self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        else:
+            # Fallback: no UVA, use regular CPU tensor
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self.np = self.cpu.numpy()
+            self.uva = torch.zeros(size, dtype=dtype, device="cuda")
 
 class UvaBufferPool:
-    """Preallocate each slot at size, growing its first dimension as needed.
-
-    Callers must retire a slot's GPU readers before reuse, including growth.
-    """
-
     def __init__(
         self,
         size: int | Sequence[int],
@@ -77,8 +68,7 @@ class UvaBufferPool:
         self.max_concurrency = max_concurrency
 
         # UVA buffers for concurrency
-        self._buffer_cls = UvaBuffer if is_uva_available() else NonUvaBuffer
-        self._uva_bufs = [self._buffer_cls(size, dtype) for _ in range(max_concurrency)]
+        self._uva_bufs = [UvaBuffer(size, dtype) for _ in range(max_concurrency)]
         # Current buffer index
         self._curr = 0
 
@@ -86,15 +76,14 @@ class UvaBufferPool:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
-        n = len(x)
-        if n > buf.cpu.shape[0]:
-            capacity = 1 << (n - 1).bit_length()
-            buf = self._buffer_cls((capacity, *buf.cpu.shape[1:]), self.dtype)
-            self._uva_bufs[self._curr] = buf
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
+        n = len(x)
         dst[:n] = x
-        return buf.uva(n)
+        if not buf._uva_available:
+            buf.uva[:n].copy_(buf.cpu[:n], non_blocking=True)
+
+        return buf.uva[:n]
 
     def copy_to_gpu(
         self,
@@ -114,18 +103,34 @@ class UvaBackedTensor:
         max_concurrency: int | None = None,
     ):
         self.dtype = dtype
-
+        self._uva_available = is_uva_available()
         # Source of truth
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
         self.np = self.cpu.numpy()
 
-        # Buffers for concurrency
-        self.pool = UvaBufferPool(size, dtype, max_concurrency)
-        self.gpu = self.pool.copy_to_uva(self.np)
+        self.pool: UvaBufferPool | None = None
+        if self._uva_available:
+            # Buffers for concurrency
+            self.pool = UvaBufferPool(size, dtype, max_concurrency)
+            self.gpu = self.pool.copy_to_uva(self.np)
+        else:
+            # Fallback: maintain a real GPU tensor, sync via normal H2D copy
+            self.gpu = torch.zeros(size, dtype=dtype, device="cuda")
 
     def copy_to_uva(self, n: int | None = None) -> torch.Tensor:
         # CPU-to-CPU copy
-        self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        # self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        if self._uva_available:
+            assert self.pool is not None
+            # CPU-to-CPU copy
+            self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        else:
+            # Fallback: normal CPU-to-GPU copy
+            src = self.cpu if n is None else self.cpu[:n]
+            dst = self.gpu if n is None else self.gpu[:n]
+            dst.copy_(src, non_blocking=True)
+
+
         return self.gpu
 
 
@@ -150,17 +155,14 @@ class StagedWriteTensor:
         self.device = device
         self.max_concurrency = max_concurrency
 
-        # Without UVA, large-but-cold tensors live on the GPU directly.
-        uva_instead_of_gpu = uva_instead_of_gpu and is_uva_available()
-
-        if not uva_instead_of_gpu:
+        if not uva_instead_of_gpu or not is_uva_available():
             # Create a GPU tensor (default)
             self.gpu = torch.zeros(size, dtype=dtype, device=device)
         else:
             # For a large but not-frequently-accessed tensor, we can use UVA instead of
             # GPU to save GPU memory
             self._uva_buf = UvaBuffer(size, dtype)
-            self.gpu = self._uva_buf.uva()
+            self.gpu = self._uva_buf.uva
 
         self._staged_write_indices: list[int] = []
         self._staged_write_starts: list[int] = []
@@ -172,7 +174,6 @@ class StagedWriteTensor:
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
-        self.write_contents = new_buffer(1, dtype=dtype) if uva_instead_of_gpu else None
 
     def stage_write(
         self, index: int, start: int, x: Iterable[int] | Iterable[float]
@@ -202,14 +203,10 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        if self.write_contents is None:
-            write_contents = async_tensor_h2d(
-                self._staged_write_contents, device=self.device, dtype=self.dtype
-            )
-        else:
-            write_contents = self.write_contents.copy_to_uva(
-                self._staged_write_contents
-            )
+        # Special handling for write_contents
+        write_contents = async_tensor_h2d(
+            self._staged_write_contents, device=self.device, dtype=self.dtype
+        )
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
@@ -340,3 +337,4 @@ def _load_ptr(ptr_to_ptr, elem_dtype):
     ptr = tl.load(ptr_to_ptr)
     ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
     return tl.multiple_of(ptr, 16)
+
