@@ -133,6 +133,7 @@ class OnlineDerenderer:
                 if choice.logprobs is not None
                 else None
             )
+            auto_tools_called = False
 
             if self.parser is not None and chat_request is not None:
                 # Parser path: decode with special tokens preserved
@@ -180,6 +181,13 @@ class OnlineDerenderer:
                     if tool_calls
                     else []
                 )
+                auto_tools_called = (
+                    bool(tc_items)
+                    and bool(chat_request.tools)
+                    and chat_request.tool_choice == "auto"
+                    and self.enable_auto_tools
+                    and bool(self.parser.tool_parser_cls)
+                )
 
                 is_named_tool_choice = (
                     type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
@@ -207,12 +215,21 @@ class OnlineDerenderer:
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
+            # Match the non-streaming chat completion finish-reason policy.
+            finish_reason = choice.finish_reason or "stop"
+            if auto_tools_called or (
+                chat_request is not None
+                and chat_request.tool_choice == "required"
+                and choice.finish_reason == "stop"
+            ):
+                finish_reason = "tool_calls"
+
             choices.append(
                 ChatCompletionResponseChoice(
                     index=choice.index,
                     message=message,
                     logprobs=resolved_logprobs,
-                    finish_reason=choice.finish_reason,
+                    finish_reason=finish_reason,
                 )
             )
 
