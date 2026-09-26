@@ -406,12 +406,11 @@ class ExpertMapManager:
         if self._expert_map is None:
             return f"[0..{self.global_num_experts - 1}]"
 
-        # Build the string on the host: per-element .item() on an accelerator
-        # tensor costs one device round trip (and on XLA, one compile) each.
-        expert_map = self._expert_map.tolist()
+        # Read the host copy: reading the device map would sync the device
+        # (and on lazy/XLA backends flush and compile the pending graph).
         return ", ".join(
             f"{local_index}->{global_index}"
-            for global_index, local_index in enumerate(expert_map)
+            for global_index, local_index in enumerate(self._expert_map_host)
             if local_index != -1
         )
 
@@ -442,18 +441,28 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        (
-            self._local_num_experts,
-            self._expert_map,
-            self._expert_mask,
-        ) = determine_expert_map(
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            global_num_experts=self.global_num_experts,
-            expert_placement_strategy=self._placement_strategy,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            return_expert_mask=self.rocm_aiter_enabled,
-        )
+        # Build the maps on the host and move them to the device once. Under a
+        # device context every op below would otherwise be a device op, and
+        # host readers of the map would have to sync the device.
+        device = torch.get_default_device()
+        with torch.device("cpu"):
+            (
+                self._local_num_experts,
+                expert_map,
+                expert_mask,
+            ) = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self._placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_enabled,
+            )
+        # Host copy of the map as built; in-place updates to the device map
+        # (e.g. EPLB rebalancing) are not reflected here.
+        self._expert_map_host = None if expert_map is None else expert_map.tolist()
+        self._expert_map = None if expert_map is None else expert_map.to(device)
+        self._expert_mask = None if expert_mask is None else expert_mask.to(device)
 
         self._local_num_experts += self.num_fused_shared_experts
 
