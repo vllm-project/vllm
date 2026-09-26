@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _full_attention_spec,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
 )
@@ -4683,3 +4684,180 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+def _make_align_mamba_chunk_scheduler() -> OffloadingConnectorScheduler:
+    """Qwen3.5-style hybrid geometry: full-attention + align-mode Mamba
+    groups with identical block sizes, hash fills one block exactly, and a
+    multi-block offload chunk (tokens_per_block == tokens_per_hash == 16,
+    blocks_per_chunk = 4)."""
+    vllm_config = _make_vllm_config(extra_config={"blocks_per_chunk": 4})
+    vllm_config.cache_config.prefix_match_unit = 16
+    vllm_config.speculative_config = None
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec()),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+def _make_align_mamba_chunk_request(
+    scheduler: OffloadingConnectorScheduler, num_tokens: int = 64
+):
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.kv_hints = None
+    request.num_prompt_tokens = num_tokens
+    request.num_tokens = num_tokens
+    request.block_hashes = [
+        BlockHash(f"b{i}".encode()) for i in range(num_tokens // 16)
+    ]
+    request.all_token_ids = list(range(num_tokens))
+    request.lora_request = None
+    request.skip_reading_prefix_cache = False
+    request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+    return request
+
+
+def test_align_mamba_chunk_unit_is_one_hash_block():
+    scheduler = _make_align_mamba_chunk_scheduler()
+    full, mamba = scheduler.config.kv_group_configs
+
+    # Geometry sanity: identical block sizes, hash fills one block exactly.
+    assert full.tokens_per_block == mamba.tokens_per_block == 16
+    assert full.tokens_per_chunk == 64
+    assert mamba.sliding_window_size_in_chunks == 1
+    # The align-mode mamba group offloads one hash block per chunk.
+    assert mamba.tokens_per_chunk == 16
+    assert mamba.hashes_per_chunk == 1
+
+
+def test_align_mamba_handoff_off_chunk_grid_is_stored():
+    """The final mamba hand-off under MTP/EAGLE prefill lookahead is
+    hash-aligned but off the blocks_per_chunk grid (48 here vs the 64-token
+    chunk); it must be stored, otherwise the sliding-window lookup can never
+    hit and the whole request adopts zero external KV (issue #52735)."""
+    scheduler = _make_align_mamba_chunk_scheduler()
+    _make_align_mamba_chunk_request(scheduler)
+    scheduler._req_status["req"].update_offload_keys()
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={
+                "req": [
+                    (0, 88, 64),  # full attention: chunk-aligned, stored
+                    (1, 99, 48),  # mamba: hash-aligned, off the chunk grid
+                ]
+            },
+        )
+    )
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+
+    req_context = scheduler._req_status["req"].req_context
+    by_boundary = {}
+    for job_id, job in jobs.items():
+        for key in scheduler._jobs[job_id].keys:
+            by_boundary[req_context.get_offload_key_position(key)] = job
+
+    # Full-attention hand-off on the chunk grid: unchanged behavior.
+    assert 64 in by_boundary
+    # The MTP-shifted mamba hand-off must survive the alignment filter.
+    mamba_job = by_boundary[48]
+    src_spec = mamba_job.src_spec
+    assert src_spec.block_ids.tolist() == [99]
+    # Source block index within the group: boundary / tokens_per_block - 1.
+    assert src_spec.block_indices[1] == 48 // 16 - 1
+
+
+def test_update_state_after_alloc_loads_confirmed_mamba_window_only():
+    """With a single-block mamba chunk, the load key slice must use the
+    group's own blocks-per-chunk (1); the global value (4) slices in keys
+    below the confirmed sliding-window, which prepare_load rejects (chunk
+    not found)."""
+    scheduler = _make_align_mamba_chunk_scheduler()
+    request = _make_align_mamba_chunk_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 32
+    req_status.update_offload_keys()
+
+    full_blocks = [
+        KVCacheBlock(31),
+        KVCacheBlock(32),
+        KVCacheBlock(33),
+        KVCacheBlock(34),
+    ]
+    full_blocks[0].set_block_hash(
+        make_block_hash_with_group_id(BlockHash(b"h0"), 0), 16
+    )
+    full_blocks[1].set_block_hash(
+        make_block_hash_with_group_id(BlockHash(b"h1"), 0), 16
+    )
+    mamba_blocks = [
+        KVCacheBlock(0, is_null=True),
+        KVCacheBlock(0, is_null=True),
+        KVCacheBlock(43),
+        KVCacheBlock(44),
+    ]
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks((full_blocks, mamba_blocks)),
+        num_external_tokens=32,
+    )
+    [job_id] = scheduler._current_batch_load_jobs
+    load_job = scheduler._current_batch_load_jobs[job_id]
+    req_context = req_status.req_context
+    mamba_positions = sorted(
+        req_context.get_offload_key_position(key)
+        for key in scheduler._jobs[job_id].keys
+        if get_offload_group_idx(key) == 1
+    )
+    # Only the confirmed trailing window: keys at 48 and 64.
+    assert mamba_positions == [48, 64]
+    dst = load_job.dst_spec
+    assert dst.block_ids.tolist() == [33, 34, 43, 44]
+
+
+def test_align_mamba_lookup_serves_hash_grid_handoff():
+    """End-to-end lookup: with only a hash-aligned mamba hand-off stored
+    (176 = 16x11, off the 64-token chunk grid) and full-attention chunks
+    stored on the 64-token grid, the request must still adopt up to the
+    hand-off. On the unfixed code the mamba key grid misses 176 entirely."""
+    scheduler = _make_align_mamba_chunk_scheduler()
+    _make_align_mamba_chunk_request(scheduler, num_tokens=208)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+
+    def lookup(key, req_context):
+        if get_offload_group_idx(key) == 1 and (
+            req_context.get_offload_key_position(key) != 176
+        ):
+            return LookupResult.MISS  # only the 176 hand-off is stored
+        return LookupResult.HIT
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == 176

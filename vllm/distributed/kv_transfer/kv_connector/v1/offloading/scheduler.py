@@ -272,15 +272,29 @@ class SchedulerOffloadConfig(NamedTuple):
             assert manager_cls is not None, (
                 f"No manager found for KV cache spec {type(kv_spec).__name__}"
             )
+            # Align-mode Mamba groups hand off a CoW state snapshot at
+            # every hash-block boundary, so the offload chunk unit is one
+            # hash block whenever a hash fills exactly one KV block. The
+            # blocks_per_chunk cadence never matches those boundaries once
+            # speculative decoding shifts the final hand-off off the chunk
+            # grid (issue #52735).
+            is_single_block_align_mamba = (
+                isinstance(kv_spec, MambaSpec)
+                and kv_spec.mamba_cache_mode == "align"
+                and spec.tokens_per_hash == tokens_per_block
+            )
+            tokens_per_chunk = (
+                spec.tokens_per_hash
+                if is_single_block_align_mamba
+                else tokens_per_block * spec.blocks_per_chunk
+            )
             kv_group_configs_list.append(
                 GroupOffloadConfig(
                     group_idx=group_id,
                     tokens_per_block=tokens_per_block,
-                    tokens_per_chunk=tokens_per_block * spec.blocks_per_chunk,
-                    hashes_per_chunk=(
-                        (tokens_per_block * spec.blocks_per_chunk)
-                        // spec.tokens_per_hash
-                    ),
+                    tokens_per_chunk=tokens_per_chunk,
+                    # For single-hash-block chunks the division is 1.
+                    hashes_per_chunk=tokens_per_chunk // spec.tokens_per_hash,
                     sliding_window_size_in_chunks=sw,
                     kv_cache_spec=kv_spec,
                     manager_cls=manager_cls,
@@ -1155,8 +1169,12 @@ class OffloadingConnectorScheduler:
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
             if num_pending_gpu_blocks:
-                start_chunk_idx = (
-                    load_start_gpu_block_idx // self.config.blocks_per_chunk
+                # Divide by THIS group's blocks-per-chunk: single-block
+                # align-mode mamba chunks span one block, and the global
+                # config value would slice in keys below the confirmed
+                # sliding-window (issue #52735).
+                start_chunk_idx = load_start_gpu_block_idx // (
+                    tokens_per_chunk // tokens_per_block
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
                 assert len(offload_keys) >= end_chunk_idx
