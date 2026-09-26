@@ -448,6 +448,21 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
+- label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
+  key: kernels-minimax-m3-attention-b200
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/config/cache.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/attention/utils.py
+  - tests/kernels/attention/test_minimax_m3.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
+
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
   timeout_in_minutes: 30
@@ -497,7 +512,6 @@ steps:
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-  - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
@@ -543,7 +557,6 @@ steps:
           pytest -v -s tests/kernels/moe/test_flashinfer.py
           pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
           pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-          pytest -v -s tests/kernels/attention/test_minimax_m3.py
           ;;
         *)
           echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
