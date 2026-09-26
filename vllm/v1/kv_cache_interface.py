@@ -1331,6 +1331,46 @@ def is_full_attention_spec(kv_cache_spec: KVCacheSpec) -> bool:
     )
 
 
+def get_kv_cache_spec_kind_for_class(spec_cls: type[KVCacheSpec]) -> KVCacheSpecKind:
+    """Return the kind of a KV cache spec class.
+
+    ``UniformTypeKVCacheSpecs`` is a wrapper, not a spec of its own, so it has no
+    class-level kind; the kind of a group carrying it comes from the specs it
+    wraps, which is what ``get_kv_cache_spec_kind`` answers.
+
+    Args:
+        spec_cls: a concrete spec class, or the wrapper class.
+
+    Returns:
+        The kind of ``spec_cls``, or ``KVCacheSpecKind.UNKNOWN`` for the wrapper
+        class and for classes the table does not name.
+
+    """
+    if issubclass(spec_cls, UniformTypeKVCacheSpecs):
+        return KVCacheSpecKind.UNKNOWN
+    # Keep subclass checks before base classes so specialized specs keep their
+    # more precise kind.
+    if issubclass(spec_cls, SlidingWindowMLASpec):
+        return KVCacheSpecKind.SLIDING_WINDOW_MLA
+    if issubclass(spec_cls, MLAAttentionSpec):
+        return KVCacheSpecKind.MLA_ATTENTION
+    if issubclass(spec_cls, SinkFullAttentionSpec):
+        return KVCacheSpecKind.SINK_FULL_ATTENTION
+    if issubclass(spec_cls, FullAttentionSpec):
+        return KVCacheSpecKind.FULL_ATTENTION
+    if issubclass(spec_cls, ChunkedLocalAttentionSpec):
+        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
+    if issubclass(spec_cls, SlidingWindowSpec):
+        return KVCacheSpecKind.SLIDING_WINDOW
+    if issubclass(spec_cls, MambaSpec):
+        return KVCacheSpecKind.MAMBA
+    if issubclass(spec_cls, EncoderOnlyAttentionSpec):
+        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+    if issubclass(spec_cls, CrossAttentionSpec):
+        return KVCacheSpecKind.CROSS_ATTENTION
+    return KVCacheSpecKind.UNKNOWN
+
+
 def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         inner_kinds = {
@@ -1349,27 +1389,7 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
         if len(base_specs) == 1 and next(iter(base_specs)) is FullAttentionSpec:
             return KVCacheSpecKind.FULL_ATTENTION
         return KVCacheSpecKind.UNKNOWN
-    # Keep subclass checks before base classes so specialized specs keep their
-    # more precise kind.
-    if isinstance(kv_cache_spec, SlidingWindowMLASpec):
-        return KVCacheSpecKind.SLIDING_WINDOW_MLA
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
-        return KVCacheSpecKind.MLA_ATTENTION
-    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
-        return KVCacheSpecKind.SINK_FULL_ATTENTION
-    if isinstance(kv_cache_spec, FullAttentionSpec):
-        return KVCacheSpecKind.FULL_ATTENTION
-    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
-        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        return KVCacheSpecKind.SLIDING_WINDOW
-    if isinstance(kv_cache_spec, MambaSpec):
-        return KVCacheSpecKind.MAMBA
-    if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
-    if isinstance(kv_cache_spec, CrossAttentionSpec):
-        return KVCacheSpecKind.CROSS_ATTENTION
-    return KVCacheSpecKind.UNKNOWN
+    return get_kv_cache_spec_kind_for_class(type(kv_cache_spec))
 
 
 def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:

@@ -27,15 +27,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    get_representative_spec,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     MambaSpec,
-    SlidingWindowSpec,
+    get_kv_cache_spec_sliding_window,
+    is_full_attention_spec,
 )
 
 if TYPE_CHECKING:
@@ -95,7 +98,7 @@ class NixlBaseConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not is_full_attention_spec(g.kv_cache_spec)
                 for g in kv_cache_config.transfer_groups
             )
         )
@@ -132,12 +135,13 @@ class NixlBaseConnectorScheduler:
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
-        ]
+        sw_sizes_tokens: list[tuple[int, int]] = []
+        for g in kv_cache_config.transfer_groups:
+            window = get_kv_cache_spec_sliding_window(g.kv_cache_spec)
+            if window is None:
+                sw_sizes_tokens.append((0, self.block_size))
+            else:
+                sw_sizes_tokens.append((window, g.kv_cache_spec.block_size))
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
         self.blocks_per_sw = [
@@ -146,13 +150,15 @@ class NixlBaseConnectorScheduler:
         ]
 
         # Trailing scratch slots that mamba managers co-allocate per request
-        # for speculative decoding; None for non-SSM groups.
-        self._ssm_spec_blocks = [
-            g.kv_cache_spec.num_speculative_blocks
-            if isinstance(g.kv_cache_spec, MambaSpec)
-            else None
-            for g in kv_cache_config.transfer_groups
-        ]
+        # for speculative decoding; None for non-SSM groups. The representative
+        # spec unwraps a uniform-type group, whose layers are all Mamba or all
+        # not, so a wrapped SSM group keeps its scratch slots.
+        self._ssm_spec_blocks = []
+        for g in kv_cache_config.transfer_groups:
+            spec = get_representative_spec(g.kv_cache_spec)
+            self._ssm_spec_blocks.append(
+                spec.num_speculative_blocks if isinstance(spec, MambaSpec) else None
+            )
         # Only "all" mode keeps a state per block position; the other modes
         # keep a single running state in the last non-speculative slot.
         self._ssm_state_slots_are_positional = (

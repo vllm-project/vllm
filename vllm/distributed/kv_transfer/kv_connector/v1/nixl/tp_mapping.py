@@ -12,7 +12,10 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     TransferTopology,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    is_ssm_spec,
+)
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 # ======================================================================
 # Data structures
@@ -27,14 +30,6 @@ class ReadSpec:
     local_block_ids: BlockIds
     remote_block_ids: BlockIds
     block_ids_by_region: bool = False
-
-
-def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
-    return issubclass(spec_type, AttentionSpec)
-
-
-def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
-    return issubclass(spec_type, MambaSpec)
 
 
 @dataclass(frozen=True)
@@ -109,7 +104,7 @@ def compute_tp_mapping(
         attn_ranks = (start + np.sort(unique_idx)).tolist()
 
     # --- SSM source ranks ---
-    has_ssm = any(_is_ssm_spec(t) for t in group_spec_types)
+    has_ssm = any(is_ssm_spec(t) for t in group_spec_types)
     if has_ssm:
         if tp_size < remote_tp_size:
             abs_tp = remote_tp_size // tp_size
@@ -123,7 +118,7 @@ def compute_tp_mapping(
 
     # --- Per-group ordered source ranks ---
     source_ranks_per_group = tuple(
-        tuple(ssm_ranks) if _is_ssm_spec(t) else tuple(attn_ranks)
+        tuple(ssm_ranks) if is_ssm_spec(t) else tuple(attn_ranks)
         for t in group_spec_types
     )
 
