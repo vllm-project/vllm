@@ -203,13 +203,14 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         return json_str
 
     def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
-        """Raise GenerationError if finish_reason indicates an error."""
-        if finish_reason == "error":
+        """Raise GenerationError if finish_reason indicates an error or abort."""
+        if finish_reason in ("error", "abort"):
             logger.error(
-                "Request %s failed with an internal error during generation",
+                "Request %s terminated unexpectedly with finish_reason: %s",
                 request_id,
+                finish_reason,
             )
-            raise GenerationError("Internal server error")
+            raise GenerationError(f"Engine request terminated ({finish_reason})")
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError
