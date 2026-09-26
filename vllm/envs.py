@@ -222,6 +222,8 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_PAGED_PREFILL: bool = False
+    VLLM_FLASHINFER_PAGED_PREFILL_WARMUP: bool = True
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1769,6 +1771,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # Prefill through the experimental unified FlashInfer paged-attention
+    # API (FlashInfer PR #4015) instead of the native wrapper; decode keeps
+    # the existing path. Only SM89 (L20) is validated.
+    "VLLM_FLASHINFER_PAGED_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_PAGED_PREFILL", "0"))
+    ),
+    # Prepare the opt-in's FA2 module and plan state at engine init instead of
+    # inside the first request; set to 0 to keep the cold start measurable
+    # with the opt-in itself still on.
+    "VLLM_FLASHINFER_PAGED_PREFILL_WARMUP": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_PAGED_PREFILL_WARMUP", "1"))
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
