@@ -757,6 +757,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
+    model: Qwen3NextModel
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,

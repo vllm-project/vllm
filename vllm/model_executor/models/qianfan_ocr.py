@@ -36,14 +36,14 @@ class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        kwargs.setdefault("image_size", vision_config.image_size)
-        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
-        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
-        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
-        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        merged_kwargs.setdefault("image_size", vision_config.image_size)
+        merged_kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        merged_kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        merged_kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        merged_kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        image_processor = InternVLImageProcessor(**kwargs)
+        image_processor = InternVLImageProcessor(**merged_kwargs)
         image_size = image_processor.image_size
         patch_size = vision_config.patch_size
         downsample_ratio = config.downsample_ratio
@@ -73,7 +73,7 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
     """
 
     def _patch_quant_config(
-        self, config: PreTrainedConfig, quant_config: QuantizationConfig
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ) -> None:
         super()._patch_quant_config(config, quant_config)
         # ignore vit layers to preserve model performance
