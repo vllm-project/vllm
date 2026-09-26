@@ -406,11 +406,13 @@ class ExpertMapManager:
         if self._expert_map is None:
             return f"[0..{self.global_num_experts - 1}]"
 
-        global_indices = torch.where(self._expert_map != -1)[0]
-        local_indices = self._expert_map[global_indices]
+        # Build the string on the host: per-element .item() on an accelerator
+        # tensor costs one device round trip (and on XLA, one compile) each.
+        expert_map = self._expert_map.tolist()
         return ", ".join(
-            f"{local_index.item()}->{global_index.item()}"
-            for local_index, global_index in zip(local_indices, global_indices)
+            f"{local_index}->{global_index}"
+            for global_index, local_index in enumerate(expert_map)
+            if local_index != -1
         )
 
     # Private methods
