@@ -870,6 +870,7 @@ def get_cutlass_moe_mm_data(
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
     is_gated: bool = True,
+    expert_map: torch.Tensor | None = None,
 ):
     """Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -894,6 +895,8 @@ def get_cutlass_moe_mm_data(
                           blockscale_offsets[E]
     - is_gated: Whether the activation is gated (gate + up). When True, the
                 first GEMM N dimension is 2*n; when False, it is n.
+    - expert_map: Optional global-to-local expert mapping. Non-local experts
+                  must map to -1.
     """
     return torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
@@ -907,6 +910,7 @@ def get_cutlass_moe_mm_data(
         k,
         blockscale_offsets,
         is_gated,
+        expert_map,
     )
 
 

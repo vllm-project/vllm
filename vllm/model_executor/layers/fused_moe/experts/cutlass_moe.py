@@ -831,6 +831,7 @@ def run_cutlass_moe_mxfp4(
     device: torch.device,
     apply_router_weight_on_input: bool = False,
     *,
+    expert_map: torch.Tensor | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
     """MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM."""
@@ -888,6 +889,7 @@ def run_cutlass_moe_mxfp4(
         k,
         blockscale_offsets,
         is_gated=is_gated,
+        expert_map=expert_map,
     )
 
     a = ops.shuffle_rows(a, a_map)
@@ -1038,7 +1040,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return moe_parallel_config.ep_size == 1
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1105,6 +1107,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
             activation_config=self.activation_config,
         )
 

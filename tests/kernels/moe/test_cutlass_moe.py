@@ -180,6 +180,55 @@ def test_cutlass_moe_permutation_maps_padding_to_zero():
     torch.testing.assert_close(restored[3], torch.zeros_like(restored[3]))
 
 
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()
+    ),
+    reason="Grouped gemm is not supported on this GPU type.",
+)
+def test_cutlass_moe_data_maps_global_experts_to_local():
+    """Expert-parallel routes must index the rank-local weight tensors."""
+    num_local_experts = 2
+    topk_ids = torch.tensor([[0, 1], [2, 3]], device="cuda", dtype=torch.int32)
+    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+    num_routes = topk_ids.numel()
+
+    expert_offsets = torch.empty(
+        num_local_experts + 1, device="cuda", dtype=torch.int32
+    )
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_local_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(num_routes, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_local_experts,
+        128,
+        128,
+        blockscale_offsets,
+        expert_map=expert_map,
+    )
+
+    torch.testing.assert_close(
+        expert_offsets, torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        input_permutation,
+        torch.tensor([0, 1, -1, -1], device="cuda", dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        output_permutation,
+        torch.tensor([0, 4, 1, 4], device="cuda", dtype=torch.int32),
+    )
+
+
 @pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
 @torch.inference_mode()
 def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: str):

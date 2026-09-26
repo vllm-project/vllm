@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -541,6 +542,38 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
     assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
     assert processed_layers == [layer]
+
+
+def test_compressed_tensors_mxfp4_rejects_cutlass_with_unsupported_parallel_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
+    )
+
+    parallel_config = SimpleNamespace(ep_size=2)
+    monkeypatch.setattr(
+        ct_mxfp4.CutlassExpertsMxfp4,
+        "_supports_current_device",
+        lambda: True,
+    )
+    supports_parallel = MagicMock(return_value=False)
+    monkeypatch.setattr(
+        ct_mxfp4.CutlassExpertsMxfp4,
+        "_supports_parallel_config",
+        supports_parallel,
+    )
+    moe_config = SimpleNamespace(
+        w13_num_shards=2,
+        moe_backend="auto",
+        moe_parallel_config=parallel_config,
+    )
+
+    method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
+
+    supports_parallel.assert_called_once_with(parallel_config)
+    assert not method.use_cutlass_mxfp4
+    assert method.experts_cls is ct_mxfp4.MarlinExperts
 
 
 def test_b12x_mxfp4_falls_back_to_a16(

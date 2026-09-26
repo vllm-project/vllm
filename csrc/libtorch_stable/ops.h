@@ -85,7 +85,8 @@ void get_cutlass_moe_mm_data(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated);
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& expert_map);
 
 void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     const torch::stable::Tensor& expert_first_token_offset,

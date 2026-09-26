@@ -13,13 +13,24 @@ constexpr uint64_t THREADS_PER_EXPERT = 512;
 // threshold must match the dispatch logic in run_cutlass_moe_mm_sm90()
 constexpr int SWAP_AB_THRESHOLD = 64;
 
+__device__ __forceinline__ int32_t
+map_expert_id(const int32_t expert_id, const int32_t* __restrict__ expert_map,
+              const int expert_map_size) {
+  if (expert_map == nullptr) {
+    return expert_id;
+  }
+  if (expert_id < 0 || expert_id >= expert_map_size) {
+    return -1;
+  }
+  return expert_map[expert_id];
+}
+
 template <bool SWAP_AB>
-__global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
-                                      int32_t* problem_sizes1,
-                                      int32_t* problem_sizes2,
-                                      int32_t* atomic_buffer,
-                                      const int topk_length, const int n,
-                                      const int k, const bool is_gated) {
+__global__ void compute_problem_sizes(
+    const int32_t* __restrict__ topk_ids,
+    const int32_t* __restrict__ expert_map, int32_t* problem_sizes1,
+    int32_t* problem_sizes2, int32_t* atomic_buffer, const int topk_length,
+    const int expert_map_size, const int n, const int k, const bool is_gated) {
   int expert_id = blockIdx.x;
   // For gated activations (gate + up), first GEMM output is 2*n.
   // For non-gated activations (up only), first GEMM output is n.
@@ -27,7 +38,8 @@ __global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
 
   int occurrences = 0;
   for (int i = threadIdx.x; i < topk_length; i += THREADS_PER_EXPERT) {
-    occurrences += (topk_ids[i] == expert_id);
+    occurrences +=
+        (map_expert_id(topk_ids[i], expert_map, expert_map_size) == expert_id);
   }
   atomicAdd(&atomic_buffer[expert_id], occurrences);
   __syncthreads();
@@ -86,15 +98,17 @@ __global__ void compute_expert_blockscale_offsets(
 }
 
 __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
+                                  const int32_t* __restrict__ expert_map,
                                   int32_t* input_permutation,
                                   int32_t* output_permutation,
                                   int32_t* atomic_buffer, const int topk_length,
-                                  const int topk) {
+                                  const int topk, const int expert_map_size) {
   int const blk_expert_id = blockIdx.x;
   int const num_experts = gridDim.x;
 
   for (int i = threadIdx.x; i < topk_length; i += THREADS_PER_EXPERT) {
-    int const expert_id = topk_ids[i];
+    int const expert_id =
+        map_expert_id(topk_ids[i], expert_map, expert_map_size);
     if ((expert_id < 0 || expert_id >= num_experts) && blockIdx.x == 0) {
       int const start = atomicAdd(&atomic_buffer[num_experts], 1);
       input_permutation[start] = -1;
@@ -113,14 +127,12 @@ __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
 }
 
 namespace {
-inline void launch_compute_problem_sizes(const torch::stable::Tensor& topk_ids,
-                                         torch::stable::Tensor& problem_sizes1,
-                                         torch::stable::Tensor& problem_sizes2,
-                                         torch::stable::Tensor& atomic_buffer,
-                                         int64_t num_experts, int64_t n,
-                                         int64_t k, cudaStream_t stream,
-                                         const bool swap_ab,
-                                         const bool is_gated) {
+inline void launch_compute_problem_sizes(
+    const torch::stable::Tensor& topk_ids, const int32_t* expert_map,
+    torch::stable::Tensor& problem_sizes1,
+    torch::stable::Tensor& problem_sizes2, torch::stable::Tensor& atomic_buffer,
+    int64_t num_experts, int64_t expert_map_size, int64_t n, int64_t k,
+    cudaStream_t stream, const bool swap_ab, const bool is_gated) {
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
   auto const* topk_ptr = topk_ids.const_data_ptr<int32_t>();
@@ -130,9 +142,9 @@ inline void launch_compute_problem_sizes(const torch::stable::Tensor& topk_ids,
 
   VLLM_STABLE_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
     compute_problem_sizes<SwapAB><<<num_experts, num_threads, 0, stream>>>(
-        topk_ptr, ps1_ptr, ps2_ptr, atomic_ptr,
-        static_cast<int>(topk_ids.numel()), static_cast<int>(n),
-        static_cast<int>(k), is_gated);
+        topk_ptr, expert_map, ps1_ptr, ps2_ptr, atomic_ptr,
+        static_cast<int>(topk_ids.numel()), static_cast<int>(expert_map_size),
+        static_cast<int>(n), static_cast<int>(k), is_gated);
   });
 }
 }  // namespace
@@ -242,7 +254,8 @@ void get_cutlass_moe_mm_data_caller(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated) {
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& expert_map) {
   auto device = topk_ids.device();
   const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   auto stream = get_current_cuda_stream(device.index());
@@ -251,13 +264,30 @@ void get_cutlass_moe_mm_data_caller(
 
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
+  const int32_t* expert_map_ptr = nullptr;
+  int64_t expert_map_size = 0;
+  if (expert_map.has_value()) {
+    const auto& map = expert_map.value();
+    STD_TORCH_CHECK(map.is_cuda(), "expert_map must be a CUDA tensor");
+    STD_TORCH_CHECK(map.device() == device,
+                    "expert_map must be on the same device as topk_ids");
+    STD_TORCH_CHECK(map.scalar_type() == torch::headeronly::ScalarType::Int,
+                    "expert_map must be int32");
+    STD_TORCH_CHECK(map.dim() == 1, "expert_map must be 1D");
+    STD_TORCH_CHECK(map.is_contiguous(), "expert_map must be contiguous");
+    STD_TORCH_CHECK(map.numel() <= INT32_MAX,
+                    "expert_map size must fit in int32");
+    expert_map_ptr = map.const_data_ptr<int32_t>();
+    expert_map_size = map.numel();
+  }
+
   // Swap-AB should be disabled for FP4 path
   bool may_swap_ab = (!blockscale_offsets.has_value()) &&
                      (topk_ids.numel() <= SWAP_AB_THRESHOLD);
 
-  launch_compute_problem_sizes(topk_ids, problem_sizes1, problem_sizes2,
-                               atomic_buffer, num_experts, n, k, stream,
-                               may_swap_ab, is_gated);
+  launch_compute_problem_sizes(
+      topk_ids, expert_map_ptr, problem_sizes1, problem_sizes2, atomic_buffer,
+      num_experts, expert_map_size, n, k, stream, may_swap_ab, is_gated);
 
   if (blockscale_offsets.has_value()) {
     // fp4 path
@@ -275,11 +305,11 @@ void get_cutlass_moe_mm_data_caller(
         may_swap_ab);
   }
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
-      static_cast<const int32_t*>(topk_ids.data_ptr()),
+      static_cast<const int32_t*>(topk_ids.data_ptr()), expert_map_ptr,
       static_cast<int32_t*>(input_permutation.data_ptr()),
       static_cast<int32_t*>(output_permutation.data_ptr()),
       static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(),
-      topk_ids.size(1));
+      topk_ids.size(1), expert_map_size);
 }
 
 template <bool SWAP_AB>
