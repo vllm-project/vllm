@@ -32,7 +32,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import find_tool_name, find_tool_properties
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -194,11 +194,16 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_PREAMBLE,
                 (),
             ),
-            (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
+            # DeepSeek V4 can intermittently omit or corrupt the outer
+            # <｜DSML｜tool_calls> wrapper while still emitting a complete
+            # invoke. Hold this recovery path until the function name is
+            # complete and verify that the request actually declared it.
+            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
+                provisional_tool_call=True,
             ),
-            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+            (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
@@ -209,6 +214,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             (ParserState.TOOL_ARGS, "INVOKE_END"): Transition(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
+                commit_provisional_tool_call=True,
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.TOOL_BETWEEN,
@@ -266,6 +272,20 @@ class DeepSeekV4Parser(ParserEngine):
             **kwargs,
         )
         self._arg_converter = self._convert_args
+        self._recovery_tools: list[Tool] = list(tools or [])
+        self._engine.recovery_tool_name_validator = self._can_recover_tool_name
+
+    def _check_skip_tool_parsing(self, request) -> None:
+        super()._check_skip_tool_parsing(request)
+        tools = getattr(request, "tools", None) or []
+        self._recovery_tools = (
+            [] if getattr(request, "tool_choice", None) == "none" else list(tools)
+        )
+
+    def _can_recover_tool_name(self, name: str) -> bool:
+        return bool(
+            name and self._recovery_tools and find_tool_name(self._recovery_tools, name)
+        )
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
         converter = self.parser_engine_config.arg_converter
