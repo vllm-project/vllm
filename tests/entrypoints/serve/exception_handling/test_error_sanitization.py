@@ -9,6 +9,7 @@ speech-to-text WebSocket paths.
 """
 
 import pytest
+from PIL import Image
 
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 
@@ -86,7 +87,7 @@ class TestSanitizeMessageCoversLeakPatterns:
             ),
             (
                 "<PIL.PngImagePlugin.PngImageFile image mode=RGB "
-                "size=8x8 at 0x7f3c1a2b4d90>",
+                "size=8x8 at 0x7F3C1A2B4D90>",
                 "<PIL.PngImagePlugin.PngImageFile image mode=RGB size=8x8>",
             ),
             (
@@ -112,6 +113,32 @@ class TestSanitizeMessageCoversLeakPatterns:
         raw = "<obj at 0xaaa> and <obj at 0xbbb>"
         result = sanitize_message(raw)
         assert "0x" not in result
+
+    def test_strips_address_from_live_pil_image_repr(self):
+        """Pillow formats id() as uppercase hex; use a real repr()."""
+        kept: list[Image.Image] = []
+        raw = None
+        for _ in range(10_000):
+            img = Image.new("RGB", (1, 1))
+            kept.append(img)
+            candidate = repr(img)
+            hex_part = candidate.rsplit(" at 0x", 1)[1].rstrip(">")
+            if any(ch in hex_part for ch in "ABCDEF"):
+                raw = candidate
+                break
+        assert raw is not None
+        result = sanitize_message(raw)
+        assert "0x" not in result
+
+    def test_strips_address_from_processor_failure_message(self):
+        img = Image.new("RGB", (8, 8))
+        raw = (
+            f"Failed to apply FooProcessor on data={{'image': {img!r}}} "
+            "with kwargs={}"
+        )
+        result = sanitize_message(raw)
+        assert "0x" not in result
+        assert "FooProcessor" in result
 
 
 class TestAffectedModulesUseSanitize:
