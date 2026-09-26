@@ -70,6 +70,26 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         }
 
 
+def compute_num_decode_draft_tokens(
+    num_padded_reqs: int,
+    num_scheduled_tokens: np.ndarray,
+    num_draft_tokens_per_req: np.ndarray | None,
+    is_prefilling: np.ndarray,
+) -> np.ndarray:
+    """Preserve the speculative state layout for decode rows without drafts."""
+    num_reqs = num_scheduled_tokens.shape[0]
+    # GDN uses >= 0 to select spec-decode rows, so non-decode rows
+    # need the -1 sentinel rather than a raw zero draft count.
+    num_decode_draft_tokens = np.full(num_padded_reqs, -1, dtype=np.int32)
+    if num_draft_tokens_per_req is None:
+        num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
+    is_decode = (~is_prefilling) & (num_scheduled_tokens > 0)
+    num_decode_draft_tokens[:num_reqs] = np.where(
+        is_decode, num_draft_tokens_per_req, -1
+    )
+    return num_decode_draft_tokens
+
+
 class MambaHybridModelState(DefaultModelState):
     """Model state for hybrid attention + Mamba / linear-attention models."""
 
@@ -273,9 +293,7 @@ class MambaHybridModelState(DefaultModelState):
                 input_batch.idx_mapping
             ]
 
-            # GDN uses >= 0 to select spec-decode rows, so non-decode rows
-            # need the -1 sentinel rather than a raw zero draft count.
-            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
+            is_prefilling_for_state = input_batch.is_prefilling_np
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
                 # Test request state, not num_scheduled_tokens == draft_count+1:
@@ -288,14 +306,17 @@ class MambaHybridModelState(DefaultModelState):
                 is_prompt_tail = (num_computed > 0) & (
                     input_batch.prefill_len_np - num_computed == 1
                 )
-                is_decode = (~input_batch.is_prefilling_np | is_prompt_tail) & (
-                    input_batch.num_scheduled_tokens > 0
+                is_prefilling_for_state = input_batch.is_prefilling_np & ~(
+                    is_prompt_tail & (num_draft_tokens_per_req > 0)
                 )
-                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
-                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, num_draft_tokens_per_req, -1
+            num_decode_draft_tokens_cpu = torch.from_numpy(
+                compute_num_decode_draft_tokens(
+                    num_reqs,
+                    input_batch.num_scheduled_tokens,
+                    num_draft_tokens_per_req,
+                    is_prefilling_for_state,
                 )
-            num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+            )
 
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
