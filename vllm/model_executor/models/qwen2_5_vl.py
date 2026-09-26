@@ -41,18 +41,24 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
 )
+from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
 from vllm.config import VllmConfig
+from vllm.config.multimodal import VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -72,9 +78,11 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    VideoItem,
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
@@ -102,8 +110,9 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
+    Qwen2VLDummyInputsBuilder,
+    Qwen2VLMultiModalDataParser,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
 )
@@ -115,7 +124,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
-    FusedInputNorm,
     get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
@@ -659,9 +667,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
-        self.input_norm = (
-            input_norm if input_norm is not None else FusedInputNorm.identity()
-        )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -1137,6 +1143,40 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class Qwen2_5_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides: VideoDummyOptions | None = None,
+    ) -> list[VideoItem]:
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
+        video_items = []
+        for video in videos:
+            video_num_frames = video.shape[0]
+            video_metadata = {
+                "fps": 2.0,
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            }
+            video_items.append((video, video_metadata))
+        return video_items
+
+
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
@@ -1144,8 +1184,15 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
+        )
+
+    def get_data_parser(self):
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
 
@@ -1159,6 +1206,25 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
+
+    def _get_hf_mm_inputs(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+
+        if videos := hf_data.get("videos"):
+            # HF expects video metadata as a separate argument.
+            hf_data["videos"] = [video for video, _ in videos]
+            hf_data["video_metadata"] = [
+                VideoMetadata(
+                    **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
+                )
+                for _, metadata in videos
+            ]
+        return hf_inputs
 
     def _get_prompt_updates(
         self,
@@ -1360,7 +1426,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
-                input_norm=FusedInputNorm.from_model_config(self.model_config),
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

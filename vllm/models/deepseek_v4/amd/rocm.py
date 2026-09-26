@@ -7,6 +7,8 @@ from typing import cast
 
 import torch
 
+from vllm import envs
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -25,6 +27,7 @@ from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -34,12 +37,57 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
+    """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
+
+    E8M0 is an unsigned exponent-only scale format with bias 127. A finite
+    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
+    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
+    Microscaling Formats (MX) Specification, section 5.4.1:
+    https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+
+    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    or decode it to a floating-point power of two. Floating-point inputs are
+    accepted only when the original E8M0 byte can be recovered losslessly.
+    This function does not quantize or round arbitrary scales.
+    """
+    if scale.dtype == torch.float8_e8m0fnu:
+        # Reinterpret the native E8M0 storage. ``to(uint8)`` would perform a
+        # numeric conversion instead of preserving the encoded exponent byte.
+        return scale.view(torch.uint8).contiguous()
+    if scale.dtype == torch.uint8:
+        # The checkpoint loader already exposed the E8M0 wire representation.
+        return scale.contiguous()
+    if not scale.dtype.is_floating_point:
+        return None
+
+    scale_f32 = scale.detach().float()
+    if not bool(torch.isfinite(scale_f32).all()) or bool((scale_f32 <= 0).any()):
+        return None
+
+    # With no mantissa, E8M0 can represent only exact powers of two. Rebuild
+    # the value before encoding so this adapter never silently quantizes a
+    # general floating-point checkpoint scale.
+    exponent = torch.round(torch.log2(scale_f32))
+    if not torch.equal(torch.exp2(exponent), scale_f32):
+        return None
+
+    encoded = exponent.to(torch.int32) + 127
+    # 0xFF is NaN in OCP E8M0, not a finite exponent.
+    if int(encoded.min()) < 0 or int(encoded.max()) > 254:
+        return None
+    return encoded.to(torch.uint8).contiguous()
 
 
 def _trust_dsv4_extra_cache_nan_free(
@@ -401,6 +449,20 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # All per-token metadata is built from device query boundaries into
+            # persistent buffers, so adaptive verification can replay varlen
+            # FULL decode graphs after reallocating drafts across requests.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -468,6 +530,20 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # SWA indices, lengths, and token-to-request mappings are built from
+            # device boundaries into persistent buffers, so adaptive verification
+            # can replay varlen FULL decode graphs safely.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
     # also refreshes the ROCm-specific ragged SWA indices and indptrs.
     supports_draft_decode_metadata_update = False
@@ -555,6 +631,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._wo_a_fp8_weight: torch.Tensor | None = None
+        self._wo_a_e8m0_scale: torch.Tensor | None = None
+        self._wo_a_cos_cache: torch.Tensor | None = None
+        self._wo_a_sin_cache: torch.Tensor | None = None
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -815,6 +895,93 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
+        if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
+            self._prepare_fp8_wo_a()
+
+    def _prepare_fp8_wo_a(self) -> None:
+        try:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale as mxscale_op,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant as inverse_quant_op,
+            )
+        except ImportError:
+            logger.warning_once(
+                "The DeepSeek V4 FP8 WO_A path requires AITER >= 0.1.20; "
+                "falling back to BF16 WO_A."
+            )
+            return
+        del mxscale_op, inverse_quant_op
+
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_fp8_block_weight_scale,
+            is_fp8,
+        )
+
+        weight = getattr(self.wo_a, "weight", None)
+        scale = get_fp8_block_weight_scale(self.wo_a)
+        if scale is None:
+            # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+            # historical ``_inv`` suffix.
+            scale = getattr(self.wo_a, "weight_scale", None)
+        if weight is None or scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a block-scaled FP8 wo_a weight; "
+                "the layer exposes no weight/weight scale. Falling back to "
+                "BF16 WO_A."
+            )
+            return
+        if weight.dim() != 2 or scale.dim() != 2 or not is_fp8(weight.dtype):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a 2-D FP8 wo_a weight with a 2-D "
+                "block scale, got weight %s%s and scale %s. Falling back to "
+                "BF16 WO_A.",
+                weight.dtype,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
+            return
+
+        groups = self.n_local_groups
+        out_per_group = self.o_lora_rank
+        out_features, in_features = weight.shape
+        if (
+            out_features != groups * out_per_group
+            or out_per_group % 128 != 0
+            or in_features % 128 != 0
+            or scale.shape != (out_features // 128, in_features // 128)
+        ):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs group-128 blocks for %d groups of "
+                "%d outputs, got weight %s and scale %s. Falling back to BF16 "
+                "WO_A.",
+                groups,
+                out_per_group,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
+            return
+
+        e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
+        if e8m0_scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A could not losslessly encode the %s wo_a "
+                "block scale as OCP E8M0. Falling back to BF16 WO_A.",
+                scale.dtype,
+            )
+            return
+
+        self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
+        self._wo_a_e8m0_scale = e8m0_scale.view(
+            groups, out_per_group // 128, in_features // 128
+        )
+        cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
+        if cache is None:
+            cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
+        cos_cache, sin_cache = cache.chunk(2, dim=-1)
+        self._wo_a_cos_cache = cos_cache.contiguous()
+        self._wo_a_sin_cache = sin_cache.contiguous()
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -973,17 +1140,45 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
-        z = rocm_inv_rope_einsum(
-            self.rotary_emb,
-            o,
-            positions,
-            self.rope_head_dim,
-            self.n_local_groups,
-            self.o_lora_rank,
-            self.wo_a,
-        )
-        zf = z.flatten(1)
+        if self._wo_a_fp8_weight is not None:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant,
+            )
+
+            assert self._wo_a_cos_cache is not None
+            assert self._wo_a_sin_cache is not None
+            o_fp8, o_scale = inverse_rope_group_quant(
+                o.view(o.shape[0], self.n_local_heads, self.head_dim),
+                positions.to(torch.int64),
+                self._wo_a_cos_cache,
+                self._wo_a_sin_cache,
+                num_groups=self.n_local_groups,
+                quant_group_size=128,
+            )
+            assert self._wo_a_e8m0_scale is not None
+            zf = batched_gemm_a8w8_mxscale(
+                o_fp8,
+                self._wo_a_fp8_weight,
+                o_scale,
+                self._wo_a_e8m0_scale,
+                dtype=o.dtype,
+            ).flatten(1)
+        else:
+            # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+            z = rocm_inv_rope_einsum(
+                self.rotary_emb,
+                o,
+                positions,
+                self.rope_head_dim,
+                self.n_local_groups,
+                self.o_lora_rank,
+                self.wo_a,
+                inverse_rope=False,
+            )
+            zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
             return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
         return self.wo_b(zf)
@@ -1052,9 +1247,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
+        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
+        # the rotation into the decode reduce would apply it twice. Only the
+        # BF16 einsum path hands its rotation off to the decode.
+        fuse_inv_rope = self._wo_a_fp8_weight is None
+        rotated = 0
         if num_decodes > 0:
-            self._forward_decode(
+            rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
+                positions=positions[:num_decode_tokens] if fuse_inv_rope else None,
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,
@@ -1068,17 +1269,31 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     and rocm_metadata.for_cudagraph_capture
                 ),
             )
+        if fuse_inv_rope:
+            # Only the decode reduce rotates its own rows, and only the leading
+            # `rotated` of them; prefill rows and any decode path that did not
+            # fuse still owe the standalone pass. Settle that here rather than
+            # in _o_proj: the split is batch-dependent and _o_proj runs
+            # compiled, where such a value freezes at its trace-time value.
+            rocm_inverse_rope_rows_(
+                output[rotated:, : self.n_local_heads, :],
+                positions[rotated:],
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+            )
 
     def _forward_decode(
         self,
         q: torch.Tensor,
+        positions: torch.Tensor | None,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
         adaptive_splits: bool,
-    ) -> None:
+    ) -> int:
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -1110,7 +1325,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        rocm_sparse_attn_decode(
+        return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
@@ -1130,6 +1345,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             rope_head_dim=self.rope_head_dim,
             output=output,
             adaptive_splits=adaptive_splits,
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
