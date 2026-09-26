@@ -292,7 +292,7 @@ class TestToolResultContent:
         assert tool_msg[0]["content"] == "line 1\nline 2"
 
     def test_tool_result_with_image(self):
-        """Image in tool_result should produce a follow-up user message."""
+        """An image remains in the tool message that produced it."""
         request = self._make_tool_result_request(
             [
                 {
@@ -307,27 +307,22 @@ class TestToolResultContent:
         )
         result = _convert(request)
 
+        assert [m["role"] for m in result.messages] == ["assistant", "tool"]
         tool_msg = [m for m in result.messages if m["role"] == "tool"]
         assert len(tool_msg) == 1
-        assert tool_msg[0]["content"] == ""
-
-        # The image should be injected as a follow-up user message
-        follow_up = [
-            m
-            for m in result.messages
-            if m["role"] == "user" and isinstance(m.get("content"), list)
-        ]
-        assert len(follow_up) == 1
-        img_parts = follow_up[0]["content"]
-        assert len(img_parts) == 1
-        assert img_parts[0] == {
-            "type": "image_url",
-            "image_url": {"url": "data:image/png;base64,AAAA"},
+        assert tool_msg[0] == {
+            "role": "tool",
+            "tool_call_id": "call_001",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                }
+            ],
         }
 
     def test_tool_result_with_text_and_image(self):
-        """Mixed text+image tool_result: text in tool msg, image in user
-        msg."""
+        """Mixed text and image content remains in one tool message."""
         request = self._make_tool_result_request(
             [
                 {"type": "text", "text": "Here is the screenshot"},
@@ -339,23 +334,23 @@ class TestToolResultContent:
                         "data": "QUFB",
                     },
                 },
+                {"type": "text", "text": "End of screenshot"},
             ]
         )
         result = _convert(request)
 
+        assert [m["role"] for m in result.messages] == ["assistant", "tool"]
         tool_msg = [m for m in result.messages if m["role"] == "tool"]
         assert len(tool_msg) == 1
-        assert tool_msg[0]["content"] == "Here is the screenshot"
-
-        follow_up = [
-            m
-            for m in result.messages
-            if m["role"] == "user" and isinstance(m.get("content"), list)
+        assert tool_msg[0]["tool_call_id"] == "call_001"
+        assert tool_msg[0]["content"] == [
+            {"type": "text", "text": "Here is the screenshot"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64,QUFB"},
+            },
+            {"type": "text", "text": "End of screenshot"},
         ]
-        assert len(follow_up) == 1
-        assert follow_up[0]["content"][0]["image_url"]["url"] == (
-            "data:image/jpeg;base64,QUFB"
-        )
 
     def test_tool_result_with_multiple_images(self):
         request = self._make_tool_result_request(
@@ -379,16 +374,157 @@ class TestToolResultContent:
         )
         result = _convert(request)
 
-        follow_up = [
-            m
-            for m in result.messages
-            if m["role"] == "user" and isinstance(m.get("content"), list)
+        assert [m["role"] for m in result.messages] == ["assistant", "tool"]
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 1
+        assert tool_msg[0]["tool_call_id"] == "call_001"
+        assert tool_msg[0]["content"] == [
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,IMG1"},
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://example.com/img2.jpg"},
+            },
         ]
-        assert len(follow_up) == 1
-        urls = [p["image_url"]["url"] for p in follow_up[0]["content"]]
-        assert urls == [
-            "data:image/png;base64,IMG1",
-            "https://example.com/img2.jpg",
+
+    def test_parallel_tool_results_remain_consecutive(self):
+        request = _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_A",
+                            "name": "read_image",
+                            "input": {},
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_B",
+                            "name": "read_text",
+                            "input": {},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_A",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": "AAAA",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_B",
+                            "content": "result_B",
+                        },
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == [
+            "assistant",
+            "tool",
+            "tool",
+        ]
+        tool_messages = result.messages[1:]
+        assert [m["tool_call_id"] for m in tool_messages] == ["call_A", "call_B"]
+        assert tool_messages[0]["content"] == [
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+            }
+        ]
+        assert tool_messages[1]["content"] == "result_B"
+
+    def test_invalid_image_url_preserves_text_only_content(self):
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "still text"},
+                {"type": "image", "source": {"type": "url"}},
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["assistant", "tool"]
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 1
+        assert tool_msg[0]["content"] == "still text"
+
+    def test_tool_reference_only_preserves_existing_messages(self):
+        request = self._make_tool_result_request(
+            [{"type": "tool_reference", "tool_name": "calculator"}]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == [
+            "assistant",
+            "tool",
+            "tool",
+        ]
+        assert result.messages[1:] == [
+            {"role": "tool", "tool_call_id": "call_001", "content": ""},
+            {
+                "role": "tool",
+                "tool_call_id": "call_001",
+                "content": [{"type": "tool_reference", "name": "calculator"}],
+            },
+        ]
+
+    def test_tool_result_image_and_reference_preserve_existing_messages(self):
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "before_A"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                },
+                {"type": "tool_reference", "tool_name": "calculator"},
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == [
+            "assistant",
+            "tool",
+            "tool",
+        ]
+        assert result.messages[1:] == [
+            {
+                "role": "tool",
+                "tool_call_id": "call_001",
+                "content": [
+                    {"type": "text", "text": "before_A"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_001",
+                "content": [{"type": "tool_reference", "name": "calculator"}],
+            },
         ]
 
     def test_tool_result_none_content(self):

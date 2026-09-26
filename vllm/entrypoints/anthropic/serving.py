@@ -463,51 +463,46 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls, block, openai_messages: list[dict[str, Any]]
     ) -> None:
         """Convert user tool_result with text and image support."""
-        tool_text = ""
-        tool_image_urls: list[str] = []
+        tool_content: str | list[dict[str, Any]] = ""
         tool_reference: list[dict[str, Any]] = []
 
         if isinstance(block.content, str):
-            tool_text = block.content
+            tool_content = block.content
         elif isinstance(block.content, list):
             text_parts: list[str] = []
+            structured_parts: list[dict[str, Any]] = []
+            has_image = False
             for item in block.content:
                 if not isinstance(item, dict):
                     continue
                 item_type = item.get("type")
                 if item_type == "text":
-                    text_parts.append(item.get("text", ""))
+                    text = item.get("text", "")
+                    text_parts.append(text)
+                    structured_parts.append({"type": "text", "text": text})
                 elif item_type == "image":
                     source = item.get("source", {})
                     url = cls._convert_image_source_to_url(source)
                     if url:
-                        tool_image_urls.append(url)
+                        structured_parts.append(
+                            {"type": "image_url", "image_url": {"url": url}}
+                        )
+                        has_image = True
                 elif item_type == "tool_reference":
                     ref_name = item.get("tool_name") or item.get("name")
                     if ref_name:
                         tool_reference.append(
                             {"type": "tool_reference", "name": ref_name}
                         )
-            tool_text = "\n".join(text_parts)
+            tool_content = structured_parts if has_image else "\n".join(text_parts)
 
         openai_messages.append(
             {
                 "role": "tool",
                 "tool_call_id": block.tool_use_id or "",
-                "content": tool_text or "",
+                "content": tool_content,
             }
         )
-
-        if tool_image_urls:
-            openai_messages.append(
-                {
-                    "role": "user",
-                    "content": [  # type: ignore[dict-item]
-                        {"type": "image_url", "image_url": {"url": img}}
-                        for img in tool_image_urls
-                    ],
-                }
-            )
 
         if tool_reference:
             openai_messages.append(
