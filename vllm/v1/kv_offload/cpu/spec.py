@@ -149,12 +149,19 @@ class CPUOffloadingSpec(OffloadingSpec):
             # Maximum entries in the internal tracker's LRU table.
             max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
 
+            # pin_in_flight_chunks: prefer evicting chunks of finished requests
+            # over chunks an unfinished request will resume from.
+            pin_in_flight_chunks = bool(
+                self.extra_config.get("pin_in_flight_chunks", False)
+            )
+
             self._manager = CPUOffloadingManager(
                 num_chunks=self.num_chunks,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
+                pin_in_flight_chunks=pin_in_flight_chunks,
                 max_tracker_size=max_tracker_size,
             )
         return self._manager

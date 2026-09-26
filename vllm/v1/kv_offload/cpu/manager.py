@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
@@ -9,6 +9,7 @@ from typing_extensions import override
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -28,6 +29,8 @@ from vllm.v1.kv_offload.cpu.common import (
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
+logger = init_logger(__name__)
+
 
 @dataclass(slots=True)
 class _RequestCacheAccess:
@@ -40,6 +43,7 @@ class _RequestCacheAccess:
     inserted_keys: set[OffloadKey] = field(default_factory=set)
     reused_keys: set[OffloadKey] = field(default_factory=set)
     store_miss_keys: set[OffloadKey] = field(default_factory=set)
+    pinned_keys: set[OffloadKey] = field(default_factory=set)
     finished: bool = False
 
 
@@ -62,6 +66,8 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        *,
+        pin_in_flight_chunks: bool = False,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
@@ -78,6 +84,21 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_write_pending_chunks: int = 0
 
         self.store_threshold: int = store_threshold
+        # When enabled, chunks of unfinished requests are the last ones a
+        # policy takes, within a bounded search: a rollout frozen across a
+        # weight update keeps the prefix it will resume from instead of losing
+        # it to unrelated traffic, without an unbounded scan when everything
+        # in the cache is in flight.
+        if pin_in_flight_chunks and not self._policy.supports_deprioritized_eviction:
+            logger.warning(
+                "pin_in_flight_chunks is ignored: cache policy %s does not "
+                "declare support for deprioritized eviction candidates.",
+                type(self._policy).__name__,
+            )
+            pin_in_flight_chunks = False
+        self._in_flight_keys: Counter[OffloadKey] | None = (
+            Counter() if pin_in_flight_chunks else None
+        )
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
@@ -153,6 +174,13 @@ class CPUOffloadingManager(OffloadingManager):
             req_context.set_state(state)
         return state
 
+    def _pin(self, key: OffloadKey, state: _RequestCacheAccess) -> None:
+        """Hold a chunk this request will resume from, once per request."""
+        if self._in_flight_keys is None or key in state.pinned_keys:
+            return
+        state.pinned_keys.add(key)
+        self._in_flight_keys[key] += 1
+
     def _record_request_cache_access(
         self,
         keys: Iterable[OffloadKey],
@@ -170,6 +198,7 @@ class CPUOffloadingManager(OffloadingManager):
             group_idx = get_offload_group_idx(key)
             state.key_groups.setdefault(group_idx, []).append(key)
             state.seen_keys.add(key)
+            self._pin(key, state)
         state.inserted_keys.update(inserted_keys)
         # Re-reading a chunk inserted by this request is an internal transfer
         # (for example, a tiering cascade), not a second cache access.
@@ -254,6 +283,7 @@ class CPUOffloadingManager(OffloadingManager):
         # aged out; the threshold applies only to new store candidates.
         keys_to_store: list[OffloadKey] = []
         ready_existing_keys: list[OffloadKey] = []
+        pending_existing_keys: list[OffloadKey] = []
         for key in keys:
             chunk = self._policy.get(key)
             if chunk is None:
@@ -261,6 +291,8 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
+                else:
+                    pending_existing_keys.append(key)
 
         if self.counts is not None:
             num_store_candidates = len(keys_to_store)
@@ -292,6 +324,12 @@ class CPUOffloadingManager(OffloadingManager):
             req_context,
             reused_keys=ready_existing_keys,
         )
+        # A chunk another request is still storing is one this request will
+        # resume from too, but it is neither a store candidate nor a completed
+        # reuse, so it would otherwise be seen by nobody but its writer.
+        if self._in_flight_keys is not None:
+            for key in pending_existing_keys:
+                self._pin(key, state)
 
         if not keys_to_store:
             return PrepareStoreOutput(
@@ -314,7 +352,14 @@ class CPUOffloadingManager(OffloadingManager):
             # Chunks from the original input are excluded from eviction candidates:
             # a chunk that was already stored must remain in the cache after this call.
             protected = set(keys)
-            evicted = self._policy.evict(num_chunks_to_evict, protected)
+            if self._in_flight_keys:
+                evicted = self._policy.evict(
+                    num_chunks_to_evict, protected, self._in_flight_keys.keys()
+                )
+            else:
+                # Two-argument call, so a policy written against the older
+                # signature keeps working whenever pinning is off.
+                evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
                 return None
 
@@ -400,6 +445,12 @@ class CPUOffloadingManager(OffloadingManager):
         ):
             return
         state.finished = True
+        if self._in_flight_keys is not None:
+            for key in state.pinned_keys:
+                if self._in_flight_keys[key] > 1:
+                    self._in_flight_keys[key] -= 1
+                else:
+                    del self._in_flight_keys[key]
         key_groups = []
         for group_idx in sorted(state.key_groups):
             keys = state.key_groups[group_idx]
@@ -426,6 +477,8 @@ class CPUOffloadingManager(OffloadingManager):
         # flushes in-flight load job IDs to the workers before any new stores
         # can begin, preventing a cross-direction data race on reused offload chunk IDs.
         self._policy.clear()
+        if self._in_flight_keys is not None:
+            self._in_flight_keys.clear()
         self._cache_generation += 1
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
