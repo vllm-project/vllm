@@ -361,7 +361,16 @@ def _run_flashinfer_autotune_dummy_runs(
             num_tokens,
             tuning_buckets,
         )
-        with fi_utils.autotune(tuning_buckets=tuning_buckets):
+        # round_up=True: map runtime M to the smallest bucket >= M, matching what
+            # mm_mxfp8's own mapper (map_to_hybrid_bucket_uncapped) does at serving
+            # time. The autotuner's override default is floor mapping, which hands a
+            # cute-dsl low-M split-K tactic tuned at bucket b to calls with
+            # b < M < next bucket; the runner then rejects the tactic (its MMA tile
+            # is chosen by rounding M up) and the dummy run raises
+            # "Invalid MXFP8 split-K tactic" — seen on the spec-decode draft
+            # forward, whose M is not a bucket value.
+            # See https://github.com/flashinfer-ai/flashinfer/issues/5450
+            with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
             runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
