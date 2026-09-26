@@ -493,6 +493,14 @@ Supported models:
 
 Flags: `--tool-call-parser apertus`
 
+### BerryLM Models (`berrylm`)
+
+Supported models:
+
+* `RWB/BerryLM-OS`
+
+Flags: `--tool-call-parser berrylm` (add `--reasoning-parser berrylm` for the thinking mode)
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
