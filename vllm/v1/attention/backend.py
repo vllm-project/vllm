@@ -503,19 +503,13 @@ class CommonAttentionMetadata:
         # but not the right per-request boundaries. Padding requests have a query
         # length of zero and are skipped by the device boundary search.
         num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        from vllm.v1.attention.ops.metadata import _token_request_mapping_kernel
+        from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 
         num_output_tokens = max(num_mapped_tokens, num_tokens)
         assert buffer.shape[0] >= num_output_tokens
-        _token_request_mapping_kernel[((num_output_tokens + 255) // 256,)](
-            self.query_start_loc,
-            buffer,
-            self.query_start_loc.shape[0] - 1,
-            num_mapped_tokens,
-            num_output_tokens,
-            num_warps=4,
+        self._token_to_req_indices_cache = compute_token_to_req_indices(
+            self.query_start_loc, buffer, num_mapped_tokens, num_output_tokens
         )
-        self._token_to_req_indices_cache = buffer[:num_output_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
@@ -606,8 +600,11 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
-    # Whether all step-dependent draft decode metadata can be updated in place,
-    # allowing one metadata build to be reused across autoregressive draft steps.
+    # Whether update_draft_decode_metadata() can regenerate all decode metadata
+    # from persistent device buffers with capture-safe ops only. Lets a
+    # speculator record the refresh inside its draft decode CUDA graph, so no
+    # eager build() is needed between steps or between the batches that replay
+    # it, whether the graph holds one draft forward or a multi-step loop.
     supports_draft_decode_metadata_update: bool = False
 
     @abstractmethod
@@ -755,12 +752,12 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         )
 
     def update_draft_decode_metadata(self, metadata: M) -> None:
-        """Update step-dependent draft decode metadata in place.
+        """Update draft decode metadata in place.
 
-        The fused draft loop may call this method during full CUDA graph
-        capture. CUDA graph replay does not run this Python method, so
-        implementations must emit capture-safe operations and keep replayed
-        tensor state in persistent storage.
+        Speculators can record this call inside their draft decode CUDA graphs,
+        so it runs once at capture and never again in Python. Implementations
+        must emit only capture-safe operations and write results into persistent
+        tensors that ``metadata`` already references.
         """
         raise NotImplementedError
 
