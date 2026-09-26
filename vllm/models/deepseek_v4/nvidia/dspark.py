@@ -569,6 +569,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
 
+    def skip_checkpoint_weight(self, name: str) -> bool:
+        # The drafter ships inside its target's checkpoint; without this the
+        # loader reads the whole target (~160 GB for DeepSeek-V4-Flash) only
+        # for load_weights to drop everything but mtp.*.
+        return self._remap_dspark_name(name) is None
+
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
 
