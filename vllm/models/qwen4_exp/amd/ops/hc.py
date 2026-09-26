@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -158,6 +159,248 @@ def _hc_gate_mix_kernel(
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(y_ptr + row * stride_y + offs_inner, acc, mask)
+
+
+@triton.jit
+def _hc_down_silu_kernel(
+    x_ptr,
+    w_ptr,
+    y_ptr,
+    stride_x,
+    stride_w,
+    stride_y,
+    M,
+    K: tl.constexpr,
+    RANK: tl.constexpr,
+    HC: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+) -> None:
+    """Down projection with the SiLU folded into the epilogue.
+
+    One program per output column, reducing over K. At decode M the two skinny
+    projections are pure weight-load traffic, so a column per program reads
+    each weight row exactly once and needs no ``tl.dot`` -- whose smallest tile
+    would be several times the batch.
+
+    M is a runtime value padded to ``BLOCK_M``: a served batch is whatever is
+    in flight, not a power of two, and ``tl.arange`` requires one.
+    """
+    n = tl.program_id(0)
+    offs_m = tl.arange(0, BLOCK_M)
+    mask_m = offs_m < M
+    acc = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        mask_k = offs_k < K
+        w = tl.load(w_ptr + n * stride_w + offs_k, mask_k, other=0.0).to(tl.float32)
+        x = tl.load(
+            x_ptr + offs_m[:, None] * stride_x + offs_k[None, :],
+            mask_m[:, None] & mask_k[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        acc += tl.sum(x * w[None, :], axis=1)
+
+    # The merged projection also carries the injection logits and the
+    # alignment pad; only the low-rank columns take the activation.
+    if n < RANK:
+        z = acc / HC
+        acc = z * tl.sigmoid(z)
+
+    tl.store(y_ptr + offs_m * stride_y + n, acc.to(y_ptr.dtype.element_ty), mask=mask_m)
+
+
+def _hc_down_silu(
+    x: torch.Tensor, weight: torch.Tensor, rank: int, hc_count: int
+) -> torch.Tensor:
+    M, K = x.shape
+    N = weight.shape[0]
+    assert weight.shape[1] == K
+
+    if not supports_fused_low_rank_mix(x, weight):
+        # The unfused route, by the same ops the caller used to run inline.
+        # All three HyperConnection projections are bias-free, unquantized and
+        # TP-disabled, so the raw GEMM is what the Linear module would have
+        # done. Only the low-rank columns take the activation; the injection
+        # logits and the alignment pad pass through.
+        #
+        # The activation runs in place, straight into the slice, rather than
+        # through the `hc_silu` op. That op allocates its own output, so using
+        # it here needs an assignment back into the slice -- a copy kernel per
+        # boundary that the inline caller never paid, which at 95 boundaries a
+        # step measured as a 4-6% TPOT regression above the gate. The kernel is
+        # too small to matter in bytes and too frequent not to matter in
+        # launches. In-place is safe because each program owns one row and
+        # loads it in a single block before storing to the same addresses.
+        out = rocm_unquantized_gemm_impl(x, weight, None)
+        low_rank = out[:, :rank]
+        _hc_silu_kernel[(M,)](
+            low_rank,
+            low_rank,
+            low_rank.stride(0),
+            low_rank.stride(0),
+            DIM=rank,
+            HC=hc_count,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+        return out
+
+    global fused_call_count
+    fused_call_count += 1
+    out = x.new_empty((M, N))
+    _hc_down_silu_kernel[(N,)](
+        x,
+        weight,
+        out,
+        x.stride(0),
+        weight.stride(0),
+        out.stride(0),
+        M=M,
+        K=K,
+        RANK=rank,
+        HC=hc_count,
+        BLOCK_M=triton.next_power_of_2(M),
+        BLOCK_K=4096,
+        num_warps=4,
+    )
+    return out
+
+
+def _hc_down_silu_fake(
+    x: torch.Tensor, weight: torch.Tensor, rank: int, hc_count: int
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]))
+
+
+@triton.jit
+def _hc_up_gate_mix_kernel(
+    y_ptr,
+    w_ptr,
+    xn_ptr,
+    out_ptr,
+    stride_y,
+    stride_w,
+    stride_xn,
+    stride_out,
+    M,
+    RANK: tl.constexpr,
+    HC: tl.constexpr,
+    HC_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+) -> None:
+    """Up projection with the sigmoid gate mix folded in.
+
+    One program per output channel. It computes only the ``HC`` gate values
+    that channel needs, as ``HC`` dot products of length ``RANK``, and consumes
+    each immediately -- so the ``[M, HC*HC_DIM]`` gate tensor, the largest
+    intermediate in the block, is never written or read back.
+    """
+    h = tl.program_id(0)
+    offs_m = tl.arange(0, BLOCK_M)
+    mask_m = offs_m < M
+    offs_r = tl.arange(0, BLOCK_R)
+    mask_r = offs_r < RANK
+
+    y = tl.load(
+        y_ptr + offs_m[:, None] * stride_y + offs_r[None, :],
+        mask_m[:, None] & mask_r[None, :],
+        other=0.0,
+    ).to(tl.float32)
+
+    acc = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for stream in tl.static_range(HC):
+        row = stream * HC_DIM + h
+        w = tl.load(w_ptr + row * stride_w + offs_r, mask_r, other=0.0).to(tl.float32)
+        gate = tl.sum(y * w[None, :], axis=1)
+        xn = tl.load(xn_ptr + offs_m * stride_xn + row, mask_m, other=0.0).to(
+            tl.float32
+        )
+        acc += tl.sigmoid(gate) * xn
+    acc /= HC
+
+    tl.store(
+        out_ptr + offs_m * stride_out + h,
+        acc.to(out_ptr.dtype.element_ty),
+        mask=mask_m,
+    )
+
+
+def _hc_up_gate_mix(
+    lora: torch.Tensor, weight: torch.Tensor, xn: torch.Tensor, hc_count: int
+) -> torch.Tensor:
+    M, rank = lora.shape
+    DIM = weight.shape[0]
+    assert weight.shape[1] == rank
+    assert xn.shape == (M, DIM)
+    assert DIM % hc_count == 0
+
+    if not supports_fused_low_rank_mix(lora, weight, xn):
+        gate = rocm_unquantized_gemm_impl(lora, weight, None)
+        return _hc_gate_mix(xn, gate, hc_count)
+
+    global fused_call_count
+    fused_call_count += 1
+    hc_dim = DIM // hc_count
+    out = xn.new_empty((M, hc_dim))
+    _hc_up_gate_mix_kernel[(hc_dim,)](
+        lora,
+        weight,
+        xn,
+        out,
+        lora.stride(0),
+        weight.stride(0),
+        xn.stride(0),
+        out.stride(0),
+        M=M,
+        RANK=rank,
+        HC=hc_count,
+        HC_DIM=hc_dim,
+        BLOCK_M=triton.next_power_of_2(M),
+        BLOCK_R=triton.next_power_of_2(rank),
+        num_warps=4,
+    )
+    return out
+
+
+def _hc_up_gate_mix_fake(
+    lora: torch.Tensor, weight: torch.Tensor, xn: torch.Tensor, hc_count: int
+) -> torch.Tensor:
+    return xn.new_empty((xn.shape[0], weight.shape[0] // hc_count))
+
+
+# The skinny-GEMM path these kernels replace only covers up to five rows
+# (`wvSplitK`'s N_in switch), and above that the unfused path stops using it.
+# The fused kernels are written for that same regime -- they do not tile M, so
+# they degrade quickly past it. Prefill must take the unfused path.
+HC_FUSED_MIX_MAX_TOKENS = 5
+
+# Incremented whenever a fused kernel is actually chosen. This exists so tests
+# can assert the fused path was *reached*, not merely that the result is right:
+# both paths compute the same thing, so numerics alone cannot tell them apart,
+# and an earlier revision of this code shipped a fused path that no served
+# request ever ran.
+fused_call_count = 0
+
+
+def supports_fused_low_rank_mix(xn: torch.Tensor, *weights: torch.Tensor) -> bool:
+    """Whether the fused kernels can handle this call.
+
+    Consulted from inside the ops, not by the caller. The caller is compiled
+    ahead of time as a single graph spanning the whole token range, so a
+    Python branch there is resolved once -- against the memory profile run,
+    which is thousands of tokens wide -- and baked in for every batch the
+    graph will ever serve. A `direct_register_custom_op` op is opaque to that
+    tracing and is re-entered on every execution, including once per captured
+    CUDA-graph size, so the decision made here is the one that runs.
+    """
+    return (
+        xn.dim() == 2
+        and xn.shape[0] <= HC_FUSED_MIX_MAX_TOKENS
+        and xn.dtype in (torch.float16, torch.bfloat16)
+        and xn.stride(1) == 1
+        and all(w.stride(1) == 1 and w.dtype == xn.dtype for w in weights)
+    )
 
 
 def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
@@ -433,6 +676,16 @@ direct_register_custom_op(
     op_func=_hc_combine_norm,
     fake_impl=_hc_combine_norm_fake,
 )
+direct_register_custom_op(
+    op_name="qwen4_exp_hc_down_silu",
+    op_func=_hc_down_silu,
+    fake_impl=_hc_down_silu_fake,
+)
+direct_register_custom_op(
+    op_name="qwen4_exp_hc_up_gate_mix",
+    op_func=_hc_up_gate_mix,
+    fake_impl=_hc_up_gate_mix_fake,
+)
 
 
 def grouped_gemma_rmsnorm(
@@ -478,10 +731,26 @@ def hc_combine_norm(
     )
 
 
+def hc_down_silu(
+    x: torch.Tensor, weight: torch.Tensor, rank: int, hc_count: int
+) -> torch.Tensor:
+    return torch.ops.vllm.qwen4_exp_hc_down_silu(x, weight, rank, hc_count)
+
+
+def hc_up_gate_mix(
+    lora: torch.Tensor, weight: torch.Tensor, xn: torch.Tensor, hc_count: int
+) -> torch.Tensor:
+    return torch.ops.vllm.qwen4_exp_hc_up_gate_mix(lora, weight, xn, hc_count)
+
+
 __all__ = [
+    "HC_FUSED_MIX_MAX_TOKENS",
     "grouped_gemma_rmsnorm",
     "hc_combine",
     "hc_combine_norm",
+    "hc_down_silu",
     "hc_gate_mix",
     "hc_silu",
+    "hc_up_gate_mix",
+    "supports_fused_low_rank_mix",
 ]
