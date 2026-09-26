@@ -67,6 +67,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.notifications import has_pending_worker_notifications
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -2060,6 +2061,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
+            worker_notifications_pending=has_pending_worker_notifications(),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
@@ -2202,6 +2204,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            worker_notifications_pending=has_pending_worker_notifications(),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
