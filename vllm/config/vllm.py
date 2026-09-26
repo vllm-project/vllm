@@ -3376,6 +3376,24 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
+            # A dense (non-MLA) DFlash/DSpark draft under DCP: the flash DCP
+            # path all-gathers query heads across the DCP group and attends
+            # them against this rank's KV-head shard, so the draft reads the
+            # wrong KV heads and acceptance silently collapses to ~0%. MLA
+            # drafts (one latent KV head) are not affected. Fail fast instead.
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method in ("dflash", "dspark")
+                and self.speculative_config.draft_model_config is not None
+                and not self.speculative_config.draft_model_config.use_mla
+            ):
+                raise NotImplementedError(
+                    "DFlash/DSpark speculative decoding with a dense (non-MLA) "
+                    "draft does not support decode context parallelism; use "
+                    "decode_context_parallel_size=1 or a different speculative "
+                    "method (e.g. mtp)."
+                )
+
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
             assert not self.scheduler_config.disable_chunked_mm_input, (
