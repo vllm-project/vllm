@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TypeVar
 
 import torch
@@ -134,6 +135,7 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
         self._last_slot_layout: tuple[int | None, ...] | None = None
+        self._mm_lora_mappings: dict[LoRAMappingType, LoRAMapping] = {}
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
 
@@ -458,6 +460,7 @@ class LoRAModelManager:
         self._active_adapters.clear()
         self._last_mapping = None
         self._last_slot_layout = None
+        self._mm_lora_mappings.clear()
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:
@@ -1329,6 +1332,38 @@ class LoRAModelManager:
             self._set_adapter_mapping(mapping)
             self._last_mapping = mapping
             self._last_slot_layout = slot_layout
+        if mapping.type in (LoRAMappingType.TOWER, LoRAMappingType.CONNECTOR):
+            self._mm_lora_mappings[mapping.type] = mapping
+
+    @contextmanager
+    def use_mm_lora_mapping(
+        self, image_index: int, tower_tokens: int, connector_tokens: int
+    ) -> Iterator[None]:
+        """Scope encoder metadata to one image, using its original batch index."""
+        originals = []
+        try:
+            for kind, count in (
+                (LoRAMappingType.TOWER, tower_tokens),
+                (LoRAMappingType.CONNECTOR, connector_tokens),
+            ):
+                mapping = self._mm_lora_mappings.get(kind)
+                # Encoder profiling can run before any adapter mapping is set.
+                if mapping is None:
+                    continue
+                adapter_id = mapping.prompt_mapping[image_index]
+                originals.append(mapping)
+                self._set_adapter_mapping(
+                    LoRAMapping(
+                        (adapter_id,) * count,
+                        (adapter_id,),
+                        is_prefill=True,
+                        type=kind,
+                    )
+                )
+            yield
+        finally:
+            for mapping in originals:
+                self._set_adapter_mapping(mapping)
 
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)

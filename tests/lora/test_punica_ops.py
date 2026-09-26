@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import weakref
 from threading import Lock
 
 import pytest
@@ -7,7 +8,12 @@ import torch
 
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
-from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.lora.ops.triton_ops.utils import (
+    _LORA_A_PTR_DICT,
+    _LORA_B_PTR_DICT,
+    _get_lora_a_ptr,
+    _get_lora_b_ptr,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -639,3 +645,16 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.parametrize("projection", ["shrink", "expand"])
+def test_single_slice_pointer_lookup_releases_temporary_weight(projection):
+    """Temporary grouped adapter weights must not accumulate in the pointer cache."""
+    weight = torch.ones(2, 1, 16, 8, device="cpu", dtype=torch.bfloat16)
+    reference = weakref.ref(weight)
+    if projection == "shrink":
+        metadata = _get_lora_a_ptr([weight], weight.device)
+    else:
+        metadata = _get_lora_b_ptr([weight], 0, weight.device)
+    del metadata, weight
+    assert reference() is None
