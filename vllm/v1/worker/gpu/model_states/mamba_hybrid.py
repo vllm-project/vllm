@@ -139,7 +139,17 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
-    ) -> MambaSpecDecodeGPUContext:
+        bind: bool = False,
+    ) -> tuple[MambaSpecDecodeGPUContext, bool]:
+        """Return the align context, optionally leaving it bound to ``block_tables``.
+
+        Only a caller holding the source per-request-slot tables may bind (pass
+        ``bind=True``). The copy kernels index rows by ``req_idx``, so a binding
+        taken from the per-step gathered views -- dummy runs, cudagraph capture --
+        would be read by every later launch. Such callers get a temporary binding
+        for the launch they are about to issue; the returned flag tells them to
+        release it afterwards (``ctx.is_initialized = False``).
+        """
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
@@ -163,6 +173,7 @@ class MambaHybridModelState(DefaultModelState):
                 ),
             )
         ctx = self._mamba_ctx
+        temporary = False
         if not ctx.is_initialized:
             forward_context = self.vllm_config.compilation_config.static_forward_context
             # block_tables are batch-order slices of the persistent
@@ -174,7 +185,11 @@ class MambaHybridModelState(DefaultModelState):
                 copy_funcs,
                 [block_tables[gid] for gid in mamba_group_ids],
             )
-        return ctx
+            temporary = not bind
+        # ``temporary`` is only true when this call took the binding: a
+        # capture/dummy batch must not decide the tables every later copy kernel
+        # indexes by req_idx.
+        return ctx, temporary
 
     def preprocess_state(
         self,
@@ -195,7 +210,14 @@ class MambaHybridModelState(DefaultModelState):
         if num_reqs == 0:
             return
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
-        ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        ctx, temporary = self._ensure_align_ctx(
+            kv_cache_config,
+            mamba_group_ids,
+            block_tables,
+            # Source per-request-slot tables: this call decides the binding.
+            bind=True,
+        )
+        assert not temporary, "preprocess_state binds the source block tables"
 
         # The state-advance + pre-copy kernels run every step; they fast-exit per
         # request when src_col < 0 or src_col == dst_col, so no copy happens on
@@ -306,12 +328,20 @@ class MambaHybridModelState(DefaultModelState):
                     if hasattr(builder, "mamba_aligned_state_indices"):
                         aligned_index_builders.append((group_idx, builder))
             if aligned_index_builders:
-                ctx = self._ensure_align_ctx(
+                # prepare_attn only ever holds the per-step gathered views, so
+                # it must not decide the binding (bind defaults to False): it
+                # launches against a temporary binding and releases it, leaving
+                # the source tables to bind on the first real batch.
+                ctx, temporary = self._ensure_align_ctx(
                     kv_cache_config, mamba_group_ids, block_tables
                 )
-                all_group_indices = ctx.compute_aligned_state_indices(
-                    input_batch.seq_lens, num_reqs
-                )
+                try:
+                    all_group_indices = ctx.compute_aligned_state_indices(
+                        input_batch.seq_lens, num_reqs, input_batch.idx_mapping
+                    )
+                finally:
+                    if temporary:
+                        ctx.is_initialized = False
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
