@@ -367,12 +367,18 @@ class RequestRunner:
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
         skip_reading_prefix_cache: bool = False,
+        skip_writing_prefix_cache: bool = False,
     ):
         self.req_id += 1
 
         sampling_params = SamplingParams(
             max_tokens=1000,
             skip_reading_prefix_cache=skip_reading_prefix_cache or None,
+            extra_args=(
+                {"skip_writing_prefix_cache": True}
+                if skip_writing_prefix_cache
+                else None
+            ),
         )
         sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
