@@ -1091,6 +1091,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 self.paged_kv_indices,
                 block_table_tensor,
                 block_table_tensor.stride(0),
+                block_table_tensor.stride(1),
                 paged_kv_indptr,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
                 BLOCK_SIZE=1024,
@@ -1288,7 +1289,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 def _expand_page_indices_kernel(
     page_indices,
     block_table,
-    block_table_stride,
+    block_table_stride_0,
+    block_table_stride_1,
     cu_num_tokens,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -1311,7 +1313,7 @@ def _expand_page_indices_kernel(
     # workgroup walked the whole sequence in a serial loop.
     req_idx = tl.program_id(0)
     chunk_idx = tl.program_id(1)
-    row_ptr = block_table + req_idx * block_table_stride
+    row_ptr = block_table + req_idx * block_table_stride_0
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
@@ -1332,7 +1334,9 @@ def _expand_page_indices_kernel(
     offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
 
     # Load the block ID from the block table
-    block_ids = tl.load(row_ptr + block_idx, mask=mask)
+    # Both strides are taken from the caller: the block table is a view owned
+    # elsewhere, so a unit column stride must not be assumed.
+    block_ids = tl.load(row_ptr + block_idx * block_table_stride_1, mask=mask)
 
     # Compute flat index in the flattened kv_buffer
     flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
