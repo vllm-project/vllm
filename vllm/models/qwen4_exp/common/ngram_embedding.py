@@ -465,10 +465,17 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
 
         flat_ids = input_ids.reshape(-1).long()
         if flat_ids.numel():
+            if self.weight.dtype == torch.float8_e4m3fn:
+                uva_weight_view = self._uva_weight.view(torch.int8)
+                output_view = output.view(torch.int8)
+            else:
+                uva_weight_view = self._uva_weight
+                output_view = output
+
             _lookup_ple_embedding_from_pinned_kernel[(flat_ids.numel(),)](
-                self._uva_weight,
+                uva_weight_view,
                 flat_ids,
-                output,
+                output_view,
                 self.embedding_dim,
                 self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
