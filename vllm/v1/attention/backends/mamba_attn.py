@@ -97,6 +97,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
+    # "align" mode state indices, set each step by MRV2's MambaHybridModelState.
+    mamba_aligned_state_indices: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -279,14 +281,31 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         **kwargs: Any,
     ) -> M:
         """Default build implementation for Mamba-like attention backends.
-        Subclasses (e.g., Mamba2) can override to add additional metadata.
+        Subclasses (e.g., Mamba2) can override _compute_common_metadata to add
+        additional metadata.
         """
-        return self._compute_common_metadata(
+        state_indices_tensor = self.mamba_aligned_state_indices
+        if state_indices_tensor is None:
+            state_indices_tensor = mamba_get_block_table_tensor(
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )
+        # KV cache groups of one pass differ only in their state indices, so
+        # later groups reuse the first group's metadata.
+        cache = common_attn_metadata._cross_group_cache
+        if cache is not None and type(self) in cache:
+            return self._with_state_indices(cache[type(self)], state_indices_tensor)
+        metadata = self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
             prev_last_scheduled_idx=prev_last_scheduled_idx,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        if cache is not None:
+            cache[type(self)] = metadata
+        return self._with_state_indices(metadata, state_indices_tensor)
 
     def _compute_chunk_metadata(
         self,
@@ -465,7 +484,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         prev_last_scheduled_idx: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """Compute metadata common to both Mamba1 and Mamba2."""
+        """Compute the batch-level metadata, without state indices."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when
@@ -550,8 +569,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
 
-            # Return a tensor of shape (#requests, #max blocks)
-            state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related variables:
             mamba_block_size = self.kv_cache_spec.block_size
             (
@@ -569,27 +586,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     prev_last_scheduled_idx,
                     fallback,
                 )
-        else:
-            state_indices_tensor = mamba_get_block_table_tensor(
-                common_attn_metadata.block_table_tensor,
-                common_attn_metadata.seq_lens,
-                self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
-            )
-
-        if state_indices_tensor.dim() == 1:
-            state_indices_tensor = state_indices_tensor.unsqueeze(-1)
-
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
-        )
-        if self.vllm_config.cache_config.mamba_cache_mode != "all":
-            state_indices_tensor_d = state_indices_tensor_d[
-                :, : 1 + self.num_spec_tokens
-            ]
-            state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         # Sometimes even with specdec enabled we get single-token prefill chunks that
         # should be treated as decodes but don't have num_accepted_tokens set.
@@ -735,15 +731,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ):
             bc_pre_scratch = self.decode_bc_pre_scratch[:num_decodes]
 
-        metadata = self.metadata_cls(
+        return self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
-            state_indices_tensor_p=state_indices_tensor_p,
-            state_indices_tensor_d=state_indices_tensor_d,
+            state_indices_tensor_p=None,
+            state_indices_tensor_d=None,
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
@@ -765,7 +761,30 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
 
-        return self._update_metadata_for_cudagraph_capture(metadata)
+    def _with_state_indices(self, metadata: M, state_indices_tensor: torch.Tensor) -> M:
+        """Add this KV cache group's state indices to the batch-level metadata
+        and stage it for FULL cudagraphs."""
+        if state_indices_tensor.dim() == 1:
+            state_indices_tensor = state_indices_tensor.unsqueeze(-1)
+
+        state_indices_tensor_d, state_indices_tensor_p = torch.split(
+            state_indices_tensor,
+            [metadata.num_decodes, metadata.num_prefills],
+            dim=0,
+        )
+        if self.vllm_config.cache_config.mamba_cache_mode != "all":
+            state_indices_tensor_d = state_indices_tensor_d[
+                :, : 1 + self.num_spec_tokens
+            ]
+            state_indices_tensor_p = state_indices_tensor_p[:, 0]
+
+        return self._update_metadata_for_cudagraph_capture(
+            replace(
+                metadata,
+                state_indices_tensor_d=state_indices_tensor_d,
+                state_indices_tensor_p=state_indices_tensor_p,
+            )
+        )
 
     def _update_metadata_for_cudagraph_capture(
         self,
@@ -903,9 +922,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )
-        if state_indices_tensor.dim() == 1:
-            state_indices_tensor = state_indices_tensor.unsqueeze(-1)
-
         assert (
             metadata.num_prefills + metadata.num_decodes
             == state_indices_tensor.shape[0]
@@ -915,21 +931,4 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             f"got {state_indices_tensor.shape[0]}."
         )
 
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [metadata.num_decodes, metadata.num_prefills],
-            dim=0,
-        )
-        if self.vllm_config.cache_config.mamba_cache_mode != "all":
-            state_indices_tensor_d = state_indices_tensor_d[
-                :, : 1 + self.num_spec_tokens
-            ]
-            state_indices_tensor_p = state_indices_tensor_p[:, 0]
-
-        new_metadata = replace(
-            metadata,
-            state_indices_tensor_d=state_indices_tensor_d,
-            state_indices_tensor_p=state_indices_tensor_p,
-        )
-
-        return self._update_metadata_for_cudagraph_capture(new_metadata)
+        return self._with_state_indices(metadata, state_indices_tensor)
