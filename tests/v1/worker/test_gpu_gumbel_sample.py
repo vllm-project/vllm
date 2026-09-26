@@ -22,6 +22,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required for Gumbel sampler tests", allow_module_level=True)
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import (
     _uniform64_from_random53,
     gumbel_sample,
@@ -526,3 +527,20 @@ def test_logits_cache_narrower_than_logits_is_rejected():
             logits_cache=cache,
             logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("vocab", [4096, 4097, 129280])
+def test_greedy_argmax_matches_torch(dtype, vocab):
+    """Random rows, cross-block ties, NaN/inf, masked tails and strided rows."""
+    logits = torch.randn(64, vocab + 1, device=DEVICE, dtype=dtype)[:, 1:]
+    logits[0].zero_()
+    logits[1].fill_(float("-inf"))
+    logits[2, [5, -1]] = float("inf")
+    logits[3, [5, -1]] = float("nan")
+    logits[4].fill_(float("-inf"))
+    logits[4, -1] = 1
+    logits[5].round_().clamp_(max=2)
+    logits[5, :4096].clamp_(max=1)
+    expected = logits.argmax(-1)
+    torch.testing.assert_close(greedy_argmax(logits), expected, rtol=0, atol=0)
