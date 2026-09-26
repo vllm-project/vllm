@@ -276,12 +276,12 @@ steps:
       - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly"
-  key: spec-decode-dflash-nightly
-  timeout_in_minutes: 90
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Reference MRV1 Nightly"
+  key: spec-decode-dflash-reference-mrv1-nightly
+  timeout_in_minutes: 30
   device: h200_35gb
   optional: true
-  source_file_dependencies:
+  source_file_dependencies: &spec-decode-dflash-deps
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
@@ -290,19 +290,18 @@ steps:
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
-    # DFlash2 NVFP4 (27B) does not fit a 35GB MIG slice; runs on B200 below.
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv1.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode AL DFlash Nightly"
+      label: ":amd: (MI300) Spec Decode AL DFlash Reference MRV1 Nightly"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 120
+      timeout_in_minutes: 30
       commands:
-      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv1.py
       depends_on:
       - image-build-amd
-      source_file_dependencies:
+      source_file_dependencies: &spec-decode-dflash-amd-deps
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/v1/attention/
@@ -317,6 +316,48 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Reference MRV2 Nightly"
+  key: spec-decode-dflash-reference-mrv2-nightly
+  timeout_in_minutes: 30
+  device: h200_35gb
+  optional: true
+  source_file_dependencies: *spec-decode-dflash-deps
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv2.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode AL DFlash Reference MRV2 Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 30
+      commands:
+      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv2.py
+      depends_on:
+      - image-build-amd
+      source_file_dependencies: *spec-decode-dflash-amd-deps
+
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Correctness Nightly"
+  key: spec-decode-dflash-correctness-nightly
+  timeout_in_minutes: 30
+  device: h200_35gb
+  optional: true
+  source_file_dependencies: *spec-decode-dflash-deps
+  commands:
+    # Catch-all for dflash/: runs every file the other DFlash jobs do not.
+    # DFlash2 NVFP4 (27B) does not fit a 35GB MIG slice; runs on B200 below.
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ --ignore=v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv1.py --ignore=v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv2.py --ignore=v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash2.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode AL DFlash Correctness Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 30
+      commands:
+      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ --ignore=v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv1.py --ignore=v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash_reference_mrv2.py --ignore=v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash2.py
+      depends_on:
+      - image-build-amd
+      source_file_dependencies: *spec-decode-dflash-amd-deps
+
 - label: ":nvidia: (B200) Spec Decode AL DFlash2 Nightly"
   key: spec-decode-dflash2-nightly-b200
   timeout_in_minutes: 60
@@ -330,7 +371,7 @@ steps:
     - vllm/model_executor/models/qwen3_5.py
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash2.py
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly"
   key: spec-decode-dspark-nightly
