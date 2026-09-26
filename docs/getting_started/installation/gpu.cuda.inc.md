@@ -520,3 +520,11 @@ The argument `vllm/vllm-openai` specifies the image to run, and should be replac
 See [Feature x Hardware](../../features/README.md#feature-x-hardware) compatibility matrix for feature support information.
 
 --8<-- [end:supported-features]
+
+### Troubleshooting Legacy Environments (Ubuntu 20.04 + CUDA 12.6)
+
+When attempting to build vLLM on Ubuntu 20.04 with CUDA 12.6, failures occur because pre-built wheels require GLIBC >= 2.34 (Ubuntu 20.04 ships with 2.31).
+
+**Resolutions:**
+1. **Use Docker:** Bypasses host constraints completely (`docker pull vllm/vllm-openai:latest`)
+2. **Upgrade GCC and pin index:** Upgrade your native toolchain to GCC-11+ and point your indices explicitly to `https://pytorch.org` before compiling source frameworks.
