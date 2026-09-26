@@ -1254,6 +1254,11 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
                 f"requires dataset fps is -1 or greater than 0 but got {fps}"
             )
 
+        # num_frames sizes the linspace buffer. A request can set it far
+        # above the container, including when fps == -1 skips the clamp above.
+        if total_frames_num > 0 and num_frames > total_frames_num:
+            num_frames = total_frames_num
+
         sample_frame_timestamps = np.linspace(
             0, total_duration, num_frames, dtype=float
         )
