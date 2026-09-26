@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -43,6 +44,65 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Engines with a failed read, pending a local NIXL metadata check.
+        self._failed_remote_engines: set[str] = set()
+        # Engines whose local metadata is gone; cleaned up once reads drain.
+        self._invalid_remote_engines: set[str] = set()
+
+    def _handle_failed_transfer(
+        self,
+        req_id: str,
+        handle: int | None,
+        failed_req_ids: set[str] | None = None,
+        record_failed_transfer: bool = True,
+    ) -> bool:
+        # Only transport failures can indicate lost peer metadata.
+        if (
+            record_failed_transfer
+            and (meta := self._recving_metadata.get(req_id)) is not None
+            and meta.remote is not None
+        ):
+            self._failed_remote_engines.add(meta.remote.engine_id)
+        return super()._handle_failed_transfer(
+            req_id, handle, failed_req_ids, record_failed_transfer
+        )
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        results = super().get_transfer_results()
+        if self._failed_remote_engines or self._invalid_remote_engines:
+            self._recover_remote_engines()
+        return results
+
+    def _recover_remote_engines(self) -> None:
+        # Handshakes load NIXL metadata off-thread; don't query or remove native
+        # metadata while one is in flight. New ones only start on this thread.
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+        for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
+            agents = self._remote_agents.get(engine_id, {}).values()
+            try:
+                # No descriptors: query local existence, not peer health.
+                if not all(map(self.nixl_wrapper.check_remote_metadata, agents)):
+                    self._invalid_remote_engines.add(engine_id)
+            except Exception:
+                logger.warning(
+                    "Could not check local NIXL metadata for engine %s.",
+                    engine_id,
+                    exc_info=True,
+                )
+        self._failed_remote_engines.clear()
+        for engine_id in (
+            self._invalid_remote_engines - self._engines_with_inflight_transfers()
+        ):
+            if engine_id in self._remote_agents:
+                self._cleanup_remote_engine(engine_id, log_eviction=False)
+                logger.info(
+                    "Cleared invalid NIXL state for engine %s; "
+                    "the next request will handshake again.",
+                    engine_id,
+                )
+            self._invalid_remote_engines.discard(engine_id)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -72,14 +132,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
             self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
@@ -144,6 +196,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        if engine_id in self._invalid_remote_engines:
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+        if engine_id not in self._remote_agents:
+            # Also re-handshakes queued requests that outlived invalid-peer cleanup.
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
