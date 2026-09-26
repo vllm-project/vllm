@@ -1169,6 +1169,23 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# Hybrid-model tests require the CUDA extensions from these exact upstream
+# tags. Build them once in the stable test-dependency layer instead of once per
+# parallel GPU shard. No arm64 job runs these tests, so arm64 images skip them.
+# The jobs check versions and sources with .buildkite/scripts/check-hybrid-test-deps.py.
+# torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+# mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        rm -rf /tmp/mamba-src \
+        && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src \
+        && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py \
+        && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src \
+        && rm -rf /tmp/mamba-src \
+        && CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation \
+            'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'; \
+    fi
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
