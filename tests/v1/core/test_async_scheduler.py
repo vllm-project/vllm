@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict, deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from unittest.mock import Mock
 
 import pytest
@@ -13,7 +14,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler, mock_kv
+from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
 
@@ -361,6 +362,13 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert not scheduler.running
 
 
+@dataclass
+class _QueuedStep:
+    scheduler_output: SchedulerOutput
+    new_reqs: list[tuple[str, int, int]]
+    sampled_tokens: list[int] | None
+
+
 class PipelinedEngine:
     """Drive a real AsyncScheduler like EngineCore.step_with_batch_queue:
     schedule until the batch queue is full, then process the oldest step's
@@ -391,8 +399,9 @@ class PipelinedEngine:
         self.scheduler = scheduler
         self.queue_size = queue_size
         self.accept_drafts = accept_drafts
-        # In-flight steps: (scheduler_output, new_reqs snapshot) in FIFO order.
-        self.queue: deque[tuple[SchedulerOutput, list[tuple[str, int, int]]]] = deque()
+        # In-flight steps in FIFO order. New steps are added to the left and
+        # retired from the right to match the engine's batch queue.
+        self.queue: deque[_QueuedStep] = deque()
         # Runner-side request state: req_id -> [seq_len, num_computed] as the
         # runner sees them (its own sampled tokens, not the scheduler's).
         self.runner_view: dict[str, list[int]] = {}
@@ -403,7 +412,10 @@ class PipelinedEngine:
         self.step_idx = 0
         self._next_token = 1000
 
-    def _schedule(self) -> bool:
+    def _schedule(
+        self,
+        sampled_tokens: list[int] | None = None,
+    ) -> SchedulerOutput:
         scheduler_output = self.scheduler.schedule()
         self.step_idx += 1
         # Snapshot what NewRequestData serializes at schedule time (both new
@@ -414,11 +426,13 @@ class PipelinedEngine:
         ]
         # Enqueue empty steps too (the engine executes them), so the runner
         # still observes their preempted/finished request ids in step order.
-        self.queue.appendleft((scheduler_output, new_reqs))
-        return True
+        self.queue.appendleft(_QueuedStep(scheduler_output, new_reqs, sampled_tokens))
+        return scheduler_output
 
     def _process_oldest_step(self) -> None:
-        scheduler_output, new_reqs = self.queue.pop()
+        step = self.queue.pop()
+        scheduler_output = step.scheduler_output
+        new_reqs = step.new_reqs
         # Worker-side state updates, in step order: flush preempted/finished
         # slots, then (re-)add new/resumed requests.
         for req_id in scheduler_output.preempted_req_ids or ():
@@ -454,7 +468,9 @@ class PipelinedEngine:
             tokens = list(range(self._next_token, self._next_token + 1 + num_accepted))
             self._next_token += 1 + num_accepted
             self.emitted[req_id].extend(tokens)
-            sampled_token_ids.append(tokens)
+            sampled_token_ids.append(
+                list(step.sampled_tokens) if step.sampled_tokens is not None else tokens
+            )
             # Rejected drafts roll back computed; the sampled tokens extend
             # the runner's sequence.
             view[1] = end - num_rejected
@@ -534,6 +550,99 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
             f"output {i} of {req.request_id}: token sampled for position "
             f"{actual}, delivered as position {expected}"
         )
+
+
+@pytest.mark.parametrize("retire_old_result_before_resume", [False, True])
+def test_resumable_scheduler_race(
+    retire_old_result_before_resume: bool,
+):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        num_blocks=100,
+        block_size=16,
+        max_num_batched_tokens=512,
+    )
+    engine = PipelinedEngine(scheduler, queue_size=3)
+
+    old_prompt_len = 10
+    continuation_len = 12
+    old_late_tokens = [EOS_TOKEN_ID, 60002]
+    new_turn_token = 61000
+    request_id = "resumable-race"
+
+    request = create_requests(
+        1, num_tokens=old_prompt_len, max_tokens=4, req_ids=[request_id]
+    )[0]
+    request.resumable = True
+    continuation = create_requests(
+        1, num_tokens=continuation_len, max_tokens=4, req_ids=[request_id]
+    )[0]
+    continuation.resumable = True
+
+    old_prompt = list(request.prompt_token_ids)
+    continuation_prompt = list(continuation.prompt_token_ids)
+    expected_prompt = old_prompt + continuation_prompt
+    safe_frontier = len(old_prompt)
+    scheduler.add_request(request)
+
+    s0 = engine._schedule(sampled_tokens=[EOS_TOKEN_ID])
+    assert s0.num_scheduled_tokens == {request_id: old_prompt_len}
+
+    for i, old_late_token in enumerate(old_late_tokens, 1):
+        old_step = engine._schedule(sampled_tokens=[old_late_token])
+        assert old_step.num_scheduled_tokens[request_id] > 0
+
+    engine._process_oldest_step()
+    assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert request.num_in_flight_tokens > 0
+    assert request.num_output_placeholders == 0
+    assert request.num_stale_output_tokens == request.num_in_flight_tokens
+    assert list(request.all_token_ids) == old_prompt + [EOS_TOKEN_ID]
+    assert request.num_computed_tokens == safe_frontier
+
+    if retire_old_result_before_resume:
+        all_token_ids_before_stale = list(request.all_token_ids)
+        for _ in old_late_tokens:
+            engine._process_oldest_step()
+            assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+            assert sum(req is request for req in scheduler.skipped_waiting) == 1
+        assert request.num_stale_output_tokens == 0
+        assert list(request.all_token_ids) == all_token_ids_before_stale
+
+    scheduler.add_request(continuation)
+    new_step = engine._schedule(sampled_tokens=[new_turn_token])
+    assert new_step.num_scheduled_tokens == {request_id: continuation_len}
+    assert scheduler.requests[request_id] is request
+    assert list(request.prompt_token_ids) == expected_prompt
+    assert list(request.output_token_ids) == []
+    assert request.num_output_placeholders == 1
+    assert new_step.scheduled_new_reqs[0].num_computed_tokens == safe_frontier
+
+    if not retire_old_result_before_resume:
+        all_token_ids_before_stale = list(request.all_token_ids)
+        for _ in old_late_tokens:
+            engine._process_oldest_step()
+        assert list(request.output_token_ids) == []
+        assert list(request.all_token_ids) == all_token_ids_before_stale
+        assert request.status == RequestStatus.RUNNING
+        assert request.num_output_placeholders == 1
+        assert request.num_in_flight_tokens == continuation_len
+
+    engine._process_oldest_step()
+    assert list(request.output_token_ids) == [new_turn_token]
+    assert list(request.all_token_ids) == expected_prompt + [new_turn_token]
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_in_flight_tokens == 0
+    assert request.num_stale_output_tokens == 0
+
+    owner_count = sum(
+        req is request
+        for queue in (scheduler.running, scheduler.waiting, scheduler.skipped_waiting)
+        for req in queue
+    )
+    assert owner_count == 1
+    assert scheduler.num_waiting_for_streaming_input == 0
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])

@@ -2397,6 +2397,16 @@ class Scheduler(SchedulerInterface):
         if not request.resumable:
             return True
 
+        # Drop the finished turn's in-flight work and resume from the
+        # materialized frontier.
+        safe_frontier = request.num_computed_tokens - request.num_output_placeholders
+        assert safe_frontier >= 0
+        request.num_computed_tokens = safe_frontier
+        request.spec_token_ids = []
+        request.drop_stale_output = True
+        request.num_stale_output_tokens = request.num_in_flight_tokens
+        request.num_output_placeholders = 0
+
         if request.streaming_queue:
             update = request.streaming_queue.popleft()
             if update is None:
