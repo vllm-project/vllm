@@ -860,6 +860,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )
+        # trtllm-gen decode reads seq_lens and block tables from the buffers
+        # that fused draft steps advance in place; DCP-local seq_lens are not.
+        self.supports_draft_decode_metadata_update = (
+            self.flashinfer_trtllm_api_decode_kernel
+            == FlashInferDecodeKernel.TRTLLM_GEN
+            and not self.use_dcp
+        )
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=(
@@ -1828,6 +1835,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
+
+    def update_draft_decode_metadata(self, _metadata: FlashInferMetadata) -> None:
+        pass
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
