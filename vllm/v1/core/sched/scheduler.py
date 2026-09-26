@@ -1066,6 +1066,17 @@ class Scheduler(SchedulerInterface):
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
 
+                if load_kv_async and not all(
+                    self._holds_kv_blocks(req) for req in step_skipped_waiting
+                ):
+                    # An async load is not preemptible and only runs once the
+                    # scan reaches it. Never let it take blocks while a request
+                    # ahead of it holds none: that request may then not fit, the
+                    # scan stops at it, and the load's blocks are never freed.
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
@@ -2373,6 +2384,9 @@ class Scheduler(SchedulerInterface):
             RequestStatus.WAITING_FOR_REMOTE_KVS,
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
+
+    def _holds_kv_blocks(self, request: Request) -> bool:
+        return any(self.kv_cache_manager.coordinator.get_blocks(request.request_id))
 
     def _enqueue_waiting_request(self, request: Request) -> None:
         if self._is_blocked_waiting_status(request.status):
