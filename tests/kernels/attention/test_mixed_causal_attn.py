@@ -5,6 +5,12 @@
 Validates that both triton and flash-attention backends correctly handle
 batches where some sequences use causal masking and others use non-causal
 (bidirectional) masking — needed by DiffusionGemma.
+
+Covers both full attention and sliding-window layers. The sliding-window
+cases guard the per-sequence semantics fixed in
+vllm-project/flash-attention#154: causal sequences keep a one-sided window
+over the past while bidirectional sequences in the same batch use a
+symmetric window.
 """
 
 import pytest
@@ -68,14 +74,16 @@ def ref_paged_attn(
             mask = torch.zeros(query_len, kv_len, device=attn.device).bool()
 
         if sliding_window is not None:
-            sw_mask = (
-                torch.triu(
-                    torch.ones(query_len, kv_len, device=attn.device),
-                    diagonal=kv_len - (query_len + sliding_window) + 1,
-                )
-                .bool()
-                .logical_not()
-            )
+            # Per-sequence sliding-window semantics shared by both kernels
+            # (dist = query_abs_pos - key_pos): a causal sequence keeps a
+            # one-sided window over the past, a bidirectional sequence uses
+            # a symmetric window.
+            q_pos = torch.arange(kv_len - query_len, kv_len, device=attn.device)
+            k_pos = torch.arange(kv_len, device=attn.device)
+            dist = q_pos[:, None] - k_pos[None, :]
+            sw_mask = dist >= sliding_window
+            if not per_seq_causal[i]:
+                sw_mask |= dist <= -sliding_window
             mask |= sw_mask
 
         attn.masked_fill_(mask, float("-inf"))
@@ -96,12 +104,13 @@ def ref_paged_attn(
 )
 @pytest.mark.parametrize(
     "seq_lens",
-    [[(1, 128), (5, 64), (1, 256)]],
+    [[(1, 128), (5, 64), (1, 256)], [(129, 256), (5, 64), (65, 128)]],
 )
 @pytest.mark.parametrize(
     "per_seq_causal",
     [[True, False, True], [False, True, False], [True, True, False]],
 )
+@pytest.mark.parametrize("sliding_window", [None, 64])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -110,6 +119,7 @@ def ref_paged_attn(
 def test_triton_mixed_causal(
     seq_lens: list[tuple[int, int]],
     per_seq_causal: list[bool],
+    sliding_window: int | None,
     num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
@@ -176,7 +186,9 @@ def test_triton_mixed_causal(
         max_seqlen_k=max_seqlen_k,
         softmax_scale=scale,
         causal=causal_tensor,
-        window_size=(-1, -1),
+        # Decoder layers hand the kernel a causal-shaped window; the kernel
+        # resolves the per-sequence (a)symmetry internally.
+        window_size=(sliding_window - 1, 0) if sliding_window is not None else (-1, -1),
         block_table=block_tables,
         softcap=0.0,
         q_descale=None,
@@ -193,6 +205,7 @@ def test_triton_mixed_causal(
         block_tables,
         scale,
         per_seq_causal,
+        sliding_window=sliding_window,
     )
 
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
@@ -207,12 +220,13 @@ def test_triton_mixed_causal(
 )
 @pytest.mark.parametrize(
     "seq_lens",
-    [[(1, 128), (5, 64), (1, 256)]],
+    [[(1, 128), (5, 64), (1, 256)], [(129, 256), (5, 64), (65, 128)]],
 )
 @pytest.mark.parametrize(
     "per_seq_causal",
     [[True, False, True], [False, True, False]],
 )
+@pytest.mark.parametrize("sliding_window", [None, 64])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -221,6 +235,7 @@ def test_triton_mixed_causal(
 def test_flash_attn4_mixed_causal(
     seq_lens: list[tuple[int, int]],
     per_seq_causal: list[bool],
+    sliding_window: int | None,
     num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
@@ -294,7 +309,21 @@ def test_flash_attn4_mixed_causal(
         block_tables,
         scale,
         per_seq_causal,
+        sliding_window=sliding_window,
     )
+
+    # Mirror FlashAttentionImpl.forward: full-attention layers compile the
+    # kernel causal (dynamic_causal is read in the causal branch); sliding
+    # window layers symmetrize the window (_maybe_symmetrize_window) and
+    # compile the kernel local (causal=False), relying on dynamic_causal to
+    # restore the one-sided window for causal sequences
+    # (vllm-project/flash-attention#154).
+    if sliding_window is None:
+        causal = True
+        window_size = None
+    else:
+        causal = False
+        window_size = [sliding_window - 1, sliding_window - 1]
 
     output = torch.empty_like(query)
     flash_attn_varlen_func(
@@ -307,8 +336,8 @@ def test_flash_attn4_mixed_causal(
         seqused_k=seqused_k,
         max_seqlen_k=max(kv_lens),
         softmax_scale=scale,
-        # The kernel must be compiled causal for `dynamic_causal` to take effect.
-        causal=True,
+        causal=causal,
+        window_size=window_size,
         block_table=block_tables,
         softcap=0.0,
         dynamic_causal=per_seq_causal_tensor,
