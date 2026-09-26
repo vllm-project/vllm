@@ -547,7 +547,11 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            await self.abort(request.request_id, internal=True)
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
