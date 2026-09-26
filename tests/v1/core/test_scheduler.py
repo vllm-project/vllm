@@ -2499,6 +2499,13 @@ def test_kv_connector_honors_skip_reading_prefix_cache():
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
 
+    # Only the plain request counts as an external cache query.
+    external_stats = scheduler.make_stats().connector_prefix_cache_stats
+    assert external_stats is not None
+    assert external_stats.requests == 1
+    assert external_stats.queries == BLOCK_SIZE * 4
+    assert external_stats.hits == BLOCK_SIZE * 2
+
 
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
