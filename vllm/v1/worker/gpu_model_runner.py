@@ -141,6 +141,7 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilde
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
+    compute_mm_prefix_ranges,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
@@ -2356,59 +2357,23 @@ class GPUModelRunner(
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
-        # By default, ranges exceeding sliding_window are skipped to prevent
-        # early tokens from attending across the entire image span. Models that
-        # clamp mm_prefix to the sliding window *in-kernel* (e.g. Gemma4, which
-        # needs HF's (causal OR blockwise) AND sliding_window on sliding layers)
-        # opt out of the skip so the bidirectional range survives for images
-        # larger than the window; the kernel then bounds it per-query.
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
         if self.is_mm_prefix_lm:
-            req_doc_ranges = {}
             hf_text_config = self.model_config.hf_text_config
-            _bidi_sw = getattr(hf_text_config, "sliding_window", None)
-            _clamps_in_kernel = getattr(
-                self.model, "mm_prefix_clamp_sliding_window", False
-            ) or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False)
-            # Some models (DeepSeek-V4 vision) define the bidirectional span
-            # over the whole sentinel block ([IMAGE_START, IMAGE_END]) rather
-            # than the embed tokens, and prepend a position-dependent
-            # alignment pad before the first sentinel. For those, derive the
-            # span from the full placeholder range and strip the pad.
-            # TODO(Isotr0py): Refactor mm_prefix_lm implementation
-            # for better readability and maintainability.
-            _span_pad_modulus = getattr(
-                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+            req_doc_ranges = compute_mm_prefix_ranges(
+                [
+                    self.requests[req_id].mm_features
+                    for req_id in self.input_batch.req_ids
+                ],
+                sliding_window=self.model_config.get_sliding_window(),
+                clamp_sliding_window=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                )
+                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
+                span_pad=getattr(
+                    hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+                ),
             )
-            for req_id in self.input_batch.req_ids:
-                image_doc_ranges = []
-                req_state = self.requests[req_id]
-                for mm_feature in req_state.mm_features:
-                    if mm_feature.modality == "audio":
-                        continue
-                    pos_info = mm_feature.mm_position
-                    if _span_pad_modulus:
-                        pad = (
-                            _span_pad_modulus - 1 - pos_info.offset % _span_pad_modulus
-                        )
-                        img_doc_range = [
-                            (
-                                pos_info.offset + pad,
-                                pos_info.offset + pos_info.length - 1,
-                            )
-                        ]
-                    else:
-                        img_doc_range = pos_info.extract_embeds_range()
-                    for r in img_doc_range:
-                        if (
-                            not _clamps_in_kernel
-                            and _bidi_sw is not None
-                            and (r[1] - r[0] + 1) > _bidi_sw
-                        ):
-                            continue
-                        image_doc_ranges.append(r)
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                req_doc_ranges[req_idx] = image_doc_ranges
 
         # Reference Sliding Window Attention (R-SWA): pass per-request prompt
         # lengths so the attention backend can keep the prefix globally visible.
