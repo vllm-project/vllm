@@ -416,9 +416,8 @@ class HiSparseCoordinator:
         )
         state = self._get_request_state(request_id)
         budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
-        for page_idx in range(num_pages):
-            if page_idx < importing_pages:
-                continue
+        first_page = max(state.ready_prefix_pages, importing_pages)
+        for page_idx in range(first_page, num_pages):
             if budget == 0:
                 break
             if page_idx in state.pending_pages:
