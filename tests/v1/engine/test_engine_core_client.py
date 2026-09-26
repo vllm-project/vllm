@@ -215,6 +215,10 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
     client._kv_event_sources = {}
+    client.vllm_config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
+    )
     return client
 
 

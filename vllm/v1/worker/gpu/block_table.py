@@ -15,6 +15,9 @@ from vllm.v1.worker.gpu.buffer_utils import (
 
 
 class BlockTables:
+    # Set by the elastic EP warmup so KV writes land in the null block.
+    redirect_writes_to_null_block = False
+
     def __init__(
         self,
         block_sizes: list[int],
@@ -121,6 +124,8 @@ class BlockTables:
             bpk = self.blocks_per_kv_block[i]
             if bpk > 1:
                 block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
+            if self.redirect_writes_to_null_block:
+                block_ids = [0] * len(block_ids)
             end = start + len(block_ids)
             row_capacity = self.block_tables[i].gpu.shape[1]
             if end > row_capacity:

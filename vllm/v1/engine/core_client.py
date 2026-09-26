@@ -1889,13 +1889,29 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         await asyncio.to_thread(self._coord_store.wait, ready_keys)
         logger.info("[Elastic EP] Successfully started new engines")
 
+    def _eep_commit_pause_mode(self) -> PauseMode:
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 re-warms through the request pool, so running requests must
+        # finish first while new ones stay queued in the scheduler.
+        parallel_config = self.vllm_config.parallel_config
+        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
+            parallel_config
+        ):
+            return "wait"
+        return "keep"
+
     async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         new_core_engines = [
             rank.to_bytes(2, "little")
             for rank in range(len(self.core_engines), new_data_parallel_size)
         ]
 
-        await self.pause_scheduler_async(mode="keep", clear_cache=False)
+        await self.pause_scheduler_async(
+            mode=self._eep_commit_pause_mode(), clear_cache=False
+        )
         wait_future = self._eep_wait_for_setup_switch_complete()
         finish_futures = [
             asyncio.create_task(
@@ -1967,7 +1983,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         for rank in range(new_data_parallel_size, cur_data_parallel_size):
             self._kv_event_sources.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
-        pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
+        eep_mode = self._eep_commit_pause_mode()
+        pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [
             self._call_utility_async("pause_scheduler", mode, False, engine=engine)
             for mode, engine in zip(pause_modes, old_core_engines)
