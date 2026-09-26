@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
 )
 from vllm.platforms import current_platform
@@ -23,14 +24,25 @@ from ..base import MMLinearLayerConfig
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
-    is_static_input_scheme: bool
-    is_channelwise: bool
-    input_symmetric: bool
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey
+
+    @property
+    def is_static_input_scheme(self) -> bool:
+        return self.activation_quant_key.scale.is_static
+
+    @property
+    def is_channelwise(self) -> bool:
+        return self.weight_quant_key.scale.group_shape == GroupShape.PER_CHANNEL
+
+    @property
+    def input_symmetric(self) -> bool:
+        return self.activation_quant_key.symmetric
 
 
 @dataclass
 class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
+
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     weight_shape: tuple[int, int]
