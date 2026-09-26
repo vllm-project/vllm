@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from vllm.v1.executor.multiproc_executor import WorkerProc
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
+from vllm.v1.outputs import DraftTokenIds
 
 
 class _ExitWorkerLoop(RuntimeError):
@@ -65,3 +67,29 @@ def test_execute_worker_rpc_returns_worker_exception():
     assert len(outputs) == 1
     assert isinstance(outputs[0], RuntimeError)
     assert str(outputs[0]) == "test error"
+
+
+@pytest.mark.parametrize("stalled", [False, True])
+def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
+    """A wedged draft-token readback must not block EngineCore forever."""
+    monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "7")
+    draft = DraftTokenIds(["req"], [[1, 2, 3]])
+
+    def dequeue(*, timeout=None):
+        assert timeout is not None and 0 < timeout <= 7
+        if stalled:
+            raise TimeoutError
+        return WorkerProc.ResponseStatus.SUCCESS, draft
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.output_rank = 1
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
+    executor.response_mqs = [None, SimpleNamespace(dequeue=dequeue)]
+
+    if stalled:
+        with pytest.raises(TimeoutError, match="take_draft_token_ids timed out"):
+            executor.take_draft_token_ids()
+    else:
+        assert executor.take_draft_token_ids() is draft
