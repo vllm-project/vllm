@@ -745,6 +745,11 @@ class DiffusionGemmaRequestStates:
         self.constrained: dict[int, tuple[int, ...]] = {}
         self.step_allowed: torch.Tensor | None = None
         self._allowed_cache: dict[tuple[int, ...], torch.Tensor] = {}
+        # CPU mirrors for read-only slots, which never commit: every decode
+        # appearance is one denoise step, so the step before the cap is known
+        # without a sync and its self-conditioning matmul can be skipped.
+        self.max_steps_np = np.full(max_num_reqs, max_denoising_steps, dtype=np.int32)
+        self.denoise_steps_np = np.zeros(max_num_reqs, dtype=np.int32)
         self.read_only_slots: set[int] = set()
         # Slots capped at one denoise step never consume a soft embed.
         self.single_step_slots: set[int] = set()
@@ -789,6 +794,8 @@ class DiffusionGemmaRequestStates:
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
         self.constrained.pop(slot_idx, None)
+        self.max_steps_np[slot_idx] = self.max_denoising_steps
+        self.denoise_steps_np[slot_idx] = 0
         self.canvas_width_np[slot_idx] = self.canvas_length
 
     def remove_request(self, slot_idx: int) -> None:
@@ -801,6 +808,8 @@ class DiffusionGemmaRequestStates:
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
         self.constrained.pop(slot_idx, None)
+        self.max_steps_np[slot_idx] = self.max_denoising_steps
+        self.denoise_steps_np[slot_idx] = 0
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
         """``ids`` covers the slot's canvas width; positions past it are never
@@ -1238,6 +1247,7 @@ class DiffusionSampler:
         if cap is not None:
             cap = max(1, min(int(cap), states.max_denoising_steps))
             states.max_steps[req_idx].fill_(cap)
+            states.max_steps_np[req_idx] = cap
             if cap == 1:
                 states.single_step_slots.add(req_idx)
         width = extra.get("diffusion_canvas_length")
@@ -1453,6 +1463,19 @@ class DiffusionSampler:
         # since it mutates is_encoder_phase (commit→False, converge→True).
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
+        # Read-only slots on their capped last step: the soft embed computed
+        # now would feed a step that never runs. Single-step reads are the
+        # cap-1 case of the same rule.
+        sc_skip = set(states.single_step_slots)
+        if states.read_only_slots:
+            for s in decode_slots_np.tolist():
+                if (
+                    s in states.read_only_slots
+                    and states.denoise_steps_np[s] + 1 >= states.max_steps_np[s]
+                ):
+                    sc_skip.add(s)
+        states.denoise_steps_np[decode_slots_np] += 1
+
         # Constrained step: logits are [rows, K] over the shared allowed set,
         # so the self-conditioning matmul only needs those K embedding rows.
         allowed = states.step_allowed
@@ -1528,11 +1551,8 @@ class DiffusionSampler:
                     tile_logits = logits[src.reshape(-1)].masked_fill_(
                         ~valid.reshape(-1, 1), 0
                     )
-                compute_sc = (
-                    not states.single_step_slots
-                    or not states.single_step_slots.issuperset(
-                        decode_slots_np[sel_np].tolist()
-                    )
+                compute_sc = not sc_skip or not sc_skip.issuperset(
+                    decode_slots_np[sel_np].tolist()
                 )
 
                 temp = _denoise_temperature(
