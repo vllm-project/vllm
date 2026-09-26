@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -193,3 +195,79 @@ def test_reasoning(
     output_ids = minimax_m2_tokenizer.convert_tokens_to_ids(output)
     is_reasoning_end = parser.is_reasoning_end(output_ids)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
+
+
+# ---------------------------------------------------------------------------
+# Composition with the minimax_m2 tool parser (#58486): append mode keeps
+# reasoning markup inside content, so the composed tool parser must pass
+# </think> through instead of eating it as a reasoning boundary.
+# ---------------------------------------------------------------------------
+
+
+class FakeTokenizer:
+    """Offline stand-in carrying the special tokens both parsers lex."""
+
+    def __init__(self):
+        self.vocab = {
+            "<think>": 1,
+            "</think>": 2,
+            "<minimax:tool_call>": 3,
+            "</minimax:tool_call>": 4,
+        }
+
+    def get_vocab(self):
+        return self.vocab
+
+    def decode(self, token_ids):
+        id_to_token = {v: k for k, v in self.vocab.items()}
+        return "".join(id_to_token.get(token_id, "") for token_id in token_ids)
+
+
+def test_append_think_tool_composition_keeps_closing_delimiter():
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.parser.parser_manager import ParserManager
+
+    model_output = (
+        "I should add them.</think><minimax:tool_call>"
+        '<invoke name="add"><parameter name="a">3</parameter>'
+        '<parameter name="b">5</parameter></invoke></minimax:tool_call>'
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "add",
+                "description": "Add two numbers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                    "required": ["a", "b"],
+                },
+            },
+        }
+    ]
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="minimax_m2",
+        reasoning_parser_name=parser_name,
+        enable_auto_tools=True,
+    )
+    parser = parser_cls(FakeTokenizer(), tools)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "MiniMaxAI/MiniMax-M2",
+            "messages": [{"role": "user", "content": "3 + 5?"}],
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+    )
+
+    reasoning, content = parser.extract_reasoning(model_output, request)
+    assert reasoning is None
+    tool_calls, content = parser._extract_tool_calls(
+        content, request, enable_auto_tools=True
+    )
+
+    assert content == "<think>I should add them.</think>"
+    assert tool_calls is not None and len(tool_calls) == 1
+    assert tool_calls[0].name == "add"
+    assert json.loads(tool_calls[0].arguments) == {"a": 3, "b": 5}
