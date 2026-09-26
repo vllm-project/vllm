@@ -572,6 +572,10 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
+        # The static config facts ride on the first stats payload of this
+        # process. A Prometheus child holds the values it received, so one
+        # payload is enough.
+        self._info_sent = False
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -1930,6 +1934,14 @@ class OffloadingConnectorScheduler:
                 stats = manager_stats
             else:
                 stats.aggregate(manager_stats)
+
+        if not self._info_sent:
+            if stats is None:
+                stats = OffloadingConnectorStats()
+            # Sent even when the manager reports no facts, so that the metric
+            # exists whenever offloading runs.
+            stats.set_info(self.manager.config_info())
+            self._info_sent = True
 
         return stats
 

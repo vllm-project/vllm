@@ -8,6 +8,7 @@ import pytest
 from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    KV_OFFLOAD_CONFIG_INFO,
     OffloadingConnectorStats,
     OffloadPromMetrics,
     _ConnectorMetricName,
@@ -115,14 +116,20 @@ class _FakeVllmConfig:
 
 def _spec_cls_with_metric_definitions(
     metric_definitions: dict[str, Any],
+    info_keys: tuple[str, ...] = (),
 ) -> type:
     """Build a fake offloading spec class reporting the given metric
-    definitions, so tests don't need to patch the real CPU spec."""
+    definitions and info label names, so tests don't need to patch the real
+    CPU spec."""
 
     class _FakeOffloadingSpec:
         @staticmethod
         def build_metric_definitions(extra_config):
             return metric_definitions
+
+        @staticmethod
+        def config_info_keys(extra_config):
+            return info_keys
 
     return _FakeOffloadingSpec
 
@@ -784,3 +791,242 @@ def test_prom_metrics_rejects_undeclared_metric():
                 _StatsKey.DATA: {"unknown:metric": {(): 1}},
             }
         )
+
+
+def _prom_metrics(
+    metric_definitions: dict[str, Any] | None = None,
+    info_keys: tuple[str, ...] = (),
+):
+    """Build OffloadPromMetrics over fake metric classes, with one engine."""
+    spec_cls = _spec_cls_with_metric_definitions(metric_definitions or {}, info_keys)
+    with patch.object(OffloadingSpecFactory, "get_spec_cls", return_value=spec_cls):
+        return OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"], 1: ["model", "1"]},
+        )
+
+
+def test_prom_metrics_keeps_a_gauge_declared_multiprocess_mode():
+    """A gauge that declares its own multiprocess_mode keeps it.
+
+    The value on OffloadingGaugeMetadata must stay a default. A hardcoded
+    "mostrecent" in _create_metric passes the info-gauge test below and
+    silently overrides a gauge that needs another merge, for example a real
+    cross-frontend sum.
+    """
+    prom_metrics = _prom_metrics(
+        {
+            PENDING_STORES: OffloadingGaugeMetadata(
+                documentation="gauge declaring a non-default multiprocess mode.",
+                multiprocess_mode="sum",
+            ),
+        }
+    )
+
+    gauge_def = prom_metrics._offloading_metric_defs[PENDING_STORES]
+    assert gauge_def.kwargs["multiprocess_mode"] == "sum"
+
+
+def test_prom_metrics_omits_multiprocess_mode_outside_a_gauge():
+    """multiprocess_mode reaches a gauge only.
+
+    prometheus_client accepts the argument on Gauge alone, so hoisting the
+    kwarg out of the gauge branch breaks construction of a real Counter or
+    Histogram.
+    """
+    prom_metrics = _prom_metrics(
+        {
+            MY_COUNTER: OffloadingCounterMetadata(documentation="a counter."),
+            LOOKUP_LATENCY: OffloadingHistogramMetadata(
+                documentation="a histogram.",
+                buckets=(0.1, 1),
+            ),
+        }
+    )
+
+    counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
+    histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
+    assert "multiprocess_mode" not in counter_def.kwargs
+    assert "multiprocess_mode" not in histogram_def.kwargs
+
+
+def test_prom_metrics_declares_the_info_gauge_from_the_spec_keys():
+    """The API-server process holds no manager, but it does hold the spec, so
+    it declares the gauge at startup, before any payload."""
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks", "tier1_fs_path"))
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["name"] == KV_OFFLOAD_CONFIG_INFO
+    assert gauge_def.kwargs["labelnames"] == [
+        "model_name",
+        "engine",
+        "cpu_num_chunks",
+        "tier1_fs_path",
+    ]
+    # A labeled gauge makes no child until a payload binds label values, so
+    # an engine that never reports exposes no series.
+    assert gauge_def.children == []
+
+    prom_metrics.observe(
+        {_StatsKey.INFO: {"cpu_num_chunks": 512, "tier1_fs_path": "/mnt/a"}}
+    )
+
+    # Every value renders as a label value, and the metric itself is pinned
+    # to 1.
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512", "/mnt/a")
+    assert gauge.set_values == [1]
+
+
+def test_prom_metrics_reads_the_info_payload_by_label_name():
+    """A manager orders config_info() as it likes, and msgpack keeps that
+    order, so the frontend must key on the name rather than on the position."""
+    prom_metrics = _prom_metrics(info_keys=("first", "second"))
+
+    prom_metrics.observe({_StatsKey.INFO: {"second": 2, "first": 1}})
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "1", "2")
+
+
+def test_prom_metrics_declares_the_info_gauge_as_most_recent():
+    """The info gauge must merge across frontends by freshest write.
+
+    Offloading stats reach one frontend per step as complete per-engine
+    snapshots, so summing would report the number of participating API-server
+    processes instead of the 1 an info gauge is pinned to -- wrong only under
+    multiprocess deployment, and silently, since the facts ride the labels.
+    """
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks",))
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["multiprocess_mode"] == "mostrecent"
+
+
+def test_prom_metrics_reports_the_info_gauge_without_manager_labels():
+    """A spec that declares no fact still yields the metric, so its presence
+    alone answers whether offloading runs."""
+    prom_metrics = _prom_metrics()
+
+    prom_metrics.observe({_StatsKey.INFO: {}})
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == ["model_name", "engine"]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0")
+
+
+def test_prom_metrics_empties_a_declared_info_label_no_manager_fills():
+    """A name the spec declares and the manager skips must publish empty.
+
+    PromQL reads an empty label value as an absent label, so the series still
+    matches both shapes. This code runs on the engine output path of the API
+    server, where an exception ends the output handler, so it warns and goes
+    on rather than drop the whole series.
+    """
+    prom_metrics = _prom_metrics(info_keys=("filled", "skipped"))
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
+    ) as mock_logger:
+        prom_metrics.observe({_StatsKey.INFO: {"filled": 512}})
+
+    assert mock_logger.warning_once.call_count == 1
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512", "")
+
+
+def test_prom_metrics_drops_an_info_label_the_spec_did_not_declare():
+    """A Prometheus metric binds its label names once, so a name that the spec
+    did not declare cannot join the gauge. It warns and publishes the rest."""
+    prom_metrics = _prom_metrics(info_keys=("declared",))
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
+    ) as mock_logger:
+        prom_metrics.observe({_StatsKey.INFO: {"declared": 512, "undeclared": 1}})
+
+    assert mock_logger.warning_once.call_count == 1
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == ["model_name", "engine", "declared"]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512")
+
+
+def test_prom_metrics_reports_the_info_of_every_engine():
+    """Every engine of one instance runs one offloading config, so they share
+    the gauge and differ by the engine label alone."""
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks",))
+
+    prom_metrics.observe({_StatsKey.INFO: {"cpu_num_chunks": 512}}, engine_idx=0)
+    prom_metrics.observe({_StatsKey.INFO: {"cpu_num_chunks": 512}}, engine_idx=1)
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert [child.labelvalues for child in gauge_def.children] == [
+        ("model", "0", "512"),
+        ("model", "1", "512"),
+    ]
+
+
+def test_stats_hold_the_config_info_without_an_observation():
+    """An info-only payload must survive the scheduler gate, which drops an
+    empty payload, and must add no line to the interval log."""
+    stats = OffloadingConnectorStats()
+    assert stats.is_empty()
+
+    stats.set_info({"cpu_num_chunks": 512})
+
+    assert not stats.is_empty()
+    assert stats.reduce() == {}
+
+
+def test_aggregate_keeps_the_config_info_of_the_other_payload():
+    """The scheduler payload holds the info and merges into the worker payload
+    (v1/core/sched/scheduler.py), so a dropped info would hide the metric on
+    every step that also transfers, which is every step that matters."""
+    worker_stats = OffloadingConnectorStats()
+    worker_stats.increase_counter(LOAD_BYTES, 100)
+    scheduler_stats = OffloadingConnectorStats()
+    scheduler_stats.set_info({"cpu_num_chunks": 512})
+
+    worker_stats.aggregate(scheduler_stats)
+
+    assert worker_stats.data[_StatsKey.INFO] == {"cpu_num_chunks": 512}
+    assert worker_stats.data[_StatsKey.DATA][LOAD_BYTES] == {(): 100}
+
+
+def test_aggregate_keeps_the_config_info_of_a_later_payload():
+    """The scheduler sends the info once, so a later payload must not clear
+    it."""
+    stats = OffloadingConnectorStats()
+    stats.set_info({"cpu_num_chunks": 512})
+    later_stats = OffloadingConnectorStats()
+    later_stats.increase_counter(LOAD_BYTES, 100)
+
+    stats.aggregate(later_stats)
+
+    assert stats.data[_StatsKey.INFO] == {"cpu_num_chunks": 512}
+
+
+def test_scheduler_sends_the_config_info_once(request_runner):
+    """MockOffloadingSpec publishes no fact, so the payload holds an empty
+    mapping, which still yields the metric."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+
+    stats = runner.connector_scheduler.get_stats()
+
+    assert stats is not None
+    assert stats.data[_StatsKey.INFO] == {}
+    assert runner.connector_scheduler.get_stats() is None

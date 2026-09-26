@@ -17,10 +17,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
@@ -236,6 +233,18 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     stats = manager.get_stats()
     assert stats is not None
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_reports_no_config_info_without_a_configuration():
+    """A caller that passes no configuration keeps the empty default.
+
+    The scheduler still sends an info payload, so the metric appears with the
+    engine labels alone. Tests in tests/v1/kv_offload/test_factory.py cover the
+    published labels, because a real spec supplies the configuration.
+    """
+    manager = make_cpu_manager(num_chunks=4)
+
+    assert manager.config_info() == {}
 
 
 def test_cpu_manager_reports_cache_usage_gauge():

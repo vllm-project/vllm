@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,13 +11,26 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingMetricMetadata,
+    OffloadingSpec,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+logger = init_logger(__name__)
+
+KV_OFFLOAD_CONFIG_INFO = "vllm:kv_offload_config_info"
+
+_INFO_METRIC_HELP = (
+    "Static configuration of the KV offload managers of this engine instance. "
+    "The configured offloading spec declares the label names, and each manager "
+    "fills the values, so a series appears from the first scheduler step of its "
+    "engine. Each engine reports its own configuration, not the instance total."
+)
 
 
 class _TransferMetricName:
@@ -166,6 +180,9 @@ class _StatsKey:
     TYPES = "types"
     # Maps metric name -> {label values tuple -> observed value (number or list)}
     DATA = "data"
+    # Maps info metric label name -> label value. Absent until a manager
+    # reports it, and an empty dict once a manager reports no facts.
+    INFO = "info"
 
 
 @dataclass
@@ -177,6 +194,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         {
             _StatsKey.TYPES: {name: _MetricType.*, ...},
             _StatsKey.DATA:  {name: {labelvalues: value, ...}, ...},
+            _StatsKey.INFO:  {labelname: labelvalue, ...} | None,
         }
 
     This structure is self-describing: it survives IPC serialization
@@ -187,6 +205,10 @@ class OffloadingConnectorStats(KVConnectorStats):
     use the latest snapshot per-label-tuple, and histogram values are lists of
     observed samples per-label-tuple. Unlabeled metrics use ``()`` as their
     labelvalues tuple.
+
+    ``INFO`` holds static config facts, which the scheduler sends once per
+    process. It stays out of ``DATA``, because its label names are known only
+    when the payload arrives.
     """
 
     def __post_init__(self):
@@ -197,6 +219,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         self.data: dict[str, Any] = {
             _StatsKey.TYPES: {},
             _StatsKey.DATA: {},
+            _StatsKey.INFO: None,
         }
 
     @property
@@ -211,6 +234,13 @@ class OffloadingConnectorStats(KVConnectorStats):
         if other.is_empty():
             return self
         assert isinstance(other, OffloadingConnectorStats)
+        # The scheduler payload carries the info and merges into the worker
+        # payload (v1/core/sched/scheduler.py), so the info must survive the
+        # merge in this direction. The scheduler sends it once, so a later
+        # payload with no info must not clear it.
+        other_info = other.data.get(_StatsKey.INFO)
+        if other_info is not None:
+            self.data[_StatsKey.INFO] = other_info
         other_types = other._types
         other_values = other._values
         for key, other_label_values in other_values.items():
@@ -268,7 +298,11 @@ class OffloadingConnectorStats(KVConnectorStats):
         return return_dict
 
     def is_empty(self) -> bool:
-        return not self.data.get(_StatsKey.DATA)
+        # An info-only payload is not empty. It carries no observation, but the
+        # caller drops an empty payload, and the info must reach the frontend.
+        return (
+            not self.data.get(_StatsKey.DATA) and self.data.get(_StatsKey.INFO) is None
+        )
 
     def increase_counter(
         self,
@@ -293,6 +327,18 @@ class OffloadingConnectorStats(KVConnectorStats):
         self._types.setdefault(gauge_name, _MetricType.GAUGE)
         gauge_values = self._values.setdefault(gauge_name, {})
         gauge_values[labelvalues] = gauge_value
+
+    def set_info(self, info: Mapping[str, str | int | float | bool]) -> None:
+        """Put the static config facts of this engine on the stats payload.
+
+        Args:
+            info: Mapping of info metric label name to label value, as
+                OffloadingManager.config_info() returns it. An empty mapping
+                still yields the metric, with an empty value on every label
+                the spec declared.
+
+        """
+        self.data[_StatsKey.INFO] = dict(info)
 
     def observe_histogram(
         self,
@@ -322,14 +368,22 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
-        spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
+        self._spec_cls: type[OffloadingSpec] = OffloadingSpecFactory.get_spec_cls(
+            extra_config
+        )
+        # The spec declares the info label names here; a manager fills the
+        # values later, and _observe_info() aligns the two.
+        self._info_keys: tuple[str, ...] = self._spec_cls.config_info_keys(extra_config)
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
-            **spec_cls.build_metric_definitions(extra_config),
+            **self._spec_cls.build_metric_definitions(extra_config),
             **get_connector_metric_definitions(),
+            KV_OFFLOAD_CONFIG_INFO: OffloadingGaugeMetadata(
+                documentation=_INFO_METRIC_HELP, labelnames=self._info_keys
+            ),
         }
         from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
-        self._observe_deprecated_metrics = issubclass(spec_cls, CPUOffloadingSpec)
+        self._observe_deprecated_metrics = issubclass(self._spec_cls, CPUOffloadingSpec)
         self._offloading_metric_defs: dict[str, PromMetricT] = {}
         # (engine_idx, metric_name, labelvalues) -> metric with bound labels
         self.offloading_metrics: dict[
@@ -393,6 +447,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             metric_cls = self._counter_cls
         elif isinstance(metadata, OffloadingGaugeMetadata):
             metric_cls = self._gauge_cls
+            kwargs["multiprocess_mode"] = metadata.multiprocess_mode
         elif isinstance(metadata, OffloadingHistogramMetadata):
             metric_cls = self._histogram_cls
             if metadata.buckets is not None:
@@ -476,8 +531,41 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                     observation
                 )
 
+    def _observe_info(self, info: dict[str, Any], engine_idx: int) -> None:
+        """Publish the static config facts of one engine.
+
+        The spec declares the label names, so a payload only fills them. A
+        declared name that the payload omits gets an empty value. A payload
+        name that the spec did not declare is dropped. Either gap logs once.
+
+        Args:
+            info: Mapping of label name to label value, as
+                OffloadingManager.config_info() returns it.
+            engine_idx: Index of the reporting engine.
+
+        """
+        empty = tuple(key for key in self._info_keys if key not in info)
+        dropped = tuple(key for key in info if key not in self._info_keys)
+        if empty or dropped:
+            logger.warning_once(
+                "%s: spec %s and the manager of engine %d disagree on the KV "
+                "offload config labels. Declared but not filled, so empty: %s. "
+                "Filled but not declared, so dropped: %s.",
+                KV_OFFLOAD_CONFIG_INFO,
+                self._spec_cls.__name__,
+                engine_idx,
+                empty,
+                dropped,
+            )
+
+        labelvalues = tuple(str(info.get(key, "")) for key in self._info_keys)
+        self._set_gauge(KV_OFFLOAD_CONFIG_INFO, 1, labelvalues, engine_idx)
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """Observe transfer statistics."""
+        info = transfer_stats_data.get(_StatsKey.INFO)
+        if info is not None:
+            self._observe_info(info, engine_idx)
         metric_types = transfer_stats_data.get(_StatsKey.TYPES, {})
         metric_data = transfer_stats_data.get(_StatsKey.DATA, {})
         for key, label_value_map in metric_data.items():

@@ -3,8 +3,8 @@
 """Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
@@ -213,7 +213,12 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
+    # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
+    # written by different API-server processes. Offloading stats reach one
+    # frontend per step as complete per-engine snapshots, so the freshest write
+    # is the correct value and summing would multiply it by the number of
+    # participating frontends.
+    multiprocess_mode: str = "mostrecent"
 
 
 @dataclass(frozen=True)
@@ -229,6 +234,42 @@ class OffloadingKVEventsConfig:
     # OffloadingConnector opt-in for self-describing BlockStored payloads.
     # Effective only when enable_kv_cache_events is true.
     self_describing_kv_events: bool
+
+
+@dataclass(frozen=True)
+class ConfigInfo:
+    """Static, per-engine facts that one offloading component publishes.
+
+    A subclass declares one field for each label of
+    vllm:kv_offload_config_info. OffloadingSpec.config_info_keys() returns the
+    names in the API-server process, and OffloadingManager.config_info()
+    returns the values in the engine process. Both sides come off the same
+    fields, so a name cannot appear on one side alone. Document every field in
+    docs/features/kv_offloading_usage.md (document with the correct prefix in the
+    label).
+    """
+
+    # Start of every label name of this class. A secondary tier keeps it
+    # empty, because TieringOffloadingSpec adds the tier index and the tier
+    # type to each name.
+    key_prefix: ClassVar[str] = ""
+
+    @classmethod
+    def config_info_keys(cls) -> tuple[str, ...]:
+        """Return one label name for each field, in field order."""
+        return tuple(f"{cls.key_prefix}{info.name}" for info in fields(cls))
+
+    def as_config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return the label values, under the names of config_info_keys().
+
+        Returns "None" for an unknown fact. Done so the label will not be
+        dropped, as an empty label would be.
+        """
+        values = (getattr(self, info.name) for info in fields(self))
+        return {
+            key: "None" if value is None else value
+            for key, value in zip(self.config_info_keys(), values)
+        }
 
 
 class OffloadingManager(ABC):
@@ -402,6 +443,27 @@ class OffloadingManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
+
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return static config facts to publish as info metric labels.
+
+        The scheduler reads this once, after the manager is built, so the
+        values must stay fixed for the process lifetime.
+        OffloadingSpec.config_info_keys() declares which names reach
+        Prometheus: a declared name that is absent here becomes an empty label
+        value, and a name added here that the spec did not declare is dropped.
+
+        Document each key that you publish in
+        docs/features/kv_offloading_usage.md, because a label name reaches a
+        dashboard and stays there.
+
+        Returns:
+            Mapping of label name to value. The frontend renders each value
+            with str(), so a value must be a scalar that msgpack carries, not
+            an enum or an object. Empty by default.
+
+        """
+        return {}
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
@@ -588,6 +650,30 @@ class OffloadingSpec(ABC):
     ) -> dict[str, "OffloadingMetricMetadata"]:
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
+
+    @classmethod
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this spec.
+
+        The spec declares the names, and OffloadingManager.config_info() of
+        the matching manager fills the values. Only the spec runs in the
+        API-server process, which must declare the gauge before the first
+        payload, so the two sides must agree on the names. They need not agree
+        on the order: the frontend reads each declared name out of the
+        payload. A declared name a manager does not fill becomes an empty
+        label value, and a name a manager adds is dropped, with one log line
+        for either gap.
+
+        Args:
+            extra_config: kv_connector_extra_config of this instance, the same
+                mapping the spec itself receives.
+
+        Returns:
+            Tuple of label names. The default empty tuple gives the metric no
+            manager labels, and still publishes it.
+
+        """
+        return ()
 
     def __init__(self, config: OffloadingConfig):
         self.config = config
