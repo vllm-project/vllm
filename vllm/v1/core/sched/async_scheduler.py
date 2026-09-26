@@ -60,6 +60,38 @@ class AsyncScheduler(Scheduler):
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
         status_before_update = request.status
+
+        if not is_stale and len(new_token_ids) > request.num_output_placeholders:
+            # The runner may only return tokens for steps that the scheduler
+            # reserved output placeholders for, and must return none while a
+            # request is still being prefilled. If it returns one anyway, that
+            # token was sampled from an incomplete prefix and is not a valid
+            # continuation: drop it rather than appending garbage to the
+            # response and driving num_output_placeholders negative, which trips
+            # the invariant below and kills EngineCore.
+            #
+            # Dropping is a correctness fix, not only crash protection: without
+            # it these tokens are appended to the request's output and streamed
+            # to the client as if they were valid continuations of the prompt.
+            num_reserved = request.num_output_placeholders
+            logger.warning_once(
+                "Model runner returned more tokens than there were reserved output "
+                "placeholders; dropping the extra token(s). A token sampled while "
+                "the request is still prefilling is not a valid continuation of the "
+                "prompt, so it must not be appended to the response or streamed to "
+                "the client. Run with debug logging to see which requests are "
+                "affected.",
+            )
+            logger.debug(
+                "Request %s: model runner returned %d token(s) but only %d output "
+                "placeholder(s) were reserved; dropping %d token(s).",
+                request.request_id,
+                len(new_token_ids),
+                num_reserved,
+                len(new_token_ids) - num_reserved,
+            )
+            new_token_ids = new_token_ids[:num_reserved]
+
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids
         )

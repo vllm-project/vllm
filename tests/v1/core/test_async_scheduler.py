@@ -766,3 +766,61 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
     else:
         assert handoff.is_finished()
         assert handoff.num_output_tokens == 1
+
+
+def test_prefill_chunk_token_delivery_does_not_underflow():
+    """A token delivered for a request the scheduler classed as a prefill chunk
+    must not drive num_output_placeholders negative.
+
+    Under async scheduling the scheduler reserves one output placeholder per
+    step in which it expects the runner to sample, and reserves none for a
+    prefill chunk -- it relies on the runner returning empty token ids while a
+    request is still being prefilled. The runner keeps its own copy of that
+    predicate (``discard_request_mask``, built from
+    ``num_computed_tokens + num_scheduled_tokens < num_tokens``) and the two
+    can disagree, e.g. under chunked prefill with concurrency, or when a
+    preemption has just zeroed the placeholders. The runner then hands back a
+    token no placeholder was reserved for, which used to trip
+    ``assert request.num_output_placeholders >= 0`` and kill EngineCore with
+    EngineDeadError.
+
+    Such a token was sampled from a prefix the scheduler never committed to,
+    so it must be dropped rather than counted or appended.
+    """
+    scheduler = create_scheduler(async_scheduling=True, max_num_batched_tokens=64)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=200, max_tokens=16, req_ids=["r"]
+    )
+    scheduler.add_request(request)
+
+    sched_output = scheduler.schedule()
+    assert "r" in sched_output.num_scheduled_tokens
+    assert request.is_prefill_chunk, "prompt must not fit in a single chunk"
+    assert request.num_output_placeholders == 0
+
+    num_output_tokens = request.num_output_tokens
+
+    # The runner disagrees about the prefill state and delivers a token.
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    assert request.num_output_placeholders == 0
+    assert request.num_output_tokens == num_output_tokens
+
+
+def test_async_placeholder_consumed_by_decode_delivery():
+    """The healthy path: a decode step reserves a placeholder and the token
+    delivered for it is appended, not discarded by the underflow guard."""
+    scheduler = create_scheduler(async_scheduling=True)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=4, req_ids=["r"]
+    )
+    scheduler.add_request(request)
+
+    sched_output = scheduler.schedule()
+    assert not request.is_prefill_chunk
+    assert request.num_output_placeholders == 1
+
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    assert request.num_output_placeholders == 0
+    assert request.num_output_tokens == 1
