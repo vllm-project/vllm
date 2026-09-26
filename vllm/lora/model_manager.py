@@ -451,6 +451,16 @@ class LoRAModelManager:
             self.vocab_size,
         )
 
+        if self._classification_head is not None:
+            _, classification_head = self._classification_head
+            if classification_head.punica_wrapper is punica_wrapper:
+                classification_head.set_output_mapping(
+                    tuple(
+                        self.lora_index_to_id.index(lora_id) if lora_id > 0 else -1
+                        for lora_id in mapping.prompt_mapping
+                    )
+                )
+
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
         self._registered_adapters.clear()
@@ -1262,18 +1272,23 @@ class LoRAModelManager:
                 f"classification head {module_name!r}."
             )
 
-        expected_weight_shape = (wrapper.output_size, wrapper.input_size)
         received_weight_shape = tuple(full_module.weight.shape)
-        if received_weight_shape != expected_weight_shape:
+        if (
+            full_module.weight.ndim != 2
+            or full_module.weight.size(0) < 1
+            or full_module.weight.size(0) > wrapper.max_lora_cls_labels
+            or full_module.weight.size(1) != wrapper.input_size
+        ):
             raise ValueError(
                 f"Full module {saved_module_name!r} for {module_name!r} has "
                 "an incompatible weight shape: expected "
-                f"{expected_weight_shape}, received {received_weight_shape}."
+                f"(1..{wrapper.max_lora_cls_labels}, {wrapper.input_size}), "
+                f"received {received_weight_shape}."
             )
 
         if full_module.bias is None:
             return
-        expected_bias_shape = (wrapper.output_size,)
+        expected_bias_shape = (full_module.weight.size(0),)
         received_bias_shape = tuple(full_module.bias.shape)
         if received_bias_shape != expected_bias_shape:
             raise ValueError(
