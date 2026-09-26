@@ -606,10 +606,6 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        dcp_sharded = (
-            vllm_config.parallel_config.decode_context_parallel_size == 1
-            or self.impl.dcp_world_size > 1
-        )
         # Encoder-only attention is prefill-only and keeps no autoregressive KV
         # cache. In hybrid models (e.g. Qwen3.5 / ColQwen3.5: GatedDeltaNet
         # linear_attention interleaved with full_attention) the runner iterates
@@ -667,7 +663,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
-                dcp_sharded=dcp_sharded,
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
             )
@@ -679,7 +674,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
-                dcp_sharded=dcp_sharded,
             )
 
 

@@ -21,6 +21,7 @@ import gc
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -561,7 +562,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return encoder_runner.get_encoder_timing_stats()
 
     def get_kv_cache_spec(self):
-        return get_kv_cache_spec(self.vllm_config)
+        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+        # A draft running at DCP=1 under a DCP target keeps a replicated cache.
+        if (
+            isinstance(self.speculator, DraftModelSpeculator)
+            and self.speculator.dcp_size == 1
+            and self.dcp_size > 1
+        ):
+            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
+                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
+        return kv_cache_spec
 
     def initialize_kv_cache(
         self,

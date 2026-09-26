@@ -5,8 +5,11 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.config import ParallelConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -117,3 +120,24 @@ def test_attention_uses_draft_dcp_setting_inside_target_process_group(
     impl = AttentionImplBase()
     assert impl.dcp_world_size == configured_dcp
     assert impl.dcp_rank == (0 if configured_dcp == 1 else 2)
+
+
+@pytest.mark.parametrize("draft_dcp_size", [1, 4])
+def test_runner_marks_only_replicated_draft_caches(monkeypatch, draft_dcp_size):
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    )
+    monkeypatch.setattr(
+        model_runner, "get_kv_cache_spec", lambda _: {"target": spec, "draft": spec}
+    )
+    runner = object.__new__(model_runner.GPUModelRunner)
+    runner.vllm_config = None
+    runner.dcp_size = 4
+    runner.speculator = object.__new__(DFlashSpeculator)
+    runner.speculator.dcp_size = draft_dcp_size
+    runner.speculator.draft_attn_layer_names = {"draft"}
+
+    specs = runner.get_kv_cache_spec()
+
+    assert specs["target"].dcp_sharded
+    assert specs["draft"].dcp_sharded == (draft_dcp_size == 4)
