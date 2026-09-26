@@ -3076,6 +3076,39 @@ def new_swa_mla_spec(head_size=576, sliding_window=128, model_version=None):
     )
 
 
+@pytest.mark.parametrize(
+    "spec",
+    [new_mla_spec(), new_swa_mla_spec()],
+    ids=["full-mla", "sliding-window-mla"],
+)
+@pytest.mark.parametrize("wrap_uniform", [False, True])
+@pytest.mark.parametrize("requires_zeroing", [False, True])
+def test_mla_kv_cache_zeroing_follows_backend_requirement(
+    spec: MLAAttentionSpec | SlidingWindowMLASpec,
+    wrap_uniform: bool,
+    requires_zeroing: bool,
+) -> None:
+    spec = replace(spec, requires_kv_cache_zeroing=requires_zeroing)
+    group_spec = (
+        UniformTypeKVCacheSpecs(
+            block_size=spec.block_size, kv_cache_specs={"layer": spec}
+        )
+        if wrap_uniform
+        else spec
+    )
+    worker_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], group_spec)],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+
+    assert worker_config.has_mla_layers_requiring_zeroing is requires_zeroing
+    assert worker_config.needs_kv_cache_zeroing is requires_zeroing
+    assert scheduler_config.has_mla_layers_requiring_zeroing is requires_zeroing
+    assert scheduler_config.needs_kv_cache_zeroing is requires_zeroing
+
+
 def new_indexer_mla_spec(block_size=16):
     # Sparse-attention indexer k_cache: an MLAAttentionSpec with a much smaller
     # page size than the main MLA attention (uint8, small head), so their pages
