@@ -1206,3 +1206,92 @@ class TestDelimiterPreservation:
         assert reconstructor.tool_calls[0].function.name == "search"
         streamed_args = json.loads(reconstructor.tool_calls[0].function.arguments)
         assert streamed_args == ns_args
+
+
+
+class TestStreamingWhitespaceAroundToolCalls:
+    """DeepSeek V3.2 must never emit whitespace-only delta.content around a
+    tool_calls delta — downstream routers (e.g. claude-code-router) reject
+    such chunks once a tool_use block is active.
+    """
+
+    def _feed(self, parser, chunks, request=None):
+        if request is None:
+            request = make_request()
+        deltas = []
+        prev = ""
+        for chunk in chunks:
+            curr = prev + chunk
+            d = parser.extract_tool_calls_streaming(
+                previous_text=prev,
+                current_text=curr,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            prev = curr
+            if d is not None:
+                deltas.append(d)
+        finish = parser.finish_streaming()
+        if finish is not None:
+            deltas.append(finish)
+        return deltas
+
+    @staticmethod
+    def _leaked_ws(deltas):
+        return [
+            d.content
+            for d in deltas
+            if getattr(d, "content", None) is not None
+            and d.content != ""
+            and d.content.strip() == ""
+        ]
+
+    def test_no_whitespace_content_before_tool_call(self):
+        parser = make_parser()
+        body = build_tool_call("get_weather", {"location": "Beijing"})
+        deltas = self._feed(parser, ["\n\n", body])
+        assert self._leaked_ws(deltas) == []
+
+    def test_no_whitespace_content_after_tool_call(self):
+        parser = make_parser()
+        body = build_tool_call("get_weather", {"location": "Beijing"})
+        deltas = self._feed(parser, [body, "\n"])
+        assert self._leaked_ws(deltas) == []
+
+    def test_no_whitespace_content_around_tool_call_chunked(self):
+        """Whitespace + tool + whitespace where prior real content has set
+        `_content_has_nonws`."""
+        parser = make_parser()
+        body = build_tool_call("get_weather", {"location": "Beijing"})
+        deltas = self._feed(
+            parser,
+            ["Sure, checking.", "\n\n", body, "\n"],
+        )
+        assert self._leaked_ws(deltas) == []
+        # And legitimate text before the whitespace is still emitted.
+        content = "".join(d.content for d in deltas if d.content)
+        assert content == "Sure, checking."
+
+    def test_tool_calls_chunk_has_no_content(self):
+        """The OpenAI streaming contract: any delta that carries
+        `tool_calls` must have `content=None` (or non-whitespace)."""
+        parser = make_parser()
+        body = build_tool_call("get_weather", {"location": "Beijing"})
+        deltas = self._feed(parser, ["\n\n" + body + "\n"])
+        for d in deltas:
+            if d.tool_calls:
+                assert (
+                    d.content is None or d.content.strip() != ""
+                ), f"Whitespace-only content leaked alongside tool_calls: {d.content!r}"
+
+    def test_real_text_before_tool_call_still_streamed(self):
+        """Non-whitespace content before a tool call is preserved."""
+        parser = make_parser()
+        body = build_tool_call("get_weather", {"location": "SF"})
+        deltas = self._feed(parser, ["Thinking about it. ", body])
+        content = "".join(d.content for d in deltas if d.content)
+        assert "Thinking about it." in content
+
