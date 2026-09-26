@@ -864,6 +864,14 @@ def qsa_sparse_paged_attention(
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
     small_profile_limit = 8 if block_m <= 8 else 4
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx11
+
+        # gfx11 WMMA needs M >= 16; with a smaller BLOCK_M Triton lowers these
+        # tl.dot calls to FMA instead, which is much slower. Heads past
+        # GROUP_SIZE are masked on load and store, so padding is safe.
+        if on_gfx11():
+            block_m = max(block_m, 16)
 
     # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
     # Narrow tiles favor decode; wide tiles improve throughput for prefill.
