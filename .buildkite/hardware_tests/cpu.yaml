@@ -12,7 +12,7 @@ steps:
   - CMakeLists.txt
   - vllm/_custom_ops.py
   - tests/kernels/attention/test_cpu_attn.py
-  - tests/v1/attention/test_group_head_counts.py
+  - tests/v1/attention/dense/test_group_head_counts.py
   - tests/kernels/attention/test_amx_mla.py
   - vllm/v1/attention/backends/mla/amx_mla.py
   - vllm/model_executor/layers/attention/mla_attention.py
@@ -36,7 +36,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB \
       tests/kernels/attention/test_cpu_attn.py \
-      tests/v1/attention/test_group_head_counts.py \
+      tests/v1/attention/dense/test_group_head_counts.py \
       tests/kernels/attention/test_amx_mla.py \
       tests/kernels/test_deepseek_v4_cpu_kernels.py \
       tests/kernels/moe/test_cpu_fused_moe.py \

@@ -31,15 +31,45 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) V1 Attention Shard %N"
-  key: v1-attention-b200
-  timeout_in_minutes: 80
+- label: ":nvidia: (B200) V1 Attention / Sparse MLA"
+  key: v1-attention-b200-sparse-mla
+  timeout_in_minutes: 30
   device: b200-k8s
-  source_file_dependencies:
+  source_file_dependencies: &v1-attention-b200-deps
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+    - pytest -v -s v1/attention/sparse_mla
+
+- label: ":nvidia: (B200) V1 Attention / MLA Correctness Shard %N"
+  key: v1-attention-b200-mla-correctness
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies: *v1-attention-b200-deps
+  commands:
+    - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 3
+
+- label: ":nvidia: (B200) V1 Attention / Dense and SSM"
+  key: v1-attention-b200-dense-ssm
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies: *v1-attention-b200-deps
+  commands:
+    - pytest -v -s v1/attention/dense v1/attention/ssm
+
+- label: ":nvidia: (B200) V1 Attention / DCP, MLA Backends and ROCm"
+  key: v1-attention-b200-dcp-mla-backends-rocm
+  timeout_in_minutes: 15
+  device: b200-k8s
+  source_file_dependencies: *v1-attention-b200-deps
+  commands:
+    # Three short coverage units share one worker. Each keeps its own pytest
+    # process so a failure still names the unit it came from. The find runs any
+    # test file added at the v1/attention or v1/attention/mla root.
+    - pytest -v -s v1/attention/dcp
+    - pytest -v -s v1/attention/mla/backends
+    - pytest -v -s v1/attention/rocm
+    - find v1/attention v1/attention/mla -maxdepth 1 -name 'test_*.py' | xargs -r pytest -v -s

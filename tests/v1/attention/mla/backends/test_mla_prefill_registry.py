@@ -28,6 +28,11 @@ class CustomMLAPrefillBackend(MLAPrefillBackend):
         raise NotImplementedError
 
 
+# Derived from __name__ so moving this file between directories cannot leave a
+# stale class path behind.
+CUSTOM_BACKEND_PATH = f"{__name__}.CustomMLAPrefillBackend"
+
+
 def test_prefill_backend_clone_has_isolated_metadata():
     backend = CustomMLAPrefillBackend(
         num_heads=4,
@@ -84,17 +89,13 @@ def test_custom_unregistered_raises():
 def test_register_custom_backend_with_class_path():
     register_mla_prefill_backend(
         backend=MLAPrefillBackendEnum.CUSTOM,
-        class_path=(
-            "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-        ),
+        class_path=CUSTOM_BACKEND_PATH,
     )
 
     assert MLAPrefillBackendEnum.CUSTOM.is_overridden()
 
     class_path = MLAPrefillBackendEnum.CUSTOM.get_path()
-    assert class_path == (
-        "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-    )
+    assert class_path == CUSTOM_BACKEND_PATH
 
     backend_cls = MLAPrefillBackendEnum.CUSTOM.get_class()
     assert backend_cls.get_name() == "CUSTOM"
@@ -124,9 +125,7 @@ def test_override_existing_backend():
 
     register_mla_prefill_backend(
         backend=MLAPrefillBackendEnum.FLASH_ATTN,
-        class_path=(
-            "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-        ),
+        class_path=CUSTOM_BACKEND_PATH,
     )
 
     assert MLAPrefillBackendEnum.FLASH_ATTN.is_overridden()
@@ -141,9 +140,7 @@ def test_clear_override():
 
     register_mla_prefill_backend(
         backend=MLAPrefillBackendEnum.FLASH_ATTN,
-        class_path=(
-            "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-        ),
+        class_path=CUSTOM_BACKEND_PATH,
     )
     assert MLAPrefillBackendEnum.FLASH_ATTN.is_overridden()
 

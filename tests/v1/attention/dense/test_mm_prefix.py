@@ -43,7 +43,7 @@ requires_fa4 = pytest.mark.skipif(
 if _fa4_available():
     from types import MethodType
 
-    from tests.v1.attention.test_attention_backends import (
+    from tests.v1.attention.dense.test_attention_backends import (
         MockAttentionLayer,
         create_and_prepopulate_kv_cache,
     )
