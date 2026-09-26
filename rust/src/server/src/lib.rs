@@ -368,9 +368,16 @@ where
                 Some(context) => MaybeTlsListener::tls(grpc_listener, context),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
-            let server =
-                svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-            let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
+            let stop_accepting = CancellationToken::new();
+            let server = svc
+                .serve_with_incoming_shutdown(incoming, stop_accepting.clone().cancelled_owned());
+            let health_monitor = grpc::monitor_health(
+                health_reporter,
+                engine_health,
+                shutdown,
+                stop_accepting,
+                config.grpc_shutdown_grace_period,
+            );
 
             info!(%addr, tls, model, "gRPC server is ready to accept requests");
 

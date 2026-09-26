@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::time::Duration;
+
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService;
@@ -14,6 +16,8 @@ pub(crate) async fn monitor_health(
     mut health_reporter: HealthReporter,
     mut engine_health: watch::Receiver<bool>,
     shutdown: CancellationToken,
+    stop_accepting: CancellationToken,
+    withdrawal_grace: Duration,
 ) {
     let inference_service = InferenceGrpcService::NAME;
     let control_service = ControlGrpcService::NAME;
@@ -58,6 +62,18 @@ pub(crate) async fn monitor_health(
             "server shutting down; closing gRPC health watches"
         );
     }
+
+    // Keep the inference listener and existing connections serving while
+    // discovery consumers process NOT_SERVING. Health watches remain open so
+    // subscribers connecting during this window see the current status too.
+    if !withdrawal_grace.is_zero() {
+        info!(
+            ?withdrawal_grace,
+            "Allowing late gRPC requests during discovery withdrawal"
+        );
+        tokio::time::sleep(withdrawal_grace).await;
+    }
+    stop_accepting.cancel();
 
     health_reporter.clear_service_status(inference_service).await;
     health_reporter.clear_service_status(control_service).await;

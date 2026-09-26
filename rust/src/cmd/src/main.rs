@@ -139,6 +139,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
+            let drain_frontend_first =
+                !args.headless && args.runtime.grpc_shutdown_grace_period > 0;
             let engine_config = args.to_managed_engine_config(handshake_port);
             let handshake_address = engine_config.handshake_address();
 
@@ -192,12 +194,24 @@ async fn async_main(cli: Cli) -> Result<()> {
             // that all serving tasks are notified.
             shutdown.cancel();
 
-            // Shutdown begins. Terminate the managed engine first.
+            // With discovery withdrawal enabled, the engine must remain available
+            // for late requests and accepted streams until the frontend drains.
+            let drained_frontend =
+                if drain_frontend_first && !matches!(shutdown_reason, ShutdownReason::Server(_)) {
+                    Some((&mut serve_task).await)
+                } else {
+                    None
+                };
+
+            // Shutdown begins. Terminate the managed engine first when no
+            // discovery withdrawal grace was requested.
             engine.shutdown(shutdown_timeout).await?;
             info!("managed engine shut down gracefully");
             // Wait for the API server to shut down gracefully by draining in-flight
             // requests.
-            if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
+            if let Some(result) = drained_frontend {
+                result.context("serve task join failed")??;
+            } else if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
                 serve_task.await.context("serve task join failed")??;
             }
 

@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
         disable_log_stats: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
+        grpc_shutdown_grace_period: Duration::ZERO,
         keep_alive_timeout: Duration::from_secs(5),
         profiler: None,
     };
