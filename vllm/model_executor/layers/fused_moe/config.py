@@ -1311,6 +1311,9 @@ class FusedMoEConfig:
 
     max_capture_size: int = 0
 
+    # Routing method before RoutingSimulatorRouter overrides it with Simulated.
+    original_routing_method: RoutingMethodType | None = None
+
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
     # Use the allocated width as the checkpoint TP stride, including for scales.
