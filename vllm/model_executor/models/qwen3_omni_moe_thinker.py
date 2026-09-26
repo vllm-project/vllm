@@ -1258,6 +1258,24 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             assert isinstance(audios, (list, tuple))
             feature_extractor = self.info.get_hf_processor().feature_extractor
             hop_length = feature_extractor.hop_length
+            max_samples = int(feature_extractor.n_samples)
+            sampling_rate = int(feature_extractor.sampling_rate)
+
+            def waveform(audio: np.ndarray | tuple[np.ndarray, object]) -> np.ndarray:
+                return audio if isinstance(audio, np.ndarray) else audio[0]
+
+            for audio in audios:
+                if audio is None:
+                    continue
+                audio_np = waveform(audio)
+                if audio_np.shape[-1] > max_samples:
+                    duration_s = audio_np.shape[-1] / sampling_rate
+                    max_duration_s = max_samples / sampling_rate
+                    raise ValueError(
+                        "Audio is too long: "
+                        f"{duration_s:.1f}s exceeds the profiled maximum of "
+                        f"{max_duration_s:.1f}s."
+                    )
 
             def pad_to_hop_length(x: np.ndarray) -> np.ndarray:
                 length = x.shape[-1]
