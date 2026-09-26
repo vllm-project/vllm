@@ -335,7 +335,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         hf_config = vllm_config.model_config.hf_text_config
         assert hf_config.index_topk is not None
         self._index_topk = int(hf_config.index_topk)
-        self._index_kpool = int(kv_cache_spec.tokens_per_state)
+        self._index_kpool = int(getattr(hf_config, "index_kpool", 1) or 1)
 
     def _kv_lens_host(self, cam: CommonAttentionMetadata) -> tuple[int, torch.Tensor]:
         """Exact per-row KV lengths, host-side (the flashinfer wrapper bakes
@@ -393,8 +393,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
                 + 1
             )
         topk = self._index_topk
-        kpool = max(self._index_kpool, 1)
-        lens = torch.where(ctx <= topk, ctx, topk + ctx % kpool)
+        lens = torch.where(ctx <= topk, ctx, topk + ctx % self._index_kpool)
         return num_rows, lens.to(torch.int32)
 
     def build(

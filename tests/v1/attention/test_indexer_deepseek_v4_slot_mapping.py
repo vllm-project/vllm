@@ -7,6 +7,9 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
@@ -96,8 +99,11 @@ def test_fused_indexer_decode_metadata(query_lens, padding):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0]])
-def test_device_token_request_mapping(query_lens):
+@pytest.mark.parametrize(
+    "query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0], [0, 0, 0]]
+)
+@pytest.mark.parametrize("use_sparse_mla_builder", [False, True])
+def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     """Graph replay follows device boundaries even when CPU lengths are stale."""
     lengths = torch.tensor(query_lens, device="cuda", dtype=torch.int32)
     qsl = torch.cat(
@@ -118,7 +124,16 @@ def test_device_token_request_mapping(query_lens):
         ),
         slot_mapping=torch.full((n + 7,), -1, device="cuda", dtype=torch.int64),
     )
-    result = common.token_to_req_indices(output)
+
+    def build_mapping():
+        if use_sparse_mla_builder:
+            builder = SimpleNamespace(req_id_per_token_buffer=output)
+            return SparseMLACommonMetadataBuilder._build_req_id_per_token(
+                builder, common
+            )
+        return common.token_to_req_indices(output)
+
+    result = build_mapping()
     assert result.data_ptr() == output.data_ptr()
     expected = torch.repeat_interleave(
         torch.arange(len(query_lens), device="cuda", dtype=torch.int32), lengths
@@ -128,7 +143,7 @@ def test_device_token_request_mapping(query_lens):
     graph = torch.cuda.CUDAGraph()
     common._token_to_req_indices_cache = None
     with torch.cuda.graph(graph):
-        common.token_to_req_indices(output)
+        build_mapping()
     reversed_lens = lengths.flip(0)
     qsl[1:].copy_(reversed_lens.cumsum(0))
     graph.replay()
