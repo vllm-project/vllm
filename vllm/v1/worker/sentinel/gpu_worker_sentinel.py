@@ -12,6 +12,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.utils.network_utils import bind_ephemeral
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
 
@@ -56,16 +57,45 @@ class WorkerSentinel:
         if self.dp_size > 1:
             get_ep_all2all_manager().clean_buffers()
             old_cpu_group = get_dp_group().cpu_group
-            stateless_destroy_torch_distributed_process_group(old_cpu_group)
-            world_size = self.worker.parallel_config.world_size
-            port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
-            get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
+            from vllm.distributed.utils import get_cached_tcp_store_client
+
+            coord_store = get_cached_tcp_store_client(
                 self.data_parallel_master_ip,
-                port,
-                self.dp_rank,
-                self.dp_size,
-                backend="gloo",
+                params["new_stateless_dp_group_coord_port"],
             )
+            world_size = self.worker.parallel_config.world_size
+            local_rank = self.worker.rank % world_size
+            port_key = (
+                f"ft_worker_dp_port_{params['new_stateless_dp_group_epoch']}_"
+                f"{local_rank}"
+            )
+            listen_socket = None
+            if self.dp_rank == 0:
+                listen_socket, port = bind_ephemeral(self.data_parallel_master_ip)
+                try:
+                    coord_store.set(port_key, str(port).encode())
+                except Exception:
+                    listen_socket.close()
+                    raise
+            else:
+                port = int(coord_store.get(port_key).decode())
+
+            stateless_destroy_torch_distributed_process_group(old_cpu_group)
+            try:
+                get_dp_group().cpu_group = (
+                    stateless_init_torch_distributed_process_group(
+                        self.data_parallel_master_ip,
+                        port,
+                        self.dp_rank,
+                        self.dp_size,
+                        backend="gloo",
+                        listen_socket=listen_socket,
+                    )
+                )
+            except Exception:
+                if listen_socket is not None:
+                    listen_socket.close()
+                raise
 
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
