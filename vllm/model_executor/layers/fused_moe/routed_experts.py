@@ -36,6 +36,69 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# A single copy_ into a strided CUDA destination can allocate a device-side
+# temporary covering the whole view, so strided writes are split into chunks of
+# about this many bytes. Introduced by #54699.
+_H2D_CHUNK_BYTES = 1 << 20
+
+
+def _copy_h2d_bounded(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """Copy a dense CPU ``src`` into ``dst``, bounding any device temporary.
+
+    When ``dst`` is a strided view, such as a padded TP slice, a single
+    ``copy_`` can stage the entire view on the device at once. Splitting along
+    the outermost dimension caps that staging buffer instead.
+    """
+    if dst.is_contiguous():
+        dst.copy_(src)
+        return
+
+    num_chunks = max(cdiv(src.nbytes, _H2D_CHUNK_BYTES), 1)
+    for dst_chunk, src_chunk in zip(
+        dst.chunk(num_chunks, dim=0), src.chunk(num_chunks, dim=0), strict=True
+    ):
+        dst_chunk.copy_(src_chunk)
+
+
+def _copy_h2d_dst_strided(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """Copy src into dst, keeping the host->device memcpy contiguous.
+
+    Fused-MoE checkpoints (e.g. ModelOpt Llama-4) store expert weights
+    transposed relative to the runtime layout, so ``src`` arrives here as
+    a non-contiguous CPU view of the memory-mapped checkpoint tensor.
+    ``dst.copy_(src)`` then materializes ``src.contiguous()`` on the CPU,
+    an elementwise strided gather that costs seconds per expert tensor
+    (see https://github.com/vllm-project/vllm/issues/31624).
+
+    Flipping the strided side to the destination keeps the H2D transfer
+    dense: ``src.transpose(-1, -2)`` recovers the contiguous on-disk slab
+    at zero cost. That leaves the destination strided, which is the case
+    #54699 bounds, so the write goes through ``_copy_h2d_bounded`` rather
+    than a single ``copy_``.
+    """
+    if dst.device != src.device and src.device.type == "cpu" and src.ndim >= 2:
+        if not src.is_contiguous():
+            src_t = src.transpose(-1, -2)
+            if src_t.is_contiguous():
+                _copy_h2d_bounded(dst.transpose(-1, -2), src_t)
+                return
+            if src_t.stride(-1) == 1:
+                # TP-narrowed slab: unit inner stride but padded row pitch.
+                # Contiguation here degrades to row-run memcpys instead of an
+                # elementwise gather, after which the H2D transfer is dense.
+                _copy_h2d_bounded(dst.transpose(-1, -2), src_t.contiguous())
+                return
+            # Neither orientation is dense. Fall through: the gather is
+            # unavoidable, but keep the destination write bounded.
+            _copy_h2d_bounded(dst, src.contiguous())
+            return
+        # src is already dense; dst may still be a padded view.
+        _copy_h2d_bounded(dst, src)
+        return
+
+    dst.copy_(src)
+
+
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
@@ -406,7 +469,7 @@ class RoutedExperts(PluggableLayer):
                 hidden_dim=hidden_dim,
                 shard_dim=shard_dim,
             )
-            expert_data.copy_(loaded_weight)
+            _copy_h2d_dst_strided(expert_data, loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
@@ -533,7 +596,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        expert_data.copy_(loaded_weight)
+        _copy_h2d_dst_strided(expert_data, loaded_weight)
 
     def _load_w2(
         self,
@@ -567,24 +630,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        if (
-            loaded_weight.device.type == "cpu"
-            and expert_data.device.type == "cuda"
-            and not expert_data.is_contiguous()
-            and expert_data.ndim == 2
-        ):
-            # A strided CPU-to-CUDA copy can allocate a full-shard CUDA
-            # temporary. Make the TP slice contiguous on CPU and copy rows
-            # in chunks to limit the temporary used for the padded view.
-            loaded_weight = loaded_weight.contiguous()
-            num_chunks = max(cdiv(loaded_weight.nbytes, 1 << 20), 1)
-            for dst, src in zip(
-                expert_data.chunk(num_chunks, dim=0),
-                loaded_weight.chunk(num_chunks, dim=0),
-            ):
-                dst.copy_(src)
-            return
-        expert_data.copy_(loaded_weight)
+        _copy_h2d_dst_strided(expert_data, loaded_weight)
 
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
