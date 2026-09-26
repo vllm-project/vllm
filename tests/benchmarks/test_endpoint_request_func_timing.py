@@ -15,13 +15,11 @@ import importlib.util
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import numpy as np
 import pytest
 
-import benchmarks.benchmark_mm_render as render_benchmark
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
@@ -464,49 +462,3 @@ def test_legacy_usage_only_stream_is_not_reported_as_success(
 
     assert not output.success
     assert output.itl == []
-
-
-@pytest.mark.asyncio
-async def test_render_benchmark_includes_full_response_transfer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = _ScriptedClock()
-    monkeypatch.setattr(render_benchmark, "time", _FakeTime(clock))
-    body = b"serialized multimodal tensors"
-
-    async def read_body() -> bytes:
-        clock()
-        return body
-
-    response = MagicMock()
-    response.status = 200
-    response.read = AsyncMock(side_effect=read_body)
-    response.__aenter__ = AsyncMock(return_value=response)
-    response.__aexit__ = AsyncMock(return_value=None)
-    session = MagicMock(spec=aiohttp.ClientSession)
-    session.post.return_value = response
-
-    latency, actual_body = await render_benchmark.send_request(
-        session, "http://test/v1/chat/completions/render", b"request"
-    )
-
-    assert latency == 2.0
-    assert actual_body == body
-    response.read.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 503])
-async def test_render_benchmark_rejects_unsuccessful_requests(status: int) -> None:
-    response = MagicMock()
-    response.status = status
-    response.read = AsyncMock(return_value=b"request rejected")
-    response.__aenter__ = AsyncMock(return_value=response)
-    response.__aexit__ = AsyncMock(return_value=None)
-    session = MagicMock(spec=aiohttp.ClientSession)
-    session.post.return_value = response
-
-    with pytest.raises(RuntimeError, match=f"HTTP {status}: request rejected"):
-        await render_benchmark.send_request(
-            session, "http://test/v1/chat/completions/render", b"request"
-        )

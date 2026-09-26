@@ -89,8 +89,7 @@ pipeline without adding a preprocessing-worker IPC boundary.
 to keep a fixed API-server count. Values greater than `1` use spawned worker
 processes per API renderer. The default, `1`, retains the existing single-threaded
 multimodal preprocessing path. This is separate from `--renderer-num-workers`,
-which controls the renderer's thread pool. Do not assume process workers are
-faster: compare them with API-server scale-out on the deployment's workload.
+which controls the renderer's thread pool.
 
 ```bash
 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
@@ -107,34 +106,25 @@ placement; an explicit `device` in the processor kwargs takes precedence.
 
 The multimodal processor cache must be disabled with `--mm-processor-cache-gb 0`.
 Content hashes are preserved, so prefix caching does **not** need to be disabled.
-Workers do not add API servers or change API request admission limits or engine
-scheduling limits.
+Workers do not change API request admission or engine scheduling limits.
 
-Each worker loads its own processor and tokenizer and uses additional host
-memory. The worker count multiplies across API renderers, so budget memory and
-CPU cores for the entire deployment. Sending inputs to workers and returning
-processed outputs adds serialization and inter-process communication (IPC)
-overhead, which can outweigh parallelism for small inputs.
+Each worker loads its own processor and tokenizer, not the model weights. Budget
+host memory and CPU cores across all API renderers and their workers. Additional
+serialization and IPC can outweigh the benefit of preprocessing parallelism.
 
 The process pool's CPU tensor transport uses shared memory (`/dev/shm` on Linux).
 Docker's default 64 MiB shared-memory allocation can be insufficient for large
 image batches. Provision adequate shared memory with a suitably sized
-`--shm-size` or `--ipc=host` where appropriate. Budget for concurrently in-flight
+`--shm-size`. Budget for concurrently in-flight
 tensors across all workers, not just the compressed input media.
 
-Budget intra-op threads as well as processes to avoid oversubscribing CPU cores.
-Each worker uses one PyTorch intra-op thread by default, following
-`set_default_torch_num_threads`. Set `OMP_NUM_THREADS` to override the per-worker
-thread count; account for all API renderers, their workers, and other CPU work
-when choosing it. The thread count is not divided by the number of workers.
+Each worker uses one PyTorch intra-op thread by default. `OMP_NUM_THREADS`
+overrides this per-worker count; it is not divided by the number of workers.
+Account for other frontend and engine threads to avoid oversubscribing CPU cores.
 
-Benchmark representative inputs and concurrency on the target hardware with `1`
-and several larger worker counts, measuring throughput, time to first token,
-CPU utilization, host memory, and shared-memory usage. Exclude process startup
-and warmup from steady-state comparisons; more workers are not always faster.
-See the [multimodal concurrency benchmark procedure](../benchmarking/mm_preprocessing.md)
-for a CPU-only rendering comparison and the separate inference benchmark
-required to establish an end-to-end benefit.
+Use the [inference comparison procedure](../benchmarking/mm_preprocessing.md)
+to measure end-to-end performance against API-server scale-out before enabling
+process workers. More workers are not necessarily faster.
 
 ## Parallelism Strategies
 
