@@ -231,6 +231,38 @@ def test_moe_permute_unpermute(
     torch.testing.assert_close(result4, gold4, atol=2e-2, rtol=0)
 
 
+@pytest.mark.parametrize("use_scratch", [False, True])
+def test_moe_permute_empty_routing(use_scratch: bool) -> None:
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    hidden_states = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
+    topk_ids = torch.empty((0, 2), dtype=torch.int32, device="cuda")
+    expert_map = torch.arange(8, dtype=torch.int32, device="cuda")
+    scratch = (
+        get_moe_permute_scratch(
+            max_num_tokens=1,
+            topk=2,
+            num_experts=8,
+            num_local_experts=8,
+            device=hidden_states.device,
+            hidden_size=128,
+            hidden_dtype=hidden_states.dtype,
+        )
+        if use_scratch
+        else None
+    )
+
+    permuted, _, offsets, inverse, permuted_idx = moe_permute(
+        hidden_states, None, topk_ids, 8, expert_map=expert_map, scratch=scratch
+    )
+
+    assert permuted.shape == (0, 128)
+    torch.testing.assert_close(offsets, torch.zeros_like(offsets))
+    assert inverse.numel() == 0
+    assert permuted_idx.numel() == 0
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_token", [1, 33, 128])
 @pytest.mark.parametrize("topk", [1, 6, 8])
