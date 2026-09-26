@@ -108,7 +108,7 @@ def test_deepseek_v4_import_and_jit_monitor_do_not_hijack_hip_symbols() -> None:
     # Both claims are about process-global state, `sys.modules` and the symbol
     # table, and a sibling test legitimately imports TileLang to exercise those
     # kernels, so the checks only mean something in an interpreter of their own.
-    script = Path(__file__).parent / "scripts" / "check_no_tilelang_hijack.py"
+    script = Path(__file__).parents[1] / "scripts" / "check_no_tilelang_hijack.py"
     result = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True,
