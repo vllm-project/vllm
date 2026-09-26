@@ -361,6 +361,15 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
+    if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
+        # Consumer Blackwell: the OAI Triton kernels run but their 99KB shared
+        # memory budget caps them at small tiles, so MARLIN prefills ~10%
+        # faster at equal decode throughput. Keep TRITON as an opt-in.
+        _AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.TRITON)
+        _AVAILABLE_BACKENDS.insert(
+            _AVAILABLE_BACKENDS.index(Mxfp4MoeBackend.BATCHED_MARLIN) + 1,
+            Mxfp4MoeBackend.TRITON,
+        )
     return _AVAILABLE_BACKENDS
 
 
