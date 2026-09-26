@@ -135,6 +135,7 @@ Batch invariance has been tested and verified on the following models:
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 - **OLMo 2**: `allenai/OLMo-2-0425-1B-Instruct`
+- **Granite MoE SWA**: `ibm-granite/granite-swash-3b-a600m` (MoE + sliding-window attention; FLASH_ATTN and TRITON_ATTN backends; FLEX_ATTENTION and decode-vs-prefill test excluded due to per-layer SWA KV window differences)
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
