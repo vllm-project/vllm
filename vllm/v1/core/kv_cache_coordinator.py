@@ -897,8 +897,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # Eagle matches one extra drop unit (one hash unit for
                 # fine-grained managers, else one cache block) and then drops
                 # it, landing back at the candidate length. No margin for
-                # mamba: its finder never drops (draft models have no mamba
-                # layers), so the hit would grow past the candidate.
+                # mamba: unlike the other managers, MambaManager's finder
+                # never needs to search *beyond* the candidate length to
+                # honor drop_eagle_block -- it skips only the first (most
+                # recent) checkpoint it finds within [0, curr_hit_length) and
+                # keeps scanning for the next, older one, so the result never
+                # exceeds curr_hit_length in the first place.
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
                     eagle_margin = (
                         self.hash_block_size

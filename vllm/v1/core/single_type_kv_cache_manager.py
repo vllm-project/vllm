@@ -143,9 +143,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
-        # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
+        # ``CacheConfig.enable_mamba_fine_grained_prefix_cache``, narrowed and set
         # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
-        self.shared_prefix_checkpoint = False
+        self.fine_grained_prefix_cache = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -1523,12 +1523,28 @@ class MambaManager(SingleTypeKVCacheManager):
             max_num_partial_units = min(
                 max_length // hash_block_size, len(block_hashes)
             )
+            # In "align" mode, real Mamba state checkpoints only exist at
+            # sparse positions (block_size / scheduler-step boundaries), not
+            # at every fine-grained hash unit. So we must not pre-shrink the
+            # search ceiling by a fixed hash_block_size (that reliably lands
+            # in a gap between checkpoints and yields no hit at all). Instead,
+            # search the full, unrestricted window and -- only for the first
+            # (most recent) checkpoint we actually find -- skip it once when
+            # drop_eagle_block is set, then keep scanning for the next
+            # (necessarily older, already-committed) checkpoint below it.
+            # This excludes exactly the one block that may hold unverified
+            # MTP/EAGLE draft state, instead of blanking out the whole tail
+            # of the search window.
+            skip_next_hit = drop_eagle_block
             for fine_idx in range(max_num_partial_units - 1, -1, -1):
                 num_tokens = (fine_idx + 1) * hash_block_size
                 block_hash = block_hashes[fine_idx]
                 if cached_block := block_pool.get_cached_block(
                     block_hash, kv_cache_group_ids
                 ):
+                    if skip_next_hit:
+                        skip_next_hit = False
+                        continue
                     block_idx = fine_idx // scale_factor
                     for computed, cached in zip(computed_blocks, cached_block):
                         computed.extend([block_pool.null_block] * block_idx)
@@ -1538,6 +1554,10 @@ class MambaManager(SingleTypeKVCacheManager):
             return computed_blocks, hit_length
 
         max_num_blocks = max_length // block_size
+        # See the fine-grained branch above for why we don't pre-shrink the
+        # ceiling: skip only the first real match we find when
+        # drop_eagle_block is set, then keep scanning for the next one.
+        skip_next_hit = drop_eagle_block
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
@@ -1550,6 +1570,9 @@ class MambaManager(SingleTypeKVCacheManager):
                     block_size != alignment_tokens  # Faster for common case.
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
+                    continue
+                if skip_next_hit:
+                    skip_next_hit = False
                     continue
                 for computed, cached in zip(computed_blocks, cached_block):
                     # the hit length logic later assumes:
@@ -2090,7 +2113,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # running state block, mutated in place, which equals what its key
         # promises only after that step's forward.
         if num_tokens != latest_prompt_hash_boundary and not (
-            self.shared_prefix_checkpoint
+            self.fine_grained_prefix_cache
             and num_tokens == request.shared_prefix_boundary
             and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
         ):
