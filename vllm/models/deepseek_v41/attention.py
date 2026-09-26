@@ -170,6 +170,11 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
+def _swa_cache_block_size() -> int:
+    """Page size for the V4.1 sliding-window cache."""
+    return 64 if current_platform.is_device_capability_family(120) else 32
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -552,7 +557,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
-            block_size=32,
+            block_size=_swa_cache_block_size(),
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
             bounded_replay=swa_bounded_replay,
