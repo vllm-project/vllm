@@ -60,6 +60,45 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_mxfp4(weight_quant):
+            if layer.moe_config.moe_backend == "humming":
+                if (
+                    format != CompressionFormat.mxfp4_pack_quantized.value
+                    or input_quant is None
+                ):
+                    raise ValueError(
+                        "Humming MXFP4 MoE requires packed MXFP4 weights "
+                        "and quantized activations"
+                    )
+
+                from vllm.model_executor.layers.quantization.humming import (
+                    HummingLayerQuantizationConfig,
+                    HummingMoEMethod,
+                )
+                from vllm.utils.humming import BaseInputSchema, BaseWeightSchema
+
+                weight_schema = BaseWeightSchema.from_config(
+                    {
+                        **weight_quant.model_dump(exclude_none=True),
+                        "quant_method": "compressed-tensors",
+                        "format": format,
+                    }
+                )
+                input_schema = BaseInputSchema.from_config(
+                    {
+                        **input_quant.model_dump(exclude_none=True),
+                        "quant_method": "compressed-tensors",
+                        "format": format,
+                    }
+                )
+                return HummingMoEMethod(
+                    HummingLayerQuantizationConfig(
+                        weight_schema=weight_schema,
+                        input_schema=input_schema,
+                        allow_input_schema_fallback=False,
+                    ),
+                    layer.moe_config,
+                )
+
             from .compressed_tensors_moe_w4a4_mxfp4 import (
                 CompressedTensorsW4A4Mxfp4MoEMethod,
             )
