@@ -6665,6 +6665,107 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.request_id not in req_to_blocks
 
 
+def _create_hybrid_mamba_align_scheduler(
+    block_size: int = 16, num_blocks: int = 200
+) -> Scheduler:
+    """FA + Mamba ("align" cache mode) scheduler with stats logging on."""
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            enable_chunked_prefill=True,
+            is_encoder_decoder=False,
+        ),
+        model_config=ModelConfig(
+            model="facebook/opt-125m",
+            trust_remote_code=True,
+            dtype="float16",
+            seed=42,
+            skip_tokenizer_init=True,
+        ),
+        cache_config=CacheConfig(
+            block_size=block_size,
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+        ),
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    register_all_kvcache_specs(vllm_config)
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=block_size,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+
+
+def test_sparse_retention_miss_recorded_at_admission():
+    """The sparse-retention counter reads the shared-prefix boundary that
+    ``schedule()`` stores on the request during its lookup. Going through the
+    scheduler pins that wiring: if the boundary were not stored before the
+    admission-time stats call, the loss would be reported as zero."""
+    block_size = 16
+    scheduler = _create_hybrid_mamba_align_scheduler(block_size)
+    manager = scheduler.kv_cache_manager
+    init_none_hash(sha256)
+    block_hasher = get_request_block_hasher(block_size, sha256)
+    sampling_params = SamplingParams(max_tokens=16)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    shared = [7] * (2 * block_size)
+
+    def make(req_id: str, tail: int) -> Request:
+        return Request(
+            request_id=req_id,
+            prompt_token_ids=shared + [tail] * (2 * block_size),
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_hasher=block_hasher,
+        )
+
+    # The attention group caches the shared prefix densely, while align-mode
+    # Mamba keeps only its own tail, which sits past the shared prefix.
+    seed = make("seed", 50)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(seed)
+    manager.allocate_slots(seed, seed.num_tokens, num_computed, computed_blocks)
+
+    request = make("req", 60)
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    assert request.shared_prefix_boundary == 2 * block_size
+    stats = scheduler.make_stats()
+    assert stats is not None and stats.prefix_cache_stats is not None
+    assert stats.prefix_cache_stats.hits == 0
+    assert stats.prefix_cache_stats.sparse_retention_misses == 2 * block_size
+
+
 def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
