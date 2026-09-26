@@ -783,13 +783,18 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         triton_uses_128 = (
             backend == Mxfp4MoeBackend.TRITON_UNFUSED and get_cdna_version() != 4
         )
+        aiter_w4a4 = backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4
 
-        alignment = (
-            128 if is_situ_or_silu and (aiter_uses_128 or triton_uses_128) else 256
+        intermediate_alignment = (
+            128
+            if aiter_w4a4 or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
+            else 256
         )
+        # W4A4 stage 1 still requires a 256-aligned hidden dimension.
+        hidden_alignment = 256 if aiter_w4a4 else intermediate_alignment
 
-        intermediate_size = round_up(intermediate_size, alignment)
-        hidden_size = round_up(hidden_size, alignment)
+        intermediate_size = round_up(intermediate_size, intermediate_alignment)
+        hidden_size = round_up(hidden_size, hidden_alignment)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
