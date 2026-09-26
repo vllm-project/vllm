@@ -138,6 +138,21 @@ class TestProcessorCompoundDeltas:
         assert len(deltas) == 1
         assert deltas[0].delta == '{"city":"SF"}'
 
+    def test_incomplete_tool_call_status_is_preserved(self):
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[
+                    _make_tool_call(0, name="get_weather", arguments='{"city":"SF"')
+                ]
+            ),
+        )
+        events.extend(processor.close_current(item_status="incomplete"))
+
+        done = next(e for e in events if e.type == "response.output_item.done")
+        assert done.item.status == "incomplete"
+
     def test_reasoning_to_content_transition(self):
         """Regression: the old special case in emit_delta handled this;
         now split_delta handles it generically."""

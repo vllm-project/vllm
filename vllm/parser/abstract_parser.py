@@ -98,6 +98,7 @@ class Parser:
     tool_parser_cls: type[ToolParser] | None = None
     # Server-side floor for tool-call structural tags (--tool-strict-level).
     tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    always_adjust_request: bool = False
 
     def __init__(
         self,
@@ -142,6 +143,14 @@ class Parser:
         )
 
     @property
+    def has_incomplete_tool_call(self) -> bool:
+        return bool(self.incomplete_tool_call_indices)
+
+    @property
+    def incomplete_tool_call_indices(self) -> set[int]:
+        return set()
+
+    @property
     def reasoning_parser(self) -> ReasoningParser | None:
         """The underlying reasoning parser, if any."""
         return self._reasoning_parser
@@ -180,6 +189,10 @@ class Parser:
 
         """
         return request
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Provide the exact rendered prompt to parsers that need prefix state."""
+        return
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:

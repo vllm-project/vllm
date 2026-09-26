@@ -139,6 +139,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.get_tokenizer(),
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -434,6 +435,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             response_parser = self._make_response_parser(
                 request, tokenizer, chat_template_kwargs
             )
+            if response_parser is not None:
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+                if prompt_token_ids is not None:
+                    response_parser.set_prompt_token_ids(prompt_token_ids)
 
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
@@ -691,6 +698,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                     context.request,
                     context.response_messages,
                 )
+                if context.response_parser is not None:
+                    prompt_token_ids = self._extract_prompt_components(
+                        engine_input
+                    ).token_ids
+                    if prompt_token_ids is not None:
+                        context.response_parser.set_prompt_token_ids(prompt_token_ids)
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
@@ -1037,6 +1050,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tool_calls=tool_calls,
                 logprobs=logprobs,
                 tools=request.tools,
+                incomplete_tool_call_indices=parser.incomplete_tool_call_indices,
             )
 
         # Fallback when no parser is configured
@@ -1198,7 +1212,9 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
 
-        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+        hide_stream_metadata = (
+            not request.include_reasoning and context.response_parser is not None
+        )
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1252,7 +1268,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                 for event in processor.emit_delta(dm, output, _get_logprobs):
                     yield _increment_sequence_number_and_return(event)
 
-        for event in processor.close_current():
+        incomplete_tool = bool(
+            context.response_parser and context.response_parser.has_incomplete_tool_call
+        )
+        for event in processor.close_current(
+            item_status="incomplete" if incomplete_tool else "completed"
+        ):
             yield _increment_sequence_number_and_return(event)
 
     async def _process_harmony_streaming_events(

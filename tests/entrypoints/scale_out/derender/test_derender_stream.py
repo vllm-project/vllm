@@ -278,6 +278,45 @@ def parsed_derenderer(tokenizer):
     return dr
 
 
+def test_non_streaming_derender_initializes_parser_prefix(
+    derenderer, tokenizer, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    from vllm.entrypoints.generate.base.protocol import FunctionCall
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [FunctionCall(name="tool", arguments="{}")],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    generated_ids = tokenizer.encode("answer", add_special_tokens=False)
+    response = GenerateResponse(
+        request_id="test",
+        prompt_token_ids=[11, 12],
+        choices=[
+            GenerateResponseChoice(
+                index=0,
+                token_ids=generated_ids,
+                finish_reason="length",
+            )
+        ],
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "question"}],
+    )
+
+    choices = derenderer._derender_chat(response, request)
+
+    parser.set_prompt_token_ids.assert_called_once_with([11, 12])
+    assert choices[0].message.tool_calls[0].function.name == "tool"
+    assert choices[0].finish_reason == "length"
+
+
 class TestDetokenizeDelta:
     """_detokenize_delta: chunked decode must equal one shot decode."""
 
@@ -650,6 +689,26 @@ class TestDerenderChatStreamParsed:
         assert chunk.choices[0].delta.role == "assistant"
         assert chunk.choices[0].finish_reason == "stop"
         assert state.output_token_ids == [_FakeParser.CONTENT]
+
+    @pytest.mark.asyncio
+    async def test_incomplete_tool_call_keeps_finish_reason(
+        self, parsed_derenderer, monkeypatch
+    ):
+        class IncompleteToolParser(_FakeParser):
+            @property
+            def incomplete_tool_call_indices(self) -> set[int]:
+                return {0}
+
+        monkeypatch.setattr(parsed_derenderer, "parser", IncompleteToolParser)
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.TOOL_START], finish_reason="stop"
+            ),
+            chat_request=_chat_request(),
+        )
+        assert chunk.choices[0].delta.tool_calls
+        assert chunk.choices[0].finish_reason == "stop"
 
     @pytest.mark.asyncio
     async def test_role_sent_once(self, parsed_derenderer):

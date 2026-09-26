@@ -54,6 +54,22 @@ class _NoOpParser(DelegatingParser):
         return None
 
 
+class _IncompleteParser(_NoOpParser):
+    def parse(self, *args, **kwargs):
+        return (
+            None,
+            "answer",
+            [
+                FunctionCall(name="complete_tool", arguments="{}"),
+                FunctionCall(name="partial_tool", arguments='{"partial":'),
+            ],
+        )
+
+    @property
+    def incomplete_tool_call_indices(self) -> set[int]:
+        return {1}
+
+
 class _ReasoningOnlyParser(DelegatingParser):
     """Parser that extracts reasoning but no tool calls."""
 
@@ -320,6 +336,16 @@ def test_finish_reason_tracked():
 
     ctx.append_output(_make_request_output(finish_reason="length"))
     assert ctx.finish_reason == "length"
+
+
+def test_malformed_tool_call_marks_response_item_incomplete():
+    ctx = _make_context(_IncompleteParser)
+
+    ctx.append_output(_make_request_output(text="partial call", finish_reason="stop"))
+
+    assert ctx.response_messages[-3].status == "completed"
+    assert ctx.response_messages[-2].status == "completed"
+    assert ctx.response_messages[-1].status == "incomplete"
 
 
 # ---------------------------------------------------------------------------

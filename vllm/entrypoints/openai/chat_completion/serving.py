@@ -165,6 +165,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.get_tokenizer(),
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -300,6 +301,8 @@ class OpenAIServingChat(GenerateBaseServing):
         mm_token_counts: dict[str, int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
+            if parser is not None and prompt_token_ids is not None:
+                parser.set_prompt_token_ids(prompt_token_ids)
             mm_token_counts = _get_mm_token_counts(engine_input)
 
             # If we are creating sub requests for multiple prompts, ensure that they
@@ -766,6 +769,9 @@ class OpenAIServingChat(GenerateBaseServing):
                             tools_streamed[i]
                             and not tool_choice_function_name
                             and output.finish_reason == "stop"
+                            and not (
+                                parser is not None and parser.has_incomplete_tool_call
+                            )
                         ):
                             finish_reason_ = "tool_calls"
                         else:

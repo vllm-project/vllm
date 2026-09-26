@@ -116,17 +116,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for messages in request.messages
         ]
 
-        parser: Parser | None = None
-        if self.parser_cls is not None:
-            chat_template_kwargs = self._effective_chat_template_kwargs(
-                single_requests[0]
-            )
-            parser = self.parser_cls(
-                tokenizer,
-                None,  # tools
-                chat_template_kwargs=chat_template_kwargs,
-            )
-
         render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
             return render_result
@@ -194,7 +183,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             all_conversations,
             tokenizer,
             request_metadata,
-            parser,
+            self.parser_cls,
         )
 
     async def chat_completion_full_generator_batch(
@@ -206,7 +195,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         all_conversations: list[list[ConversationMessage]],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        parser: Parser | None = None,
+        parser_cls: type[Parser] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         """Handle batched (non-streaming) chat completions.
 
@@ -265,10 +254,21 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else:
                     logprobs = None
 
-                if parser is not None:
+                if parser_cls is not None:
+                    single_request = request.to_chat_completion_request(
+                        request.messages[prompt_idx]
+                    )
+                    parser = parser_cls(
+                        tokenizer,
+                        None,
+                        chat_template_kwargs=self._effective_chat_template_kwargs(
+                            single_request
+                        ),
+                    )
+                    parser.set_prompt_token_ids(final_res.prompt_token_ids)
                     reasoning, content, _ = parser.parse(
                         output.text,
-                        request=request,  # type: ignore[arg-type]
+                        request=single_request,
                         model_output_token_ids=output.token_ids,
                     )
                     if not request.include_reasoning:

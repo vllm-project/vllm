@@ -22,6 +22,7 @@ from vllm.entrypoints.chat_utils import (
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -30,6 +31,8 @@ from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -463,6 +466,14 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
+    if args.chat_template is not None and "response_template" in (
+        args.tool_call_parser,
+        getattr(args, "reasoning_parser", None),
+    ):
+        logger.warning(
+            "--chat-template is set; the response_template parser still expects "
+            "the checkpoint's output format."
+        )
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:

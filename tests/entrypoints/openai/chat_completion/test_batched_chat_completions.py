@@ -232,11 +232,15 @@ async def test_batched_chat_completions_logprob_token_ids(
     }
 
 
-def _make_request_output(prompt_idx: int, text: str) -> RequestOutput:
+def _make_request_output(
+    prompt_idx: int,
+    text: str,
+    prompt_token_ids: list[int] | None = None,
+) -> RequestOutput:
     return RequestOutput(
         request_id=f"req-{prompt_idx}",
         prompt=None,
-        prompt_token_ids=[1, 2, 3],
+        prompt_token_ids=prompt_token_ids or [1, 2, 3],
         prompt_logprobs=None,
         outputs=[
             CompletionOutput(
@@ -252,8 +256,12 @@ def _make_request_output(prompt_idx: int, text: str) -> RequestOutput:
     )
 
 
-async def _generator(prompt_idx: int, text: str) -> AsyncGenerator[RequestOutput, None]:
-    yield _make_request_output(prompt_idx, text)
+async def _generator(
+    prompt_idx: int,
+    text: str,
+    prompt_token_ids: list[int] | None = None,
+) -> AsyncGenerator[RequestOutput, None]:
+    yield _make_request_output(prompt_idx, text, prompt_token_ids)
 
 
 @pytest.mark.asyncio
@@ -322,3 +330,47 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     )
 
     assert response.choices[0].message.content == "PREFIX ASSISTANT ANSWER"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_parser_receives_each_prompt_prefix() -> None:
+    prefixes = []
+
+    class RecordingParser:
+        def __init__(self, *args, **kwargs):
+            self.prompt_token_ids = None
+
+        def set_prompt_token_ids(self, prompt_token_ids):
+            self.prompt_token_ids = prompt_token_ids
+
+        def parse(self, model_output, **kwargs):
+            prefixes.append(self.prompt_token_ids)
+            return None, model_output, None
+
+    serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
+    serving.response_role = "assistant"
+    serving.system_fingerprint = None
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    serving.default_chat_template_kwargs = {}
+
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=[
+            [{"role": "user", "content": "first"}],
+            [{"role": "user", "content": "second"}],
+        ],
+    )
+    await serving.chat_completion_full_generator_batch(
+        request=request,
+        generators=[_generator(0, "one", [1]), _generator(1, "two", [2])],
+        request_id="req-prefix",
+        model_name="test-model",
+        all_conversations=request.messages,
+        tokenizer=object(),
+        request_metadata=RequestResponseMetadata(request_id="req-prefix"),
+        parser_cls=RecordingParser,
+    )
+
+    assert prefixes == [[1], [2]]
