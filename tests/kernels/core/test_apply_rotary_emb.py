@@ -225,3 +225,46 @@ def test_apply_rotary_emb_xpu_matches_native(
         expected = op.forward_native(x, cos, sin)
         actual = op.forward_xpu(x, cos, sin)
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only test.")
+@pytest.mark.parametrize("num_tokens", [257, 2304])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_packed_qk_rope_correctness(
+    num_tokens: int, dtype: torch.dtype, default_vllm_config
+):
+    """packed_qk_rope_ must be bitwise identical to the per-tensor
+    ApplyRotaryEmb path with enable_fp32_compute=True, and must leave the V
+    slice untouched."""
+    from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+    from vllm.model_executor.layers.rotary_embedding.packed_qk_rope import (
+        packed_qk_rope_,
+    )
+
+    num_heads, head_dim = 12, 128
+    rng = torch.Generator(device="cuda").manual_seed(0)
+
+    angles = (
+        torch.rand(num_tokens, head_dim // 2, device="cuda", generator=rng) * torch.pi
+    )
+    freqs_cis = torch.polar(torch.ones_like(angles), angles)
+    cos = freqs_cis.real.contiguous()
+    sin = freqs_cis.imag.contiguous()
+
+    xqkv = torch.randn(
+        num_tokens, 3, num_heads, head_dim, dtype=dtype, device="cuda", generator=rng
+    )
+    xqkv_ref = xqkv.clone()
+    xq, xk, xv = torch.unbind(xqkv_ref, dim=-3)
+
+    op = ApplyRotaryEmb(
+        enforce_enable=True, is_neox_style=False, enable_fp32_compute=True
+    )
+    # op() dispatches to forward_cuda / forward_hip per platform.
+    xq_ref = op(xq, cos, sin)
+    xk_ref = op(xk, cos, sin)
+
+    packed_qk_rope_(xqkv, freqs_cis)
+    torch.testing.assert_close(xqkv[:, 0], xq_ref, atol=0, rtol=0)
+    torch.testing.assert_close(xqkv[:, 1], xk_ref, atol=0, rtol=0)
+    torch.testing.assert_close(xqkv[:, 2], xv, atol=0, rtol=0)
