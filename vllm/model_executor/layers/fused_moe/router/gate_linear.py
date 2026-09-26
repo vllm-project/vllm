@@ -4,6 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
@@ -12,6 +14,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 
 @PluggableLayer.register("gate_linear")
@@ -23,7 +27,8 @@ class GateLinear(ReplicatedLinear):
     2. fp32 specialized kernel (SM90+ or gfx950, bf16/fp32 in, fp32 out,
        M<=32, model-specific shapes)
     3. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
-    4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    4. bf16×bf16→fp32 GEMM: cuBLAS (SM90+ + bf16 weight + fp32 out_dtype)
+       or AITER tuned GEMM (ROCm gfx950, bf16 weight)
     5. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
@@ -74,6 +79,11 @@ class GateLinear(ReplicatedLinear):
             ) in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
         can_use_specialized_kernels = (
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
+        )
+        can_use_aiter_tuned_gemm = (
+            not bias
+            and not force_fp32_compute
+            and bool(rocm_aiter_ops.is_tgemm_enabled())
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -155,6 +165,13 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        # AITER tuned GEMM eligibility
+        self.allow_aiter_router_gemm = (
+            can_use_aiter_tuned_gemm and self.weight.dtype == torch.bfloat16
+        )
+        if self.allow_aiter_router_gemm:
+            logger.info_once("Enabled the AITER tuned GEMM router gate.")
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -226,10 +243,21 @@ class GateLinear(ReplicatedLinear):
             output = bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
-        # Tier 4: cuBLAS bf16→fp32
-        if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-            output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
-            return self._return(output)
+        # Tier 4: bf16→fp32 GEMM, the AITER tuned GEMM on ROCm or cuBLAS elsewhere.
+        # The torch.mm epilogue below is eligible on ROCm too, so AITER is tried
+        # first to keep it reachable there.
+        if x.dtype == torch.bfloat16:
+            if self.allow_aiter_router_gemm:
+                output = torch.ops.vllm.rocm_aiter_router_gemm(
+                    x,
+                    self.weight,
+                    self.out_dtype if self.out_dtype is not None else self.weight.dtype,
+                )
+                return self._return(output)
+
+            if self.allow_cublas_router_gemm:
+                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
+                return self._return(output)
 
         # Tier 5: F.linear (ReplicatedLinear)
         if (
@@ -298,4 +326,41 @@ direct_register_custom_op(
     op_name="fp32_router_gemm_dispatch",
     op_func=fp32_router_gemm_dispatch_impl,
     fake_impl=fp32_router_gemm_dispatch_fake,
+)
+
+
+def rocm_aiter_router_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """AITER tuned GEMM for the MoE router gate on ROCm.
+
+    Wrapped in a custom op so torch.compile treats the AITER tuned-config
+    lookup as opaque instead of specializing on it.
+
+    AITER keys its tuned configs on the output dtype as well as the shape, and
+    only ships bf16-output entries for the gate's shapes. Asking for out_dtype
+    directly would miss the table whenever the router runs in fp32 and fall back
+    to an untuned solution, so take the tuned bf16 kernel and cast the tiny
+    num_tokens x num_experts output instead.
+    """
+    from aiter.tuned_gemm import tgemm
+
+    out = tgemm.mm(x, weight, None)
+    return out if out.dtype == out_dtype else out.to(out_dtype)
+
+
+def rocm_aiter_router_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
+
+
+direct_register_custom_op(
+    op_name="rocm_aiter_router_gemm",
+    op_func=rocm_aiter_router_gemm_impl,
+    fake_impl=rocm_aiter_router_gemm_fake,
 )
