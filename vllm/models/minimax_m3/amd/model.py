@@ -106,6 +106,9 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (
     MiniMaxM3SparseAiterPAImpl,
     MiniMaxM3SparseAiterPAPrefillMetadata,
 )
+from vllm.models.minimax_m3.common.encoder_cudagraph import (
+    MiniMaxM3EncoderCudaGraphMixin,
+)
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
 from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLDummyInputsBuilder,
@@ -1685,7 +1688,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
 class MiniMaxM3SparseForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal,
+    MiniMaxM3EncoderCudaGraphMixin,
+    SupportsPP,
+    SupportsEagle3,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
@@ -1730,6 +1737,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.multimodal_config = vllm_config.model_config.multimodal_config
         assert self.multimodal_config is not None
         self.use_data_parallel = self.multimodal_config.mm_encoder_tp_mode == "data"
+        self._encoder_cg_pad_totals: dict[int, int] = {}
 
         text_hidden_size = getattr(config.text_config, "hidden_size", None)
         assert text_hidden_size is not None, "text_config.hidden_size is required"
