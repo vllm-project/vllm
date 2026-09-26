@@ -22,6 +22,7 @@ from vllm.transformers_utils.config import (
     mrope_num_dims,
     patch_legacy_rope_type,
     try_get_generation_config,
+    uses_harmony,
     uses_mrope,
 )
 from vllm.transformers_utils.configs.glm5_next import (
@@ -347,3 +348,21 @@ def test_mrope_num_dims_from_nested_rope_parameters():
 
 def test_mrope_num_dims_without_mrope():
     assert mrope_num_dims(PreTrainedConfig()) == 0
+
+
+@pytest.mark.parametrize(
+    ("model_type", "config_kwargs", "expected"),
+    [
+        ("gpt_oss", {}, True),
+        ("llama", {}, False),
+        # Fine-tunes of gpt-oss with a different chat template can opt out
+        ("gpt_oss", {"use_harmony": False}, False),
+        # Harmony-formatted models on other architectures can opt in
+        ("llama", {"use_harmony": True}, True),
+    ],
+)
+def test_uses_harmony(model_type, config_kwargs, expected):
+    config = PreTrainedConfig(**config_kwargs)
+    config.model_type = model_type
+
+    assert uses_harmony(config) is expected

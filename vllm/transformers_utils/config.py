@@ -767,6 +767,17 @@ def is_encoder_decoder(config: PreTrainedConfig) -> bool:
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
 
 
+def uses_harmony(config: PreTrainedConfig) -> bool:
+    """Detect if the model with this config uses the OpenAI Harmony format.
+
+    Defaults to True for gpt-oss. Set `use_harmony` in the config to override.
+    """
+    use_harmony = getattr(config, "use_harmony", None)
+    if isinstance(use_harmony, bool):
+        return use_harmony
+    return config.model_type == "gpt_oss"
+
+
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """Update kwargs for AutoConfig initialization based on model_type."""
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:

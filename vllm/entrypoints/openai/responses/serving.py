@@ -89,6 +89,7 @@ from vllm.renderers.online_renderer import (
 )
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.config import uses_harmony
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -138,7 +139,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             enable_auto_tools=enable_auto_tools,
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
-            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            is_harmony=uses_harmony(self.model_config.hf_config),
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -165,7 +166,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 "the store."
             )
 
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = uses_harmony(self.model_config.hf_config)
         if self.use_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
