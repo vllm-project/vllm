@@ -49,6 +49,34 @@ def validate_cache_salt(cache_salt: object) -> None:
         )
 
 
+def validate_request_mm_kwargs(
+    *,
+    mm_processor_kwargs: dict[str, Any] | None,
+    media_io_kwargs: dict[str, dict[str, Any]] | None,
+    trust_request_mm_kwargs: bool,
+) -> None:
+    """Reject untrusted per-request multimodal kwarg overrides."""
+    if trust_request_mm_kwargs:
+        return
+
+    if mm_processor_kwargs:
+        raise VLLMValidationError(
+            "Per-request mm_processor_kwargs are disabled by default because "
+            "they can change multimodal preprocessing resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="mm_processor_kwargs",
+        )
+    if media_io_kwargs:
+        raise VLLMValidationError(
+            "Per-request media_io_kwargs are disabled by default because "
+            "they can change multimodal media loading resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="media_io_kwargs",
+        )
+
+
 class SpeculativeDecodingMetrics(OpenAIBaseModel):
     """Per-request speculative-decoding acceptance metrics.
 
