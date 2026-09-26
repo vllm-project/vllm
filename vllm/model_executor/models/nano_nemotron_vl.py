@@ -53,6 +53,7 @@ from vllm.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -942,6 +943,7 @@ class NemotronH_Nano_VL_V2(
     packed_modules_mapping = NemotronHForCausalLM.packed_modules_mapping
     embedding_modules = NemotronHForCausalLM.embedding_modules
     lora_skip_prefixes = NemotronHForCausalLM.lora_skip_prefixes
+    supports_tower_connector_lora = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1712,3 +1714,73 @@ class NemotronH_Nano_VL_V2(
     @classmethod
     def get_mamba_state_copy_func(cls):
         return NemotronHForCausalLM.get_mamba_state_copy_func()
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        data = mm_kwargs.get_data() if mm_kwargs is not None else {}
+        if modality == "audio":
+            if mm_kwargs is None:
+                return num_mm_embeds, num_mm_embeds
+
+            input_features = data["input_audio_features"]
+            assert isinstance(input_features, torch.Tensor)
+            assert self.sound_encoder is not None
+            input_length = torch.tensor([input_features.shape[-2]])
+            output_length = int(
+                self.sound_encoder.encoder._get_subsampling_output_length(
+                    input_length
+                ).item()
+            )
+            num_tokens = input_features.shape[0] * output_length
+            return num_tokens, num_tokens
+
+        if modality not in ("image", "video"):
+            raise ValueError(f"Unsupported modality: {modality}")
+
+        if "image_embeds" in data or "video_embeds" in data:
+            return 0, 0
+
+        reduction_factor = int(round(1 / self.downsample_ratio))
+        if mm_kwargs is not None:
+            key = (
+                "pixel_values_flat"
+                if modality == "image"
+                else "pixel_values_flat_video"
+            )
+            pixel_values = data[key]
+            assert isinstance(pixel_values, torch.Tensor)
+            height, width = pixel_values.shape[-2:]
+            num_patches = (height // self.patch_size) * (width // self.patch_size)
+            if modality == "video":
+                num_tubelets = math.ceil(
+                    pixel_values.shape[0] / self.video_temporal_patch_size
+                )
+                num_patches *= num_tubelets
+            else:
+                image_num_patches = (
+                    1 if pixel_values.ndim == 3 else pixel_values.shape[0]
+                )
+                num_patches *= image_num_patches
+        else:
+            connector_tokens = num_mm_embeds
+            if modality == "video" and self.video_pruning_rate:
+                connector_tokens = math.ceil(
+                    connector_tokens / (1 - self.video_pruning_rate)
+                )
+            num_patches = connector_tokens * reduction_factor**2
+            if modality == "video":
+                num_tubelets = math.ceil(connector_tokens / self.num_image_token)
+            else:
+                image_num_patches = math.ceil(connector_tokens / self.num_image_token)
+
+        num_skip = self.vision_model.model.patch_generator.num_skip
+        return (
+            num_patches
+            + (num_tubelets if modality == "video" else image_num_patches) * num_skip,
+            num_patches // reduction_factor**2,
+        )
