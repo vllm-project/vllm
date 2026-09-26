@@ -61,6 +61,10 @@ from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -616,6 +620,7 @@ class Glm4vVisionTransformer(nn.Module):
         vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -642,6 +647,7 @@ class Glm4vVisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -924,7 +930,7 @@ class Glm4vVisionTransformer(nn.Module):
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
 
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
         x = self.post_conv_layernorm(x)
 
@@ -1755,6 +1761,7 @@ class Glm4vForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1786,6 +1793,7 @@ class Glm4vForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1867,7 +1875,7 @@ class Glm4vForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
@@ -1888,9 +1896,7 @@ class Glm4vForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
-            )
+            pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,

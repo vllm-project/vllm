@@ -18,6 +18,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -351,6 +352,7 @@ class Glm5NextVisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -384,6 +386,7 @@ class Glm5NextVisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -564,7 +567,7 @@ class Glm5NextVisionTransformer(nn.Module):
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
         if encoder_metadata is not None:
