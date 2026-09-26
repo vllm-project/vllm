@@ -480,32 +480,16 @@ def test_compilation_config():
     )
 
 
-def test_allow_mm_processor_kwargs_cli(monkeypatch: pytest.MonkeyPatch):
-    from vllm.platforms import current_platform
+def test_trust_request_mm_kwargs_cli():
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
 
-    if not current_platform.device_type:
-        monkeypatch.setattr(current_platform, "device_type", "cpu")
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
 
     args = parser.parse_args([])
-    engine_args = EngineArgs.from_cli_args(args=args)
-    assert not engine_args.allow_mm_processor_kwargs
+    assert not args.trust_request_mm_kwargs
 
-    args = parser.parse_args(["--allow-mm-processor-kwargs"])
-    engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.allow_mm_processor_kwargs
-
-
-def test_allow_mm_processor_kwargs_passed_to_model_config():
-    from unittest.mock import patch
-
-    with patch("vllm.engine.arg_utils.ModelConfig") as model_config_cls:
-        EngineArgs(
-            model="test",
-            allow_mm_processor_kwargs=True,
-        ).create_model_config()
-
-    assert model_config_cls.call_args.kwargs["allow_mm_processor_kwargs"] is True
+    args = parser.parse_args(["--trust-request-mm-kwargs"])
+    assert args.trust_request_mm_kwargs
 
 
 def test_attention_config():

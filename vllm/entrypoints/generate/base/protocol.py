@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -19,9 +19,6 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -52,19 +49,31 @@ def validate_cache_salt(cache_salt: object) -> None:
         )
 
 
-def validate_mm_processor_kwargs(
-    value: dict[str, Any] | None,
-    model_config: "ModelConfig",
+def validate_request_mm_kwargs(
+    *,
+    mm_processor_kwargs: dict[str, Any] | None,
+    media_io_kwargs: dict[str, dict[str, Any]] | None,
+    trust_request_mm_kwargs: bool,
 ) -> None:
-    """Reject untrusted per-request multimodal processor overrides."""
-    mm_config = model_config.multimodal_config
-    if value and not (mm_config is not None and mm_config.allow_mm_processor_kwargs):
+    """Reject untrusted per-request multimodal kwarg overrides."""
+    if trust_request_mm_kwargs:
+        return
+
+    if mm_processor_kwargs:
         raise VLLMValidationError(
             "Per-request mm_processor_kwargs are disabled by default because "
             "they can change multimodal preprocessing resource usage. Start "
-            "the server with --allow-mm-processor-kwargs only when clients "
+            "the server with --trust-request-mm-kwargs only when clients "
             "are trusted.",
             parameter="mm_processor_kwargs",
+        )
+    if media_io_kwargs:
+        raise VLLMValidationError(
+            "Per-request media_io_kwargs are disabled by default because "
+            "they can change multimodal media loading resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="media_io_kwargs",
         )
 
 

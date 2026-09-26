@@ -16,7 +16,7 @@ from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.generate.base.protocol import validate_mm_processor_kwargs
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
@@ -61,6 +61,7 @@ class PoolingBaseServing(ABC, BaseServing):
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
         self.chat_template_config = chat_template_config
+        self.trust_request_mm_kwargs = chat_template_config.trust_request_mm_kwargs
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = self.renderer._executor
@@ -109,8 +110,10 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
-        validate_mm_processor_kwargs(
-            getattr(request, "mm_processor_kwargs", None), self.model_config
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
         base_request_id = self._base_request_id(
             raw_request, getattr(request, "request_id", None)

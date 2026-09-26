@@ -24,7 +24,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
 )
-from vllm.entrypoints.generate.base.protocol import validate_mm_processor_kwargs
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     build_harmony_preamble,
@@ -124,6 +124,7 @@ class OnlineRenderer:
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
+        trust_request_mm_kwargs: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -156,6 +157,7 @@ class OnlineRenderer:
             default_chat_template_kwargs or {}
         )
         self.trust_request_chat_template = trust_request_chat_template
+        self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
@@ -675,8 +677,10 @@ class OnlineRenderer:
         """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
         model_config = self.model_config
-        validate_mm_processor_kwargs(
-            getattr(request, "mm_processor_kwargs", None), model_config
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
 
         parsed_prompts = [
@@ -714,8 +718,10 @@ class OnlineRenderer:
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
-        validate_mm_processor_kwargs(
-            getattr(request, "mm_processor_kwargs", None), self.model_config
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
         mm_config = self.model_config.multimodal_config
 

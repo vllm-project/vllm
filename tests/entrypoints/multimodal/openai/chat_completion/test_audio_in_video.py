@@ -26,7 +26,7 @@ def server():
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 3, "video": 3}),
-        "--allow-mm-processor-kwargs",
+        "--trust-request-mm-kwargs",
         *ROCM_EXTRA_ARGS,
     ]
 

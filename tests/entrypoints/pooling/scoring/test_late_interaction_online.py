@@ -38,6 +38,7 @@ async def test_flash_late_interaction_rejects_mm_processor_kwargs_by_default():
 
     serving = MagicMock()
     serving.model_config = MagicMock(multimodal_config=MultiModalConfig())
+    serving.trust_request_mm_kwargs = False
     serving.io_processor = MagicMock()
     serving._init_ctx = PoolingBaseServing._init_ctx.__get__(serving)
     request = ScoreQueriesDocumentsRequest(

@@ -169,11 +169,6 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
-    allow_mm_processor_kwargs: bool = False
-    """Allow clients to set per-request multi-modal processor kwargs.
-
-    Only enable this option when API clients are trusted because these kwargs
-    can change multi-modal preprocessing resource usage."""
     mm_device_do_normalize: bool | None = True
     """
     Move the do_normalize computation in the mm preprocessing to before the ViT, 

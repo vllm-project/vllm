@@ -509,14 +509,45 @@ async def test_online_renderer_rejects_mm_processor_kwargs_by_default():
         )
 
 
-def test_mm_processor_kwargs_opt_in_allows_overrides():
-    from vllm.entrypoints.generate.base.protocol import validate_mm_processor_kwargs
-
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_media_io_kwargs_by_default():
     model_config = MockModelConfig()
-    model_config.multimodal_config = MultiModalConfig(allow_mm_processor_kwargs=True)
-    kwargs = {"use_audio_in_video": True}
+    model_config.multimodal_config = MultiModalConfig()
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
 
-    validate_mm_processor_kwargs(kwargs, model_config)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        media_io_kwargs={"video": {"num_frames": 1_000_000}},
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Per-request media_io_kwargs are disabled",
+    ):
+        await online_renderer.preprocess_chat(
+            request,
+            request.messages,
+            default_template=None,
+            default_template_content_format="auto",
+            default_template_kwargs=None,
+        )
+
+
+def test_trust_request_mm_kwargs_opt_in_allows_overrides():
+    from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
+
+    validate_request_mm_kwargs(
+        mm_processor_kwargs={"use_audio_in_video": True},
+        media_io_kwargs={"video": {"num_frames": 4}},
+        trust_request_mm_kwargs=True,
+    )
 
 
 @pytest.mark.parametrize("format_value", [None, {}])
