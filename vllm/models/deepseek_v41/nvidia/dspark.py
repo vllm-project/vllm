@@ -18,6 +18,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -50,12 +51,15 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 
+from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
     _linear_scale_param_name,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
+    maybe_init_gemm_rs,
+    prepare_mega_gate_routing_metadata,
 )
 
 logger = init_logger(__name__)
@@ -77,6 +81,7 @@ class DSparkDeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.num_dspark_layers = (
@@ -109,12 +114,18 @@ class DSparkDeepseekV4Model(nn.Module):
         )
 
         current_vllm_config = get_current_vllm_config()
+        # The target model already holds the GEMM-RS workspace (same hidden
+        # size, same TP group); this only re-checks and binds the draft layers.
+        run_gemm_rs = maybe_init_gemm_rs(
+            current_vllm_config, self.use_sequence_parallel
+        )
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
+                    run_gemm_rs=run_gemm_rs,
                 )
                 for i in range(self.num_dspark_layers)
             ]
@@ -202,6 +213,15 @@ class DSparkDeepseekV4Model(nn.Module):
                 )
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
+        mega_gate_metadata = None
+        if self.use_mega_moe:
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
@@ -215,6 +235,7 @@ class DSparkDeepseekV4Model(nn.Module):
                 post_mix,
                 res_mix,
                 residual,
+                mega_gate_metadata=mega_gate_metadata,
             )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         # Collapse the hc copies with the pre-mix from the last layer's FFN
@@ -234,67 +255,24 @@ def _insert_context_kv(
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
-
-    Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
-    query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
-    """
-    swa_cache = attn.swa_cache_layer.kv_cache
-    block_size = attn.swa_cache_layer.block_size
-    cos_sin_cache = attn.rotary_emb.cos_sin_cache
-    cache_dtype = swa_cache.dtype
-    n_ctx = kv.shape[0]
-    dummy_q = torch.zeros(
-        (n_ctx, attn.n_local_heads, attn.head_dim),
-        dtype=kv.dtype,
-        device=kv.device,
+    """Insert normalized context KV without constructing an unused query."""
+    # The bound cache already is [num_blocks, block_size, bytes_per_token], so
+    # the record width needs no per-layer attribute -- one whose name the
+    # attention layer is free to change (kv_bytes_per_token has to become
+    # swa_bytes_per_token once the sliding-window and compressed records can
+    # differ). block_size stays the layer's, so the op's size(1) check still
+    # cross-checks the two rather than restating the tensor.
+    cache = attn.swa_cache_layer.kv_cache
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        kv,
+        cache,
+        slot_mapping,
+        positions,
+        attn.rotary_emb.cos_sin_cache,
+        attn.swa_cache_layer.block_size,
+        attn._flashinfer_fp8_kv_scale if cache.dtype == torch.float8_e4m3fn else None,
+        attn.kv_mxfp8,
     )
-    if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
-            kv,
-            swa_2d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
-            block_size,
-            True,  # apply_q_norm (unused: the query is a discarded dummy)
-            attn.kv_mxfp8,
-        )
-    elif cache_dtype == torch.bfloat16:
-        swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-            dummy_q,
-            kv,
-            swa_3d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.eps,
-            block_size,
-        )
-    else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # TODO(ben): double-check if this is being dispatched correctly for FI backend
-        swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-            dummy_q,
-            kv,
-            dummy_q_fp8,
-            swa_3d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn._flashinfer_fp8_kv_scale,
-            attn._flashinfer_fp8_q_scale_inv,
-            attn.eps,
-            block_size,
-        )
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
@@ -520,8 +498,22 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
+    def _finalize_attn(self) -> None:
+        """Run the attention backend's post-load weight step on the draft layers.
+
+        They are ordinary DeepseekV4DecoderLayers, so they take the engine-wide
+        attention backend and owe it whatever the target model owes it -- mega
+        attention permutes wq_b / wo_a here and refuses to run without it.
+        Idempotent, like the target's.
+        """
+        for layer in self.model.layers:
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
+
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
+        self._finalize_attn()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.

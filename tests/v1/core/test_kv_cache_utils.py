@@ -279,6 +279,44 @@ def make_request(
     )
 
 
+@pytest.mark.parametrize("dcp", [1, 4])
+def test_effective_attention_block_size_matches_events(dcp):
+    from vllm.distributed.kv_events import BlockStored
+    from vllm.v1.engine.core import EngineCore
+
+    config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], new_kv_cache_spec()),
+        ],
+    )
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([config]),
+        max_model_len=256,
+        scheduler_block_size=16 * dcp,
+        hash_block_size=16 * dcp,
+        dcp_world_size=dcp,
+        enable_kv_cache_events=True,
+    )
+    core = EngineCore.__new__(EngineCore)
+    core.vllm_config = SimpleNamespace(cache_config=CacheConfig(block_size=16))
+    core.scheduler = SimpleNamespace(kv_cache_manager=manager)
+    core._initialize_effective_attention_block_size()
+    block_size = core.vllm_config.cache_config.effective_attention_block_size
+    assert block_size == 16 * dcp
+
+    request = make_request(
+        "block-size", list(range(64)), block_size=16 * dcp, hash_fn=sha256
+    )
+    assert manager.allocate_slots(request, 64) is not None
+    assert [
+        event.block_size
+        for event in manager.take_events()
+        if isinstance(event, BlockStored)
+    ] == [block_size]
+
+
 def new_kv_cache_spec(
     block_size=16,
     num_kv_heads=2,
@@ -981,6 +1019,37 @@ def test_request_block_hasher(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_fn):
+    mm_positions = [
+        PlaceholderRange(offset=4, length=2),
+        PlaceholderRange(offset=6, length=1),
+    ]
+    incremental = make_request(
+        request_id="incremental",
+        prompt_token_ids=list(range(7)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+    incremental.append_output_token_ids(7)
+    fresh = make_request(
+        request_id="fresh",
+        prompt_token_ids=list(range(8)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+
+    expected_second_hash = hash_fn(
+        (incremental.block_hashes[0], (4, 5, 6, 7), (("A", 0), ("B", 2)))
+    )
+    assert incremental.block_hashes[1] == expected_second_hash
+    assert incremental.block_hashes == fresh.block_hashes
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_tokens_different_mm_input(hash_fn):
     request1 = make_request(
         request_id="0",
@@ -1030,10 +1099,24 @@ def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
     return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
 
+def test_metrics_empty_distinguishes_no_queries_from_no_hits():
+    """`hit_rate` alone cannot tell the two apart; `empty` can.
+
+    Both an unobserved window and a genuine all-miss window report a hit
+    rate of 0.0, so anything surfacing that number to a human has to check
+    `empty` first - which is what the prefix-cache log line does.
+    """
+    metrics = CachingMetrics(max_recent_requests=5)
+    assert metrics.empty
+    assert metrics.hit_rate == 0.0
+
+    metrics.observe(_stats(1, 20, 0))
+    assert not metrics.empty
+    assert metrics.hit_rate == 0.0
+
+
 def test_metrics():
-    """
-    Test the prefix caching metrics.
-    """
+    """Test the prefix caching metrics."""
     metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
@@ -1063,9 +1146,7 @@ def test_metrics():
 
 
 def test_metrics_empty_stats():
-    """
-    Test the prefix caching metrics with empty stats.
-    """
+    """Test the prefix caching metrics with empty stats."""
     metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))
@@ -1865,7 +1946,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
 
 def test_allocate_with_lookahead():
-    """Verify that lookahead tokens correctly affect block allocation"""
+    """Verify that lookahead tokens correctly affect block allocation."""
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,
@@ -3884,8 +3965,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
-    """
-    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+    """Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
 
     This test guards against that regression by verifying that a VllmConfig
     with kv_events_config set still resolves disable_hybrid_kv_cache_manager
@@ -4226,12 +4306,16 @@ def _deepseek_v4_specs(model_version="deepseek_v4"):
     }
 
 
-def test_deepseek_v4_draft_group_annotated_on_packed_path():
+@pytest.mark.parametrize(
+    ("method", "model_type"),
+    [("mtp", "deepseek_v4"), ("dspark", "deepseek_v4"), ("dspark", "deepseek_v41")],
+)
+def test_deepseek_v4_draft_group_annotated_on_packed_path(method, model_type):
     # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
     # carries no draft marker and only the positional rule can find it. This
     # pins the pre-existing behaviour that the unified annotator must preserve.
     groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method="mtp", model_type="deepseek_v4"),
+        _spec_decode_grouping_config(method=method, model_type=model_type),
         _deepseek_v4_specs(model_version=None),
     )
 
@@ -4240,13 +4324,93 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
     assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
 
 
-def test_deepseek_v4_annotation_requires_model_type():
-    # The positional rule is only sound for DeepseekV4, where the draft layer
-    # is known to be registered last. Without that model gate nothing may be
-    # flagged, however the grouping happens to fall out.
+def test_trailing_layer_fallback_applies_to_any_mtp_model():
+    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
+    # MTP blocks reuse the target's decoder layer (no spec marker) and always
+    # register after every target layer. The model_type must not gate it.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="other"),
         _deepseek_v4_specs(),
     )
 
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+
+
+def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
+    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
+    the MTP drafter's full-attn layer (spec-identical to the target's)
+    registered last."""
+    specs = {}
+    idx = 0
+    for _ in range(2):
+        for _ in range(3):
+            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
+                mamba_cache_mode="align"
+            )
+            idx += 1
+        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
+        idx += 1
+    if with_mtp_layer:
+        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
+    return specs
+
+
+def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
+    # A hybrid mamba + full-attention model with an MTP drafter that is
+    # spec-indistinguishable from the target reaches the general multi-group
+    # path. The trailing-layer rule must locate the draft group there so the
+    # Mamba groups are not swept up by the flag-all consumer fallback.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "dspark"])
+def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
+    # Other drafters are not covered by the trailing-layer rule, so an
+    # unidentifiable hybrid draft must still warn.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method=method, model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
     assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" in caplog_vllm.text
+
+
+def test_trailing_layer_fallback_requires_exact_partition():
+    # If the groups do not partition the layers exactly (e.g. a caller that
+    # dropped or duplicated layers), the positional rule is meaningless and
+    # must not fire.
+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+
+    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
+    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
+    groups = get_kv_cache_groups(config, specs)
+    for g in groups:
+        g.is_eagle_group = False
+    # Remove one layer from its group: no longer an exact partition.
+    trimmed = [
+        KVCacheGroupSpec(
+            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
+            g.kv_cache_spec,
+        )
+        for g in groups
+    ]
+    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
+
+    assert not any(g.is_eagle_group for g in trimmed)

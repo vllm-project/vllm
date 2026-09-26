@@ -39,6 +39,7 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     hidden_size: int = 768
     dtype: torch.dtype = torch.float32
@@ -506,7 +507,7 @@ class TestRenderPrompt:
 
 class TestRenderEmbedPrompt:
     def _create_test_embed_bytes(self, tensor: torch.Tensor) -> bytes:
-        """Helper to create base64-encoded tensor bytes"""
+        """Helper to create base64-encoded tensor bytes."""
         buffer = io.BytesIO()
         torch.save(tensor, buffer)
         buffer.seek(0)

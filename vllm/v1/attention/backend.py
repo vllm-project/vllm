@@ -34,8 +34,7 @@ from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
-    """
-    Attention type.
+    """Attention type.
     Use string to be compatible with `torch.compile`.
     """
 
@@ -70,7 +69,9 @@ class AttentionBackend(ABC):
     forward_includes_kv_cache_update: bool = True
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: "KVCacheSpec | None" = None,
+    ) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @staticmethod
@@ -383,8 +384,7 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 @dataclass
 class CommonAttentionMetadata:
-    """
-    Per-batch attention metadata, shared across layers and backends.
+    """Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
     For many of the tensors we keep both GPU and CPU versions.
@@ -573,6 +573,26 @@ class AttentionCGSupport(Enum):
     """NO cudagraph support"""
 
 
+def max_decode_query_len(vllm_config: "VllmConfig") -> int:
+    """Widest request a spec-as-decode builder treats as a decode.
+
+    On model runner V2 this is a verification request, 1 +
+    num_speculative_tokens: no V2 speculator builds a wider query. The reorder
+    threshold and the code that mirrors the builders' decode/prefill split all
+    read this, so they cannot drift apart.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is None or speculative_config.num_speculative_tokens is None:
+        return 1
+    num_speculative_tokens = speculative_config.num_speculative_tokens
+    max_query_len = 1 + num_speculative_tokens
+    if speculative_config.parallel_drafting and not vllm_config.use_v2_model_runner:
+        # Model runner V1 only; remove with it. Its parallel drafter appends up
+        # to num_speculative_tokens mask slots to each verified request.
+        max_query_len += num_speculative_tokens
+    return max_query_len
+
+
 class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
@@ -616,6 +636,30 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        """Get the largest per-request query length L of the variable-length
+        decode batches a FULL cudagraph of this builder class can replay.
+
+        The graph must replay any decode batch in which every real request has
+        between 1 and L query tokens and every padding request has 0. Lengths
+        come from the device query_start_loc; host metadata carries only the
+        token count and an upper bound on the per-request length. Batches with
+        a prefill never replay these graphs. Whether host metadata may
+        understate device query lengths at all is a separate backend question;
+        see supports_device_cpu_query_lens_mismatch().
+
+        Returns:
+            L, or None for builders reporting ALWAYS, which replay any batch,
+            and for builders that cannot replay variable-length batches.
+
+        """
+        return None
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
@@ -632,14 +676,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                max_num_queries_for_spec = (
-                    1
-                    + (2 if speculative_config.parallel_drafting else 1)
-                    * speculative_config.num_speculative_tokens
-                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    max_num_queries_for_spec,
+                    max_decode_query_len(self.vllm_config),
                 )
 
         if (
@@ -655,8 +694,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> M:
-        """
-        Central method that builds attention metadata.
+        """Central method that builds attention metadata.
         Some builders (MLA) require reorder_batch to be called prior to build.
 
         Args:
@@ -665,6 +703,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
                 result of a build call may only be used for few layers/iters.
+
         """
         raise NotImplementedError
 
@@ -674,8 +713,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
-        """
-        Update the block table for the attention metadata.
+        """Update the block table for the attention metadata.
         Faster when theres multiple kv-cache groups that create virtually the
         same metadata but just with different block tables.
 
@@ -686,8 +724,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
-        """
-        Build attention metadata for CUDA graph capture. Uses build by default.
+        """Build attention metadata for CUDA graph capture. Uses build by default.
         Subclasses that override this method should call self.build or
         super().build_for_cudagraph_capture.
         """
@@ -700,8 +737,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
     ) -> M:
-        """
-        Build attention metadata for draft model. Uses build by default.
+        """Build attention metadata for draft model. Uses build by default.
 
         Args:
             common_attn_metadata: The common attention metadata.
@@ -710,6 +746,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 draft attempt for the i-th token.
                 For tree-based attention, this index instead refers to the
                 draft attempt for the i-th level in the tree of tokens.
+
         """
         return self.build(
             common_prefix_len=0,
@@ -910,8 +947,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         raise NotImplementedError
 
     def fused_output_quant_supported(self, quant_key: "QuantKey") -> bool:
-        """
-        Does this attention implementation support fused output quantization.
+        """Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
@@ -920,20 +956,23 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
         Returns:
             is fusion supported for this type of quantization
+
         """
         return False
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        """
-        Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
+        """Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
         This is used by the QkNormRopeKvCachePattern to only fuse the QKNorm ops
         with the RoPE ops and the KV cache update for implementations that support it.
         """
         return False
 
+    def fused_qk_norm_mrope_kvcache_supported(self):
+        """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
+        return False
+
     def fused_rope_kvcache_supported(self):
-        """
-        Does this attention implementation support RoPE+KVCache fusion.
+        """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
         with the KV cache update for implementations that support it.
         """
@@ -954,12 +993,31 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        """
-        If `fused_qk_norm_rope_kvcache_supported` returns True, this method
+        """If `fused_qk_norm_rope_kvcache_supported` returns True, this method
         will be called by the fused custom op. Applies QK-norm + RoPE and
         writes K/V to the KV cache. Results are written to the pre-allocated
         q_out and k_out tensors; V is split from QKV at the graph level.
         """
+        raise NotImplementedError
+
+    def do_qk_norm_mrope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        mrope_section: tuple[int, int, int],
+        is_interleaved: bool,
+        rotary_dim: int,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """Apply QK-norm and MRoPE, then write K/V to the cache."""
         raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
@@ -974,8 +1032,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        """
-        If `fused_rope_kvcache_supported` returns True, this method will be called
+        """If `fused_rope_kvcache_supported` returns True, this method will be called
         by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
         to perform the inplace RoPE and KV cache update.
         """
@@ -1040,8 +1097,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         raise NotImplementedError
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
-        """
-        Does this attention implementation support fused output quantization.
+        """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
@@ -1080,9 +1136,7 @@ def subclass_attention_backend(
     attention_backend_cls: type[AttentionBackend],
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
-    """
-    Return a new subclass where `get_builder_cls` returns `builder_cls`.
-    """
+    """Return a new subclass where `get_builder_cls` returns `builder_cls`."""
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
 
     return type(

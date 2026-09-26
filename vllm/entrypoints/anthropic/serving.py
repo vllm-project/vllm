@@ -3,14 +3,14 @@
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/serving.py
 
-"""Anthropic Messages API serving handler"""
+"""Anthropic Messages API serving handler."""
 
 import json
 import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, get_args
 
 import jinja2
 from fastapi import Request
@@ -22,11 +22,15 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicCountTokensResponse,
     AnthropicDelta,
+    AnthropicDisabledThinkingEffort,
+    AnthropicDisabledThinkingEffortOption,
+    AnthropicEffort,
     AnthropicError,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
     AnthropicStreamEvent,
+    AnthropicThinkingConfig,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -96,7 +100,7 @@ def wrap_data_with_event(data: str, event: str):
 
 
 class AnthropicServingMessages(OpenAIServingChat):
-    """Handler for Anthropic Messages API requests"""
+    """Handler for Anthropic Messages API requests."""
 
     def __init__(
         self,
@@ -112,9 +116,11 @@ class AnthropicServingMessages(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
     ):
         super().__init__(
             engine_client=engine_client,
@@ -127,6 +133,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             reasoning_parser=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
@@ -138,6 +145,53 @@ class AnthropicServingMessages(OpenAIServingChat):
             "tool_calls": "tool_use",
         }
         self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        # Resolved lazily from the renderer when "auto".
+        self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
+            None if disabled_thinking_effort == "auto" else disabled_thinking_effort
+        )
+
+    async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
+        if self._disabled_thinking_effort is None:
+            self._disabled_thinking_effort = (
+                await self._probe_disabled_thinking_effort()
+            )
+            logger.info(
+                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                self._disabled_thinking_effort,
+            )
+        return self._disabled_thinking_effort
+
+    async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
+        """Use ``low`` if the renderer rejects or ignores ``none``.
+
+        ``none`` is ignored when it renders the same prompt as a thinking
+        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
+        """
+        none_prompt = await self._render_probe_prompt("none")
+        if none_prompt is None:
+            return "low"
+        for effort in get_args(AnthropicEffort):
+            if await self._render_probe_prompt(effort) == none_prompt:
+                return "low"
+        return "none"
+
+    async def _render_probe_prompt(
+        self, effort: AnthropicDisabledThinkingEffort
+    ) -> tuple[list[int] | None, str | None] | None:
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hi"}],
+            reasoning_effort=effort,
+        )
+        try:
+            result = await self.online_renderer.render_chat(request)
+        except Exception:
+            logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
+            return None
+        if isinstance(result, ErrorResponse):
+            return None
+        _, (engine_input,) = result
+        components = self._extract_prompt_components(engine_input)
+        return components.token_ids, components.text
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
@@ -195,8 +249,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         *,
         merge_inline_system: bool = False,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
     ) -> ChatCompletionRequest:
-        """Convert Anthropic message format to OpenAI format"""
+        """Convert Anthropic message format to OpenAI format."""
         openai_messages: list[dict[str, Any]] = []
 
         cls._convert_system_message(
@@ -212,6 +267,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
+        cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
         return req
@@ -224,7 +280,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> None:
-        """Convert Anthropic system message to OpenAI format"""
+        """Convert Anthropic system message to OpenAI format."""
         system_parts: list[str] = []
 
         # Top-level system field
@@ -278,7 +334,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> None:
-        """Convert Anthropic messages to OpenAI format"""
+        """Convert Anthropic messages to OpenAI format."""
         for msg in messages:
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
@@ -310,7 +366,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_msg: dict[str, Any],
         openai_messages: list[dict[str, Any]],
     ) -> None:
-        """Convert complex message content blocks"""
+        """Convert complex message content blocks."""
         content_parts: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         reasoning_parts: list[str] = []
@@ -349,7 +405,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         reasoning_parts: list[str],
         openai_messages: list[dict[str, Any]],
     ) -> None:
-        """Convert individual content block"""
+        """Convert individual content block."""
         if block.type == "text" and block.text:
             content_parts.append({"type": "text", "text": block.text})
         elif block.type == "image" and block.source:
@@ -374,7 +430,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
-        """Convert tool_use block to OpenAI function call format"""
+        """Convert tool_use block to OpenAI function call format."""
         tool_call = {
             "id": block.id or f"call_{int(time.time())}",
             "type": "function",
@@ -393,7 +449,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
         content_parts: list[dict[str, Any]],
     ) -> None:
-        """Convert tool_result block to OpenAI format"""
+        """Convert tool_result block to OpenAI format."""
         if role == "user":
             cls._convert_user_tool_result(block, openai_messages)
         else:
@@ -406,7 +462,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _convert_user_tool_result(
         cls, block, openai_messages: list[dict[str, Any]]
     ) -> None:
-        """Convert user tool_result with text and image support"""
+        """Convert user tool_result with text and image support."""
         tool_text = ""
         tool_image_urls: list[str] = []
         tool_reference: list[dict[str, Any]] = []
@@ -468,7 +524,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         openai_messages: list[dict[str, Any]],
     ) -> ChatCompletionRequest:
-        """Build base ChatCompletionRequest"""
+        """Build base ChatCompletionRequest."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return ChatCompletionRequest(
                 model=anthropic_request.model,
@@ -493,12 +549,39 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
 
     @classmethod
+    def _handle_thinking(
+        cls,
+        req: ChatCompletionRequest,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
+    ) -> None:
+        """Handle extended-thinking configuration.
+
+        ``display`` is intentionally ignored: suppressing reasoning would mark
+        it ended for structured outputs and drop it from multi-turn history.
+        """
+        if isinstance(anthropic_request, AnthropicCountTokensRequest):
+            return
+        thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
+        if thinking is None:
+            return
+
+        if thinking.type == "disabled":
+            # "none" clears enable_thinking for templates that honor it; models
+            # that cannot disable thinking are configured with a low effort.
+            req.reasoning_effort = disabled_thinking_effort
+        elif thinking.type == "enabled":
+            req.thinking_token_budget = thinking.budget_tokens
+        # "adaptive" pins nothing: the model chooses depth beneath the ceiling
+        # already set from output_config.effort.
+
+    @classmethod
     def _handle_output_config(
         cls,
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
-        """Handle output configuration such as output format and effort"""
+        """Handle output configuration such as output format and effort."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         output_config: AnthropicOutputConfig | None = anthropic_request.output_config
@@ -519,7 +602,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
-        """Handle streaming configuration"""
+        """Handle streaming configuration."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         if anthropic_request.stream:
@@ -534,7 +617,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
-        """Convert Anthropic tool_choice to OpenAI format"""
+        """Convert Anthropic tool_choice to OpenAI format."""
         if anthropic_request.tool_choice is None:
             req.tool_choice = None
             return
@@ -563,7 +646,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
-        """Convert Anthropic tools to OpenAI format"""
+        """Convert Anthropic tools to OpenAI format."""
         if anthropic_request.tools is None:
             return
 
@@ -593,17 +676,20 @@ class AnthropicServingMessages(OpenAIServingChat):
         request: AnthropicMessagesRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | AnthropicMessagesResponse | ErrorResponse:
-        """
-        Messages API similar to Anthropic's API.
+        """Messages API similar to Anthropic's API.
 
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
+        if request.thinking is not None and request.thinking.type == "disabled":
+            disabled_thinking_effort = await self._get_disabled_thinking_effort()
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=disabled_thinking_effort,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())

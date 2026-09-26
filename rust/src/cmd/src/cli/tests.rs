@@ -177,10 +177,14 @@ fn serve_args_forward_python_flags_with_separator() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -196,6 +200,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1013,10 +1018,14 @@ fn frontend_args_accept_json() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1032,6 +1041,7 @@ fn frontend_args_accept_json() {
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1118,6 +1128,73 @@ fn frontend_args_json_ignores_engine_owned_max_model_len() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+}
+
+#[test]
+fn hf_overrides_preserve_merge_patch_in_cli_and_python_bootstrap() {
+    let patch = r#"{"text_config":{"rope_parameters":{"factor":4}},"sliding_window":null}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides",
+        patch,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    let expected: serde_json::Value = serde_json::from_str(patch).unwrap();
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        expected
+    );
+    let engine = args.to_managed_engine_config(1234);
+    let index = engine.python_args.iter().position(|arg| arg == "--hf-overrides").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
+        expected
+    );
+    assert!(!engine.python_args.iter().any(|arg| arg == "--hf-config-path"));
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    assert_eq!(serde_json::to_value(config.hf_overrides).unwrap(), expected);
+
+    let payload = serde_json::json!({"model_tag":"Qwen/Qwen3-0.6B", "hf_overrides":expected});
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        &payload.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args")
+    };
+    assert_eq!(
+        serde_json::to_value(args.into_config().hf_overrides).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn hf_overrides_reject_non_object_inputs() {
+    for patch in ["null", "[]", "1", r#""callable""#] {
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--hf-overrides",
+            patch,
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }
 
 #[test]
@@ -1613,10 +1690,14 @@ fn serve_args_accept_handshake_aliases() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1632,6 +1713,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1763,6 +1845,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
             generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
@@ -1771,6 +1856,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1784,6 +1870,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
+                sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1852,6 +1939,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
             generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
@@ -1860,6 +1950,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1873,6 +1964,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
+                sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1963,6 +2055,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
             generation_config: Auto,
             served_model_name: [],
             listener_mode: InheritedFd {
@@ -1970,6 +2065,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             tool_call_parser: None,
             reasoning_parser: None,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1983,6 +2079,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
+                sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
                 allow_origins: [

@@ -16,11 +16,33 @@ from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
 
 logger = init_logger(__name__)
+
+
+def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
+    """Copy target KV scales while preserving their tensor representation.
+
+    Default attention scales are scalar buffers, while some quantization
+    methods replace them with length-one or per-head parameters. Preserve the
+    draft layer's registration type so the shared KV cache is interpreted with
+    the target's values and shapes without aliasing target parameters.
+    """
+    for scale_name in ("_k_scale", "_v_scale"):
+        draft_scale = getattr(attn, scale_name)
+        target_scale = getattr(target_attn, scale_name)
+        scale = target_scale.detach().clone()
+        if isinstance(draft_scale, nn.Parameter):
+            scale = nn.Parameter(scale, requires_grad=False)
+        setattr(attn, scale_name, scale)
+    for scale_name in ("_k_scale_float", "_v_scale_float"):
+        setattr(attn, scale_name, getattr(target_attn, scale_name))
+    for scale_name in ("_k_scale_cpu", "_v_scale_cpu"):
+        getattr(attn, scale_name).copy_(getattr(target_attn, scale_name))
 
 
 class Gemma4Speculator(AutoRegressiveSpeculator):
@@ -40,7 +62,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             draft_model = get_model(
                 vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
-                load_config=self.speculative_config.draft_load_config,
+                load_config=get_draft_load_config(draft_vllm_config),
             )
         self._setup_gemma4_kv_sharing(draft_model, target_attn_layer_names)
         self._share_embeddings(draft_model, target_model)
@@ -76,7 +98,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
         model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> None:
-        """Wire draft layers to share KV with the target model.
+        """Wire draft layers to share KV and KV scales with the target model.
 
         Each draft decoder layer is mapped to the last non-KV-shared
         target layer of the same attention type (sliding or full).
@@ -91,7 +113,10 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             return
 
         target_num_kv_shared = getattr(target_text_config, "num_kv_shared_layers", 0)
-        num_non_shared = len(target_layer_types) - target_num_kv_shared
+        target_num_layers = getattr(
+            target_text_config, "num_hidden_layers", len(target_layer_types)
+        )
+        num_non_shared = target_num_layers - target_num_kv_shared
         type_to_target_indices: dict[str, list[int]] = defaultdict(list)
         for idx, lt in enumerate(target_layer_types[:num_non_shared]):
             type_to_target_indices[lt].append(idx)
@@ -127,6 +152,17 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             target_idx = candidates[-1]
             target_layer_name = f"{target_prefix}.{target_idx}.self_attn.attn"
             attn.kv_sharing_target_layer_name = target_layer_name
+
+            # KV-cache sharing aliases the cache tensor during allocation, but
+            # the quantization scales live on the Attention modules themselves.
+            # The BF16 draft model has no quantization config, so its K/V scales
+            # otherwise remain at the default 1.0 while it reads the target's
+            # calibrated FP8 cache.
+            target_attn = self.vllm_config.compilation_config.static_forward_context[
+                target_layer_name
+            ]
+            _copy_target_kv_scales(attn, target_attn)
+
             logger.info(
                 "Gemma4 MTP: draft layer %d (%s) -> %s",
                 draft_idx,

@@ -56,9 +56,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
@@ -121,7 +122,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 
 @pytest.mark.asyncio
 async def test_chat_error_non_stream():
-    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -246,7 +247,7 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 @pytest.mark.asyncio
 async def test_chat_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -472,6 +473,81 @@ def test_json_schema_response_format_missing_schema():
             messages=[{"role": "user", "content": "hello"}],
             response_format={"type": "json_schema"},
         )
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_mm_processor_kwargs_by_default():
+    model_config = MockModelConfig()
+    model_config.multimodal_config = MultiModalConfig()
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        mm_processor_kwargs={
+            "patch_size": 1,
+            "vision_min_num_patches": 3_000_000_000,
+        },
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Per-request mm_processor_kwargs are disabled",
+    ):
+        await online_renderer.preprocess_chat(
+            request,
+            request.messages,
+            default_template=None,
+            default_template_content_format="auto",
+            default_template_kwargs=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_media_io_kwargs_by_default():
+    model_config = MockModelConfig()
+    model_config.multimodal_config = MultiModalConfig()
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        media_io_kwargs={"video": {"num_frames": 1_000_000}},
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Per-request media_io_kwargs are disabled",
+    ):
+        await online_renderer.preprocess_chat(
+            request,
+            request.messages,
+            default_template=None,
+            default_template_content_format="auto",
+            default_template_kwargs=None,
+        )
+
+
+def test_trust_request_mm_kwargs_opt_in_allows_overrides():
+    from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
+
+    validate_request_mm_kwargs(
+        mm_processor_kwargs={"use_audio_in_video": True},
+        media_io_kwargs={"video": {"num_frames": 4}},
+        trust_request_mm_kwargs=True,
+    )
 
 
 @pytest.mark.parametrize("format_value", [None, {}])

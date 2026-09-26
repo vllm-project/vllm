@@ -31,7 +31,6 @@ async def init_render_app_state(
     preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
-
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
         model_config=vllm_config.model_config,
@@ -58,9 +57,11 @@ async def init_render_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        trust_request_mm_kwargs=args.trust_request_mm_kwargs,
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
@@ -77,6 +78,7 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,

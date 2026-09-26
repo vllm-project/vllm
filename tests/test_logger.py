@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import io
 import json
 import logging
 import os
@@ -15,15 +16,20 @@ from uuid import uuid4
 
 import pytest
 
+import vllm.logger as vllm_logger
+from vllm.config import LoggingConfig
 from vllm.logger import (
     _DATE_FORMAT,
     _FORMAT,
     _configure_vllm_root_logger,
+    _use_color,
+    configure_logging,
     enable_trace_function_call,
     init_logger,
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+from vllm.utils.system_utils import decorate_logs
 
 
 def f1(x):
@@ -48,16 +54,27 @@ def test_trace_function_call():
     os.remove(path)
 
 
+def test_caplog_vllm_captures_info_before_runtime_logging_is_configured(caplog_vllm):
+    message = "Capture this unconfigured INFO record"
+    logger = init_logger(f"vllm.test_logger.{uuid4()}")
+
+    logger.info(message)
+
+    assert message in caplog_vllm.text
+
+
 def test_default_vllm_root_logger_configuration(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
     behavior is activated."""
     monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
-    _configure_vllm_root_logger()
+    early_logger = init_logger(f"vllm.test_logger.{uuid4()}")
+    configure_logging(LoggingConfig())
 
     logger = logging.getLogger("vllm")
     assert logger.level == logging.INFO
     assert not logger.propagate
+    assert early_logger.isEnabledFor(logging.INFO)
 
     handler = logger.handlers[0]
     assert isinstance(handler, logging.StreamHandler)
@@ -70,6 +87,103 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     assert isinstance(formatter, NewLineFormatter)
     assert formatter._fmt == _FORMAT
     assert formatter.datefmt == _DATE_FORMAT
+
+
+def test_offline_llm_configures_logging_before_logging_args(monkeypatch):
+    import vllm.entrypoints.llm as llm_module
+
+    class StopInitialization(Exception):
+        pass
+
+    configured = False
+
+    def configure_logging(_):
+        nonlocal configured
+        configured = True
+
+    def log_args(_):
+        assert configured
+        raise StopInitialization
+
+    monkeypatch.setattr(llm_module, "configure_logging_if_needed", configure_logging)
+    monkeypatch.setattr(llm_module, "log_non_default_args", log_args)
+
+    with pytest.raises(StopInitialization):
+        llm_module.LLM(model="facebook/opt-125m")
+
+
+def test_json_logging(monkeypatch, tmp_path):
+    output = io.StringIO()
+    logging_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "json": {
+                "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                "format": (
+                    "%(asctime)s %(levelname)s %(name)s %(vllm_process_name)s "
+                    "%(process)d %(message)s"
+                ),
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "vllm": {
+                "handlers": ["console"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+    }
+
+    logging_config_path = tmp_path / "logging_config.json"
+    logging_config_path.write_text(json.dumps(logging_config))
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(sys, "stdout", output)
+            # Restore this module-global state when the context exits.
+            context.setattr(vllm_logger, "_vllm_process_info", None)
+            _configure_vllm_root_logger(
+                LoggingConfig(pylogging_config_file=str(logging_config_path))
+            )
+            decorate_logs("Worker_DP0")
+            init_logger("vllm.structured_log_probe").info("structured log probe")
+
+            log = json.loads(output.getvalue())
+    finally:
+        _configure_vllm_root_logger(LoggingConfig())
+
+    assert log["message"] == "structured log probe"
+    assert log["vllm_process_name"] == "Worker_DP0"
+    assert log["process"] == os.getpid()
+
+
+def test_use_color_force_color(monkeypatch):
+    """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
+    explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    for var in ("NO_COLOR", "FORCE_COLOR", "VLLM_LOGGING_COLOR"):
+        monkeypatch.delenv(var, raising=False)
+
+    assert not _use_color()
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert _use_color()
+
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
+    assert not _use_color()
+    monkeypatch.delenv("VLLM_LOGGING_COLOR")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not _use_color()
 
 
 def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):
@@ -110,7 +224,7 @@ def test_logger_configuring_can_be_disabled(monkeypatch):
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
     with patch("vllm.logger.dictConfig") as dict_config_mock:
-        _configure_vllm_root_logger()
+        configure_logging(LoggingConfig(configure_logging=False))
     dict_config_mock.assert_not_called()
 
 
@@ -191,9 +305,11 @@ def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
         with patch("vllm.logger.dictConfig") as dict_config_mock:
-            _configure_vllm_root_logger()
+            configure_logging(
+                LoggingConfig(pylogging_config_file=logging_config_file.name)
+            )
             dict_config_mock.assert_called_with(valid_logging_config)
 
 
@@ -214,13 +330,18 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monke
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
         with pytest.raises(RuntimeError) as ex_info:
-            _configure_vllm_root_logger()
+            configure_logging(
+                LoggingConfig(
+                    configure_logging=False,
+                    pylogging_config_file=logging_config_file.name,
+                )
+            )
         assert ex_info.type is RuntimeError
         expected_message_snippet = (
-            "VLLM_CONFIGURE_LOGGING evaluated to false, but "
-            "VLLM_LOGGING_CONFIG_PATH was given."
+            "Logging configuration is disabled, but a Python logging config "
+            "file was given."
         )
         assert expected_message_snippet in str(ex_info)
 
@@ -274,6 +395,8 @@ test_logger = init_logger("vllm.test_logger")
 
 def mp_function(**kwargs):
     # This function runs in a subprocess
+    if logging_config := kwargs.pop("logging_config", None):
+        configure_logging(logging_config)
 
     test_logger.warning("This is a subprocess: %s", kwargs.get("a"))
     test_logger.error("This is a subprocess error.")
@@ -305,7 +428,13 @@ def test_caplog_mp_spawn(caplog_mp_spawn):
         p = ctx.Process(
             target=mp_function,
             name=f"SubProcess{1}",
-            kwargs={"a": "AAAA", "b": "BBBBB"},
+            kwargs={
+                "a": "AAAA",
+                "b": "BBBBB",
+                "logging_config": LoggingConfig(
+                    pylogging_config_file=os.environ["VLLM_LOGGING_CONFIG_PATH"]
+                ),
+            },
         )
         p.start()
         p.join()
