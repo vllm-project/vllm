@@ -287,21 +287,24 @@ class RejectionSampler(nn.Module):
 
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
-        # Create mask for valid tokens.
-        valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
-            output_token_ids_np < vocab_size
-        )
         output_logprobs = None
         if logprobs_tensors is not None:
+            # Create mask for valid tokens.
+            valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
+                output_token_ids_np < vocab_size
+            )
             cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
             filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
             output_logprobs = filtered_tensors.tolists(cu_num_tokens)
 
-        if len(discard_req_indices) > 0:
-            valid_mask[discard_req_indices] = False
+        # A row holds only max_spec_len + 1 tokens, so per-row NumPy dispatch
+        # costs more than filtering the whole batch in Python.
         outputs = [
-            row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
+            [t for t in row if t != PLACEHOLDER_TOKEN_ID and t < vocab_size]
+            for row in output_token_ids_np.tolist()
         ]
+        for i in discard_req_indices:
+            outputs[int(i)] = []
         return outputs, output_logprobs
 
     def apply_logits_processors(
