@@ -166,3 +166,58 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+def test_streaming_does_not_leak_closing_answer_marker():
+    """Regression test for issue #58127.
+
+    The outer streaming loop only keeps calling
+    ``extract_reasoning_streaming`` while ``is_reasoning_end_streaming``
+    reports reasoning is still open. For the Hunyuan A13B three-state envelope
+    (``<think>...</think>\\n<answer>...</answer>``), the reasoning hand-off used
+    to fire as soon as the state machine entered the ``response`` state (right
+    after ``<answer>``). That stopped feeding the parser before it could consume
+    the closing ``\\n</answer>`` marker, which was then passed through verbatim
+    into the streamed ``content``.
+    """
+    # Exact token id sequence reported in the issue, decoding to:
+    #   <think>\nink\n</think>\n<answer>\n</answer>
+    token_ids = [
+        14023, 771, 397, 771, 198, 524, 27963, 397, 27, 9399, 397,
+        198, 524, 9399, 29,
+    ]
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+
+    # Mirror DelegatingParser.parse_delta(): only feed the reasoning parser
+    # while reasoning is still open; afterwards deltas pass straight to content.
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    reasoning_ended = False
+    current_ids: list[int] = []
+    for tid in token_ids:
+        delta_text = tokenizer.convert_tokens_to_string(
+            tokenizer.convert_ids_to_tokens([tid])
+        )
+        current_ids.append(tid)
+        if not reasoning_ended:
+            delta_message = parser.extract_reasoning_streaming(
+                previous_text="",
+                current_text="".join(content_parts),
+                delta_text=delta_text,
+                previous_token_ids=current_ids[:-1],
+                current_token_ids=current_ids,
+                delta_token_ids=[tid],
+            )
+            if delta_message is not None:
+                if delta_message.reasoning:
+                    reasoning_parts.append(delta_message.reasoning)
+                if delta_message.content:
+                    content_parts.append(delta_message.content)
+            if parser.is_reasoning_end_streaming(current_ids, [tid]):
+                reasoning_ended = True
+        else:
+            content_parts.append(delta_text)
+
+    content = "".join(content_parts)
+    assert "</answer>" not in content, (
+        f"Closing </answer> marker leaked into streamed content: {content!r}"
+    )
