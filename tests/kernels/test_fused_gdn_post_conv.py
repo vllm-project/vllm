@@ -387,3 +387,78 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
         )
 
     torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
+
+
+# Qwen3.6 GDN shape: H=16, HV=48, K=128, V=128 -> qkv_dim = 10240.
+# A prefill batch of max_num_batched_tokens=262144 tokens makes the largest
+# element offset (L - 1) * qkv_dim exceed 2**31 - 1, so any offset arithmetic
+# left in int32 wraps negative and the kernel reads/writes out of bounds.
+# This is the shape that crashed B300 serving workers, so the test pins the
+# indexing dtype rather than just the math.
+GDN_LARGE_PREFILL = (16, 48, 128, 128)
+
+
+def test_fused_post_conv_offsets_exceed_int32():
+    """Large prefills must use 64-bit element offsets.
+
+    Guards against silent corruption / illegal memory access when
+    (L - 1) * qkv_dim overflows signed int32.
+    """
+    device = "cuda"
+    dtype = torch.bfloat16
+    H, HV, K, V = GDN_LARGE_PREFILL
+    qkv_dim = 2 * H * K + HV * V
+
+    # First token row whose element offset does not fit in signed int32, plus a
+    # margin so several BLOCK_T blocks land past the boundary.
+    overflow_row = (2**31 - 1) // qkv_dim + 1
+    L = overflow_row + 2048
+    assert (L - 1) * qkv_dim > 2**31 - 1, "test config no longer crosses int32"
+
+    # bf16 in/out + fp32 g/beta, with headroom for the reference slice.
+    required_bytes = int(2.0 * (qkv_dim + 2 * H * K + HV * V) * L + 8 * HV * L)
+    free_bytes, _ = torch.accelerator.get_memory_info()
+    if free_bytes < required_bytes + (2 << 30):
+        pytest.skip(
+            f"needs ~{required_bytes / 2**30:.1f} GiB free, "
+            f"have {free_bytes / 2**30:.1f} GiB"
+        )
+
+    torch.manual_seed(7)
+    conv_output = torch.randn(L, qkv_dim, dtype=dtype, device=device)
+    a = torch.randn(L, HV, dtype=dtype, device=device)
+    b = torch.randn(L, HV, dtype=dtype, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) - 2.0
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+
+    fused_q, fused_k, fused_v, fused_g, fused_beta = fused_post_conv_prep(
+        conv_output,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+    )
+    torch.accelerator.synchronize()
+
+    # Only the tokens past the int32 boundary can expose the overflow, so
+    # compare that window against the reference instead of all L tokens.
+    lo = overflow_row - 64
+    ref_q, ref_k, ref_v, ref_g, ref_beta = reference_post_conv(
+        conv_output[lo:],
+        a[lo:],
+        b[lo:],
+        A_log,
+        dt_bias,
+        H,
+        K,
+        V,
+    )
+
+    torch.testing.assert_close(fused_q[lo:], ref_q, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(fused_k[lo:], ref_k, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(fused_v[lo:], ref_v, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(fused_g[lo:], ref_g, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(fused_beta[lo:], ref_beta, atol=1e-4, rtol=1e-4)
