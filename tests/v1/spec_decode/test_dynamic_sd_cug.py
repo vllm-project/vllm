@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -15,7 +16,9 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
@@ -81,6 +84,122 @@ def _create_vllm_config_for_dsd(
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
+
+
+@pytest.mark.parametrize(
+    ("k", "mixed", "case", "expected_decode"),
+    [
+        (1, False, "tail", True),
+        (3, True, "tail", True),
+        (8, True, "tail", True),
+        (3, True, "prefill", False),
+        (3, True, "partial-drafts", False),
+        (3, True, "ragged", False),
+        (3, True, "adaptive", False),
+        (3, True, "pcp", False),
+        (3, True, "uncaptured", True),
+        (0, False, "tail", False),
+    ],
+)
+def test_prompt_tail_decode_dispatch(monkeypatch, k, mixed, case, expected_decode):
+    """Prepare prompt inputs before sharing decode classification with the drafter."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    width = k + 1
+    config = _create_vllm_config_for_dsd(
+        2, k, cudagraph_mode="FULL_DECODE_ONLY", use_dynamic_sd=False
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        config,
+        torch.device("cpu"),
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        decode_query_len=width,
+    )
+    manager._graphs_captured = case != "uncaptured"
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = {
+        "tail": width,
+        **({"decode": width} if mixed else {}),
+    }
+    output.scheduled_spec_decode_tokens = {
+        req_id: [-1] * k for req_id in output.num_scheduled_tokens
+    }
+    if case == "prefill":
+        del output.scheduled_spec_decode_tokens["tail"]
+    elif case == "partial-drafts":
+        output.scheduled_spec_decode_tokens["decode"].pop()
+    elif case == "ragged":
+        output.num_scheduled_tokens["decode"] -= 1
+        output.scheduled_spec_decode_tokens["decode"].pop()
+    output.total_num_scheduled_tokens = sum(output.num_scheduled_tokens.values())
+
+    runner = object.__new__(GPUModelRunner)
+    for method in (
+        "update_pp_decode_requests",
+        "finish_requests",
+        "free_states",
+        "add_requests",
+        "update_requests",
+    ):
+        setattr(runner, method, MagicMock())
+    runner.block_tables = MagicMock()
+    runner.aux_output_connector = None
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"tail": 0, "decode": 1},
+        prefill_len=SimpleNamespace(np=np.array([4096, 100])),
+        num_computed_prefill_tokens=np.array(
+            [4096 - (width if case == "prefill" else 1), 100]
+        ),
+    )
+    runner.model_config = SimpleNamespace(is_hybrid=False, is_attention_free=False)
+    runner.speculative_config = SimpleNamespace(draft_model_config=runner.model_config)
+    runner.parallel_config = config.parallel_config
+    runner.observability_config = SimpleNamespace(cudagraph_metrics=False)
+    runner.decode_query_len = width
+    runner.dp_size, runner.dp_rank = 1, 0
+    runner.cudagraph_manager = manager
+    runner.pcp_manager = runner.lora_config = runner.adaptive_verification = None
+    runner.ubatch_runner = None
+    runner.is_encoder_decoder = False
+    if case == "adaptive":
+        runner.adaptive_verification = SimpleNamespace(
+            get_num_tokens=lambda counts, drafts: sum(counts.values())
+        )
+    elif case == "pcp":
+        runner.pcp_manager = SimpleNamespace(
+            get_num_tokens_for_dispatch=lambda counts, prefilling: int(counts.sum())
+        )
+    prepared_batch = SimpleNamespace(has_prefill=True)
+
+    def prepare_inputs(scheduled, state, desc, num_active_loras):
+        assert state.has_prefill
+        assert state.is_prefilling_np[state.req_ids.index("tail")]
+        prepared_batch.req_ids = state.req_ids
+        prepared_batch.is_prefilling_np = state.is_prefilling_np.copy()
+        expected_mode = (
+            CUDAGraphMode.FULL
+            if expected_decode and manager._graphs_captured
+            else CUDAGraphMode.NONE
+        )
+        assert desc.cg_mode == expected_mode
+        return prepared_batch
+
+    class ReachedAttentionPreparation(Exception):
+        pass
+
+    def prepare_attn(batch):
+        assert batch is prepared_batch
+        assert batch.has_prefill is (not expected_decode)
+        assert batch.is_prefilling_np[batch.req_ids.index("tail")]
+        raise ReachedAttentionPreparation
+
+    runner.prepare_inputs = prepare_inputs
+    runner.prepare_attn = prepare_attn
+    with pytest.raises(ReachedAttentionPreparation):
+        runner.execute_model(output)
 
 
 def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch):

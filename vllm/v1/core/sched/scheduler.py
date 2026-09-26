@@ -1096,7 +1096,7 @@ class Scheduler(SchedulerInterface):
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
-                        and (scheduled_running_reqs or num_computed_tokens > 0)
+                        and num_computed_tokens > 0
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).

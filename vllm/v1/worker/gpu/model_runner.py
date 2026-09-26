@@ -1251,8 +1251,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
+        has_prefill_for_dispatch = (
+            batch_state.has_prefill
+            and not self._can_run_padded_prompt_tail_as_decode(scheduler_output)
+        )
         return batch_state, get_uniform_decode_token_count(
-            num_reqs, num_toks, max_query_len, batch_state.has_prefill
+            num_reqs,
+            num_toks,
+            max_query_len,
+            has_prefill=has_prefill_for_dispatch,
+        )
+
+    def _can_run_padded_prompt_tail_as_decode(
+        self, scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Check decode eligibility for a batch containing prefills."""
+        # PCP/adaptive verification can change the scheduler's layout.
+        if (
+            self.speculative_config is None
+            or self.decode_query_len <= 1
+            or self.adaptive_verification is not None
+            or self.pcp_manager is not None
+        ):
+            return False
+
+        # The scheduler pads only final prompt tokens with computed context.
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        return all(
+            n == self.decode_query_len and len(draft_tokens.get(req_id, ())) == n - 1
+            for req_id, n in scheduler_output.num_scheduled_tokens.items()
         )
 
     def prepare_inputs(
@@ -1707,6 +1734,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
+            if uniform_tok_count is not None:
+                # Drafters must reuse the target's DP classification.
+                input_batch.has_prefill = False
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and

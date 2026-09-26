@@ -2096,41 +2096,40 @@ def _model_output(scheduler, output, sampled):
     )
 
 
-def test_spec_decode_padding_first_decode_step():
-    """A request taking its first decode step (whole prompt already computed via
-    a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
-    the worker with the same 1 + num_spec_tokens shape as the other speculative
-    decodes, keeping the batch uniform.
-    """
+@pytest.mark.parametrize("num_prompt_tokens", [1, 33])
+def test_spec_decode_padding_first_decode_step(num_prompt_tokens):
+    """Pad cached prompt tails, but not uncached one-token prompts."""
     num_spec = 3
     scheduler = create_scheduler(
         num_speculative_tokens=num_spec,
         enable_prefix_caching=True,
         block_size=16,
     )
-    # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
-    # second identical request hits num_computed == num_prompt_tokens - 1.
+    # Only the 33-token prompt gets a cache hit (two 16-token blocks).
     r1, r2 = create_requests(
-        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+        num_requests=2, num_tokens=num_prompt_tokens, same_prompt=True, max_tokens=16
     )
 
     # Drive r1 through prefill so its prompt blocks are cached, then give it real
     # drafts so it is a running speculative decode (1 + num_spec shape).
     scheduler.add_request(r1)
     out = scheduler.schedule()
-    assert out.num_scheduled_tokens[r1.request_id] == 33
+    assert out.num_scheduled_tokens[r1.request_id] == num_prompt_tokens
     _model_output(scheduler, out, [[100]])
     scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
 
-    # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
+    # Admit r2 alongside a running speculative decode.
     scheduler.add_request(r2)
     out = scheduler.schedule()
 
     # r1 verifies its real drafts.
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
-    # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
-    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
-    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    if num_prompt_tokens == 1:
+        assert out.num_scheduled_tokens[r2.request_id] == 1
+        assert r2.request_id not in out.scheduled_spec_decode_tokens
+    else:
+        assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
+        assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
 def test_spec_decode_padding_resumed_request_without_running_requests():
