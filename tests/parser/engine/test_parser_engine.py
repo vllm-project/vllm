@@ -697,6 +697,20 @@ class TestFixArgTypes:
         original = '{"name": "Alice"}'
         assert engine._fix_arg_types(original, "f") == original
 
+    def test_only_coerced_values_are_rewritten(self):
+        """Separators, whitespace and escapes outside coerced values survive."""
+        tool = _make_tool(
+            "f",
+            {
+                "s": {"type": "string"},
+                "n": {"type": "integer"},
+                "t": {"type": "string"},
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"s":"\\u00e9","n":"42",\n "t":"b"}', "f")
+        assert result == '{"s":"\\u00e9","n":42,\n "t":"b"}'
+
     @pytest.mark.parametrize(
         "properties, input_json, expected_substr",
         [
@@ -1662,32 +1676,100 @@ class TestArgDeltaWithConverter:
 
 
 class TestSafeArgPrefix:
-    """Unit tests for ParserEngine._safe_arg_prefix."""
+    """Unit tests for ParserEngine._safe_arg_prefix.
+
+    A trailing value that cannot stream (non-string, or a string for a key the
+    schema may coerce) is withheld together with its ``"key": `` separator:
+    the flush can drop an unfinished parameter, and a prefix ending on the
+    separator then has no valid completion.
+    """
 
     @pytest.mark.parametrize(
         "json_str, expected",
         [
-            ('{"a": 1}', '{"a": '),
-            ('{"a": 1, "b": 2}', '{"a": 1, "b": '),
+            ('{"a": 1}', ""),
+            ('{"a": 1, "b": 2}', '{"a": 1'),
             ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": "world'),
-            ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}, "b": '),
-            ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80", "b": '),
-            ('{"a": 1', '{"a": '),
+            ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}'),
+            ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80"'),
+            ('{"a": 1', ""),
             ("{}", ""),
             ("{", ""),
             ("", ""),
-            ('{"k":1}', '{"k":'),
-            ('{"k": 1, "v":2}', '{"k": 1, "v":'),
+            ('{"k":1}', ""),
+            ('{"k": 1, "v":2}', '{"k": 1'),
             ('{"k":"value"}', '{"k":"value'),
             ('{"k":"unterminated', '{"k":"unterminated'),
             (r'{"k":"escaped \" quote"}', r'{"k":"escaped \" quote'),
+            # A complete trailing value followed by a separator is kept whole.
+            ('{"a": "x", "b": 2, ', '{"a": "x", "b": 2'),
+            # Unfinished containers are withheld with their key.
+            ('{"a": "x", "obj": {"b": ', '{"a": "x"'),
+            ('{"a": "x", "items": [1, ', '{"a": "x"'),
+            # A streamed string never ends inside an escape sequence.
+            ('{"t": "ab\\', '{"t": "ab'),
+            ('{"t": "ab\\u12', '{"t": "ab'),
+            ('{"t": "ab\\u12ab', '{"t": "ab\\u12ab'),
+            ('{"t": "ab\\n', '{"t": "ab\\n'),
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
+        """Each partial argument string maps to its streamable prefix."""
         assert ParserEngine._safe_arg_prefix(json_str) == expected
+
+    def test_schema_typed_trailing_string_is_withheld_with_its_key(self):
+        """A string value for a key the schema may coerce is withheld with its key."""
+        json_str = '{"path": "README.md", "count": "1'
+        assert (
+            ParserEngine._safe_arg_prefix(json_str, {"path"}) == '{"path": "README.md"'
+        )
+
+
+class TestJsonPrefixTerminator:
+    """Unit tests for ParserEngine._json_prefix_terminator.
+
+    Every non-empty suffix must make the prefix parse; a prefix with no valid
+    completion yields "" so the caller can decline to close it.
+    """
+
+    @pytest.mark.parametrize(
+        "prefix, expected",
+        [
+            ('{"a": "x', '"}'),
+            ('{"a": "x\\', '\\"}'),
+            ('{"a": [', "]}"),
+            ('{"a": {"b": "x', '"}}'),
+            # A dangling separator is completed with null so the prefix parses;
+            # null may still fail the tool's schema.
+            ('{"count": ', "null}"),
+            ('{"a": "x", "b": ', "null}"),
+            ('{"a": {"b": ', "null}}"),
+            ('{"a": "x", "items": [1, ', "null]}"),
+            # An object after a comma cannot be completed without inventing a key.
+            ('{"a": 1, ', ""),
+            # A partial escape cannot be completed without inventing characters.
+            ('{"t": "ab\\u12', ""),
+            ('{"flag": tr', ""),
+            ("", ""),
+        ],
+    )
+    def test_json_prefix_terminator(self, prefix, expected):
+        """Each prefix gets its shortest parsing suffix, or "" when none exists."""
+        suffix = ParserEngine._json_prefix_terminator(prefix)
+        assert suffix == expected
+        if suffix:
+            json.loads(prefix + suffix)
 
 
 # ── Coercion instability regression tests ────────────────────────
+
+
+def _json_converter(raw_args: str, partial: bool) -> str:
+    """Identity converter: round-trips JSON, returns raw string when partial."""
+    try:
+        return json.dumps(json.loads(raw_args), ensure_ascii=False)
+    except (json.JSONDecodeError, ValueError):
+        return raw_args if partial else ""
 
 
 def _growing_kv_converter(raw_args: str, partial: bool) -> str:
@@ -1772,6 +1854,42 @@ class TestCoercionInstabilityRegression:
         assert parsed["val"] == "4e"
         assert isinstance(parsed["val"], str)
         assert parsed["extra"] == "ok"
+
+    def test_integer_middle_field_not_truncated_by_coercion(self):
+        """Integer middle field must not cause truncation when coerced at flush.
+
+        Three chunks are required: the first triggers tool-name emission
+        (consuming the chunk without calling _compute_arg_delta), the second
+        leaves the integer value complete in streamed_json as a quoted string
+        ("42") while the JSON is still open, and the third closes the JSON.
+        Without the fix, flush-time coercion changes "42"→42, breaking the
+        startswith invariant and silently dropping the rest of the arguments.
+        """
+        tool = _make_tool("f", {"n": {"type": "integer"}, "s": {"type": "string"}})
+        engine = _make_engine(_converter_config(_json_converter), tools=[tool])
+        parsed = _run_streaming_tool(engine, "f", ["{", '"n": "42", "s": "h', 'i"}'])
+        assert parsed == {"n": 42, "s": "hi"}
+        assert isinstance(parsed["n"], int)
+
+    def test_boolean_middle_field_not_truncated_by_coercion(self):
+        """Boolean middle field must not cause truncation when coerced at flush."""
+        tool = _make_tool("f", {"flag": {"type": "boolean"}, "msg": {"type": "string"}})
+        engine = _make_engine(_converter_config(_json_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine, "f", ["{", '"flag": "true", "msg": "h', 'i"}']
+        )
+        assert parsed == {"flag": True, "msg": "hi"}
+        assert isinstance(parsed["flag"], bool)
+
+    def test_null_middle_field_not_truncated_by_coercion(self):
+        """Null-typed middle field must not cause truncation when coerced at flush."""
+        tool = _make_tool("f", {"v": {"type": "null"}, "tag": {"type": "string"}})
+        engine = _make_engine(_converter_config(_json_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine, "f", ["{", '"v": "null", "tag": "h', 'i"}']
+        )
+        assert parsed == {"v": None, "tag": "hi"}
+        assert parsed["v"] is None
 
 
 _DROP_VOCAB: dict[str, int] = {

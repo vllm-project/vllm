@@ -296,24 +296,36 @@ class ParserEngine(Parser):
         return args, changed
 
     @staticmethod
-    def _safe_arg_prefix(json_str: str, string_keys: set[str] | None = None) -> str:
+    def _safe_arg_prefix(
+        json_str: str,
+        string_keys: set[str] | None = None,
+        clip_middle: bool = True,
+    ) -> str:
         """Return the prefix of *json_str* up to the last top-level value.
 
-        Middle values (followed by a comma) are stable across streaming
-        ticks and included.  The trailing value is excluded for non-string
-        values because type coercion may change its serialised form between
-        ticks, which would violate the ``startswith(prev)`` prefix invariant.
-        String values for keys in ``string_keys`` are prefix-stable, so stream
-        their unterminated content instead of buffering long arguments until
-        the closing tag arrives.
+        The trailing value is excluded for non-string keys because type
+        coercion may change its serialised form, which would violate the
+        ``startswith(prev)`` prefix invariant.  String values for keys in
+        ``string_keys`` are prefix-stable, so their unterminated content is
+        streamed incrementally.
+
+        Middle (comma-terminated) values for non-string keys are also excluded
+        for the same coercion reason: the prefix is clipped at the start of the
+        first non-string-typed value so that ``_fix_arg_types`` at flush time
+        never rewrites anything already sent to the client. Pass
+        ``clip_middle=False`` when *json_str* already carries coerced values.
         """
         last_colon = -1
+        last_comma = -1
         last_key: str | None = None
         pending_key: str | None = None
         in_string = False
         escape = False
         string_start = -1
         depth = 0
+        # Index of the first non-string-typed value start; -1 if none seen yet.
+        non_string_clip: int = -1
+
         for i, c in enumerate(json_str):
             if escape:
                 escape = False
@@ -337,27 +349,69 @@ class ParserEngine(Parser):
                 last_colon = i
                 last_key = pending_key
                 pending_key = None
+                if string_keys is not None and last_key not in string_keys:
+                    # Record where this key's value starts; clip here so the
+                    # value is never partially sent before flush-time coercion.
+                    val_start = i + 1
+                    while val_start < len(json_str) and json_str[val_start] in (
+                        " ",
+                        "\t",
+                        "\n",
+                        "\r",
+                    ):
+                        val_start += 1
+                    if non_string_clip < 0:
+                        non_string_clip = val_start
+            elif c == "," and depth == 1:
+                last_comma = i
         if last_colon < 0:
             return ""
+
+        # Clip only after a top-level comma proves this is a middle value.
+        # A trailing non-string value must still be withheld with its key.
+        if clip_middle and non_string_clip >= 0 and last_comma >= non_string_clip:
+            return json_str[:non_string_clip]
+
         end = last_colon + 1
         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
             end += 1
-        if end >= len(json_str) or json_str[end] != '"':
-            return json_str[:end]
-        if string_keys is not None and last_key not in string_keys:
-            return json_str[:end]
+        if (
+            end >= len(json_str)
+            or json_str[end] != '"'
+            or (string_keys is not None and last_key not in string_keys)
+        ):
+            # The trailing value cannot stream. Stop after the last complete
+            # top-level value rather than after ``"key": ``: the flush can
+            # drop an unfinished parameter, and a prefix that ends on the
+            # separator then has no valid completion.
+            return json_str[:last_comma] if last_comma >= 0 else ""
 
         escape = False
+        escape_start = -1
+        hex_left = 0
         for i in range(end + 1, len(json_str)):
             c = json_str[i]
+            if hex_left:
+                hex_left -= 1
+                if hex_left == 0:
+                    escape_start = -1
+                continue
             if escape:
                 escape = False
+                if c == "u":
+                    hex_left = 4
+                else:
+                    escape_start = -1
                 continue
             if c == "\\":
                 escape = True
+                escape_start = i
                 continue
             if c == '"':
                 return json_str[:i]
+        if escape_start >= 0:
+            # Never end on a partial escape: ``\u12`` has no valid completion.
+            return json_str[:escape_start]
         return json_str
 
     @staticmethod
@@ -384,7 +438,8 @@ class ParserEngine(Parser):
         String values are coerced via :func:`coerce_to_schema_type`.
         Nested objects and arrays are recursed into when the schema
         defines ``properties`` or ``items``.  Without a schema, values
-        stay as strings.
+        stay as strings.  Only the coerced top-level values are
+        re-serialized; see :meth:`_replace_top_level_values`.
         """
         if not self._tools or not func_name:
             return args_json
@@ -399,11 +454,55 @@ class ParserEngine(Parser):
         if not properties:
             return args_json
 
-        _, changed = self._coerce_dict(args, properties)
+        coerced: dict[str, object] = {}
+        for key, value in args.items():
+            prop = properties.get(key)
+            if not isinstance(prop, dict):
+                continue
+            new_value, changed = self._coerce_value(value, prop)
+            if changed:
+                coerced[key] = new_value
 
-        if changed:
-            return json.dumps(args, ensure_ascii=False)
+        if coerced:
+            return self._replace_top_level_values(args_json, coerced)
         return args_json
+
+    @staticmethod
+    def _replace_top_level_values(args_json: str, values: dict[str, object]) -> str:
+        """Re-serialize the top-level members named in *values* in place.
+
+        Every other character of *args_json*, including its separators,
+        whitespace and string escapes, is kept. Converters that pass the
+        model's JSON through verbatim (inkling, granite) stream a prefix of
+        that text, and re-serializing the whole object would stop the flush
+        result from starting with it.
+        """
+        decoder = json.JSONDecoder()
+
+        def skip_ws(i: int) -> int:
+            while args_json[i] in " \t\n\r":
+                i += 1
+            return i
+
+        parts: list[str] = []
+        last = 0
+        pos = skip_ws(0) + 1
+        while True:
+            pos = skip_ws(pos)
+            if args_json[pos] == "}":
+                break
+            key, pos = decoder.raw_decode(args_json, pos)
+            start = skip_ws(skip_ws(pos) + 1)
+            _, end = decoder.raw_decode(args_json, start)
+            if key in values:
+                parts.append(args_json[last:start])
+                parts.append(json.dumps(values[key], ensure_ascii=False))
+                last = end
+            pos = skip_ws(end)
+            if args_json[pos] == ",":
+                pos += 1
+        parts.append(args_json[last:])
+        return "".join(parts)
 
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:
@@ -1031,8 +1130,19 @@ class ParserEngine(Parser):
         if slot.name:
             current_json = self._fix_arg_types(current_json, slot.name)
 
+        # _fix_arg_types coerces middle values only when this tick's JSON
+        # parses. Otherwise the flush may still rewrite them, so withhold them.
+        clip_middle = False
+        if slot.string_keys is not None:
+            try:
+                json.loads(current_json)
+            except (json.JSONDecodeError, ValueError):
+                clip_middle = True
+
         prev = slot.streamed_json
-        safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
+        safe_json = self._safe_arg_prefix(
+            current_json, slot.string_keys, clip_middle=clip_middle
+        )
 
         if not safe_json or safe_json == prev:
             return None
@@ -1050,6 +1160,7 @@ class ParserEngine(Parser):
         return None
 
     def _flush_arg_converter(self, idx: int) -> str | None:
+        """Return the argument text still owed to the client when tool ``idx`` ends."""
         converter = self._arg_converter
         if converter is None:
             return None
@@ -1067,11 +1178,101 @@ class ParserEngine(Parser):
         prev = slot.streamed_json
         if final_json and len(final_json) > len(prev):
             if prev and not final_json.startswith(prev):
-                return None
+                return self._close_streamed_json(slot, prev)
             diff = final_json[len(prev) :]
-            slot.streamed_json = final_json
+            try:
+                json.loads(final_json)
+            except (json.JSONDecodeError, ValueError):
+                # A converter that returns its input span verbatim (inkling)
+                # can extend the prefix with a value that EOS cut off. If that
+                # span has no completion (a key, a comma, a partial literal or
+                # escape), close it after its last complete value instead. The
+                # streamed prefix can stop short of that value, on the
+                # ``"key": `` of a middle field _safe_arg_prefix withheld.
+                suffix = self._json_prefix_terminator(final_json)
+                if not suffix:
+                    cut = self._safe_arg_prefix(final_json)
+                    tail = self._json_prefix_terminator(cut) if cut else ""
+                    if tail and len(cut) > len(prev) and cut.startswith(prev):
+                        slot.streamed_json = cut + tail
+                        return cut[len(prev) :] + tail
+                    return self._close_streamed_json(slot, prev)
+                diff += suffix
+            slot.streamed_json = prev + diff
             return diff
+        if prev:
+            return self._close_streamed_json(slot, prev)
         return None
+
+    def _close_streamed_json(self, slot: ToolCallSlot, prev: str) -> str | None:
+        """Terminate an argument prefix the flush cannot extend.
+
+        ``_safe_arg_prefix`` deliberately streams unterminated string values for
+        prefix-stable keys, on the understanding that the flush completes them.
+        If the model never closes a parameter, the non-partial re-derivation
+        drops that parameter entirely, so it is neither longer than nor a prefix
+        of what was already sent. Returning ``None`` there ends the stream with
+        ``finish_reason`` set while the client holds a half-written string, which
+        no JSON parser accepts. Close what was already sent instead: the client
+        gets the truncated value rather than an unparsable message.
+        """
+        suffix = self._json_prefix_terminator(prev)
+        if not suffix:
+            return None
+        slot.streamed_json = prev + suffix
+        return suffix
+
+    @staticmethod
+    def _json_prefix_terminator(prefix: str) -> str:
+        """Return the shortest suffix that makes ``prefix`` parse, or ``""``."""
+        in_string = False
+        escape = False
+        stack: list[str] = []
+        for c in prefix:
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_string = False
+                continue
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                stack.append("}")
+            elif c == "[":
+                stack.append("]")
+            elif c in "}]" and stack:
+                stack.pop()
+        suffix = ""
+        if escape:
+            # A trailing escape would swallow the quote that closes the string.
+            suffix += "\\"
+        if in_string:
+            suffix += '"'
+        else:
+            # A dangling separator has no value to close. ``null`` is used
+            # purely to make the prefix PARSE: the client is being handed a
+            # truncated call either way, and a null placeholder may still fail
+            # the tool's schema, which is strictly better than arguments no
+            # JSON parser accepts. An object cannot be completed after a comma
+            # without inventing a key, so that case falls through to the parse
+            # check below and yields no suffix.
+            tail = prefix.rstrip()
+            if tail.endswith(":") or (
+                tail.endswith(",") and stack and stack[-1] == "]"
+            ):
+                suffix += "null"
+        suffix += "".join(reversed(stack))
+        if not suffix:
+            return ""
+        try:
+            json.loads(prefix + suffix)
+        except (json.JSONDecodeError, ValueError):
+            return ""
+        return suffix
 
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
 
