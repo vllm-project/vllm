@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    triton_fused_rope_and_cache,
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
@@ -47,6 +48,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+CUDA_FUSED_ROPE_KVCACHE_ENABLED = True
 
 
 # constants
@@ -809,7 +812,7 @@ class TritonAttentionImpl(AttentionImpl):
     def fused_rope_kvcache_supported(self):
         if self._is_per_token_head_quant:
             return False
-        return rocm_aiter_ops.is_enabled()
+        return current_platform.is_cuda() or rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
         self,
@@ -832,18 +835,50 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
 
-        rocm_aiter_ops.triton_rope_and_cache(
-            query,
-            key,
-            value,
-            positions,
-            cos_sin_cache,
-            is_neox,
-            key_cache,
-            value_cache,
-            layer_slot_mapping,
-            layer._k_scale,
-            layer._v_scale,
-            flash_layout,
-            is_fp8_kv_cache,
-        )
+        if (
+            CUDA_FUSED_ROPE_KVCACHE_ENABLED
+            and current_platform.is_cuda()
+            and key_cache.ndim == 4
+        ):
+            triton_fused_rope_and_cache(
+                query,
+                key,
+                value,
+                positions,
+                cos_sin_cache,
+                is_neox,
+                key_cache,
+                value_cache,
+                layer_slot_mapping,
+                layer._k_scale,
+                layer._v_scale,
+                self.kv_cache_dtype,
+            )
+        elif current_platform.is_cuda():
+            from vllm import _custom_ops as ops
+
+            ops.rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                cos_sin_cache,
+                is_neox,
+            )
+            self.do_kv_cache_update(layer, key, value, kv_cache, layer_slot_mapping)
+        else:
+            rocm_aiter_ops.triton_rope_and_cache(
+                query,
+                key,
+                value,
+                positions,
+                cos_sin_cache,
+                is_neox,
+                key_cache,
+                value_cache,
+                layer_slot_mapping,
+                layer._k_scale,
+                layer._v_scale,
+                flash_layout,
+                is_fp8_kv_cache,
+            )
