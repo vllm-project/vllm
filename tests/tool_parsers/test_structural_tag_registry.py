@@ -319,6 +319,7 @@ def _plamo3_tools() -> list[ChatCompletionToolsParam]:
             type="function",
             function={
                 "name": "get_weather",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
@@ -330,6 +331,7 @@ def _plamo3_tools() -> list[ChatCompletionToolsParam]:
             type="function",
             function={
                 "name": "get_time",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {"timezone": {"type": "string"}},
