@@ -18,7 +18,7 @@ Usage:
 """
 
 import os
-import re
+import regex as re
 import sys
 
 LAMES = {
