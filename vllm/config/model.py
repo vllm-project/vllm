@@ -400,6 +400,7 @@ class ModelConfig:
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
+    allow_mm_processor_kwargs: InitVar[bool] = False
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
@@ -459,6 +460,7 @@ class ModelConfig:
             "limit_mm_per_prompt",
             "media_io_kwargs",
             "mm_processor_kwargs",
+            "allow_mm_processor_kwargs",
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
             "mm_shm_cache_max_object_size_mb",
@@ -532,6 +534,7 @@ class ModelConfig:
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
+        allow_mm_processor_kwargs: bool,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_hasher_algorithm: MMHasherAlgorithm | None,
@@ -805,6 +808,7 @@ class ModelConfig:
                 enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
+                allow_mm_processor_kwargs=allow_mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_hasher_algorithm=mm_hasher_algorithm,

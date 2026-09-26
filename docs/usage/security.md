@@ -289,6 +289,18 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
 
+### Per-request multimodal processor arguments
+
+API server endpoints reject non-empty per-request `mm_processor_kwargs` by
+default. These arguments can change image, video, or audio sizing, sampling,
+and preprocessing behavior, causing excessive CPU, GPU, or memory use when
+controlled by an untrusted client. Server-level `--mm-processor-kwargs` remain
+available for deployment configuration.
+
+Only deployments whose API clients are trusted should start the server with
+`--allow-mm-processor-kwargs` to restore per-request overrides. Do not enable
+this option on an endpoint exposed to untrusted clients.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.

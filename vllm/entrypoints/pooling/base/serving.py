@@ -16,6 +16,7 @@ from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
+from vllm.entrypoints.generate.base.protocol import validate_mm_processor_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
@@ -108,6 +109,9 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
+        validate_mm_processor_kwargs(
+            getattr(request, "mm_processor_kwargs", None), self.model_config
+        )
         base_request_id = self._base_request_id(
             raw_request, getattr(request, "request_id", None)
         )

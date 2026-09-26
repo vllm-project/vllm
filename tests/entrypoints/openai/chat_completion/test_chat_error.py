@@ -475,6 +475,50 @@ def test_json_schema_response_format_missing_schema():
         )
 
 
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_mm_processor_kwargs_by_default():
+    model_config = MockModelConfig()
+    model_config.multimodal_config = MultiModalConfig()
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        mm_processor_kwargs={
+            "patch_size": 1,
+            "vision_min_num_patches": 3_000_000_000,
+        },
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Per-request mm_processor_kwargs are disabled",
+    ):
+        await online_renderer.preprocess_chat(
+            request,
+            request.messages,
+            default_template=None,
+            default_template_content_format="auto",
+            default_template_kwargs=None,
+        )
+
+
+def test_mm_processor_kwargs_opt_in_allows_overrides():
+    from vllm.entrypoints.generate.base.protocol import validate_mm_processor_kwargs
+
+    model_config = MockModelConfig()
+    model_config.multimodal_config = MultiModalConfig(allow_mm_processor_kwargs=True)
+    kwargs = {"use_audio_in_video": True}
+
+    validate_mm_processor_kwargs(kwargs, model_config)
+
+
 @pytest.mark.parametrize("format_value", [None, {}])
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""
