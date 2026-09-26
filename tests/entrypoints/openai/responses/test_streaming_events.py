@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_browser_tool_events,
     split_delta,
 )
+from vllm.entrypoints.openai.responses.utils import decode_reasoning_state
 
 
 def test_browser_find_uses_responses_action_type():
@@ -151,3 +152,11 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestEncryptedReasoning:
+    def test_encrypted_reasoning_on_done_item(self):
+        processor = SimpleStreamingEventProcessor(encrypt_reasoning=True)
+        events = _run_through_processor(processor, DeltaMessage(reasoning="secret"))
+        events += processor.close_current()
+        assert decode_reasoning_state(events[-1].item.encrypted_content) == "secret"
