@@ -568,7 +568,6 @@ class AiterFlashAttentionMetadataBuilder(
         self.direct_fp8_context_gather = (
             found_layer
             and supports_prequantized_qkv
-            and envs.VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER
             and (
                 is_quantized_kv_cache(self.cache_config.cache_dtype)
                 or kv_cache_spec.dtype == torch.bfloat16
@@ -1067,7 +1066,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         from vllm.platforms.rocm import on_gfx950
 
         self.supports_prequantized_qkv_input = (
-            head_size == 256
+            envs.VLLM_ROCM_USE_PREQUANTIZED_QKV
+            and head_size == 256
             and on_gfx950()
             and self.num_queries_per_kv in (1, 2, 4, 8, 16)
             and self.logits_soft_cap == 0.0
@@ -1075,10 +1075,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and self.sinks is None
             and (
                 is_quantized_kv_cache(self.kv_cache_dtype)
-                or (
-                    _uses_bf16_kv_cache(self.kv_cache_dtype)
-                    and envs.VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER
-                )
+                or _uses_bf16_kv_cache(self.kv_cache_dtype)
             )
         )
 

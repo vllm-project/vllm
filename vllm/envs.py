@@ -146,6 +146,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_PREQUANTIZED_QKV: bool = False
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -157,7 +158,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
-    VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1333,6 +1333,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
     ),
+    # Whether supported ROCm AITER attention layers consume model-provided
+    # prequantized FP8 Q/K/V. The direct FP8 context path is selected
+    # automatically when this is enabled and the backend supports it.
+    "VLLM_ROCM_USE_PREQUANTIZED_QKV": lambda: (
+        os.getenv("VLLM_ROCM_USE_PREQUANTIZED_QKV", "False").lower() in ("true", "1")
+    ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
@@ -1380,11 +1386,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
-    ),
-    # Keep gathered context in FP8 for supported AITER prequantized attention.
-    "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER": lambda: (
-        os.getenv("VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER", "False").lower()
-        in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

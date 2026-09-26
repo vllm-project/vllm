@@ -417,9 +417,10 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
 
 
 @pytest.mark.parametrize(
-    ("kv_cache_dtype", "model_dtype", "direct_context_gather", "expected"),
+    ("kv_cache_dtype", "model_dtype", "use_prequantized_qkv", "expected"),
     [
-        ("fp8", torch.bfloat16, False, True),
+        ("fp8", torch.bfloat16, False, False),
+        ("fp8", torch.bfloat16, True, True),
         ("auto", torch.bfloat16, False, False),
         ("auto", torch.bfloat16, True, True),
         ("auto", torch.float16, True, False),
@@ -431,7 +432,7 @@ def test_aiter_backend_prequantized_qkv_cache_support(
     monkeypatch,
     kv_cache_dtype,
     model_dtype,
-    direct_context_gather,
+    use_prequantized_qkv,
     expected,
 ):
     monkeypatch.setitem(
@@ -442,8 +443,8 @@ def test_aiter_backend_prequantized_qkv_cache_support(
     monkeypatch.setattr(torch, "get_default_dtype", lambda: model_dtype)
     monkeypatch.setattr(
         envs,
-        "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER",
-        direct_context_gather,
+        "VLLM_ROCM_USE_PREQUANTIZED_QKV",
+        use_prequantized_qkv,
     )
 
     impl = rocm_aiter_fa.AiterFlashAttentionImpl(
