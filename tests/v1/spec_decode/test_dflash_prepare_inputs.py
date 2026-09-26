@@ -24,6 +24,7 @@ def _run_prepare(
     cp_rank: int = 0,
     cp_size: int = 1,
     cp_interleave: int = 1,
+    dcp_kv_head_replicated: bool = False,
 ):
     device = torch.device("cuda")
     max_num_reqs = 4
@@ -103,6 +104,7 @@ def _run_prepare(
         max_num_tokens,
         128,
         sample_from_anchor=True,
+        dcp_kv_head_replicated=dcp_kv_head_replicated,
     )
     torch.accelerator.synchronize()
     return SimpleNamespace(
@@ -153,6 +155,74 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
     assert out.context_positions[:4].tolist() == [10, 11, 0, 0]
     assert out.context_slot_mapping[:4].tolist() == [28, 29, PAD_SLOT_ID, PAD_SLOT_ID]
     assert out.query_slot_mapping[:3].tolist() == [PAD_SLOT_ID, PAD_SLOT_ID, 30]
+
+
+@pytest.mark.parametrize("cp_size,cp_interleave", [(2, 1), (2, 2), (4, 1), (4, 2)])
+def test_prepare_dflash_inputs_partitions_context_across_dcp_ranks(
+    cp_size: int, cp_interleave: int
+):
+    # Every accepted context position must be written by exactly one rank, and
+    # a rank must not map two positions onto the same slot.
+    block_size = 4
+    positions = [block_size * cp_size + i for i in range(4)]
+    per_rank = [
+        _run_prepare(
+            target_positions=positions,
+            block_table_values=[0, 7, 8, 9],
+            cp_rank=rank,
+            cp_size=cp_size,
+            cp_interleave=cp_interleave,
+        )
+        for rank in range(cp_size)
+    ]
+
+    # The harness rejects the last two context rows; those are PAD everywhere.
+    num_accepted = 2
+    for pos in range(num_accepted):
+        owners = [
+            rank
+            for rank, out in enumerate(per_rank)
+            if out.context_slot_mapping[pos].item() != PAD_SLOT_ID
+        ]
+        assert len(owners) == 1, f"position {positions[pos]} owned by {owners}"
+
+    for out in per_rank:
+        owned = [
+            slot
+            for slot in out.context_slot_mapping[:num_accepted].tolist()
+            if slot != PAD_SLOT_ID
+        ]
+        assert len(set(owned)) == len(owned)
+
+
+def test_prepare_dflash_inputs_pads_query_slots_for_a_replicated_draft_cache():
+    # A dense draft under DCP caches the whole DCP group's KV heads, but at
+    # input-prep time this rank holds only its local heads. Slotting the query
+    # K/V would write them under the wrong head indices, so every query slot is
+    # PAD while the context slots keep their rank-local layout.
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 7, 8, 9],
+        cp_rank=1,
+        cp_size=2,
+        cp_interleave=2,
+        dcp_kv_head_replicated=True,
+    )
+
+    assert out.context_slot_mapping[:4].tolist() == [28, 29, PAD_SLOT_ID, PAD_SLOT_ID]
+    assert out.query_slot_mapping[:3].tolist() == [PAD_SLOT_ID] * 3
+
+
+def test_prepare_dflash_inputs_keeps_query_slots_without_dcp():
+    # The flag only fires under DCP: with cp_size == 1 nothing is replicated
+    # and the query K/V still goes into the cache.
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        dcp_kv_head_replicated=True,
+    )
+
+    assert out.query_slot_mapping[:3].tolist() == [32, 33, 34]
 
 
 def test_prepare_dflash_inputs_never_writes_the_null_block():
