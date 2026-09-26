@@ -46,6 +46,28 @@ export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
 ```
 
+#### Install FlashInfer precompiled kernels {#install-flashinfer-kernels}
+
+We strongly recommend installing FlashInfer's precompiled kernels to reduce
+downloads and compilation at startup, particularly on Hopper and newer GPUs,
+**especially Blackwell**.
+
+After installing vLLM, run the following in the same Python environment:
+
+```bash
+flashinfer download-kernels
+```
+
+The CLI automatically selects compatible kernels for your installed FlashInfer
+and CUDA versions. Use `flashinfer show-config` to check the installation, or
+`flashinfer download-kernels --dry-run` to preview the installation commands.
+
+For custom container images, run this step after installing vLLM in the Python
+environment included in the final image. Some workloads may still compile
+additional kernels at runtime.
+See the [FlashInfer CLI documentation](https://docs.flashinfer.ai/cli.html#download-kernels)
+for CUDA overrides and nightly kernels.
+
 #### Install the latest code
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
@@ -102,6 +124,9 @@ This command will do the following:
 1. Identify the corresponding base commit in the main branch.
 1. Download the pre-built wheel of the base commit.
 1. Use its compiled libraries and `vllm-rs` binary in the installation.
+
+We also recommend installing FlashInfer's precompiled kernels. Follow
+[Install FlashInfer precompiled kernels](#install-flashinfer-kernels) after the editable install.
 
 !!! note
     1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
