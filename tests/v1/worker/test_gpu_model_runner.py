@@ -559,6 +559,159 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
 
 
+class _RecordingEvent:
+    """Stand-in for torch.Event that records the order it was waited on."""
+
+    def __init__(self, name: str, log: list[str]):
+        """Log this event's waits and records to ``log`` as ``name``."""
+        self.name = name
+        self.log = log
+
+    def synchronize(self):
+        """Log a host wait on this event."""
+        self.log.append(f"wait:{self.name}")
+
+    def record(self):
+        """Log a record of this event."""
+        self.log.append(f"record:{self.name}")
+
+
+def _input_prep_runner(
+    prepare_inputs_event,
+    num_accepted_tokens_event,
+    *,
+    use_async_scheduling: bool = True,
+    mamba_cache_mode: str = "align",
+) -> GPUModelRunner:
+    """A runner holding only the state synchronize_input_prep reads."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.prepare_inputs_event = prepare_inputs_event
+    runner.num_accepted_tokens_event = num_accepted_tokens_event
+    runner.use_async_scheduling = use_async_scheduling
+    runner.cache_config = CacheConfig(mamba_cache_mode=mamba_cache_mode)
+    return runner
+
+
+def test_synchronize_input_prep_waits_for_spec_decode_postprocess():
+    """The persistent batch must not be mutated while the postprocess still runs.
+
+    prepare_inputs_event is recorded when input prep ends, so it orders nothing
+    against the spec-decode postprocess that runs after the model forward. That
+    postprocess reads the block tables and staged index buffers and writes the
+    accepted counts, all of which _update_states rewrites on entry to this
+    context, so its event has to be waited on before the body.
+    """
+    log: list[str] = []
+    runner = _input_prep_runner(
+        _RecordingEvent("prepare_inputs", log),
+        _RecordingEvent("accepted_counts", log),
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    # Order between the two waits does not matter; both preceding the body does.
+    assert log.index("wait:accepted_counts") < log.index("update_states")
+    assert log.index("wait:prepare_inputs") < log.index("update_states")
+    assert log[-1] == "record:prepare_inputs"
+
+
+def test_synchronize_input_prep_without_spec_decode_is_unchanged():
+    """Without spec decode only prepare_inputs_event is waited on and recorded."""
+    log: list[str] = []
+    runner = _input_prep_runner(_RecordingEvent("prepare_inputs", log), None)
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    assert log == ["wait:prepare_inputs", "update_states", "record:prepare_inputs"]
+
+
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "all"])
+def test_synchronize_input_prep_skips_postprocess_wait_when_counts_unread(
+    mamba_cache_mode: str,
+):
+    """Async scheduling outside align mode never reads the copied counts.
+
+    _prepare_inputs fills them with 1 there instead, so waiting on the
+    postprocess would block the host on a copy nobody reads.
+    """
+    log: list[str] = []
+    runner = _input_prep_runner(
+        _RecordingEvent("prepare_inputs", log),
+        _RecordingEvent("accepted_counts", log),
+        mamba_cache_mode=mamba_cache_mode,
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    assert log == ["wait:prepare_inputs", "update_states", "record:prepare_inputs"]
+
+
+def test_synchronize_input_prep_waits_for_postprocess_without_async_scheduling():
+    """Without async scheduling input prep reads the counts in every mode.
+
+    That covers the pipeline-parallel batch queue, where max_concurrent_batches
+    is the PP size with async scheduling off. prepare_inputs_event exists only
+    under async scheduling, so the accepted-count wait must not depend on it.
+    """
+    log: list[str] = []
+    runner = _input_prep_runner(
+        None,
+        _RecordingEvent("accepted_counts", log),
+        use_async_scheduling=False,
+        mamba_cache_mode="none",
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    assert log == ["wait:accepted_counts", "update_states"]
+
+
+def test_synchronize_input_prep_is_a_noop_without_spec_decode_or_overlap():
+    """With neither event there is nothing to wait on or record."""
+    runner = _input_prep_runner(None, None, use_async_scheduling=False)
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        pass
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not hasattr(torch.cuda, "_sleep"),
+    reason="needs a CUDA device and torch.cuda._sleep",
+)
+def test_synchronize_input_prep_lands_prior_d2h_before_batch_mutation():
+    """Same contract on real events: the postprocess D2H must have landed.
+
+    The postprocess copies accepted counts into a pinned tensor that condense()
+    then compacts on the host. Unordered, the DMA lands after those host writes
+    and silently overwrites them. torch.cuda._sleep holds the copy in flight so
+    the ordering is observable rather than dependent on bus timing.
+    """
+    counts_gpu = torch.tensor([4, 3, 2, 1], dtype=torch.int32, device="cuda")
+    pinned = torch.tensor([4, 3, 2, 1], dtype=torch.int32).pin_memory()
+
+    prepare_inputs_event = torch.cuda.Event()
+    prepare_inputs_event.record()  # previous step finished reading input buffers
+    torch.cuda._sleep(400_000_000)  # ... its model forward is still running
+    accepted_event = torch.cuda.Event()
+    pinned.copy_(counts_gpu, non_blocking=True)  # the postprocess D2H
+    accepted_event.record()
+
+    runner = _input_prep_runner(prepare_inputs_event, accepted_event)
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        # What condense()/_update_states do: compact a finished row away, then
+        # initialize the row of a newly admitted request.
+        pinned[0] = pinned[3]
+        pinned[3] = 1
+
+    torch.accelerator.synchronize()
+    assert pinned.tolist() == [1, 3, 2, 1]
+
+
 def test_update_states_new_request(model_runner, dist_init):
     req_id = "req_0"
 

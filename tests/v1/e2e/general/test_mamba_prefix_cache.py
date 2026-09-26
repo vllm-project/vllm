@@ -12,7 +12,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from tests.utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -55,6 +55,7 @@ async_scheduling_mode = False
 num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
+TWO_WAVE_MODEL = "Qwen/Qwen3.8-27B"
 BLOCK_SIZE = 560
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
@@ -1225,3 +1226,74 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
+
+
+def _make_distinct_two_wave_prompts(wave: int) -> list[TokensPrompt]:
+    """Build varied prompts with no full cache block shared within or across waves."""
+    prompts: list[TokensPrompt] = []
+    for lane in range(16):
+        prompt_len = 235 + lane * 56
+        first_token = 1_000 + wave * 32 + lane
+        lane_token = 2_000 + lane
+        prompt_token_ids = [first_token] + [lane_token] * (prompt_len - 1)
+        prompts.append(TokensPrompt(prompt_token_ids=prompt_token_ids))
+    return prompts
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA regression test")
+@multi_gpu_test(num_gpus=2)
+def test_mamba_align_mtp_async_tp2_two_waves(monkeypatch: pytest.MonkeyPatch):
+    """Two concurrent waves must not reuse in-flight Mamba align state.
+
+    This covers the production failure shape where back-to-back waves of 16
+    requests can hit an illegal memory access under MRV1, TP=2, MTP=4, FP8 KV
+    cache, align mode, and async scheduling. Affected builds can fault in either
+    wave depending on kernel timing. Prompts differ from their first token so
+    prefix caching selects align mode without introducing a cache hit.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
+
+    engine = LLM(
+        model=TWO_WAVE_MODEL,
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        language_model_only=True,
+        tensor_parallel_size=2,
+        enable_prefix_caching=True,
+        block_size=BLOCK_SIZE,
+        mamba_cache_mode="align",
+        kv_cache_dtype="fp8",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+        },
+        async_scheduling=True,
+        max_num_seqs=16,
+        max_num_batched_tokens=8192,
+        max_model_len=2048,
+        gpu_memory_utilization=0.8,
+        hf_overrides={"text_config": {"num_hidden_layers": NUM_HIDDEN_LAYERS}},
+        seed=42,
+    )
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=128,
+        ignore_eos=True,
+    )
+
+    try:
+        for wave in range(2):
+            outputs = engine.generate(
+                _make_distinct_two_wave_prompts(wave),
+                sampling_params=sampling_params,
+            )
+            assert len(outputs) == 16
+            for output in outputs:
+                completion = output.outputs[0]
+                assert completion.finish_reason == "length"
+                assert len(completion.token_ids) == sampling_params.max_tokens
+    finally:
+        del engine
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
