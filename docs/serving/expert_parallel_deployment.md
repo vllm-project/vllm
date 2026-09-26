@@ -145,6 +145,12 @@ When enabled, vLLM collects load statistics with every forward pass and periodic
 
 ### EPLB Parameters
 
+To inspect per-layer logical expert distributions without turning on balancing,
+use [`--expert-load-stats-config`](../features/expert_load_stats.md). The same
+collection settings and JSONL format work with `--enable-eplb` on or off,
+including optional per-iteration histograms. These opt-in routing diagnostics
+are separate from EPLB's physical-load balancedness and do not change placement.
+
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
 
 | Parameter | Description | Default |

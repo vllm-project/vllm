@@ -6,6 +6,10 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.expert_load import (
+    ExpertLoadLayer,
+    record_logical_expert_load,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -15,7 +19,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["STATS_START", "STATS_END", "STATS_TOKEN_OFFSET"])
     def _eplb_map_and_record_i32_kernel(
         topk_ids_ptr,
         logical_replica_count_ptr,
@@ -24,12 +28,20 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         out_ptr,
         record_enabled_ptr,
         num_unpadded_tokens_ptr,
+        stats_counts_ptr,
+        stats_num_valid_ptr,
         num_logical_experts,
         map_slots,
         out_size,
         numel,
         num_active_experts,
         HAS_NUM_UNPADDED: tl.constexpr,
+        HAS_STATS: tl.constexpr,
+        STATS_START,
+        STATS_END,
+        STATS_TOKEN_OFFSET,
+        STATS_NUM_EXPERTS: tl.constexpr,
+        STATS_NUM_BINS: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -92,6 +104,20 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
         tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
 
+        if HAS_STATS:
+            record_logical_expert_load(
+                expert_id.to(tl.int32),
+                token_idx,
+                mask,
+                stats_counts_ptr,
+                stats_num_valid_ptr,
+                STATS_START,
+                STATS_END,
+                STATS_TOKEN_OFFSET,
+                STATS_NUM_EXPERTS,
+                STATS_NUM_BINS,
+            )
+
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
@@ -99,6 +125,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None,
+        expert_load_stats: ExpertLoadLayer | None = None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
@@ -108,6 +135,14 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
+        stats_span = (
+            expert_load_stats.token_span(topk_ids)
+            if expert_load_stats is not None
+            else (0, 0, 0)
+        )
+        stats_num_experts = (
+            expert_load_stats.counts.numel() if expert_load_stats is not None else 1
+        )
         _eplb_map_and_record_i32_kernel[grid](
             topk_ids_in,
             logical_replica_count.contiguous(),
@@ -116,12 +151,22 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             expert_load_view,
             record_enabled,
             num_unpadded_tokens,
+            expert_load_stats.counts if expert_load_stats is not None else None,
+            expert_load_stats.num_valid_tokens
+            if expert_load_stats is not None
+            else None,
             logical_replica_count.shape[0],
             logical_to_physical_map.shape[1],
             expert_load_view.shape[0],
             numel,
             num_active_experts,
             HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
+            HAS_STATS=expert_load_stats is not None,
+            STATS_START=stats_span[0],
+            STATS_END=stats_span[1],
+            STATS_TOKEN_OFFSET=stats_span[2],
+            STATS_NUM_EXPERTS=stats_num_experts,
+            STATS_NUM_BINS=triton.next_power_of_2(stats_num_experts),
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
@@ -133,6 +178,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        expert_load_stats: ExpertLoadLayer | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -142,6 +188,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             expert_load_view=expert_load_view,
             record_enabled=record_enabled,
             num_unpadded_tokens=num_unpadded_tokens,
+            expert_load_stats=expert_load_stats,
         )
 else:
 
@@ -152,6 +199,7 @@ else:
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        expert_load_stats: ExpertLoadLayer | None = None,
     ) -> torch.Tensor:
         return topk_ids
 
@@ -180,6 +228,7 @@ class BaseRouter(FusedMoERouter):
         self.top_k = top_k
         self.global_num_experts = global_num_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        self.expert_load_stats: ExpertLoadLayer | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -218,6 +267,7 @@ class BaseRouter(FusedMoERouter):
                 num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
                     dbo_current_ubatch_id()
                 ],
+                expert_load_stats=self.expert_load_stats,
             )
         return topk_ids
 
@@ -295,6 +345,9 @@ class BaseRouter(FusedMoERouter):
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
+
+        if self.expert_load_stats is not None and self.eplb_state is None:
+            self.expert_load_stats.record(topk_ids)
 
         # Step 3: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)

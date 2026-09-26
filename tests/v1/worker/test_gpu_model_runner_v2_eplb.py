@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.config.expert_load import ExpertLoadStatsConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
@@ -76,6 +77,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.vllm_config = SimpleNamespace(
         load_config=runner.load_config,
         model_config=runner.model_config,
+        expert_load_stats_config=ExpertLoadStatsConfig(),
     )
     runner.lora_config = None
     runner.use_aux_hidden_state_outputs = False
@@ -134,6 +136,7 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
     assert runner.eplb_state.async_started is True
+    assert runner.expert_load_stats is None
 
 
 def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
@@ -161,6 +164,7 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == []
     assert runner.eplb_state.async_started is False
+    assert runner.expert_load_stats is None
 
 
 def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):

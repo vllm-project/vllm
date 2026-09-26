@@ -818,6 +818,9 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        expert_load_stats = getattr(self.model_runner, "expert_load_stats", None)
+        if expert_load_stats is not None:
+            expert_load_stats.active = False
         warmup_sizes: list[int] = []
 
         if (
@@ -977,6 +980,10 @@ class Worker(WorkerBase):
             )
 
             trigger_inductor_lazy_init(self.device)
+
+        if expert_load_stats is not None:
+            expert_load_stats.warmup()
+            expert_load_stats.active = True
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
