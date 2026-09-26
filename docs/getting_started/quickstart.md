@@ -145,6 +145,14 @@ The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](htt
 llm = LLM(model="facebook/opt-125m")
 ```
 
+!!! note "Apple Silicon"
+    If you are following this guide with [vLLM-Metal](https://github.com/vllm-project/vllm-metal), use an MLX-optimized model from the
+    [mlx-community](https://huggingface.co/mlx-community) organization instead of `facebook/opt-125m`. For example:
+
+    ```python
+    llm = LLM(model="mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+    ```
+
 !!! note
     By default, vLLM downloads models from [Hugging Face](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
 
