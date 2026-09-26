@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -28,6 +29,46 @@ def test_precomputed_multimodal_embeddings(input_key: str):
 
     assert len(outputs) == len(embeds)
     assert all(torch.equal(output, embed) for output, embed in zip(outputs, embeds))
+
+
+def test_dynamic_multi_image_inputs_accept_tensor_split_sizes():
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    image_embeds = torch.arange(10).reshape(5, 2)
+    object.__setattr__(
+        model,
+        "config",
+        SimpleNamespace(text_config=SimpleNamespace(hidden_size=2)),
+    )
+    object.__setattr__(
+        model,
+        "extract_feature_dynamic",
+        lambda pixel_values, imgs_sizes: image_embeds,
+    )
+    image_input = SimpleNamespace(
+        pixel_values_flat=torch.empty(0),
+        imgs_sizes=[(16, 16), (16, 16)],
+        num_tokens_per_image=torch.tensor([2, 3]),
+    )
+
+    outputs = model._process_image_input_dynamic(image_input)
+
+    assert [output.shape for output in outputs] == [(2, 2), (3, 2)]
+
+
+def test_dynamic_image_parser_accepts_tensor_metadata():
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    object.__setattr__(model, "dynamic_resolution", True)
+    object.__setattr__(model, "patch_size", 16)
+
+    image_input = model._parse_and_validate_image_input(
+        pixel_values_flat=torch.zeros(1, 3, 16, 16),
+        imgs_sizes=torch.tensor([[16, 16]]),
+        num_tokens_per_image=torch.tensor([1]),
+    )
+
+    assert image_input is not None
+    assert image_input.imgs_sizes == [(16, 16)]
+    assert image_input.num_tokens_per_image == [1]
 
 
 class _TextOnlyMultiModalConfig:
