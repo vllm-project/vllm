@@ -461,6 +461,70 @@ exported when NixlConnector is active:
     Increase it via `--kv-transfer-config '{"kv_connector_extra_config":
     {"kv_lease_duration": <seconds>}}'`.
 
+## Understanding NIXL metrics aggregation semantics
+
+NIXL transfer statistics are reported through two independent paths — the
+periodic CLI log line and the Prometheus `/metrics` endpoint. They are
+computed differently, so the numbers can diverge slightly for the same
+reporting window. This section explains why.
+
+### Two paths, two computations
+
+**1. CLI logging (per-interval summary)**
+
+Each worker records raw values as transfers complete — transfer duration,
+post duration, bytes transferred, descriptor count — into per-interval
+lists. When stats from multiple workers need to be combined, `aggregate()`
+simply concatenates those raw lists together; no averaging happens at this
+stage, it's a straight extend/union of samples.
+
+Once per logging interval, `reduce()` runs over the *full* combined list for
+that interval and computes the summary shown in the CLI: average and P90
+transfer time, average post time, average MB per transfer, throughput, and
+average descriptor count. After `reduce()` runs, the raw samples for that
+interval are discarded — the CLI line is a one-time exact computation over
+that window's data.
+
+**2. Prometheus (continuous histograms)**
+
+Prometheus does **not** consume the CLI's reduced summary. Instead, each raw
+value is pushed individually into a histogram the moment it's recorded
+(`vllm:nixl_xfer_time_seconds`, `vllm:nixl_post_time_seconds`,
+`vllm:nixl_bytes_transferred`, `vllm:nixl_num_descriptors`). Percentiles and
+averages you compute from Prometheus (e.g. via `histogram_quantile()` in
+Grafana) come from bucket-boundary estimation across whatever window your
+query covers — a fundamentally different calculation from the CLI's exact
+percentile over one interval's raw samples.
+
+**Practical implication:** don't expect the CLI's "P90 xfer time" and a
+Prometheus-derived P90 over the same time window to match exactly. They're
+computed by different mechanisms from different aggregation windows —
+this is expected behavior, not a bug.
+
+### Failure counters are handled separately
+
+Failed transfers, failed notifications, and expired KV blocks are tracked
+as simple counters (`num_failed_transfers`, `num_failed_notifications`,
+`num_kv_expired_reqs`), incremented independently of the success-path
+duration/byte stats above.
+
+This matters for one edge case: an interval with **zero successful
+transfers but at least one failure** is still considered non-empty and
+will still be logged/exported — the CLI reports the failure counts instead
+of the (undefined) success-based averages. An interval is only skipped
+entirely if there is *nothing* to report at all — no successes, no
+failures, no notifications, no expirations.
+
+### Summary table
+
+| | CLI log line | Prometheus |
+|---|---|---|
+| Source data | Raw samples, current interval only | Raw samples, observed continuously |
+| Aggregation | `aggregate()` = concatenate lists across workers | Each sample pushed independently via `.observe()` |
+| Percentile calc | Exact (numpy) over the interval's raw list | Estimated from histogram buckets |
+| Data lifetime | Discarded after `reduce()` | Retained per Prometheus retention policy |
+| Failure-only interval | Still logged (failure counts shown) | Still exported (counters incremented) |
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:
