@@ -5,8 +5,10 @@ incremental lexing, and state-machine-driven semantic event emission."""
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import Lock
 
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
@@ -36,7 +38,22 @@ class _DropInfo:
     extra_token_ids: dict[int, str]
 
 
-def _build_drop_info(
+# Bounded memo for tokenizer-wide drop regex compilation. Keyed by object
+# identity: ParserEngineConfig is typically functools.cache'd per format, and
+# the serving tokenizer is long-lived. Avoids redoing vocab-wide work on every
+# per-request StreamingParserEngine construction (e.g. Mistral tool_choice=none).
+_DROP_INFO_CACHE_MAXSIZE = 32
+_drop_info_cache: OrderedDict[tuple[int, int], _DropInfo | None] = OrderedDict()
+_drop_info_cache_lock = Lock()
+
+
+def _clear_drop_info_cache() -> None:
+    """Clear the drop-info memo (tests / tokenizer reload)."""
+    with _drop_info_cache_lock:
+        _drop_info_cache.clear()
+
+
+def _compute_drop_info(
     config: ParserEngineConfig,
     tokenizer,
 ) -> _DropInfo | None:
@@ -84,6 +101,26 @@ def _build_drop_info(
         lexer_shape=lexer_shape,
         extra_token_ids=extra_token_ids,
     )
+
+
+def _build_drop_info(
+    config: ParserEngineConfig,
+    tokenizer,
+) -> _DropInfo | None:
+    key = (id(config), id(tokenizer))
+    with _drop_info_cache_lock:
+        if key in _drop_info_cache:
+            _drop_info_cache.move_to_end(key)
+            return _drop_info_cache[key]
+
+    result = _compute_drop_info(config, tokenizer)
+
+    with _drop_info_cache_lock:
+        _drop_info_cache[key] = result
+        _drop_info_cache.move_to_end(key)
+        while len(_drop_info_cache) > _DROP_INFO_CACHE_MAXSIZE:
+            _drop_info_cache.popitem(last=False)
+    return result
 
 
 class StreamingParserEngine:
