@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cgroup memory readers and SHM allocation preflight checks."""
+"""CPU topology, cgroup memory, and SHM allocation tests."""
 
+import subprocess
 import sys
 from io import StringIO
 from unittest import mock
@@ -9,6 +10,7 @@ from unittest import mock
 import pytest
 
 from vllm.utils import cpu_resource_utils as cru
+from vllm.utils.cpu_resource_utils import LogicalCPUInfo
 from vllm.utils.mem_constants import GiB_bytes
 
 _V2_LIMIT_PATH = "/sys/fs/cgroup/memory.max"
@@ -187,3 +189,46 @@ def test_check_cgroup_memory_available_skips_without_snapshot(
 
     log_debug.assert_not_called()
     log_warning.assert_not_called()
+
+
+@pytest.fixture
+def synthesized_cpu_list(monkeypatch: pytest.MonkeyPatch) -> list[LogicalCPUInfo]:
+    cpu_list = [LogicalCPUInfo(id=0, physical_core=0, numa_node=0)]
+    monkeypatch.setattr(cru, "_synthesize_cpu_list", lambda: cpu_list)
+    return cpu_list
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("lscpu is unavailable"),
+        subprocess.CalledProcessError(1, "lscpu"),
+    ],
+)
+def test_get_cpu_list_falls_back_when_lscpu_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    synthesized_cpu_list: list[LogicalCPUInfo],
+    error: Exception,
+) -> None:
+    monkeypatch.setattr(cru.sys, "platform", "linux")
+
+    def raise_error(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(subprocess, "check_output", raise_error)
+
+    assert cru._get_cpu_list() is synthesized_cpu_list
+
+
+@pytest.mark.parametrize("lscpu_output", ["not-json", "{}", '{"cpus": [null]}'])
+def test_get_cpu_list_falls_back_when_lscpu_output_is_unparsable(
+    monkeypatch: pytest.MonkeyPatch,
+    synthesized_cpu_list: list[LogicalCPUInfo],
+    lscpu_output: str,
+) -> None:
+    monkeypatch.setattr(cru.sys, "platform", "linux")
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *args, **kwargs: lscpu_output
+    )
+
+    assert cru._get_cpu_list() is synthesized_cpu_list
