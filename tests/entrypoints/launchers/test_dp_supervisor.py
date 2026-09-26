@@ -234,6 +234,28 @@ def test_validate_multi_port_external_lb_args_allows_ssl():
     validate_multi_port_external_lb_args(args)
 
 
+@pytest.mark.parametrize(
+    ("host", "use_ssl", "expected"),
+    [
+        (None, False, "http://127.0.0.1:8001"),
+        ("0.0.0.0", False, "http://127.0.0.1:8001"),
+        ("localhost", False, "http://localhost:8001"),
+        ("::", False, "http://[::1]:8001"),
+        ("fd00::1", False, "http://[fd00::1]:8001"),
+        ("::", True, "https://[::1]:8001"),
+    ],
+)
+def test_child_base_url_brackets_ipv6_hosts(host, use_ssl, expected):
+    """Probe URLs must bracket IPv6 hosts; aiohttp rejects unbracketed ones."""
+    ssl_args = (
+        {"ssl_keyfile": "/tmp/server.key", "ssl_certfile": "/tmp/server.crt"}
+        if use_ssl
+        else {}
+    )
+    args = _make_unit_args(host=host, **ssl_args)
+    assert dp_sup._child_base_url(args, 8001) == expected
+
+
 def test_aggregates_health():
     supervisor = DPSupervisor(_make_unit_args())
     supervisor._is_ready = True
