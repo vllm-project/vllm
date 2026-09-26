@@ -247,8 +247,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
                                     __float2half_rn(block_c[m][1]));
     half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]),
                                     __float2half_rn(block_c[m][3]));
-    atomicAdd(out, result01);
-    atomicAdd(out + 1, result23);
+    gptq_atomic_add(out, result01);
+    gptq_atomic_add(out + 1, result23);
   }
 }
 
@@ -359,8 +359,8 @@ __global__ void gemm_half_q_half_gptq_2bit_kernel(
     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
     half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
     half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
-    atomicAdd(out, result01);
-    atomicAdd(out + 1, result23);
+    gptq_atomic_add(out, result01);
+    gptq_atomic_add(out + 1, result23);
   }
 }
 
@@ -478,8 +478,8 @@ __global__ void gemm_half_q_half_gptq_3bit_kernel(
     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
     half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
     half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
-    atomicAdd(out, result01);
-    atomicAdd(out + 1, result23);
+    gptq_atomic_add(out, result01);
+    gptq_atomic_add(out + 1, result23);
   }
 }
 
@@ -593,8 +593,8 @@ __global__ void gemm_half_q_half_gptq_8bit_kernel(
     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
     half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
     half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
-    atomicAdd(out, result01);
-    atomicAdd(out + 1, result23);
+    gptq_atomic_add(out, result01);
+    gptq_atomic_add(out + 1, result23);
   }
 }
 
@@ -1102,7 +1102,7 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
     k += 4;
   }
   for (int m = 0; m < b_end; m++) {
-    atomicAdd(&mul[(b + m) * width + w], res[m]);
+    gptq_atomic_add(&mul[(b + m) * width + w], res[m]);
   }
 }
 
@@ -1191,7 +1191,7 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
     k += 2;
   }
   for (int m = 0; m < b_end; m++) {
-    atomicAdd(&mul[(b + m) * width + w], res[m]);
+    gptq_atomic_add(&mul[(b + m) * width + w], res[m]);
   }
 }
 
