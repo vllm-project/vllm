@@ -37,7 +37,8 @@ class ReasoningConfig:
     ``max_tokens`` or a ``thinking_token_budget`` — and then answers normally.
     Set to 0 (the default) to disable. Detection semantics match
     ``SamplingParams.repetition_detection``, which by contrast finishes the
-    whole request."""
+    whole request. Requires Model Runner V2: a config that selects the V1
+    model runner with this set is rejected."""
 
     loop_break_min_pattern_size: int = 0
     """Minimum N-gram pattern size for reasoning loop breaking. If 0, it
