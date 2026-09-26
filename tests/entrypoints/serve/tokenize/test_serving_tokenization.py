@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from argparse import Namespace
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -247,3 +248,35 @@ class TestDetokenizeClientErrorResponses:
 
         assert statuses["/tokenize"] == HTTPStatus.BAD_REQUEST
         assert statuses["/detokenize"] == HTTPStatus.BAD_REQUEST
+
+
+def test_tokenize_chat_materializes_tool_calls_and_serializable():
+    """Verify assistant messages with content=None and tool_calls are
+    materialized to lists and safely pickleable/copyable (#57738).
+    """
+    payload = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "foo", "arguments": "{}"},
+                    }
+                ],
+                "reasoning_content": "let me call foo",
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+        ]
+    }
+    req = TokenizeChatRequest.model_validate(payload)
+    assistant_msg = req.messages[1]
+    assert isinstance(assistant_msg, dict)
+    assert isinstance(assistant_msg["tool_calls"], list)
+    assert assistant_msg.get("reasoning") == "let me call foo"
+    # Verify deepcopy / pickle serialization succeeds without ValidatorIterator errors
+    copied_messages = copy.deepcopy(req.messages)
+    assert copied_messages[1]["tool_calls"] == assistant_msg["tool_calls"]
