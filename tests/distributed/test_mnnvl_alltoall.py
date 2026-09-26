@@ -243,6 +243,36 @@ def test_one_sided_combine_into_compatibility(supports_output):
     torch.testing.assert_close(output, payload + 2)
 
 
+@pytest.mark.parametrize("low_precision_combine", [False, True])
+def test_one_sided_combine_into_low_precision(low_precision_combine):
+    """The fp8 combine opt-in reaches the kernel, and stays off the call
+    signature entirely when disabled so older FlashInfer keeps working.
+    """
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    seen_kwargs = {}
+
+    class FakeMoeAlltoAll:
+        def combine(self, payload, runtime_max_tokens_per_rank, output, **kwargs):
+            seen_kwargs.update(kwargs)
+            output.copy_(payload + runtime_max_tokens_per_rank)
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = True
+    manager.low_precision_combine = low_precision_combine
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    expected = {"use_low_precision": True} if low_precision_combine else {}
+    assert seen_kwargs == expected
+    torch.testing.assert_close(output, payload + 2)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: Two-sided manager lifecycle (init, cleanup, reinit, ensure_init)
 # ---------------------------------------------------------------------------
@@ -907,6 +937,106 @@ def _one_sided_data_worker(rank, world_size):
 def test_one_sided_dispatch_combine(world_size):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
     _spawn_workers(_one_sided_data_worker, world_size, dp_size=world_size)
+
+
+def _one_sided_low_precision_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+    from vllm.distributed.parallel_state import get_dp_group
+
+    device = torch.device(f"cuda:{rank}")
+    hidden_size = 256
+    tokens_per_rank = 32
+    experts_per_token = 2
+    num_experts = world_size * 8
+
+    manager = FlashInferNVLinkOneSidedManager(get_dp_group().cpu_group)
+    manager.initialize(
+        max_num_tokens=tokens_per_rank,
+        top_k=experts_per_token,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        x_bytes_per_token=hidden_size // 2,
+        x_sf_bytes_per_token=hidden_size // 16,
+    )
+    assert manager.low_precision_combine
+
+    torch.manual_seed(rank + 42)
+    x = torch.randint(
+        0, 256, (tokens_per_rank, hidden_size // 2), device=device, dtype=torch.uint8
+    )
+    x_sf = torch.randint(
+        0, 256, (tokens_per_rank, hidden_size // 16), device=device, dtype=torch.uint8
+    )
+    topk_ids = torch.randint(
+        0,
+        num_experts,
+        (tokens_per_rank, experts_per_token),
+        device=device,
+        dtype=torch.int32,
+    )
+    topk_weights = torch.rand(
+        tokens_per_rank, experts_per_token, device=device, dtype=torch.float32
+    )
+
+    manager.moe_alltoall.dispatch(
+        token_selected_experts=topk_ids,
+        input_payloads=[x, x_sf, topk_ids, topk_weights],
+        runtime_max_tokens_per_rank=tokens_per_rank,
+    )
+
+    # Go through combine_into rather than moe_alltoall.combine: the workspace
+    # was sized for fp8, so the kernel must be told to send fp8. Calling the
+    # raw kernel here would send bf16 into fp8-sized slots and corrupt it.
+    expert_output = torch.ones(
+        world_size, tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    output = torch.empty(
+        tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    manager.combine_into(
+        payload=expert_output,
+        runtime_max_tokens_per_rank=tokens_per_rank,
+        output=output,
+    )
+
+    # Integers 1..top_k are exact in fp8_e4m3, so the fp8 transport must match
+    # bf16 exactly: one contribution per distinct expert-owning rank.
+    experts_per_rank = num_experts // world_size
+    expert_ranks = topk_ids // experts_per_rank
+    num_distinct = torch.tensor(
+        [len(set(row.tolist())) for row in expert_ranks],
+        device=device,
+        dtype=torch.bfloat16,
+    ).unsqueeze(1)
+    torch.testing.assert_close(output, num_distinct.expand_as(output))
+
+    torch.distributed.barrier()
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_one_sided
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_one_sided_combine_low_precision(world_size, monkeypatch):
+    """Exercise the real fp8 combine transport, not a fake kernel.
+
+    A workspace/dtype mismatch corrupts the combine buffer silently rather
+    than raising, so this asserts the combined values are exactly right.
+    """
+    from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+
+    from vllm.utils.func_utils import supports_kw
+
+    if not supports_kw(
+        MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
+    ):
+        pytest.skip("installed FlashInfer has no use_low_precision support")
+
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "1")
+    _spawn_workers(_one_sided_low_precision_worker, world_size, dp_size=world_size)
 
 
 # ---------------------------------------------------------------------------
