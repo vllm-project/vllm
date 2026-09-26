@@ -465,7 +465,7 @@ class XPUPlatform(Platform):
         cache_config.block_size = new_block_size
         logger.info(
             "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
-            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
+            "set mamba_page_size_padded to %s bytes accordingly, before was %s bytes.",
             new_block_size,
             kernel_block_size,
             cache_config.mamba_page_size_padded,
