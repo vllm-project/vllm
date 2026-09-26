@@ -1047,10 +1047,18 @@ def create_kv_cache_group_specs(
         layer_specs = [
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
-        merged_layer_spec = layer_specs[0].merge(layer_specs)
-        kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec)
-        )
+        group_spec: KVCacheSpec | None
+        try:
+            group_spec = layer_specs[0].merge(layer_specs)
+        except (AssertionError, ValueError):
+            # Layers of different shapes sharing a block table keep their own
+            # specs (see _get_kv_cache_groups_uniform_page_size).
+            group_spec = UniformTypeKVCacheSpecs.from_specs(
+                {name: kv_cache_spec[name] for name in layer_names_one_group}
+            )
+            if group_spec is None:
+                raise
+        kv_cache_groups.append(KVCacheGroupSpec(layer_names_one_group, group_spec))
     return kv_cache_groups
 
 
@@ -1441,6 +1449,8 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config: VllmConfig,
+    unscaled_kv_cache_spec: dict[str, KVCacheSpec] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
@@ -1500,6 +1510,10 @@ def _get_kv_cache_groups_uniform_page_size(
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
+        vllm_config: The global VllmConfig
+        unscaled_kv_cache_spec: The specs before page size unification, used
+            to plan TP-invariantly with a KV connector.
+
     Returns:
         The generated KVCacheGroupSpecs
 
@@ -1524,7 +1538,17 @@ def _get_kv_cache_groups_uniform_page_size(
                 # A raise means that the specs are incompatible.
                 type(specs[0]).merge([*specs, layer_spec])
             except (AssertionError, ValueError):
-                continue
+                # Attention layers of different shapes can still share a
+                # block table if their page sizes match; each keeps its own
+                # spec. Page sizes depend on TP, so not with a KV connector.
+                candidate = {str(i): s for i, s in enumerate([*specs, layer_spec])}
+                if (
+                    vllm_config.kv_transfer_config is not None
+                    or not isinstance(layer_spec, AttentionSpec)
+                    or layer_spec.page_size_bytes != specs[0].page_size_bytes
+                    or not UniformTypeKVCacheSpecs.is_uniform_type(candidate)
+                ):
+                    continue
             names.extend(layer_names)
             specs.append(layer_spec)
             break
@@ -1537,25 +1561,41 @@ def _get_kv_cache_groups_uniform_page_size(
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
-    # FIXME(Chen): At the moment of writing this code (2025-06-02), all
-    # open-source hybrid model follows a n:1 pattern between different attention
-    # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
-    # full), so we can use the "1" in the n:1 pattern as the group size, which
-    # is the minimum number of layers among all attention types. Need a better
-    # strategy if we want to support more complex patterns (e.g., 20 full + 30
-    # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
-    group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
-    if max_num_layers < min_num_layers * 1.5:
-        # If the number of layers is not much larger than the minimum number of
-        # layers, use the maximum number of layers as the group size to avoid
-        # too many padding layers. A typical example is gpt-oss-20b + eagle,
-        # with 12 sw + 13 full. We pad it to (13 sw, 13 full) instead of
-        # (12 sw, 24 full). 1.5 is a heuristic to avoid too many padding
-        # layers while accommodating speculative decoding drafters that add
-        # extra layers to one attention type.
-        group_size = max_num_layers
+    # Pick the group size that wastes the fewest worst-case (max_model_len)
+    # bytes per request on padding layers, from the smallest bucket (bounding
+    # the number of groups; at least min_kv_cache_group_layers so e.g. a
+    # single-layer drafter bucket cannot force per-layer groups) up to the
+    # largest. Ties prefer fewer groups.
+    bucket_sizes = [len(layers) for layers in layer_buckets]
+    min_group_layers = vllm_config.cache_config.min_kv_cache_group_layers
+    # Worst-case memory a padding layer holds per request. With a KV connector,
+    # peers (e.g. P/D) may use different TP sizes, which change page bytes but
+    # not the pages each layer needs at its own pre-unification page size, so
+    # count those pages instead of bytes.
+    tp_invariant = vllm_config.kv_transfer_config is not None
+    cost_specs = (
+        (unscaled_kv_cache_spec or kv_cache_spec) if tp_invariant else kv_cache_spec
+    )
+    padding_cost = [
+        max(
+            cdiv(
+                cost_specs[name].max_memory_usage_bytes(vllm_config),
+                cost_specs[name].page_size_bytes if tp_invariant else 1,
+            )
+            for name in names
+        )
+        for names in layer_buckets
+    ]
+    group_size = min(
+        range(
+            min(min_group_layers, max(bucket_sizes)),
+            max(bucket_sizes) + 1,
+        ),
+        key=lambda size: (
+            sum(c * (-n % size) for n, c in zip(bucket_sizes, padding_cost)),
+            sum(cdiv(n, size) for n in bucket_sizes),
+        ),
+    )
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
@@ -2342,6 +2382,7 @@ def get_kv_cache_groups(
 
     # Prefer preserving each layer's cache semantics. If physical pages cannot
     # be unified, try a supported allocation-only fallback before failing.
+    unscaled_spec = filtered_spec
     try:
         filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
     except NotImplementedError:
@@ -2349,7 +2390,9 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(
+        filtered_spec, vllm_config, unscaled_spec
+    )
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:

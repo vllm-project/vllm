@@ -781,6 +781,7 @@ class EngineArgs:
     )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    min_kv_cache_group_layers: int = CacheConfig.min_kv_cache_group_layers
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
@@ -1362,6 +1363,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--min-kv-cache-group-layers",
+            **cache_kwargs["min_kv_cache_group_layers"],
         )
         cache_group.add_argument(
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
@@ -2216,6 +2221,7 @@ class EngineArgs:
             swa_bounded_replay=self.swa_bounded_replay,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            min_kv_cache_group_layers=self.min_kv_cache_group_layers,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
