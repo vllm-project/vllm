@@ -10,6 +10,7 @@ from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (
     FastIncrementalDetokenizer,
@@ -90,10 +91,13 @@ def _run_incremental_decode(
 
 @pytest.fixture
 def tokenizer(tokenizer_name):
-    return (
-        MistralTokenizer.from_pretrained(tokenizer_name)
-        if "mistral" in tokenizer_name
-        else AutoTokenizer.from_pretrained(tokenizer_name)
+    return with_retry(
+        lambda: (
+            MistralTokenizer.from_pretrained(tokenizer_name)
+            if "mistral" in tokenizer_name
+            else AutoTokenizer.from_pretrained(tokenizer_name)
+        ),
+        f"Error loading tokenizer for {tokenizer_name}",
     )
 
 
