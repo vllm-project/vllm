@@ -380,6 +380,13 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
+    # Row-weighted mean compressed context length over this chunk's query
+    # rows.  ``total_seq_lens`` is the PACKED width of the chunk's K buffer
+    # (the sum over requests), but a query row is windowed to its own
+    # request's context, so the packed width overstates the per-row scan by
+    # the packing factor.  Kept on the host: both inputs are already CPU
+    # tensors, so this costs no device sync.
+    mean_row_context: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
 
@@ -1655,6 +1662,28 @@ def build_prefill_chunk_metadata(
 
     num_reqs = end_idx - start_idx
     device = block_table.device
+
+    # Row-weighted mean per-row context.  Dense scoring and the top-k are
+    # linear in a row's span, so summing the dense cost over rows and
+    # dividing by the row count gives exactly this quantity -- it is the
+    # chunk-level linearization of a per-row decision, not a proxy.  Rows of
+    # request i span [0, ctx_i) up to the intra-request query offset, which
+    # is at most the request's query length and so negligible against the
+    # candidate capacity.
+    _qsl = query_start_loc_cpu[start_idx : end_idx + 1]
+    _rows_per_req = (_qsl[1:] - _qsl[:-1]).to(torch.int64)
+    if query_slice is not None:
+        # Only the [qs_start, qs_stop) window of this chunk's rows is scored.
+        _lo = _qsl[:-1] - _qsl[0]
+        _hi = _qsl[1:] - _qsl[0]
+        _rows_per_req = (
+            _hi.clamp(max=query_slice.stop) - _lo.clamp(min=query_slice.start)
+        ).clamp(min=0).to(torch.int64)
+    _ctx = compressed_seq_lens_cpu[start_idx:end_idx].to(torch.int64)
+    _tot_rows = int(_rows_per_req.sum().item())
+    mean_row_context = (
+        int((_rows_per_req * _ctx).sum().item()) // _tot_rows if _tot_rows else 0
+    )
     token_to_seq = torch.empty(total_seq_lens, dtype=torch.int32, device=device)
 
     if pcp_plan is not None:
@@ -1760,6 +1789,7 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+        mean_row_context=mean_row_context,
     )
 
 
