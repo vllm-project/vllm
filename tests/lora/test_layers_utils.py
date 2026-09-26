@@ -33,6 +33,14 @@ def test_get_lora_device_ark_linear():
     assert _get_lora_device(base_layer) == base_layer.ark_linear.qweight.device
 
 
+def test_get_lora_device_none_weight_falls_back_to_packed():
+    # XPUW4A8IntLinearKernel registers weight=None after repacking and
+    # keeps the runtime tensor in weight_packed (issue #57503).
+    base_layer = nn.Module()
+    base_layer.register_parameter("weight", None)
+    base_layer.weight_packed = _param()
+    assert _get_lora_device(base_layer) == base_layer.weight_packed.device
+
 def test_get_lora_device_unsupported_raises():
     base_layer = nn.Module()
     with pytest.raises(ValueError, match="Unsupported base layer"):
