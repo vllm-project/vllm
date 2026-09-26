@@ -212,6 +212,15 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_FAST_MOE_BYPASS: bool = False
+    VLLM_FAST_MOE_MODE: Literal[
+        "auto",
+        "direct_io",
+        "direct_vram",
+        "host_staging",
+    ] = "auto"
+    VLLM_FAST_MOE_CROSSOVER_GB: float = 300.0
+    VLLM_MOE_FORCE_O_DIRECT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -1618,6 +1627,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Opt-in activation for Fast MoE tri-modal weight ingestion engine.
+    "VLLM_FAST_MOE_BYPASS": lambda: (
+        os.getenv("VLLM_FAST_MOE_BYPASS", "0").strip().lower() in ("1", "true")
+    ),
+    # Fast MoE tri-modal operational mode override:
+    # "auto" (default): dynamic auto-routing via page cache warmth and checkpoint scale.
+    # "direct_io": Mode 3 (single-reader sequential buffered broadcast via /dev/shm).
+    # "direct_vram": Mode 2 (shard-driven direct-to-VRAM streaming with prefetch).
+    # "host_staging": Mode 1 (bulk 3D host staging with bounded pinned pool).
+    "VLLM_FAST_MOE_MODE": env_with_choices(
+        "VLLM_FAST_MOE_MODE",
+        "auto",
+        ["auto", "direct_io", "direct_vram", "host_staging"],
+        case_sensitive=False,
+    ),
+    # Scale crossover threshold in GiB between Mode 1 (host staging)
+    # and Mode 2 (direct VRAM).
+    "VLLM_FAST_MOE_CROSSOVER_GB": lambda: float(
+        os.getenv("VLLM_FAST_MOE_CROSSOVER_GB", "300.0")
+    ),
+    # Force Linux O_DIRECT on DirectBlockFileReader regardless of chunk size
+    # or page cache warmth.
+    "VLLM_MOE_FORCE_O_DIRECT": lambda: (
+        os.getenv("VLLM_MOE_FORCE_O_DIRECT", "0").strip().lower()
+        in ("1", "true", "yes")
+    ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then

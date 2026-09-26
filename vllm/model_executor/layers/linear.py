@@ -35,6 +35,7 @@ from vllm.model_executor.layers.utils import (
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     BlockQuantScaleParameter,
+    GroupQuantScaleParameter,
     ModelWeightParameter,
     PackedColumnParameter,
     PackedvLLMParameter,
@@ -728,6 +729,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        if disable_tp:
+            self.tp_rank = 0
+            self.tp_size = 1
+            for p in (
+                getattr(self, "weight", None),
+                getattr(self, "weight_scale", None),
+                getattr(self, "bias", None),
+            ):
+                if p is not None:
+                    p.tp_rank = 0
+                    p.tp_size = 1
+            self.update_param_tp_status()
 
     def validate_shard_id(self, shard_id: Any) -> TypeIs[int | tuple[int, ...] | None]:
         if isinstance(shard_id, int):
@@ -937,7 +950,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 if loaded_shard_id
                 else None
             )
-            if isinstance(param, BlockQuantScaleParameter):
+            if isinstance(param, BlockQuantScaleParameter) or (
+                getattr(self, "weight_block_size", None)
+                and (
+                    isinstance(param, (BlockQuantScaleParameter, GroupQuantScaleParameter))
+                    or param is getattr(self, "weight_scale", None)
+                )
+            ):
                 weight_block_size = getattr(self, "weight_block_size", None)
                 output_sizes = [
                     adjust_block_scale_shard(weight_block_size, size, 0)[0]
@@ -956,18 +975,42 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         shard_offset //= self.tp_size
         shard_size //= self.tp_size
 
-        if isinstance(param, BlockQuantScaleParameter):
+        if isinstance(param, BlockQuantScaleParameter) or (
+            getattr(self, "weight_block_size", None)
+            and (
+                isinstance(param, (BlockQuantScaleParameter, GroupQuantScaleParameter))
+                or param is getattr(self, "weight_scale", None)
+            )
+        ):
             weight_block_size = getattr(self, "weight_block_size", None)
             shard_size, shard_offset = adjust_block_scale_shard(
                 weight_block_size, shard_size, shard_offset
             )
 
-        param.load_merged_column_weight(
-            loaded_weight=loaded_weight,
-            shard_id=loaded_shard_id,
-            shard_offset=shard_offset,
-            shard_size=shard_size,
-        )
+        try:
+            param.load_merged_column_weight(
+                loaded_weight=loaded_weight,
+                shard_id=loaded_shard_id,
+                shard_offset=shard_offset,
+                shard_size=shard_size,
+            )
+        except Exception as e:
+            logger.error(
+                "weight_loader_v2 FAILED on %s: param shape=%s, loaded_weight shape=%s, "
+                "loaded_shard_id=%s, shard_size=%s, shard_offset=%s, output_sizes=%s, tp_size=%s, tp_rank=%s, param.tp_rank=%s, param_class=%s",
+                getattr(self, "prefix", ""),
+                getattr(param, "shape", None),
+                getattr(loaded_weight, "shape", None),
+                loaded_shard_id,
+                shard_size,
+                shard_offset,
+                self.output_sizes,
+                self.tp_size,
+                self.tp_rank,
+                getattr(param, "tp_rank", None),
+                type(param).__name__,
+            )
+            raise
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
