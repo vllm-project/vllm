@@ -332,6 +332,30 @@ def test_draft_model_multimodal_embedding_capability(model_cls, expected):
     assert supports_multimodal_embeddings(model_cls) is expected
 
 
+@pytest.mark.parametrize(
+    "model_cls", [EagleLlama4ForCausalLM, EagleMistralLarge3ForCausalLM]
+)
+def test_mm_capable_drafter_merges_multimodal_embeddings(model_cls):
+    """Drafters advertising multimodal embeddings must embed text ids and
+    scatter the multimodal embeddings themselves; they do not inherit
+    SupportsMultiModal's helpers."""
+    table = torch.arange(8, dtype=torch.float32).repeat(3, 1).T  # [8, 3]
+    drafter = object.__new__(model_cls)
+    drafter.model = SimpleNamespace(embed_input_ids=lambda ids: table[ids])
+    input_ids = torch.tensor([1, 5, 6, 2])
+
+    text_only = model_cls.embed_input_ids(drafter, input_ids)
+    assert torch.equal(text_only, table[input_ids])
+
+    mm_embeds = [torch.full((2, 3), -1.0)]
+    is_multimodal = torch.tensor([False, True, True, False])
+    merged = model_cls.embed_input_ids(
+        drafter, input_ids, mm_embeds, is_multimodal=is_multimodal
+    )
+    assert torch.equal(merged[[0, 3]], table[[1, 2]])
+    assert torch.equal(merged[[1, 2]], mm_embeds[0])
+
+
 def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):
     logits_hidden = torch.full((4, 3), 1.0)
     feedback_hidden = torch.full((4, 3), 2.0)
