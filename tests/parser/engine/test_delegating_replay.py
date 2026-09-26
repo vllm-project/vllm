@@ -40,6 +40,7 @@ from vllm.parser.engine.adapters import (
     ParserEngineReasoningAdapter,
     ParserEngineToolAdapter,
 )
+from vllm.parser.minicpmv import MiniCPMVParser
 from vllm.parser.mistral import MistralParser
 
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
@@ -89,6 +90,12 @@ def _discover_pairings() -> list[_PairingInfo]:
             # Mistral uses brace-balanced JSON tool args with no TOOL_END
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
+            continue
+        if engine_cls is MiniCPMVParser:
+            # MiniCPM-V defaults to thinking disabled, where <think>/</think>
+            # are passthrough terminals rather than a reasoning boundary. That
+            # does not fit this harness; it is covered by
+            # tests/parser/engine/test_minicpmv_reasoning.py instead.
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:

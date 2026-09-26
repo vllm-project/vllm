@@ -32,6 +32,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "deepseek_vl_v2": CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja",
     "minicpmv": _get_minicpmv_chat_template_fallback,
     "minicpmv4_6": _get_minicpmv_chat_template_fallback,
+    "minicpmv4_7": _get_minicpmv_chat_template_fallback,
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "siglip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",

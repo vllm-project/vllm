@@ -521,6 +521,10 @@ _MULTIMODAL_MODELS = {
         "minicpmv4_6",
         "MiniCPMV4_6ForConditionalGeneration",
     ),
+    "MiniCPMV4_7ForConditionalGeneration": (
+        "minicpmv4_7",
+        "MiniCPMV4_7ForConditionalGeneration",
+    ),
     "Mistral3ForConditionalGeneration": (
         "mistral3",
         "Mistral3ForConditionalGeneration",
