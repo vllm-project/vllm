@@ -522,6 +522,16 @@ class ModelConfig:
                 self._update_nested(attr, value)
             else:
                 # It's a dict-valued parameter - set it directly
+                if key == "rope_scaling" and isinstance(attr, dict):
+                    # The legacy alias replaces rope_parameters in Transformers v5.
+                    value = {
+                        **{
+                            k: attr[k]
+                            for k in ("rope_theta", "partial_rotary_factor")
+                            if k in attr
+                        },
+                        **value,
+                    }
                 setattr(config, key, value)
 
     def __post_init__(
