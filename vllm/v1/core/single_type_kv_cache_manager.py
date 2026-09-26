@@ -2078,7 +2078,7 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
-        if self.use_eagle:
+        if self.drop_eagle_checkpoint_block:
             # Eagle groups match one hash unit past the candidate and drop it,
             # so register the tail one unit lower.
             latest_prompt_hash_boundary = max(
