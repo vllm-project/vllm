@@ -59,11 +59,6 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 class BaseSpeculator(ABC):
     num_query_per_req: int = 1
 
-    @property
-    def supports_padded_prompt_tail_graph(self) -> bool:
-        """Whether draft prefill can reuse a padded target verifier batch."""
-        return False
-
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass

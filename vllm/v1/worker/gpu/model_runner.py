@@ -1254,24 +1254,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
-        supports_padded_prompt_tail_graph = (
-            self.speculative_config is not None
-            and self.speculator is not None
-            and self.speculator.supports_padded_prompt_tail_graph
-            and not self.model_config.is_hybrid
-            and not self.model_config.is_attention_free
-            and not self.is_encoder_decoder
-            and not self.supports_mm_inputs
-            and self.adaptive_verification is None
-            and self.pcp_manager is None
-            and self.parallel_config.pipeline_parallel_size == 1
-            and self.model_state.num_new_sampled_tokens_per_step == 1
-        )
         # The scheduler gives prefilling requests draft slots only when padding
         # their final token. Require that complete verifier layout on every row.
+        # PCP/adaptive verification change that layout. Recurrent models need
+        # state-aware admission (e.g. an uncached tail must remain a prefill).
         is_padded_prompt_tail = (
             batch_state.has_prefill
-            and supports_padded_prompt_tail_graph
+            and self.speculative_config is not None
+            and self.adaptive_verification is None
+            and self.pcp_manager is None
+            and self.model_state.num_new_sampled_tokens_per_step == 1
+            and all(
+                not (config.is_hybrid or config.is_attention_free)
+                for config in (
+                    self.model_config,
+                    self.speculative_config.draft_model_config,
+                )
+            )
             and self.decode_query_len > 1
             and all(
                 n == self.decode_query_len

@@ -26,6 +26,8 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_mod
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
+from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp import speculator as multi_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
@@ -106,40 +108,22 @@ def _make_speculator(
     return speculator
 
 
-@pytest.mark.parametrize(
-    ("hybrid", "attention_free", "adaptive", "pcp", "expected"),
-    [
-        (False, False, False, None, True),
-        (True, False, False, None, False),
-        (False, True, False, None, False),
-        (False, False, True, None, False),
-        (False, False, False, object(), False),
-    ],
-)
-def test_padded_prompt_tail_draft_capability(
-    hybrid,
-    attention_free,
-    adaptive,
-    pcp,
-    expected,
-):
-    speculator = object.__new__(_TestSpeculator)
-    speculator.draft_model_config = SimpleNamespace(
-        is_hybrid=hybrid,
-        is_attention_free=attention_free,
-    )
-    speculator.enable_adaptive_verification = adaptive
-    speculator.pcp_manager = pcp
-    assert speculator.supports_padded_prompt_tail_graph is expected
-
-
 @pytest.mark.parametrize("has_prefill", [False, True])
+@pytest.mark.parametrize(
+    "draft_cls", [_TestSpeculator, Gemma4Speculator, MultiModuleMTPSpeculator]
+)
 def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
     monkeypatch,
     has_prefill,
+    draft_cls,
 ):
     """A prepared prompt tail must reuse the target's decode classification."""
-    speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
+    speculator = object.__new__(draft_cls)
+    speculator.__dict__.update(
+        _make_speculator(monkeypatch, torch.zeros(4, 3)).__dict__
+    )
+    speculator.input_buffers.query_start_loc = torch.tensor([0, 4])
+    speculator._prepare_inputs = lambda *args, **kwargs: None
     speculator.num_speculative_steps = 3
     speculator.max_model_len = 8192
     speculator.max_num_reqs = 1
@@ -154,6 +138,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         num_scheduled_tokens=torch.tensor([4]),
         seq_lens_cpu_upper_bound=torch.tensor([4099]),
         idx_mapping=None,
+        query_start_loc=torch.tensor([0, 4]),
         has_prefill=has_prefill,
     )
     sync = DPSyncState(
@@ -168,7 +153,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         num_tokens=4,
         num_reqs=1,
     )
-    speculator.prefill_cudagraph_manager = manager
+    speculator.prefill_cudagraph_manager = speculator.cudagraph_manager = manager
 
     class Dispatched(Exception):
         pass
@@ -181,6 +166,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         raise Dispatched
 
     monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", dispatch)
+    monkeypatch.setattr(multi_module, "dispatch_cg_and_sync_dp", dispatch)
     expected = AssertionError if has_prefill else Dispatched
     with pytest.raises(expected):
         speculator.propose(

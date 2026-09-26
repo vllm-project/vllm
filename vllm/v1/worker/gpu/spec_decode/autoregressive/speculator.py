@@ -47,18 +47,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
 
-    @property
-    def supports_padded_prompt_tail_graph(self) -> bool:
-        # Recurrent draft state and Q-only/shared-KV draft paths need their own
-        # validation. Ordinary autoregressive MTP/EAGLE preserves target rows.
-        return (
-            not self.draft_model_config.is_hybrid
-            and not self.draft_model_config.is_attention_free
-            and not self.enable_adaptive_verification
-            and self.pcp_manager is None
-            and self.advance_draft_positions
-        )
-
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
         if not self.supports_mm_inputs:

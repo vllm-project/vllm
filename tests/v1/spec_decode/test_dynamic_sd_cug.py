@@ -96,6 +96,19 @@ def _create_vllm_config_for_dsd(
     + [
         pytest.param(3, True, "real-prefill", False, id="same-shape-real-prefill"),
         pytest.param(3, True, "recurrent", False, id="recurrent-target"),
+        pytest.param(
+            3, True, "uncached-recurrent", False, id="uncached-recurrent-tail"
+        ),
+        pytest.param(3, True, "attention-free", False, id="attention-free-target"),
+        pytest.param(3, True, "recurrent-draft", False, id="recurrent-draft"),
+        pytest.param(3, True, "attention-free-draft", False, id="attention-free-draft"),
+        pytest.param(3, True, "adaptive", False, id="adaptive-layout"),
+        pytest.param(3, True, "pcp", False, id="pcp-layout"),
+        pytest.param(3, True, "multiple-bonus", False, id="multiple-bonus-tokens"),
+        pytest.param(3, True, "multimodal", True, id="multimodal-target"),
+        pytest.param(3, True, "encoder-decoder", True, id="encoder-decoder-target"),
+        pytest.param(3, True, "encoder-inputs", True, id="encoder-inputs-stay-eager"),
+        pytest.param(3, True, "pp", True, id="pipeline-parallel-target"),
         pytest.param(3, True, "partial-tail-drafts", False, id="partial-tail-drafts"),
         pytest.param(
             3, True, "missing-decode-drafts", False, id="missing-decode-drafts"
@@ -128,7 +141,7 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
-    width = 1 + k
+    width = k + (2 if case == "multiple-bonus" else 1)
     config = _create_vllm_config_for_dsd(
         2,
         k,
@@ -168,7 +181,7 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
         output.num_scheduled_tokens["decode"] -= 1
         output.scheduled_spec_decode_tokens["decode"].pop()
     output.total_num_scheduled_tokens = sum(output.num_scheduled_tokens.values())
-    prompt_len = 1 if case == "uncached-tail" else 4096
+    prompt_len = 1 if case in ("uncached-tail", "uncached-recurrent") else 4096
 
     runner = object.__new__(GPUModelRunner)
     for method in (
@@ -188,12 +201,20 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
             [prompt_len - remaining_prompt_tokens, 100]
         ),
     )
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=k)
-    runner.speculator = SimpleNamespace(supports_padded_prompt_tail_graph=True)
-    runner.model_config = SimpleNamespace(
-        is_hybrid=case == "recurrent", is_attention_free=False
+    runner.speculative_config = SimpleNamespace(
+        num_speculative_tokens=k,
+        draft_model_config=SimpleNamespace(
+            is_hybrid=case == "recurrent-draft",
+            is_attention_free=case == "attention-free-draft",
+        ),
     )
-    runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
+    runner.model_config = SimpleNamespace(
+        is_hybrid=case in ("recurrent", "uncached-recurrent"),
+        is_attention_free=case == "attention-free",
+    )
+    runner.model_state = SimpleNamespace(
+        num_new_sampled_tokens_per_step=2 if case == "multiple-bonus" else 1
+    )
     runner.parallel_config = config.parallel_config
     runner.observability_config = SimpleNamespace(cudagraph_metrics=False)
     runner.decode_query_len = width
@@ -201,7 +222,20 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
     runner.cudagraph_manager = manager
     runner.pcp_manager = runner.lora_config = runner.adaptive_verification = None
     runner.ubatch_runner = None
-    runner.is_encoder_decoder = runner.supports_mm_inputs = False
+    runner.is_encoder_decoder = case in ("encoder-decoder", "encoder-inputs")
+    runner.supports_mm_inputs = case == "multimodal"
+    if case == "encoder-inputs":
+        output.scheduled_encoder_inputs = {"tail": [0]}
+    elif case == "pp":
+        runner.parallel_config.pipeline_parallel_size = 2
+    elif case == "adaptive":
+        runner.adaptive_verification = SimpleNamespace(
+            get_num_tokens=lambda counts, drafts: sum(counts.values())
+        )
+    elif case == "pcp":
+        runner.pcp_manager = SimpleNamespace(
+            get_num_tokens_for_dispatch=lambda counts, prefilling: int(counts.sum())
+        )
     prepared_batch = SimpleNamespace(has_prefill=True)
 
     def prepare_inputs(scheduled, state, desc, num_active_loras):
@@ -212,7 +246,7 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
         prepared_batch.is_prefilling_np = state.is_prefilling_np.copy()
         expected_mode = (
             CUDAGraphMode.FULL
-            if expected_full and manager._graphs_captured
+            if expected_full and manager._graphs_captured and case != "encoder-inputs"
             else CUDAGraphMode.NONE
         )
         assert desc.cg_mode == expected_mode
