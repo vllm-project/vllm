@@ -264,6 +264,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             if info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
             _place_kernel_tensors(layer, info)
+            _run_post_weights_reload(layer)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -290,6 +291,7 @@ def finalize_layerwise_reload(*args, **kwargs):
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
+    is_reload = info.kernel_tensors is not None
     if info.kernel_tensors is None:
         if info.load_numel > 0:
             _layerwise_process(layer, info)
@@ -300,6 +302,8 @@ def _finalize_attention_layer(
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
+    if is_reload:
+        _run_post_weights_reload(layer)
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -323,7 +327,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
     if quant_method is not None:
         quant_method.process_weights_after_loading(layer)
 
-    _copy_and_restore_kernel_tensors(layer, info)
+    _copy_and_restore_kernel_tensors(layer, info, run_post_weights_reload=False)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -385,7 +389,12 @@ def _get_weight_loader(tensor: torch.Tensor):
     return getattr(tensor, "weight_loader", default_weight_loader)
 
 
-def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+def _copy_and_restore_kernel_tensors(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    *,
+    run_post_weights_reload: bool = True,
+):
     """Copy processed values into original kernel tensor storage and restore
     kernel tensor references on the layer. Preserves cudagraph references."""
     assert info.kernel_tensors is not None
@@ -402,6 +411,19 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
+    if run_post_weights_reload:
+        _run_post_weights_reload(layer)
+
+
+def _run_post_weights_reload(layer: torch.nn.Module) -> None:
+    post_weights_reload = getattr(layer, "post_weights_reload", None)
+    if post_weights_reload is not None:
+        post_weights_reload()
+
+    quant_method = getattr(layer, "quant_method", None)
+    post_weights_reload = getattr(quant_method, "post_weights_reload", None)
+    if post_weights_reload is not None:
+        post_weights_reload(layer)
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -414,4 +436,12 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, param in parameters.items():
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
+        assert buffer is not None
         layer.register_buffer(name, buffer, persistent=name not in non_persistent)
+
+    # ``get_layer_params_buffers`` intentionally omits None values, but these
+    # placeholders are still part of the module schema and must survive reload.
+    _, restore_buffers = info.restore_metadata
+    for name, buffer in restore_buffers.items():
+        if buffer is None and name not in layer._buffers:
+            layer.register_buffer(name, None, persistent=name not in non_persistent)

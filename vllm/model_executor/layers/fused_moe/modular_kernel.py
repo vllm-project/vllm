@@ -498,6 +498,57 @@ class FusedMoEExperts(ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
+    def _publish_helper_buffer(
+        self,
+        layer: torch.nn.Module,
+        name: str,
+        tensor: torch.Tensor | None,
+        *,
+        derived: bool = False,
+    ) -> torch.Tensor | None:
+        """Publish helper-owned runtime state on its owning module.
+
+        ``FusedMoEExperts`` is not an ``nn.Module`` and therefore only keeps an
+        alias. The owning layer controls the tensor storage lifetime.
+        """
+        if tensor is None:
+            return None
+        buffer_name = f"_moe_{name}"
+        helper_buffers = getattr(self, "_helper_buffer_names", None)
+        if helper_buffers is None:
+            helper_buffers = self._helper_buffer_names = {}
+        helper_buffers[name] = buffer_name
+
+        if derived:
+            from vllm.model_executor.utils import (
+                register_derived_buffer,
+                set_derived_buffer,
+            )
+
+            if buffer_name not in layer._buffers:
+                register_derived_buffer(layer, buffer_name)
+            return set_derived_buffer(layer, buffer_name, tensor)
+
+        if buffer_name not in layer._buffers:
+            layer.register_buffer(buffer_name, tensor, persistent=False)
+            return tensor
+
+        existing = layer._buffers[buffer_name]
+        assert existing is not None
+        return existing
+
+    def refresh_derived_buffers(self, layer: torch.nn.Module) -> None:  # noqa: B027
+        """Refresh weight-derived helper buffers after stable storage returns."""
+
+    def rebind_runtime_buffers(self, layer: torch.nn.Module) -> None:
+        """Rebind helper aliases to storage owned by ``layer``."""
+        for name, buffer_name in getattr(self, "_helper_buffer_names", {}).items():
+            setattr(self, name, layer._buffers[buffer_name])
+
+    def post_weights_reload(self, layer: torch.nn.Module) -> None:
+        self.refresh_derived_buffers(layer)
+        self.rebind_runtime_buffers(layer)
+
     @staticmethod
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")
