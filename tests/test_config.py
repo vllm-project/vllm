@@ -1478,7 +1478,9 @@ def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: in
     assert config.get_parallel_size(parallel) == expected
 
 
-@pytest.mark.parametrize("option", ["embedding_across_dp", "dp_shared_memory"])
+@pytest.mark.parametrize(
+    "option", ["embedding_across_dp", "dp_shared_memory", "host_file_gather"]
+)
 def test_engram_rejects_elastic_cross_dp(option):
     parallel = ParallelConfig(
         tensor_parallel_size=4,
@@ -1681,12 +1683,47 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
             assert config.engram_config.cpu_offload is True
 
 
+@pytest.mark.parametrize(
+    ("architecture", "layer_field", "rocm", "expect_error"),
+    [
+        pytest.param(
+            "DeepseekV41ForCausalLM", "engram_layer_ids", False, True, id="deepseek"
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM", "ple_layer_ids", True, True, id="qwen4exp_rocm"
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM", "ple_layer_ids", False, False, id="qwen4exp_cuda"
+        ),
+    ],
+)
+def test_engram_host_file_gather_requires_cuda_qwen4exp(
+    monkeypatch, architecture, layer_field, rocm, expect_error
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: rocm)
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(**{layer_field: [1]}),
+        ),
+    )
+    config = EngramConfig(host_file_gather=True)
+    if expect_error:
+        with pytest.raises(ValueError, match="host_file_gather"):
+            config.verify_model_config(model)
+    else:
+        config.verify_model_config(model)
+
+
 def test_engram_hash_tracks_execution_options():
     configs = [
         EngramConfig(cpu_offload=True),
         EngramConfig(cpu_offload=False),
         EngramConfig(cpu_offload=True, embedding_across_dp=True),
         EngramConfig(cpu_offload=True, dp_shared_memory=True),
+        EngramConfig(host_file_gather=True),
     ]
     assert len({config.compute_hash() for config in configs}) == len(configs)
 
