@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _has_opaque_packed_row,
+    _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
@@ -1808,6 +1809,107 @@ def test_opaque_packed_row_is_full_stride_at_offset_zero():
     assert _has_opaque_packed_row([0], [4096], [4096])
     assert not _has_opaque_packed_row([0, 1024], [1000, 1000], [4096, 4096])
     assert not _has_opaque_packed_row([], [4096], [4096])
+
+
+def test_pp_mismatch_rejects_opaque_row_in_both_directions():
+    """The smaller PP side can be either the producer or the consumer."""
+    page_view = dict(
+        remote_row_offsets=[0, 1024],
+        remote_kv_block_lens=[1000, 1000],
+        remote_block_lens=[4096, 4096],
+    )
+    opaque_row = dict(
+        remote_row_offsets=[0],
+        remote_kv_block_lens=[4096],
+        remote_block_lens=[4096],
+    )
+    # P pp=2, D pp=1, local row is opaque.
+    assert _pp_mismatch_hides_packed_layers(
+        2, 1, local_has_opaque_row=True, **page_view
+    )
+    # P pp=1, D pp=2, remote row is opaque.
+    assert _pp_mismatch_hides_packed_layers(
+        1, 2, local_has_opaque_row=False, **opaque_row
+    )
+    # Matching PP still aligns by the shared first layer name.
+    assert not _pp_mismatch_hides_packed_layers(
+        2, 2, local_has_opaque_row=True, **opaque_row
+    )
+    # Hetero PP with page-contiguous views is not this rejection.
+    assert not _pp_mismatch_hides_packed_layers(
+        2, 1, local_has_opaque_row=False, **page_view
+    )
+
+
+def test_prepare_transfer_regions_reuses_success_and_error():
+    """A peer layout is built once. Re-registering drops the cache."""
+    worker, _, _, _ = _register_sliced_packed_mla([0, 1])
+    meta = MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=1,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        req_blocks={},
+        kv_caches_base_addr=list(worker.kv_caches_base_addr),
+        block_lens=list(worker.block_len_per_layer),
+        kv_block_lens=list(worker.kv_block_len_per_layer),
+        registered_layer_names=list(worker.registered_layer_names),
+        registered_layer_indices=list(worker.registered_layer_indices),
+        registered_group_indices=list(worker.registered_group_indices),
+        registered_shared_group_ids=[
+            list(groups) for groups in worker.region_shared_groups
+        ],
+        registered_row_offsets=list(worker.region_row_offsets),
+    )
+    calls = 0
+    original = worker._get_transfer_regions
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    worker._get_transfer_regions = counting
+    prepared = worker._prepare_transfer_regions(meta)
+    assert prepared[2] is None
+    assert calls == 2
+    assert worker._prepare_transfer_regions(meta) == prepared
+    assert calls == 2
+
+    mismatch = MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=2,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        req_blocks={},
+        kv_caches_base_addr=[0x2000],
+        block_lens=[1024],
+        kv_block_lens=[1024],
+        registered_layer_names=["model.layers.9.mla_attn"],
+        registered_layer_indices=[9],
+        registered_group_indices=[0],
+        registered_row_offsets=[0],
+    )
+    failed = worker._prepare_transfer_regions(mismatch)
+    assert failed[2] is not None
+    assert calls == 4
+    assert worker._prepare_transfer_regions(mismatch)[2] == failed[2]
+    assert calls == 4
+
+    page = 1024
+    backing = torch.zeros((4, page * 2), dtype=torch.uint8)
+    kv_caches = {
+        "model.layers.0.mla_attn": backing[:, :page],
+        "model.layers.1.mla_attn": backing[:, page:],
+    }
+    worker.is_kv_consumer = True
+    with patch.object(worker.engine, "batch_register_memory", return_value=0):
+        worker.register_kv_caches(kv_caches)
+    assert worker._prepared_transfer_regions == {}
+    worker._prepare_transfer_regions(meta)
+    assert calls == 6
 
 
 def test_coalesce_keeps_a_run_inside_its_starting_row():
