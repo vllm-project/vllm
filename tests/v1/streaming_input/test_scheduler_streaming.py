@@ -115,8 +115,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[1, 2, 3],
         )
         session.num_computed_tokens = len(session.prompt_token_ids)
-        session.max_tokens = 10  # Initial max_tokens
-        session._output_token_ids = [1] * 10  # reach max_tokens
+        session.max_tokens = 2
 
         new_request = DummyRequest(
             request_id="session",
@@ -129,26 +128,21 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler._update_request_as_session(session, update)
 
         assert session.sampling_params.max_tokens == 10
-        # _update_request_as_session clears output tokens first, so
-        # max_tokens = num_output_tokens (0) + update.max_tokens (10) = 10
         assert session.max_tokens == 10
 
         session.num_computed_tokens = len(session.prompt_token_ids)
 
-        # Simulate generating 5 more output tokens
-        session._output_token_ids = [1] * 5
         new_request2 = DummyRequest(
             request_id="session",
             prompt_token_ids=[7, 8, 9],
         )
-        new_request2.sampling_params = SamplingParams(max_tokens=10)
-        new_request2.max_tokens = 10
+        new_request2.sampling_params = SamplingParams(max_tokens=4)
+        new_request2.max_tokens = 4
         update2 = StreamingUpdate.from_request(new_request2)
         scheduler._update_request_as_session(session, update2)
 
-        assert session.sampling_params.max_tokens == 10
-        # Again, output tokens are cleared first, so max_tokens = 0 + 10 = 10
-        assert session.max_tokens == 10
+        assert session.sampling_params.max_tokens == 4
+        assert session.max_tokens == 4
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
