@@ -1686,7 +1686,8 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
-def test_sparse_mla_preserves_physical_row_addressing(with_draft):
+@pytest.mark.parametrize("indexer_alignment", [None, 512])
+def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignment):
     from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
     from vllm.v1.worker.utils import allocate_kv_cache
 
@@ -1699,6 +1700,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft):
             **common,
             head_size=576,
             state_content_bytes=656,
+            block_stride_alignment=656,
             cache_dtype_str="fp8_ds_mla",
             is_index_group_leader=True,
         ),
@@ -1706,6 +1708,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft):
             **common,
             head_size=132,
             cache_role=SparseCacheRole.INDEXER,
+            block_stride_alignment=indexer_alignment,
         ),
         "draft": SlidingWindowSpec(
             block_size=64,
@@ -1725,12 +1728,13 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft):
     caches = allocate_kv_cache(
         cache_config, torch.device("cpu"), KVCacheLayout.BLHNC, [64] * len(groups)
     )
-    for name in ("target", "indexer"):
-        cache = caches[name].squeeze(1)
-        rows, stride_rows = flat_kv_row_view(cache, 64)
-        cache[1, 0].fill_(7)
-        torch.testing.assert_close(rows[stride_rows], cache[1, 0])
-        assert torch.all(rows[stride_rows] == 7)
+    cache = caches["target"].squeeze(1)
+    if indexer_alignment is not None:
+        assert caches["indexer"].stride(0) % indexer_alignment == 0
+    rows, stride_rows = flat_kv_row_view(cache, 64)
+    cache[1, 0].fill_(7)
+    torch.testing.assert_close(rows[stride_rows], cache[1, 0])
+    assert torch.all(rows[stride_rows] == 7)
 
 
 @pytest.mark.parametrize(

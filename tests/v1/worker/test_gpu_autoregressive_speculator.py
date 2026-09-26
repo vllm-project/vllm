@@ -183,6 +183,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
             data_parallel_rank=0,
+            decode_context_parallel_size=1,
         ),
     )
 
