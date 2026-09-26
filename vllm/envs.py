@@ -182,6 +182,10 @@ if TYPE_CHECKING:
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    # Enable result-metric penalties (queue-wait / preemption) and the
+    # superlinear in-flight term in the internal DP load balancer.
+    # Set to 0 to restore the plain request-count scoring behavior.
+    VLLM_DP_LB_RESULT_METRICS: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
@@ -1483,6 +1487,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_MASTER_IP": lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
     # Port of the master node in the data parallel setting
     "VLLM_DP_MASTER_PORT": lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
+    # Result-metric penalties in the internal DP load balancer (default on,
+    # 0 restores the request-count-only scoring behavior).
+    "VLLM_DP_LB_RESULT_METRICS": lambda: (
+        os.environ.get("VLLM_DP_LB_RESULT_METRICS", "1") != "0"
+    ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: (
         os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1"

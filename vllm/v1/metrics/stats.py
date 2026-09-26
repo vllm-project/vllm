@@ -196,6 +196,14 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+
+    # Optional DP load-balancing signals. mean_queue_time is the average
+    # time waiting requests have spent in the queue (an engine-side TTFT
+    # proxy); preempted_total is the cumulative preemption count. Defaults
+    # keep every existing constructor valid.
+    mean_queue_time: float = 0.0
+    preempted_total: int = 0
+
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
