@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.kernels.mamba._mamba_ssm_ssd import (
+from tests.kernels.mamba.ssd._mamba_ssm_ssd import (
     DEVICE,
     generate_random_inputs,
     ssd_minimal_discrete,

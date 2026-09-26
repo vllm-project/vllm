@@ -404,11 +404,11 @@ steps:
   timeout_in_minutes: 25
   source_file_dependencies:
   - csrc/mamba/
-  - tests/kernels/mamba
+  - tests/kernels/mamba/ssd
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
   commands:
-    - pytest -v -s kernels/mamba/test_mamba_ssm_ssd_single_example.py
+    - pytest -v -s kernels/mamba/ssd/single_example
   mirror:
     amd:
       label: ":amd: (MI250) Mamba SSD Single Example"
@@ -427,11 +427,11 @@ steps:
   timeout_in_minutes: 25
   source_file_dependencies:
   - csrc/mamba/
-  - tests/kernels/mamba
+  - tests/kernels/mamba/ssd
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
   commands:
-    - pytest -v -s kernels/mamba/test_mamba_ssm_ssd_cont_batch.py
+    - pytest -v -s kernels/mamba/ssd/cont_batch
   mirror:
     amd:
       label: ":amd: (MI250) Mamba SSD Continuous Batch"
@@ -478,6 +478,7 @@ steps:
   - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba/gdn
+    - "find kernels/mamba -maxdepth 1 -name 'test_*.py' | xargs -r pytest -v -s"
   mirror:
     amd:
       label: ":amd: (MI250) Mamba GDN Kernels"

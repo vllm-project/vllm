@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.kernels.mamba._mamba_ssm_ssd import generate_continuous_batched_examples
+from tests.kernels.mamba.ssd._mamba_ssm_ssd import generate_continuous_batched_examples
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
