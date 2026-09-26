@@ -19,6 +19,20 @@ if TYPE_CHECKING:
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.config import OffloadingConfig
 
+
+class OffloadingStartupError(RuntimeError):
+    """Fatal startup failure with native users of offload memory still possible."""
+
+
+# Strong references must outlive the exception and its traceback.
+_RETAINED_RESOURCES: list[object] = []
+
+
+def retain_until_exit(*resources: object) -> None:
+    """Keep resources alive until process exit; do not close/unmap them."""
+    _RETAINED_RESOURCES.extend(resources)
+
+
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
 # Use the helper functions below to construct / decompose keys.

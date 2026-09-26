@@ -43,6 +43,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
+    KVCRStartupError,
     MemDescriptor,
     OpHandle,
     PinRequestId,
@@ -68,10 +69,12 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingMetricMetadata,
+    OffloadingStartupError,
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
+    retain_until_exit,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -443,7 +446,12 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 ),
                 guard_config,
             )
-        except BaseException:
+        except BaseException as exc:
+            if not isinstance(exc, Exception) or isinstance(exc, KVCRStartupError):
+                retain_until_exit(self, control, local_mapping, primary_kv_view)
+                if isinstance(exc, Exception):
+                    raise OffloadingStartupError(str(exc)) from exc
+                raise
             control.close()
             if local_mapping is not None:
                 local_mapping.close()
