@@ -192,14 +192,50 @@ def parse_args() -> argparse.Namespace:
 
     sweep = p.add_argument_group(
         "optional performance sweep",
-        ("Generate benchmark files after creating one initial runtime suggestion."),
+        ("Generate benchmark files alongside the directly deployable runtime config."),
     )
     sweep.add_argument(
         "--generate-sweep",
         action="store_true",
+        help="Backward-compatible alias for --generate-scheduler-sweep.",
+    )
+    sweep.add_argument(
+        "--generate-scheduler-sweep",
+        action="store_true",
+        help=("Generate the max-num-seqs/max-num-batched-tokens scheduler sweep."),
+    )
+    sweep.add_argument(
+        "--generate-parallel-layout-sweep",
+        action="store_true",
         help=(
-            "Generate an optional vllm bench sweep package around the single "
-            "initial runtime suggestion."
+            "Generate a standalone NUMA-aware TP/DP sweep. Requires --detect-hardware."
+        ),
+    )
+    sweep.add_argument(
+        "--generate-concurrency-sweep",
+        action="store_true",
+        help=(
+            "Generate a max_concurrency workload sweep using "
+            "vllm bench sweep serve_workload."
+        ),
+    )
+    sweep.add_argument(
+        "--generate-full-sweep",
+        action="store_true",
+        help=(
+            "Generate the end-to-end TP/DP -> max_concurrency -> scheduler "
+            "tuning pipeline. Requires --detect-hardware."
+        ),
+    )
+    sweep.add_argument(
+        "--tp-dp-numa-bind-workaround",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Temporary Xeon TP/DP NUMA-binding workaround. For parallel-layout "
+            "and full sweeps, generate an explicit VLLM_CPU_OMP_THREADS_BIND "
+            "from detected NUMA topology. Enabled by default; disable with "
+            "--no-tp-dp-numa-bind-workaround after the vLLM DP binding fix."
         ),
     )
     sweep.add_argument(
@@ -766,10 +802,22 @@ def write_config(
     Path(path).write_text("\n".join(metadata) + "\n" + body, encoding="utf-8")
 
 
-def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
-    env = recipe.get("env") or {}
-    if not isinstance(env, dict):
-        raise ValueError(f"Recipe `env` must be an object, got {type(env).__name__}")
+def write_env(
+    path: str,
+    source: str,
+    recipe: dict[str, Any],
+    *,
+    env_overrides: dict[str, object] | None = None,
+) -> None:
+    recipe_env = recipe.get("env") or {}
+    if not isinstance(recipe_env, dict):
+        raise ValueError(
+            f"Recipe `env` must be an object, got {type(recipe_env).__name__}"
+        )
+
+    env = dict(recipe_env)
+    overrides = env_overrides or {}
+    env.update(overrides)
 
     lines = [
         "#!/usr/bin/env bash",
@@ -777,6 +825,9 @@ def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
         f"# Source: {source}",
         "",
     ]
+
+    if overrides:
+        lines.append("# Temporary runtime overrides derived from detected hardware.")
 
     if env:
         for key, value in env.items():
@@ -793,6 +844,21 @@ def main() -> int:
     args = parse_args()
 
     try:
+        sweep_modes = {
+            "--generate-sweep": args.generate_sweep,
+            "--generate-scheduler-sweep": args.generate_scheduler_sweep,
+            "--generate-parallel-layout-sweep": args.generate_parallel_layout_sweep,
+            "--generate-concurrency-sweep": args.generate_concurrency_sweep,
+            "--generate-full-sweep": args.generate_full_sweep,
+        }
+        selected_sweep_modes = [
+            name for name, enabled in sweep_modes.items() if enabled
+        ]
+        if len(selected_sweep_modes) > 1:
+            raise ValueError(
+                "Choose exactly one sweep-generation mode: "
+                + ", ".join(selected_sweep_modes)
+            )
         source = args.source
         if source is None:
             source = discover_recipe_source(
@@ -813,7 +879,7 @@ def main() -> int:
 
         tuning_requested = (
             args.detect_hardware
-            or args.generate_sweep
+            or bool(selected_sweep_modes)
             or any(
                 value is not None
                 for value in (
@@ -828,8 +894,11 @@ def main() -> int:
         )
 
         tuning = None
+        sweep_config = None
         workload = None
         sweep_writer = None
+        hardware = None
+        env_overrides: dict[str, object] = {}
         if tuning_requested:
             # Keep plain Recipes conversion lightweight. vLLM-specific modules
             # are imported only for optional runtime tuning or sweep generation.
@@ -848,23 +917,51 @@ def main() -> int:
                 target_qps=args.target_qps,
             )
 
-            if args.generate_sweep:
-                from sweep_generation import (
-                    validate_sweep_workload,
-                    write_sweep_files,
-                )
+            if selected_sweep_modes:
+                from sweep_generation import validate_sweep_workload
 
                 validate_sweep_workload(workload)
+
+            if args.generate_sweep or args.generate_scheduler_sweep:
+                from sweep_generation import write_sweep_files
+
                 sweep_writer = write_sweep_files
 
             recipe_hardware = recipe.get("hardware")
             policies = get_runtime_tuning_policies(recipe_hardware)
 
-            hardware = None
             if args.detect_hardware:
-                from hardware_detection import detect_hardware
+                from hardware_detection import (
+                    build_numa_omp_threads_bind,
+                    detect_hardware,
+                )
 
                 hardware = detect_hardware()
+
+                if (
+                    args.tp_dp_numa_bind_workaround
+                    and str(recipe_hardware).lower() == "xeon6"
+                    and (
+                        args.generate_parallel_layout_sweep or args.generate_full_sweep
+                    )
+                ):
+                    recipe_env = recipe.get("env") or {}
+                    current_binding = (
+                        recipe_env.get("VLLM_CPU_OMP_THREADS_BIND")
+                        if isinstance(recipe_env, dict)
+                        else None
+                    )
+
+                    # Preserve an explicit recipe-provided manual binding.
+                    # Replace an unset or "auto" value with the temporary
+                    # topology-derived binding.
+                    if current_binding in (None, "auto"):
+                        env_overrides["VLLM_CPU_OMP_THREADS_BIND"] = (
+                            build_numa_omp_threads_bind(
+                                hardware,
+                                reserved_cores_per_numa=1,
+                            )
+                        )
 
             tuning = finetune_runtime_config(
                 config,
@@ -873,19 +970,68 @@ def main() -> int:
                 policies=policies,
             )
             config.update(tuning.overrides)
+            sweep_config = dict(config)
+            sweep_config.update(tuning.sweep_overrides)
 
         write_config(args.config_out, source, recipe, config)
-        write_env(args.env_out, source, recipe)
+        write_env(
+            args.env_out,
+            source,
+            recipe,
+            env_overrides=env_overrides,
+        )
 
         sweep_files: list[Path] = []
-        if args.generate_sweep:
+        if args.generate_full_sweep:
+            if not args.detect_hardware or hardware is None:
+                raise ValueError("--generate-full-sweep requires --detect-hardware.")
             assert workload is not None
-            assert sweep_writer is not None
-            sweep_files = sweep_writer(
+            from sweep_generation import write_full_sweep_files
+
+            sweep_files = write_full_sweep_files(
                 args.sweep_out_dir,
                 config_path=args.config_out,
                 env_path=args.env_out,
                 config=config,
+                workload=workload,
+                numa_node_count=hardware.numa_node_count,
+            )
+        elif args.generate_parallel_layout_sweep:
+            if not args.detect_hardware or hardware is None:
+                raise ValueError(
+                    "--generate-parallel-layout-sweep requires --detect-hardware."
+                )
+            assert workload is not None
+            from sweep_generation import write_parallel_layout_sweep_files
+
+            sweep_files = write_parallel_layout_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+                numa_node_count=hardware.numa_node_count,
+            )
+        elif args.generate_concurrency_sweep:
+            assert workload is not None
+            from sweep_generation import write_concurrency_sweep_files
+
+            sweep_files = write_concurrency_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+            )
+        elif args.generate_sweep or args.generate_scheduler_sweep:
+            assert workload is not None
+            assert sweep_writer is not None
+            assert sweep_config is not None
+            sweep_files = sweep_writer(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=sweep_config,
                 workload=workload,
             )
 
@@ -893,6 +1039,10 @@ def main() -> int:
             if tuning.overrides:
                 print("Initial runtime suggestion:")
                 for key, value in tuning.overrides.items():
+                    print(f"  {key}: {value}")
+            if tuning.sweep_overrides and selected_sweep_modes:
+                print("Explicit scheduler sweep seed:")
+                for key, value in tuning.sweep_overrides.items():
                     print(f"  {key}: {value}")
             for note in tuning.notes:
                 print(f"  tuning: {note}")
@@ -910,15 +1060,31 @@ def main() -> int:
     print(f"  vllm serve --config {shlex.quote(args.config_out)}")
     if sweep_files:
         sweep_dir = Path(args.sweep_out_dir)
+        run_parallel = sweep_dir / "run_parallel_layout_sweep.sh"
+        recommend_parallel = sweep_dir / "recommend_parallel_layout.py"
+        run_concurrency = sweep_dir / "run_concurrency_sweep.sh"
+        recommend_concurrency = sweep_dir / "recommend_concurrency.py"
         run_sweep = sweep_dir / "run_sweep.sh"
         recommend = sweep_dir / "recommend.py"
+        run_full = sweep_dir / "run_full_sweep.sh"
         print()
         print("Optional performance sweep:")
-        print(f"  {shlex.quote(str(run_sweep))} --dry-run")
-        print(f"  {shlex.quote(str(run_sweep))}")
-        print()
-        print("After the sweep:")
-        print(f"  {shlex.quote(str(recommend))}")
+        if args.generate_full_sweep:
+            print(f"  {shlex.quote(str(run_full))}")
+        elif args.generate_concurrency_sweep:
+            print(f"  {shlex.quote(str(run_concurrency))} --dry-run")
+            print(f"  {shlex.quote(str(run_concurrency))}")
+            print(f"  {shlex.quote(str(recommend_concurrency))}")
+        elif args.generate_parallel_layout_sweep:
+            print(f"  {shlex.quote(str(run_parallel))} --dry-run")
+            print(f"  {shlex.quote(str(run_parallel))}")
+            print(f"  {shlex.quote(str(recommend_parallel))}")
+        else:
+            print(f"  {shlex.quote(str(run_sweep))} --dry-run")
+            print(f"  {shlex.quote(str(run_sweep))}")
+            print()
+            print("After the sweep:")
+            print(f"  {shlex.quote(str(recommend))}")
     return 0
 
 
