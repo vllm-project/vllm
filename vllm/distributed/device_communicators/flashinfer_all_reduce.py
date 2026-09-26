@@ -20,6 +20,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 from vllm.distributed.parallel_state import _node_count, get_node_count
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
@@ -45,6 +46,10 @@ _fi_ar_workspace = None
 # allreduce backend or a fallback backend when the primary workspace is not
 # available on the current topology.
 _fi_ar_quant_workspace = None
+# Creation is collective, so a failed attempt must not be retried on every
+# all-reduce call.
+_fi_ar_workspace_failed = False
+_fi_ar_quant_workspace_failed = False
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
@@ -79,16 +84,19 @@ def _create_workspace(
     rng_state = random.getstate()
     try:
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
-        workspace = flashinfer_comm.create_allreduce_fusion_workspace(
-            backend=backend,
-            world_size=world_size,
-            rank=rank,
-            max_token_num=max_token_num,
-            hidden_dim=hidden_dim,
-            dtype=dtype,
-            comm_backend=comm_backend,
-            group=group,
-        )
+        # Creation may run lazily inside the first sync-checked forward (e.g.
+        # with enforce_eager, which skips warmup).
+        with gpu_sync_allowed():
+            workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+                backend=backend,
+                world_size=world_size,
+                rank=rank,
+                max_token_num=max_token_num,
+                hidden_dim=hidden_dim,
+                dtype=dtype,
+                comm_backend=comm_backend,
+                group=group,
+            )
         if backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0):
             workspace.destroy()
             logger.warning_once(
@@ -175,8 +183,8 @@ def get_fi_ar_workspace(
     for standalone allreduce. Backend is controlled by
     VLLM_FLASHINFER_ALLREDUCE_BACKEND env var.
     """
-    global _fi_ar_workspace
-    if _fi_ar_workspace is not None:
+    global _fi_ar_workspace, _fi_ar_workspace_failed
+    if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
         return _fi_ar_workspace
 
     backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
@@ -218,6 +226,7 @@ def get_fi_ar_workspace(
             f"with backend={backend}"
         )
     else:
+        _fi_ar_workspace_failed = True
         logger.error_once(
             "Failed to initialize FlashInfer Allreduce norm fusion workspace "
             f"with backend={backend}"
@@ -240,8 +249,8 @@ def get_fi_ar_quant_workspace(
     non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
-    global _fi_ar_quant_workspace
-    if _fi_ar_quant_workspace is not None:
+    global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
+    if _fi_ar_quant_workspace is not None or _fi_ar_quant_workspace_failed:
         return _fi_ar_quant_workspace
 
     backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
@@ -291,6 +300,7 @@ def get_fi_ar_quant_workspace(
             f"fusion workspace with backend={backend}"
         )
     else:
+        _fi_ar_quant_workspace_failed = True
         logger.error_once(
             "Failed to initialize FlashInfer Allreduce norm quantization "
             f"fusion workspace with backend={backend}"
@@ -304,6 +314,7 @@ _fi_ar_workspace_lock = threading.Lock()
 
 def destroy_fi_ar_workspace():
     global _fi_ar_workspace, _fi_ar_quant_workspace
+    global _fi_ar_workspace_failed, _fi_ar_quant_workspace_failed
     with _fi_ar_workspace_lock:
         is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
 
@@ -313,6 +324,7 @@ def destroy_fi_ar_workspace():
             _fi_ar_quant_workspace.destroy()
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_workspace_failed = _fi_ar_quant_workspace_failed = False
         _fi_ar_workspace_groups.clear()
 
 
