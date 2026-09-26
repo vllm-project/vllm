@@ -241,6 +241,12 @@ def maybe_make_prepare_finalize(
                 physical_to_global,
                 local_expert_global_ids,
             ) = routing_tables
+        validate_deepep_ll_rdma_buffer_size(
+            num_global_experts=moe.num_experts,
+            token_hidden_size=moe.hidden_dim,
+            num_ep_ranks=all2all_manager.world_size,
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+        )
         all_to_all_args = dict(
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
@@ -431,3 +437,38 @@ def maybe_make_prepare_finalize(
         )
 
     return prepare_finalize
+
+
+MAX_DEEPEP_RDMA_BYTES = (1 << 31) * 16  # 32 GiB (2**35 bytes INT_MAX limit)
+
+
+def validate_deepep_ll_rdma_buffer_size(
+    num_global_experts: int,
+    token_hidden_size: int,
+    num_ep_ranks: int,
+    max_num_tokens_per_dp_rank: int,
+) -> None:
+    """Validate DeepEP low-latency RDMA buffer stays below 32 GiB limit."""
+    rdma_bytes = (
+        num_global_experts
+        * token_hidden_size
+        * num_ep_ranks
+        * max_num_tokens_per_dp_rank
+        * 2
+    )
+    if rdma_bytes >= MAX_DEEPEP_RDMA_BYTES:
+        rdma_gib = rdma_bytes / (1024**3)
+        denom = num_global_experts * token_hidden_size * num_ep_ranks * 2
+        suggested_max_tokens = int((MAX_DEEPEP_RDMA_BYTES - 1) / denom)
+        raise ValueError(
+            f"DeepEP low-latency RDMA buffer size ({rdma_gib:.2f} GiB) "
+            "exceeds the 32 GiB (INT_MAX * 16 bytes) limit supported by "
+            "DeepEP kernels.\n"
+            "Total expert count (including EPLB redundant experts): "
+            f"{num_global_experts}, Hidden size: {token_hidden_size}, "
+            f"EP Ranks: {num_ep_ranks}, Max Tokens/Rank: "
+            f"{max_num_tokens_per_dp_rank}.\n"
+            "To fix this, reduce `max_num_tokens` (or max_tokens_per_rank) "
+            f"to <= {suggested_max_tokens} or reduce `num_redundant_experts` "
+            "in your EPLB configuration."
+        )
