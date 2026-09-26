@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from fractions import Fraction
 
+import numpy as np
 import pytest
 import pytest_asyncio
 from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import Audio
+from mistral_common.tokens.tokenizers.audio import (
+    Audio,
+    AudioConfig,
+    AudioSpectrogramConfig,
+    TranscriptionFormat,
+)
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
@@ -16,7 +23,9 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.protocol import StreamingInput
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
@@ -214,6 +223,49 @@ def test_voxtral_realtime_cudagraph(
         _assert_expected_text(outputs)
 
 
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunk_size", [1, 7, 32])
+async def test_voxtral_realtime_buffer_preserves_audio_and_token_feedback(chunk_size):
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    config = AudioConfig(
+        sampling_rate=1000,
+        frame_rate=100.0,
+        encoding_config=AudioSpectrogramConfig(
+            num_mel_bins=80, hop_length=2, window_size=4
+        ),
+        transcription_format=TranscriptionFormat.STREAMING,
+        transcription_delay_ms=10,
+        streaming_look_ahead_ms=2,
+        streaming_look_back_ms=3,
+        streaming_n_left_pad_tokens=0,
+    )
+    buffer = VoxtralRealtimeBuffer(config, prompt_tokens=[1, 2])
+    audio = np.arange(32, dtype=np.float32)
+    for start in range(0, len(audio), chunk_size):
+        await buffer.append_audio(audio[start : start + chunk_size])
+    await buffer.append_audio(None)
+
+    prompts = buffer.get_input_stream()
+    first = await asyncio.wait_for(anext(prompts), timeout=5)
+    assert first["prompt_token_ids"] == [1, 2]
+    first_audio, first_sr = first["multi_modal_data"]["audio"]
+    np.testing.assert_array_equal(first_audio, audio[:22])
+    assert first_sr is None
+
+    await buffer.append_tokens([3])
+    second = await asyncio.wait_for(anext(prompts), timeout=5)
+    assert second["prompt_token_ids"] == [3]
+    second_audio, second_sr = second["multi_modal_data"]["audio"]
+    np.testing.assert_array_equal(second_audio, audio[17:])
+    assert second_sr is None
+
+    await buffer.append_tokens([4])
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(prompts), timeout=5)
+
+
 @pytest.mark.asyncio
 async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
     # Lazy import to avoid CUDA-reinitialization error
@@ -240,8 +292,16 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
 
         request_id = f"session-{i}"
 
+        async def input_stream(audio_buffer):
+            async for prompt in audio_buffer.get_input_stream():
+                parsed_prompt = parse_model_prompt(async_engine.model_config, prompt)
+                (engine_input,) = await async_engine.renderer.render_cmpl_async(
+                    [parsed_prompt]
+                )
+                yield StreamingInput(prompt=engine_input)
+
         async for resp in async_engine.generate(
-            prompt=buffer.get_input_stream(),
+            prompt=input_stream(buffer),
             sampling_params=sampling_params,
             request_id=request_id,
         ):
