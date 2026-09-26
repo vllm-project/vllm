@@ -69,8 +69,13 @@ from ..nvidia.attention import (
     compute_skip_topk_layers,
     is_skip_topk_indexer_weight,
 )
-from ..nvidia.hc import HYV4HCHeadLayer, HYV4HCLayer
 from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
+from .hc import (
+    HYV4HCHeadLayer,
+    HYV4HCLayer,
+    HYV4HCPreLayer,
+)
+from .triton_ihc import triton_ihc_post_pre_rms_norm, triton_ihc_supported
 
 logger = init_logger(__name__)
 
@@ -194,15 +199,35 @@ class HYV4DecoderLayer(nn.Module):
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        attention_output = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
-
-        hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
-        hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        can_fuse_ihc_post_pre_rms_norm = (
+            triton_ihc_supported(attention_output)
+            and self.hc_attn_layer.hc_post.hpc_op is None
+            and self.hc_mlp_layer.hc_pre.hpc_op is None
+        )
+        if can_fuse_ihc_post_pre_rms_norm:
+            hidden_states, post_gates, residual = triton_ihc_post_pre_rms_norm(
+                attention_output,
+                residual,
+                post_gates,
+                self.hc_mlp_layer.hc_pre.hc_fn.weight,
+                self.hc_mlp_layer.hc_pre.hc_scale,
+                self.hc_mlp_layer.hc_pre.hc_base,
+                self.post_attention_layernorm.weight,
+                self.hc_mlp_layer.hc_pre.magnitude,
+                self.hc_mlp_layer.hc_pre.hc_eps,
+                self.hc_mlp_layer.hc_pre.layernorm_epsilon,
+            )
+        else:
+            hidden_states = self.hc_attn_layer.post(
+                attention_output, residual, post_gates
+            )
+            hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
+            hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
+            hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
@@ -618,6 +643,15 @@ class HYV4Model(nn.Module):
 
         return loaded_params
 
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        """Make static iHC weights contiguous for the ROCm Triton kernels."""
+        for layer in self.modules():
+            if isinstance(layer, HYV4HCPreLayer):
+                layer.hc_fn.weight.data = layer.hc_fn.weight.data.contiguous()
+            elif isinstance(layer, HYV4HCHeadLayer):
+                layer.hc_head_fn.weight.data = layer.hc_head_fn.weight.data.contiguous()
+
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
@@ -713,6 +747,9 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         drop_mapper = WeightsMapper(orig_to_new_prefix=drop_prefixes)
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.process_weights_after_loading()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

@@ -1,23 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the HY V4 Triton iHC pre/post kernels against eager PyTorch."""
+"""Benchmark HY V4 Triton iHC kernels on CUDA or ROCm against eager PyTorch."""
 
 import os
 import subprocess
 from functools import partial
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from statistics import median
 
 import torch
 import torch.nn.functional as F
 
 import vllm
-from vllm.models.hy_v4.nvidia.triton_ihc import (
-    triton_ihc_post,
-    triton_ihc_pre,
-)
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+if current_platform.is_rocm():
+    from vllm.models.hy_v4.amd.triton_ihc import (
+        triton_ihc_post,
+        triton_ihc_pre,
+    )
+else:
+    from vllm.models.hy_v4.nvidia.triton_ihc import (
+        triton_ihc_post,
+        triton_ihc_pre,
+    )
 
 
 def eager_pre(
@@ -52,19 +60,41 @@ def eager_post(
 
 
 def _timer(method: str):
-    if method == "cupti":
-        from flashinfer.testing import bench_gpu_time_with_cupti
+    """Return a platform-appropriate GPU timer."""
+    if current_platform.is_rocm():
+        return _torch_event_timer
 
+    if method == "cupti":
+        try:
+            from flashinfer.testing import bench_gpu_time_with_cupti
+        except ImportError:
+            return _torch_event_timer
         return partial(
             bench_gpu_time_with_cupti,
             use_cuda_graph=True,
             cold_l2_cache=True,
         )
     if method == "cudagraph":
-        from flashinfer.testing import bench_gpu_time_with_cudagraph
-
+        try:
+            from flashinfer.testing import bench_gpu_time_with_cudagraph
+        except ImportError:
+            return _torch_event_timer
         return partial(bench_gpu_time_with_cudagraph, cold_l2_cache=True)
     raise ValueError(f"unknown timing method: {method}")
+
+
+def _torch_event_timer(fn):
+    for _ in range(10):
+        fn()
+    torch.accelerator.synchronize()
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
+    start.record()
+    for _ in range(20):
+        fn()
+    end.record()
+    end.synchronize()
+    return [start.elapsed_time(end) / 20]
 
 
 @torch.inference_mode()
@@ -86,8 +116,6 @@ def run_benchmark(
     scale = torch.randn(2, device=device, dtype=torch.float32) * 0.01
     base = torch.randn(2 * hc_mult, device=device, dtype=torch.float32)
     timer = _timer(method)
-
-    properties = torch.cuda.get_device_properties(device)
     git_branch = subprocess.run(
         ["git", "branch", "--show-current"],
         check=False,
@@ -100,15 +128,26 @@ def run_benchmark(
         capture_output=True,
         text=True,
     ).stdout.strip()
-    print(f"device: {properties.name}")
+    print(f"device: {current_platform.get_device_name()}")
     print(f"branch: {git_branch}; commit: {git_commit}")
     print(
         f"vllm: {vllm.__version__}; torch: {torch.__version__}; "
-        f"CUDA: {torch.version.cuda}"
+        f"platform: {'ROCm' if current_platform.is_rocm() else 'CUDA'}"
     )
+    if current_platform.is_rocm():
+        flashinfer_version = "not used"
+        timing_description = "PyTorch CUDA/HIP events"
+    else:
+        try:
+            flashinfer_version = version("flashinfer-python")
+        except PackageNotFoundError:
+            flashinfer_version = "unavailable"
+        timing_description = (
+            f"{method}; FlashInfer timing when available, PyTorch events otherwise"
+        )
     print(
-        f"triton: {triton.__version__}; flashinfer: {version('flashinfer-python')}; "
-        f"dtype: {dtype}; method: {method}; cache: cold L2"
+        f"triton: {triton.__version__}; flashinfer: {flashinfer_version}; "
+        f"dtype: {dtype}; timing: {timing_description}"
     )
     print(
         "env: VLLM_ENABLE_HPC_OPS="
@@ -118,9 +157,9 @@ def run_benchmark(
     )
     print(f"hidden_size: {hidden_size}; hc_mult: {hc_mult}")
     print(
-        f"{'tokens':>8} {'op':>6} {'eager (us)':>12} "
-        f"{'triton (us)':>12} {'speedup':>9} {'GiB':>8} "
-        f"{'eager GB/s':>12} {'triton GB/s':>13}"
+        f"{'tokens':>8} {'op':>10} {'reference (us)':>15} "
+        f"{'candidate (us)':>15} {'speedup':>9} {'GiB':>8} "
+        f"{'reference GB/s':>15} {'candidate GB/s':>16}"
     )
 
     for num_tokens in token_counts:
@@ -165,17 +204,17 @@ def run_benchmark(
                 block_output.nbytes + residual.nbytes + post.nbytes + residual.nbytes,
             ),
         )
-        for op_name, eager_fn, triton_fn, logical_bytes in benchmarks:
-            eager_us = median(timer(eager_fn)) * 1e3
-            triton_us = median(timer(triton_fn)) * 1e3
-            speedup = eager_us / triton_us
+        for op_name, reference_fn, candidate_fn, logical_bytes in benchmarks:
+            reference_us = median(timer(reference_fn)) * 1e3
+            candidate_us = median(timer(candidate_fn)) * 1e3
+            speedup = reference_us / candidate_us
             logical_gib = logical_bytes / 2**30
-            eager_gbps = logical_bytes / eager_us / 1e3
-            triton_gbps = logical_bytes / triton_us / 1e3
+            reference_gbps = logical_bytes / reference_us / 1e3
+            candidate_gbps = logical_bytes / candidate_us / 1e3
             print(
-                f"{num_tokens:>8} {op_name:>6} {eager_us:>12.1f} "
-                f"{triton_us:>12.1f} {speedup:>8.2f}x {logical_gib:>8.3f} "
-                f"{eager_gbps:>12.1f} {triton_gbps:>13.1f}"
+                f"{num_tokens:>8} {op_name:>10} {reference_us:>15.1f} "
+                f"{candidate_us:>15.1f} {speedup:>8.2f}x {logical_gib:>8.3f} "
+                f"{reference_gbps:>15.1f} {candidate_gbps:>16.1f}"
             )
 
 

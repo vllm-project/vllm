@@ -58,20 +58,23 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         is_supported, reason = super().is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
         )
-        if (
-            is_supported
-            and moe_config.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        if is_supported and moe_config.activation not in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ):
             return False, (
-                "kernel hardcodes SwiGLU-OAI activation and requires "
-                f"activation={MoEActivation.SWIGLUOAI_UNINTERLEAVE.value}; "
-                f"got activation={moe_config.activation.value}"
+                "kernel supports only SiLU or SwiGLU-OAI activation; got "
+                f"activation={moe_config.activation.value}"
             )
-        if is_supported and (
-            moe_config.swiglu_alpha is None
-            or not math.isclose(float(moe_config.swiglu_alpha), _AITER_SWIGLU_ALPHA)
-            or moe_config.swiglu_beta is None
-            or not math.isclose(float(moe_config.swiglu_beta), _AITER_SWIGLU_BETA)
+        if (
+            is_supported
+            and moe_config.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            and (
+                moe_config.swiglu_alpha is None
+                or not math.isclose(float(moe_config.swiglu_alpha), _AITER_SWIGLU_ALPHA)
+                or moe_config.swiglu_beta is None
+                or not math.isclose(float(moe_config.swiglu_beta), _AITER_SWIGLU_BETA)
+            )
         ):
             return False, (
                 "kernel hardcodes SwiGLU-OAI with "
@@ -106,6 +109,7 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
+        is_silu = activation == MoEActivation.SILU
 
         # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
         # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
@@ -122,13 +126,18 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             topk_weights.to(torch.float32),
             topk_ids.to(torch.int32),
             expert_mask=expert_mask,
-            activation_method=ActivationType.Swiglu.value,
+            activation_method=(
+                ActivationType.Silu.value if is_silu else ActivationType.Swiglu.value
+            ),
             quant_method=QuantType.per_1x32.value,
             doweight_stage1=apply_router_weight_on_input,
             w1_scale=self.w1_scale_val,
             w2_scale=self.w2_scale_val,
             a1_scale=None,
             a2_scale=None,
+            # MXFP8 w1 and its scales are preshuffled into AITER's GUGU layout
+            # during model loading. Declare that layout explicitly so AITER can
+            # dispatch the gfx950-optimized FlyDSL kernel instead of CK.
             gate_mode=GateMode.INTERLEAVE.value,
             swiglu_limit=swiglu_limit,
             output_dtype=output.dtype,

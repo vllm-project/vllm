@@ -780,7 +780,12 @@ def paged_mqa_logits_module():
         try:
             module = importlib.import_module(paged_mqa_logits_module_path)
             return module
-        except ImportError:
+        except ImportError as error:
+            logger.warning_once(
+                "AITER paged-MQA logits module %s could not be imported: %s",
+                paged_mqa_logits_module_path,
+                str(error),
+            )
             return None
     return None
 
@@ -845,6 +850,10 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _ON_GFX942 or _ON_GFX950:
+            logger.info_once(
+                "Using AITER paged-MQA logits from %s.",
+                aiter_paged_mqa_logits_module.__name__,
+            )
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
@@ -886,6 +895,11 @@ def rocm_fp8_paged_mqa_logits(
         )
         return out_qk.sum(dim=0)
     else:
+        logger.warning_once(
+            "AITER paged-MQA logits is unavailable; using the PyTorch "
+            "fallback. Set VLLM_ROCM_USE_AITER=1 and ensure "
+            "aiter.ops.triton.attention.pa_mqa_logits is importable."
+        )
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
