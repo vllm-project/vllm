@@ -218,7 +218,9 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
-if has_deep_ep_v2() and current_platform.has_device_capability(100):
+if has_deep_ep_v2() and (
+    current_platform.is_rocm() or current_platform.has_device_capability(100)
+):
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
         DeepEPV2PrepareAndFinalize,
     )
