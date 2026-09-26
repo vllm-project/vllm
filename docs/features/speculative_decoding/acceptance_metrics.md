@@ -76,14 +76,18 @@ With `detailed`, two ordered arrays are added, one entry per verification step:
 
 `metrics.speculative_decoding` is present whenever `--per-request-spec-decode-metrics`
 is `summary`/`detailed`, speculative decoding is enabled, and `n == 1` (with an
-all-zero histogram if the request drafted nothing). It is `null` otherwise.
+all-zero histogram if the request drafted nothing). It is `null` otherwise. On
+`/v1/responses` it is populated only for non-Harmony models; gpt-oss (Harmony)
+returns `null`.
 
 ## Streaming
 
-In streaming responses, `metrics` (including `speculative_decoding`) rides the
-final usage chunk, which is only emitted when usage reporting is enabled — set
-`stream_options.include_usage: true` or start the server with
-`--enable-force-include-usage`.
+In streaming chat/completions responses, `metrics` (including
+`speculative_decoding`) rides the final usage chunk, which is only emitted when
+usage reporting is enabled — set `stream_options.include_usage: true` or start
+the server with `--enable-force-include-usage`. On the
+[Responses API](../per_request_metrics.md#responses-api) it instead rides the
+final response carried by the `response.completed` event.
 
 ## Relationship to Prometheus metrics
 

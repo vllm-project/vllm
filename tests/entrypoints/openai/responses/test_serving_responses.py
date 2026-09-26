@@ -72,7 +72,7 @@ from vllm.renderers.online_renderer import (
     _extract_allowed_tools_from_mcp_requests,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -1307,10 +1307,19 @@ _PER_REQUEST_STATS = RequestStateStats(
 )
 
 
+def _spec_decode_metrics() -> RequestSpecDecodeMetrics:
+    # Two verify steps: accept 3 drafts, then 1 -> histogram [0, 1, 0, 1].
+    m = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
+    m.observe(num_draft_tokens=3, num_accepted=3)
+    m.observe(num_draft_tokens=3, num_accepted=1)
+    return m
+
+
 def _make_request_output(
     text,
     token_ids,
     metrics: RequestStateStats | None = None,
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None,
 ):
     completion = CompletionOutput(
         index=0,
@@ -1320,6 +1329,7 @@ def _make_request_output(
         logprobs=None,
         finish_reason=None,
         stop_reason=None,
+        spec_decode_metrics=spec_decode_metrics,
     )
     return RequestOutput(
         request_id="req",
@@ -1338,10 +1348,11 @@ def _make_simple_context_with_output(
     token_ids,
     response_parser=None,
     metrics: RequestStateStats | None = None,
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None,
 ):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext(response_parser=response_parser)
-    req_output = _make_request_output(text, token_ids, metrics)
+    req_output = _make_request_output(text, token_ids, metrics, spec_decode_metrics)
     ctx.append_output(req_output)
     ctx.request_metrics = metrics
     return ctx
@@ -1382,6 +1393,7 @@ async def _empty_context_generator():
 async def _make_full_metrics_response(
     enable_per_request_metrics: bool,
     request_metrics_cover_all_generation_turns: bool = True,
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None,
 ):
     serving = _make_serving_instance(
         enable_per_request_metrics=enable_per_request_metrics
@@ -1394,7 +1406,9 @@ async def _make_full_metrics_response(
     )
 
     async def generate(*args, **kwargs):
-        yield _make_request_output("hello", [10, 20], _PER_REQUEST_STATS)
+        yield _make_request_output(
+            "hello", [10, 20], _PER_REQUEST_STATS, spec_decode_metrics
+        )
 
     serving.engine_client.generate.side_effect = generate
     result_generator = serving._generate_with_builtin_tools(
@@ -1461,6 +1475,87 @@ async def test_responses_metrics_suppressed_for_multiple_generation_turns():
         True, request_metrics_cover_all_generation_turns=False
     )
 
+    assert response.metrics is None
+    assert "metrics" not in response.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_responses_spec_decode_metrics_present_for_single_sequence():
+    # Timing off, but the sequence carries acceptance metrics -> the metrics
+    # object is created just to hold metrics.speculative_decoding.
+    response = await _make_full_metrics_response(
+        False, spec_decode_metrics=_spec_decode_metrics()
+    )
+    assert response.metrics is not None
+    assert response.metrics.time_to_first_token_ms is None  # timing not requested
+    spec = response.metrics.speculative_decoding
+    assert spec is not None
+    assert spec.acceptance_histogram == [0, 1, 0, 1]  # dense, index j
+    assert spec.num_spec_steps == 2
+    assert spec.num_spec_tokens == 3
+    assert spec.mean_acceptance_length == pytest.approx(3.0)  # 1 + (3 + 1) / 2
+
+
+@pytest.mark.asyncio
+async def test_responses_spec_decode_metrics_absent_when_not_collected():
+    # No acceptance metrics on the sequence and timing off -> no metrics object.
+    response = await _make_full_metrics_response(False)
+    assert response.metrics is None
+    assert "metrics" not in response.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_responses_metrics_carries_both_timing_and_spec_decode():
+    response = await _make_full_metrics_response(
+        True, spec_decode_metrics=_spec_decode_metrics()
+    )
+    assert response.metrics is not None
+    assert response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert response.metrics.speculative_decoding is not None
+    assert response.metrics.speculative_decoding.num_spec_steps == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_spec_decode_on_completed_event():
+    # Spec-decode acceptance rides the terminal response.completed event only,
+    # independent of the timing flag.
+    serving = _make_serving_instance(enable_per_request_metrics=False)
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output(
+        "hello", [10, 20], spec_decode_metrics=_spec_decode_metrics()
+    )
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=_empty_context_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    for event in events[:-1]:
+        assert "metrics" not in event.response.model_dump(mode="json")
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    spec = events[-1].response.metrics.speculative_decoding
+    assert spec is not None
+    assert spec.acceptance_histogram == [0, 1, 0, 1]
+    assert spec.num_spec_steps == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_spec_decode_metrics_suppressed_for_multiple_generation_turns():
+    # Multi-turn responses (e.g. built-in tool workflows) don't cover all
+    # generation turns, so spec-decode acceptance is omitted like timing.
+    response = await _make_full_metrics_response(
+        False,
+        request_metrics_cover_all_generation_turns=False,
+        spec_decode_metrics=_spec_decode_metrics(),
+    )
     assert response.metrics is None
     assert "metrics" not in response.model_dump(mode="json")
 
