@@ -92,6 +92,16 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
     assert len(calls) == 2
 
 
+def test_dspark_adaptive_verification_separates_graph_cache():
+    config = object.__new__(SpeculativeConfig)
+    config.method = "dspark"
+    config.draft_model_config = None
+    config.enable_adaptive_verification = False
+    fixed_hash = config.compute_hash()
+    config.enable_adaptive_verification = True
+    assert config.compute_hash() != fixed_hash
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -582,7 +592,7 @@ def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
         speculative_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v2_model_runner_unsupported_features = lambda: []
     # The real predicate, so the test also pins where dspark lands in it.
     config._get_v1_model_runner_unsupported_features = lambda: (
@@ -813,7 +823,8 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-def test_dflash2_draft_forces_v2_model_runner():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
 
@@ -825,11 +836,15 @@ def test_dflash2_draft_forces_v2_model_runner():
             )
         )
 
-    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
-    assert not VllmConfig._is_dflash2_draft(
+    assert VllmConfig._is_dflash_candidate_draft(config("dflash", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        config("dflash", ["DFlashDraftModel"])
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(config("eagle", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        SimpleNamespace(speculative_config=None)
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(
         SimpleNamespace(
             speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
         )
@@ -873,6 +888,8 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ("FULL_AND_PIECEWISE", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "NEVER", "NONE"),
+        ("FULL_AND_PIECEWISE", True, "UNIFORM_BATCH", "FULL_AND_PIECEWISE"),
+        ("FULL", True, "UNIFORM_BATCH", "FULL_DECODE_ONLY"),
     ],
 )
 def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider(
@@ -1243,7 +1260,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v1_model_runner_unsupported_features = lambda: (
         VllmConfig._get_v1_model_runner_unsupported_features(config)
     )
@@ -1430,7 +1447,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
 
     assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
@@ -1530,26 +1547,32 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, accelerator, supported",
+    "architecture, ple_layers, platform, supported",
     [
-        ("DeepseekV41ForCausalLM", [1], True, True),
-        ("DeepseekV41ForCausalLM", [], True, False),
-        ("DeepseekV41ForCausalLM", [1], False, False),
-        ("Qwen4ExpForCausalLM", [1], True, True),
-        ("Qwen4ExpForConditionalGeneration", [1], True, True),
-        ("Qwen4ExpForCausalLM", [], True, False),
-        ("Qwen4ExpForCausalLM", None, True, False),
-        ("Qwen4ExpForCausalLM", [1], False, False),
-        ("LlamaForCausalLM", [1], True, False),
-        ("Qwen4ExpMTP", [], True, False),
-        (None, None, True, False),
+        ("DeepseekV41ForCausalLM", [1], "cuda", True),
+        ("DeepseekV41ForCausalLM", [1], "rocm", True),
+        ("DeepseekV41ForCausalLM", [], "cuda", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cuda", True),
+        ("Qwen4ExpForCausalLM", [1], "rocm", True),
+        ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
+        ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
+        ("Qwen4ExpForCausalLM", [], "cuda", False),
+        ("Qwen4ExpForCausalLM", None, "cuda", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("LlamaForCausalLM", [1], "cuda", False),
+        ("Qwen4ExpMTP", [], "cuda", False),
+        (None, None, "cuda", False),
     ],
 )
 def test_engram_model_support(
-    monkeypatch, architecture, ple_layers, accelerator, supported
+    monkeypatch, architecture, ple_layers, platform, supported
 ):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: platform == "cuda")
+    monkeypatch.setattr(
+        current_platform, "is_cuda_alike", lambda: platform in ("cuda", "rocm")
+    )
     model = (
         cast(
             ModelConfig,

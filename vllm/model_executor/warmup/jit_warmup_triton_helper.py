@@ -4,11 +4,14 @@ import ast
 import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, suppress
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from functools import cache, cached_property, update_wrapper
 from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
+from vllm import envs
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     get_ast_full_name,
@@ -226,6 +229,33 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         finally:
             self._warming = False
             self._warming_compile_key = None
+
+    def compile_many(self, compile_keys: Iterable[CompileKeyT]) -> None:
+        """Compile CUDA startup warmup variants in parallel, then wait."""
+        keys = list(compile_keys)
+        num_threads = min(envs.VLLM_TRITON_JIT_WARMUP_NUM_THREADS, len(keys))
+        async_compile = getattr(triton, "AsyncCompileMode", None)
+        # AMD LLVM code generation can abort under concurrent compilation.
+        if (
+            not current_platform.is_cuda()
+            or self._run_autotune
+            or async_compile is None
+            or num_threads <= 1
+        ):
+            return super().compile_many(keys)
+
+        def compile_all() -> None:
+            with (
+                ThreadPoolExecutor(max_workers=num_threads) as executor,
+                async_compile(executor),
+            ):
+                # Dispatch stays on this thread: compile() mutates owner state.
+                # Only Triton's underlying compiler work runs in the pool.
+                super(VllmTritonJitKernel, self).compile_many(keys)
+
+        # Older Triton versions leave async mode active on compilation failure.
+        # Isolate that state so it cannot affect later runtime JIT compilation.
+        copy_context().run(compile_all)
 
     @cached_property
     def _kernel_arg_names(self) -> tuple[str, ...]:
