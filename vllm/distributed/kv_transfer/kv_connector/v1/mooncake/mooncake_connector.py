@@ -108,6 +108,8 @@ class TransferRegion:
     group_index: int = 0
     # Groups that share this allocation. Empty unless group_index is -1.
     shared_group_ids: tuple[int, ...] = ()
+    # Byte offset of this view from the start of its block row.
+    row_offset: int = 0
 
 
 def _block_ids_for_region(
@@ -163,6 +165,7 @@ def _expand_transfer_regions(
     layer_indices: list[int],
     group_indices: list[int] | None = None,
     shared_group_ids: list[tuple[int, ...]] | None = None,
+    row_offsets: list[int] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -187,6 +190,11 @@ def _expand_transfer_regions(
     if shared_group_ids is None:
         shared_group_ids = [() for _ in layer_names]
     assert len(shared_group_ids) == len(layer_names)
+    # Missing offsets must not look like row starts, or every run would be
+    # promoted to the full row.
+    if row_offsets is None:
+        row_offsets = [-1] * len(layer_names)
+    assert len(row_offsets) == len(layer_names)
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -196,6 +204,7 @@ def _expand_transfer_regions(
         layer_index,
         group_index,
         region_groups,
+        row_offset,
     ) in zip(
         base_addrs,
         block_lens,
@@ -204,6 +213,7 @@ def _expand_transfer_regions(
         layer_indices,
         group_indices,
         shared_group_ids,
+        row_offsets,
     ):
         regions.append(
             TransferRegion(
@@ -214,6 +224,7 @@ def _expand_transfer_regions(
                 kv_block_len=kv_block_len,
                 group_index=group_index,
                 shared_group_ids=region_groups,
+                row_offset=row_offset,
             )
         )
     return regions
@@ -447,21 +458,26 @@ def _coalesce_contiguous_transfer_regions(
     """Merge aligned packed slices that are adjacent on both sides.
 
     Page-contiguous views stay addressable by layer name for hetero PP
-    (#56033). A run that covers the whole row on both peers includes the
-    allocator's padding tail so consecutive blocks can coalesce.
+    (#56033). KV groups overlay one row and must stay separate: each group
+    owns a different block-id space. A run that starts at row offset 0 is
+    lifted to the full row so consecutive blocks can coalesce.
     """
-    if len(local_regions) != len(remote_regions) or len(local_regions) <= 1:
+    if len(local_regions) != len(remote_regions):
         return local_regions, remote_regions
 
-    def adjacent(prev: TransferRegion, nxt: TransferRegion) -> bool:
+    def adjacent(
+        run_start: TransferRegion, prev: TransferRegion, nxt: TransferRegion
+    ) -> bool:
         # Page padding sits between unpadded payloads. Allow that gap, but
-        # stay inside this row so the span cannot run into the next block.
+        # keep the whole run inside the row that `run_start` began. Anchoring
+        # on `prev` would slide the bound forward as the run grows.
         return (
             prev.group_index == nxt.group_index
             and prev.shared_group_ids == nxt.shared_group_ids
             and prev.block_len == nxt.block_len
             and prev.base_addr + prev.kv_block_len <= nxt.base_addr
-            and nxt.base_addr + nxt.kv_block_len <= prev.base_addr + prev.block_len
+            and nxt.base_addr + nxt.kv_block_len
+            <= run_start.base_addr + run_start.block_len
         )
 
     def span(region: TransferRegion, kv_block_len: int) -> TransferRegion:
@@ -473,7 +489,35 @@ def _coalesce_contiguous_transfer_regions(
             kv_block_len=kv_block_len,
             group_index=region.group_index,
             shared_group_ids=region.shared_group_ids,
+            row_offset=region.row_offset,
         )
+
+    def promote(
+        merged_local: list[TransferRegion], merged_remote: list[TransferRegion]
+    ) -> tuple[list[TransferRegion], list[TransferRegion]]:
+        if not promote_full_row:
+            return merged_local, merged_remote
+        # Each KV group overlays the row from offset 0. Promoting that run to
+        # the full row copies bytes the group's block ids exclusively own.
+        promoted_local: list[TransferRegion] = []
+        promoted_remote: list[TransferRegion] = []
+        for local_region, remote_region in zip(merged_local, merged_remote):
+            if (
+                local_region.row_offset == 0
+                and remote_region.row_offset == 0
+                and local_region.block_len == remote_region.block_len
+                and local_region.kv_block_len <= local_region.block_len
+                and remote_region.kv_block_len <= remote_region.block_len
+            ):
+                promoted_local.append(span(local_region, local_region.block_len))
+                promoted_remote.append(span(remote_region, remote_region.block_len))
+            else:
+                promoted_local.append(local_region)
+                promoted_remote.append(remote_region)
+        return promoted_local, promoted_remote
+
+    if len(local_regions) <= 1:
+        return promote(list(local_regions), list(remote_regions))
 
     merged_local: list[TransferRegion] = []
     merged_remote: list[TransferRegion] = []
@@ -490,8 +534,8 @@ def _coalesce_contiguous_transfer_regions(
             merged.append(span(run[0], span_len))
 
     for local_region, remote_region in zip(local_regions[1:], remote_regions[1:]):
-        if adjacent(run_local[-1], local_region) and adjacent(
-            run_remote[-1], remote_region
+        if adjacent(run_local[0], run_local[-1], local_region) and adjacent(
+            run_remote[0], run_remote[-1], remote_region
         ):
             run_local.append(local_region)
             run_remote.append(remote_region)
@@ -500,18 +544,7 @@ def _coalesce_contiguous_transfer_regions(
         run_local = [local_region]
         run_remote = [remote_region]
     flush()
-    if (
-        promote_full_row
-        and len(merged_local) == 1
-        and merged_local[0].block_len == merged_remote[0].block_len
-        and merged_local[0].kv_block_len <= merged_local[0].block_len
-        and merged_remote[0].kv_block_len <= merged_remote[0].block_len
-    ):
-        # Padding after the last page is dead bytes inside the registered row.
-        row = merged_local[0].block_len
-        merged_local[0] = span(merged_local[0], row)
-        merged_remote[0] = span(merged_remote[0], row)
-    return merged_local, merged_remote
+    return promote(merged_local, merged_remote)
 
 
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
@@ -539,6 +572,9 @@ class MooncakeXferMetadata(
     # Parallel to registered regions. Each entry is the groups that share
     # that region. Empty means the peer did not send the field.
     registered_shared_group_ids: list[list[int]] = msgspec.field(default_factory=list)
+    # Byte offset of each registered view from its block row. -1 means the
+    # peer did not send the field, so the run must not be promoted.
+    registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
 
 
@@ -1135,6 +1171,8 @@ class MooncakeConnectorWorker:
         self.registered_group_indices: list[int] = []
         # Parallel to registered regions. -1 flattens only these groups.
         self.region_shared_groups: list[tuple[int, ...]] = []
+        # Parallel to registered regions. -1 is not a packed row view.
+        self.region_row_offsets: list[int] = []
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
 
@@ -1429,10 +1467,16 @@ class MooncakeConnectorWorker:
             self.registered_layer_indices,
             self.registered_group_indices,
             shared_groups,
+            self.region_row_offsets
+            if len(self.region_row_offsets) == len(self.registered_layer_names)
+            else None,
         )
         remote_shared = [tuple(groups) for groups in meta.registered_shared_group_ids]
         if len(remote_shared) != len(meta.registered_layer_names):
             remote_shared = None
+        remote_row_offsets = meta.registered_row_offsets
+        if len(remote_row_offsets) != len(meta.registered_layer_names):
+            remote_row_offsets = None
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
             meta.block_lens,
@@ -1441,6 +1485,7 @@ class MooncakeConnectorWorker:
             meta.registered_layer_indices,
             meta.registered_group_indices,
             remote_shared,
+            remote_row_offsets,
         )
         pre_align_local = local_regions
         pre_align_remote = remote_regions
@@ -1933,6 +1978,7 @@ class MooncakeConnectorWorker:
         self.registered_layer_indices = []
         self.registered_group_indices = []
         self.region_shared_groups: list[tuple[int, ...]] = []
+        self.region_row_offsets = []
         self.opaque_packed_storages = set()
 
         packed_storage_to_region: dict[int, int] = {}
@@ -2020,12 +2066,9 @@ class MooncakeConnectorWorker:
                     view_addr = storage_addr
                     kv_block_len = block_stride
                     self.opaque_packed_storages.add(storage_addr)
-                if not page_contiguous and self.pp_size > 1:
-                    raise RuntimeError(
-                        "Mooncake cannot align a non-page-contiguous packed "
-                        "allocation across pipeline-parallel stages "
-                        f"(layer {layer_name})."
-                    )
+                # Same PP on both sides still aligns by the first layer name.
+                # A remote PP mismatch is rejected at send time, once the
+                # peer's PP size is known.
                 dedupe_key = (view_addr, block_stride, kv_block_len)
                 region_idx = packed_view_to_region.get(dedupe_key)
                 if region_idx is not None:
@@ -2052,6 +2095,7 @@ class MooncakeConnectorWorker:
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(group_index)
                 self.region_shared_groups.append((group_index,))
+                self.region_row_offsets.append(view_addr - storage_addr)
                 continue
 
             block_is_contiguous = is_non_overlapping_and_dense(cache[0])
@@ -2096,6 +2140,8 @@ class MooncakeConnectorWorker:
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(group_index)
                 self.region_shared_groups.append((group_index,))
+                # Not a view into a shared packed row, so do not promote it.
+                self.region_row_offsets.append(-1)
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
@@ -2255,6 +2301,7 @@ class MooncakeConnectorWorker:
             registered_shared_group_ids=[
                 list(groups) for groups in self.region_shared_groups
             ],
+            registered_row_offsets=self.region_row_offsets,
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -2536,6 +2583,7 @@ class MooncakeConnectorWorker:
         layer_indices: list[int],
         group_indices: list[int] | None = None,
         shared_group_ids: list[tuple[int, ...]] | None = None,
+        row_offsets: list[int] | None = None,
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
@@ -2550,6 +2598,7 @@ class MooncakeConnectorWorker:
             layer_indices=layer_indices,
             group_indices=group_indices,
             shared_group_ids=shared_group_ids,
+            row_offsets=row_offsets,
         )
 
     def _get_sender_transfer_plan(

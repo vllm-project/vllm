@@ -1392,6 +1392,54 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
                 assert worker.registered_layer_indices == [0, 1]
 
 
+def test_register_noncontiguous_packed_allows_matching_pp():
+    """Same PP on both sides can still register a non-contiguous packed row.
+
+    A remote PP mismatch is rejected at send time, once the peer PP size is
+    known. Rejecting every local PP>1 layout at startup is too strict.
+    """
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        worker = connector.connector_worker
+        worker.pp_size = 2
+        mock_thread.return_value.is_alive.return_value = False
+        spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=64,
+            dtype=torch.float16,
+        )
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        for layer_name in layer_names:
+            worker._layer_specs[layer_name] = spec
+        raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+        tensor1, tensor2 = dense_kv_cache_views(raw, spec, 2, 2, KVCacheLayout.BHLNC)
+        assert not tensor1[0].is_contiguous()
+        with patch.object(worker.engine, "batch_register_memory", return_value=0):
+            connector.register_kv_caches(dict(zip(layer_names, (tensor1, tensor2))))
+        assert worker.kv_caches_base_addr == [raw.data_ptr()]
+        assert worker.region_row_offsets == [0]
+
+
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     """Mixed MLA+Eagle caches should register by byte length, not shape."""
     vllm_config = create_vllm_config(
@@ -1641,18 +1689,19 @@ def test_coalesce_promotes_padding_only_for_a_full_row():
     page = 1024
     row = 2560
 
-    def region(base: int) -> TransferRegion:
+    def region(base: int, row_offset: int) -> TransferRegion:
         return TransferRegion(
             layer_name="layer",
             layer_index=0,
             base_addr=base,
             block_len=row,
             kv_block_len=page,
+            row_offset=row_offset,
         )
 
     full_local, full_remote = _coalesce_contiguous_transfer_regions(
-        [region(0), region(page)],
-        [region(100), region(100 + page)],
+        [region(0, 0), region(page, page)],
+        [region(100, 0), region(100 + page, page)],
         promote_full_row=True,
     )
     assert len(full_local) == 1
@@ -1660,8 +1709,8 @@ def test_coalesce_promotes_padding_only_for_a_full_row():
     assert full_remote[0].kv_block_len == row
 
     partial_local, _ = _coalesce_contiguous_transfer_regions(
-        [region(0), region(page)],
-        [region(100), region(100 + page)],
+        [region(0, 0), region(page, page)],
+        [region(100, 0), region(100 + page, page)],
     )
     assert partial_local[0].kv_block_len == 2 * page
 
@@ -1686,6 +1735,95 @@ def test_coalesce_spans_padding_between_pages():
     )
     assert len(merged) == 1
     assert merged[0].kv_block_len == row
+
+
+def test_coalesce_promotes_each_group_that_starts_at_row_zero():
+    """Groups overlay one row, so each row-start run is its own full-row copy."""
+    page = 1000
+    gap = 1024
+    row = 4096
+
+    def region(base: int, group: int, row_offset: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name=f"group-{group}",
+            layer_index=group,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=page,
+            group_index=group,
+            row_offset=row_offset,
+        )
+
+    # Group 1's addresses jump back to the start of the same row.
+    local = [
+        region(0, 0, 0),
+        region(gap, 0, gap),
+        region(0, 1, 0),
+        region(gap, 1, gap),
+    ]
+    remote = [
+        region(8000, 0, 0),
+        region(8000 + gap, 0, gap),
+        region(8000, 1, 0),
+        region(8000 + gap, 1, gap),
+    ]
+    merged_local, merged_remote = _coalesce_contiguous_transfer_regions(
+        local, remote, promote_full_row=True
+    )
+    assert [region.group_index for region in merged_local] == [0, 1]
+    assert [region.kv_block_len for region in merged_local] == [row, row]
+    assert [region.kv_block_len for region in merged_remote] == [row, row]
+    assert merged_local[1].base_addr == 0
+    assert merged_remote[1].base_addr == 8000
+
+
+def test_coalesce_does_not_promote_a_mid_row_run():
+    """A matched PP slice that does not start at row offset 0 stays partial."""
+    page = 1000
+    row = 4096
+
+    def region(base: int, row_offset: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=2,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=page,
+            row_offset=row_offset,
+        )
+
+    merged, _ = _coalesce_contiguous_transfer_regions(
+        [region(1024, 1024), region(2048, 2048)],
+        [region(9000 + 1024, 1024), region(9000 + 2048, 2048)],
+        promote_full_row=True,
+    )
+    assert len(merged) == 1
+    assert merged[0].row_offset == 1024
+    assert merged[0].kv_block_len == 1024 + page
+
+
+def test_coalesce_keeps_a_run_inside_its_starting_row():
+    """The row bound is the run start, not the previous slice."""
+    row = 2500
+
+    def region(base: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=0,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=1000,
+            row_offset=base,
+        )
+
+    # The third slice ends at 3000. Checking it against the previous slice
+    # (base 1000) would allow it; the run start at 0 does not.
+    slices = [region(0), region(1000), region(2000)]
+    merged, _ = _coalesce_contiguous_transfer_regions(slices, slices)
+    assert len(merged) == 2
+    assert merged[0].kv_block_len == 2000
+    assert merged[1].base_addr == 2000
+    assert merged[1].kv_block_len == 1000
 
 
 def _layer_name(idx: int) -> str:
@@ -1738,6 +1876,7 @@ def _register_sliced_packed_mla(
             connector.register_kv_caches(kv_caches)
         reg.assert_called_once()
         assert reg.call_args[0][0] == [backing.data_ptr()]
+        assert worker.region_row_offsets == [i * page for i in range(len(layer_idxs))]
         regions = worker._get_transfer_regions(
             worker.kv_caches_base_addr,
             worker.block_len_per_layer,
@@ -1745,6 +1884,7 @@ def _register_sliced_packed_mla(
             worker.registered_layer_names,
             worker.registered_layer_indices,
             worker.registered_group_indices,
+            row_offsets=worker.region_row_offsets,
         )
         return worker, kv_cache_config, regions, backing.data_ptr()
 
