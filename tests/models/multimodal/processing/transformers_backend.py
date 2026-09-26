@@ -27,10 +27,14 @@ PROCESSOR_CLASSES = [
 ]
 
 
-def create_processor(model_id: str, processor_cls):
+def create_processor(model_id: str, processor_cls, mm_processor_kwargs=None):
     """Build a processor directly, because the registry only ever builds the one the
     installed transformers version selects, leaving the other path untested."""
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    model_config = ModelConfig(
+        model=model_id,
+        model_impl="transformers",
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
     ctx = InputProcessingContext(
         model_config, cached_tokenizer_from_config(model_config)
     )
