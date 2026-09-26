@@ -57,6 +57,7 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
@@ -283,6 +284,11 @@ class Scheduler(SchedulerInterface):
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
+        self.prefix_replay_boundary_retained = all(
+            isinstance(spec, SlidingWindowSpec) and spec.extra_retained_tokens > 0
+            for group in kv_cache_config.kv_cache_groups
+            if (spec := group.kv_cache_spec).prefix_replay_tokens > 0
+        )
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -963,14 +969,12 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        if self.prefix_replay_tokens:
-                            # SWA bounded replay recomputes the hit's last
-                            # window, from the block holding its first
-                            # token; the sliding-window groups retire
-                            # whole blocks below the window of the hit's
-                            # next token. Hits end on a block boundary, or
-                            # a hit ending one token short of one would
-                            # retire the block the replay starts in.
+                        if (
+                            self.prefix_replay_tokens
+                            and not self.prefix_replay_boundary_retained
+                        ):
+                            # Legacy or directly constructed cache configs may
+                            # not retain the block holding the replay boundary.
                             ext_tokens -= ext_tokens % self.block_size
                             load_kv_async = load_kv_async and ext_tokens > 0
 

@@ -420,6 +420,32 @@ def new_sliding_window_spec(
     )
 
 
+def test_bounded_replay_retains_boundary_block_in_generated_config():
+    model_config = ModelConfig(max_model_len=64)
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.cache_config.prefix_cache_retention_interval = None
+    spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=32,
+        bounded_replay=True,
+    )
+
+    config = get_kv_cache_configs(
+        vllm_config,
+        [{"layer": spec}],
+        [spec.page_size_bytes * 64],
+    )[0]
+
+    generated_spec = config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(generated_spec, SlidingWindowMLASpec)
+    assert generated_spec.prefix_replay_tokens == 32
+    assert generated_spec.extra_retained_tokens == 1
+
+
 def new_chunked_local_attention_spec(
     block_size=16,
     num_kv_heads=2,

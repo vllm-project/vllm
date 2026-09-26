@@ -2704,8 +2704,15 @@ def get_kv_cache_configs(
     extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
     for layer_name, layer_spec in merged_kv_cache_specs.items():
         if isinstance(layer_spec, SlidingWindowSpec):
+            # Bounded replay must retain the block containing its first token,
+            # including when that token is the block's final slot.
+            layer_extra_retained_tokens = max(
+                extra_retained_tokens,
+                int(layer_spec.prefix_replay_tokens > 0),
+            )
             merged_kv_cache_specs[layer_name] = replace(
-                layer_spec, extra_retained_tokens=extra_retained_tokens
+                layer_spec,
+                extra_retained_tokens=layer_extra_retained_tokens,
             )
 
     # Get global KV cache groups. This also handles spec unification for
