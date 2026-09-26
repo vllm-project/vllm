@@ -88,6 +88,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         query_start_loc=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
         seq_lens=torch.tensor([11, 21, 0, 0], dtype=torch.int32),
     )
+    speculator.dcp_size = 1
     speculator.block_tables = SimpleNamespace(
         cp_size=1,
         input_block_tables=[torch.zeros(4, 1, dtype=torch.int32)],
@@ -183,6 +184,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
             data_parallel_rank=0,
+            decode_context_parallel_size=1,
         ),
     )
 
