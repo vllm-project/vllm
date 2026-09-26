@@ -129,6 +129,8 @@ class OpenAIServingChat(GenerateBaseServing):
         trust_request_chat_template: bool = False,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
+        enable_parser_cache: bool = False,
+        parser_cache_size: int = 100,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -167,6 +169,12 @@ class OpenAIServingChat(GenerateBaseServing):
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+
+        if enable_parser_cache:
+            from vllm.parser.cache import ParserCacheManager
+            self.parser_cache = ParserCacheManager(max_size=parser_cache_size)
+        else:
+            self.parser_cache = None
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -525,6 +533,17 @@ class OpenAIServingChat(GenerateBaseServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
+                    # Update parsers with UUIDv5 seed info
+                    if res.prompt_token_ids is not None and self.parser_cls is not None:
+                        import hashlib
+                        req_str = request.model_dump_json() + str(res.prompt_token_ids)
+                        prompt_digest = hashlib.blake2b(req_str.encode("utf-8")).hexdigest()
+                        for i, p in enumerate(parsers):
+                            if p is not None:
+                                p._stream_state.request_id = request_id
+                                p._stream_state.choice_index = i
+                                p._stream_state.prompt_digest = prompt_digest
+
                     num_cached_tokens = res.num_cached_tokens
                     num_cache_creation_tokens = res.num_cache_creation_tokens
                     # Send first response for each request.n (index) with

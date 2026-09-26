@@ -2255,9 +2255,22 @@ def get_tool_call_id_type(model_config: ModelConfig) -> str:
     return "random"
 
 
-def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
+def make_tool_call_id(
+    id_type: str = "random", 
+    func_name: str | None = None, 
+    idx: int | None = None,
+    request_id: str | None = None,
+    choice_index: int | None = None,
+    prompt_digest: str | None = None,
+):
     if id_type == "kimi_k2":
         return f"functions.{func_name}:{idx}"
+    elif request_id is not None and choice_index is not None and prompt_digest is not None and idx is not None:
+        import uuid
+        seed = f"{request_id}:{choice_index}:{idx}:{prompt_digest}"
+        stable_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, seed)
+        return f"chatcmpl-tool-{stable_uuid.hex}"
     else:
         # by default return random
+        from vllm.utils import random_uuid
         return f"chatcmpl-tool-{random_uuid()}"

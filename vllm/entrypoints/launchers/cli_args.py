@@ -116,6 +116,13 @@ class BaseFrontendArgs:
     This is used to parse the model-generated tool call into OpenAI API format.
     Required for `--enable-auto-tool-choice`. You can choose any option from
     the built-in parsers or register a plugin via `--tool-parser-plugin`."""
+    enable_parser_cache: bool = False
+    """Enable LRU cache for the tool/reasoning parser state in streaming chat 
+    derender to avoid overhead on retried or RL rollout requests. Note: hit 
+    rate drops to about 1/(replicas * api_servers). If cache performance is 
+    critical, consider setting `--api-server-count 1`."""
+    parser_cache_size: int = 100
+    """Size of the parser cache for streaming chat derender."""
     tool_parser_plugin: str = ""
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in

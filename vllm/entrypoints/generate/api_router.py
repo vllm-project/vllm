@@ -140,6 +140,8 @@ async def init_generate_state(
         tool_parser=args.tool_call_parser,
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        enable_parser_cache=args.enable_parser_cache,
+        parser_cache_size=args.parser_cache_size,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
