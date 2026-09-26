@@ -180,6 +180,43 @@ from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 logger = init_logger(__name__)
 
 
+def grammar_invalid_drafts(
+    input_batch: InputBatch,
+    grammar_req_ids: list[str],
+    num_acceptable_drafts: list[int] | None,
+) -> torch.Tensor | None:
+    """Mask over logit rows whose draft was verified against a permissive row.
+
+    Draft i sits at local position i + 1, and drafts from `num_acceptable_drafts`
+    on met `_full_mask`. Local positions come from the device `cu_num_logits`, so
+    this stays right when adaptive verification trims drafts on device.
+    Returns None when there is nothing to invalidate.
+    """
+    if not grammar_req_ids or input_batch.num_draft_tokens == 0:
+        return None
+    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
+    limit = np.full(input_batch.num_reqs, np.iinfo(np.int32).max, dtype=np.int32)
+    for i, req_id in enumerate(grammar_req_ids):
+        req_idx = req_id_to_idx.get(req_id)
+        if req_idx is not None:
+            # None (an older scheduler, or warmup): invalidate the whole window.
+            limit[req_idx] = (
+                num_acceptable_drafts[i] if num_acceptable_drafts is not None else 0
+            )
+    # Adaptive verification only trims drafts, so this bound holds either way.
+    num_drafts = input_batch.num_draft_tokens_per_req
+    if num_drafts is not None and (limit >= num_drafts).all():
+        return None
+    local_pos = input_batch.expanded_local_pos
+    cu_num_logits = input_batch.cu_num_logits
+    row_limit = torch.repeat_interleave(
+        async_tensor_h2d(limit, device=local_pos.device),
+        cu_num_logits[1:] - cu_num_logits[:-1],
+        output_size=local_pos.shape[0],
+    )
+    return local_pos > row_limit
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -1517,6 +1554,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
@@ -1527,6 +1565,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+            invalid_drafts = grammar_invalid_drafts(
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                grammar_output.num_acceptable_drafts,
             )
 
         sampler_output: SamplerOutput | None
@@ -1546,6 +1589,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_drafts,
             )
 
         if shard_metadata is not None:
