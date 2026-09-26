@@ -98,7 +98,7 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Send the same context on every call.** `chat_request` and `prompt_token_ids` aren't kept between calls, so they go with every chunk including the usage chunk. Both are required when a tool or reasoning parser is configured. `prompt_token_ids` is the `token_ids` of the `GenerateRequest` returned by `/render`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
 
-Streaming chunks don't carry logprobs yet, so `logprobs` on a generate chunk are dropped. The non-streaming endpoints do resolve them, including `token_id:N` placeholders.
+Streaming derender resolves `logprobs` on the plain detokenization path, including `token_id:N` placeholders, same as the non-streaming endpoints (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
 
 ## Streaming cost
 
@@ -114,6 +114,15 @@ When a tool or reasoning parser is configured, parser internal state (buffered m
 - Replay runs off the event loop on the renderer's executor (`renderer_num_workers`, default `1`). Size it for the expected number of concurrent parser configured streams.
 
 `output_token_ids` and `prompt_token_ids` are both bounded by `max_model_len` but callers streaming long reasoning traces through a parser configured model should expect materially more state transport and CPU cost than the plain detokenization path.
+
+## Streaming state and logprobs
+
+Streaming derender is stateless on the server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_tokens`, `prefix_offset`, `read_offset`), `role_sent`, and the parser path's replay fields (see [Streaming cost](#streaming-cost)), the state carries two fields for logprob handling:
+
+- `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
+- `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
+
+When a streamed `GenerateResponseStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice — for chat as `ChatCompletionLogProbs`, for completions converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
 
 ## Example
 
