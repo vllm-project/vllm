@@ -19,6 +19,8 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader import runai_streamer_loader as rsl
 from vllm.utils.mem_constants import GiB_bytes
 
+from .conftest import requires_runai
+
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
 # TODO(amacaskill): Replace with a GKE owned GCS bucket.
@@ -80,6 +82,7 @@ def test_checkpoint_selection_hook_is_optional_for_model_detection():
         assert SupportsMultiModal.get_language_model(model) is model.language_model
 
 
+@requires_runai
 def test_runai_model_loader_download_files(vllm_runner):
     with vllm_runner(test_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
