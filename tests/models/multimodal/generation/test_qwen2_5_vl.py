@@ -45,6 +45,10 @@ def _window_attention_regression_image():
 
 
 def _encoder_cudagraph_config(*, max_vision_items: int) -> dict:
+    # XPU graph is opt-in via VLLM_XPU_ENABLE_XPU_GRAPH and has its own CI job,
+    # so don't force encoder capture in a job that runs with it disabled.
+    if current_platform.is_xpu():
+        return {}
     return {
         "cudagraph_mm_encoder": True,
         "encoder_cudagraph_max_vision_items_per_batch": max_vision_items,
