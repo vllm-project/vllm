@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import importlib.metadata
 import json
 import logging
 import os
@@ -599,9 +600,18 @@ def _resolve_rust_cli_path() -> str | None:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
 
+        for distribution in importlib.metadata.distributions(name="vllm"):
+            for file in distribution.files or ():
+                if file.name == "vllm-rs":
+                    installed_binary = str(file.locate())
+                    if os.path.isfile(installed_binary) and os.access(
+                        installed_binary, os.X_OK
+                    ):
+                        return installed_binary
+
         raise FileNotFoundError(
             "VLLM_RUST_FRONTEND_PATH=auto but the vllm-rs binary was "
-            f"not found at {candidate}. "
+            f"not found at {candidate} or in the installed vllm distribution. "
             "Build with setuptools-rust or set the path explicitly."
         )
     return raw

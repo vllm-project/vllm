@@ -499,6 +499,12 @@ class precompiled_build_rust(build_rust):
             )
 
         if not missing:
+            scripts_dir = self.get_finalized_command("build_scripts").build_dir
+            self.mkpath(scripts_dir)
+            self.copy_file(
+                str(PRECOMPILED_RUST_FRONTEND_PATH),
+                os.path.join(scripts_dir, "vllm-rs"),
+            )
             logger.info(
                 "Skipping local Rust build: using precompiled %s and %s",
                 PRECOMPILED_RUST_FRONTEND_PATH,
@@ -1058,6 +1064,11 @@ class precompiled_wheel_utils:
                 tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
+                    if extract_rust_frontend and re.fullmatch(
+                        r"[^/]+\.data/scripts/vllm-rs", member.filename
+                    ):
+                        file_members.append(member)
+                        continue
                     if member.filename in exact_members:
                         file_members.append(member)
                         continue
@@ -1088,7 +1099,15 @@ class precompiled_wheel_utils:
 
                 for file in file_members:
                     print(f"[extract] {file.filename}")
-                    target_path = os.path.join(".", file.filename)
+                    is_rust_binary = extract_rust_frontend and (
+                        file.filename == "vllm/vllm-rs"
+                        or re.fullmatch(r"[^/]+\.data/scripts/vllm-rs", file.filename)
+                    )
+                    target_path = (
+                        str(PRECOMPILED_RUST_FRONTEND_PATH)
+                        if is_rust_binary
+                        else os.path.join(".", file.filename)
+                    )
                     os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     with (
                         wheel.open(file.filename) as src,
@@ -1099,6 +1118,8 @@ class precompiled_wheel_utils:
                     if mode:
                         os.chmod(target_path, mode)
 
+                    if is_rust_binary:
+                        continue
                     pkg = os.path.dirname(file.filename).replace("/", ".")
                     package_data_patch.setdefault(pkg, []).append(
                         os.path.basename(file.filename)
@@ -1485,10 +1506,6 @@ if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
 
-# If the rust frontend binary is already present in the source tree (e.g.,
-# pre-built in a separate Docker build stage), ship it as-is.
-if PRECOMPILED_RUST_FRONTEND_PATH.exists():
-    add_vllm_package_data("vllm-rs")
 for rust_extension_path in get_precompiled_rust_extension_paths():
     add_vllm_package_data(rust_extension_path.name)
 
@@ -1515,8 +1532,6 @@ if (
 vllm_version = get_vllm_version()
 rust_build.prepare_build_environment()
 
-# Rust artifacts, built via setuptools-rust and installed into the package
-# directory alongside the Python modules.
 rust_extensions = rust_build.rust_extensions(
     optional=not should_require_rust_frontend()
 )
@@ -1526,6 +1541,7 @@ setup(
     version=vllm_version,
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
+    exclude_package_data={"vllm": ["vllm-rs"]},
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
