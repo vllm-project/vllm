@@ -992,6 +992,78 @@ class TestInlineSystemMessageInMessagesArray:
         assert result.messages[1]["content"] == "Real system content."
 
 
+class TestInlineSystemMessageMerge:
+    def test_inline_system_is_rerolled_and_merged_with_user_turns(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "system", "content": "LATESYS"},
+                {"role": "user", "content": "Q2"},
+            ]
+        )
+
+        result = _convert(request, merge_inline_system=True)
+
+        assert result.messages == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Q"},
+                    {"type": "text", "text": "LATESYS"},
+                    {"type": "text", "text": "Q2"},
+                ],
+            }
+        ]
+
+    def test_inline_system_with_top_level_system_stays_after_prefix(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Be concise."},
+            ],
+            system="Top-level prompt.",
+        )
+
+        result = _convert(request, merge_inline_system=True)
+
+        assert result.messages == [
+            {"role": "system", "content": "Top-level prompt."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello"},
+                    {"type": "text", "text": "Be concise."},
+                ],
+            },
+        ]
+
+    def test_inline_system_block_content_is_converted_to_user_text(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Part one. "},
+                        {"type": "text", "text": "Part two."},
+                    ],
+                },
+            ]
+        )
+
+        result = _convert(request, merge_inline_system=True)
+
+        assert result.messages == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello"},
+                    {"type": "text", "text": "Part one. Part two."},
+                ],
+            }
+        ]
+
+
 # ======================================================================
 # Streaming conversion: message_stream_converter
 # ======================================================================
