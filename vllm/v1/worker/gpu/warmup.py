@@ -414,6 +414,9 @@ def _warmup_kernels(
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
+            if num_spec_steps > 0:
+                # Drain any pending draft-model TP collectives.
+                torch.accelerator.synchronize()
 
             for i, use_spec in zip(indices, spec_flags):
                 req_computed[i] += decode_query_len if use_spec else 1

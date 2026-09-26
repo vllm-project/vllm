@@ -103,6 +103,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    allow_rocm_deepseek_v4_piecewise_without_compile,
+)
+from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
 )
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
@@ -685,6 +688,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         piecewise_capture_available = bool(
             envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
+        )
+        piecewise_capture_available = (
+            piecewise_capture_available
+            or allow_rocm_deepseek_v4_piecewise_without_compile(self.vllm_config)
         )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
