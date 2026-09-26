@@ -839,7 +839,15 @@ def make_routing_data(
 
     n_rows, num_topk = topk_ids.size()
 
-    BLOCK_SIZE_M = 512
+    # `BLOCK_SIZE_M` only tiles the row loop, and `pack_bitmatrix` masks its tail
+    # with `offsets_m < n_rows`, so the packed bitmatrix is bit-identical for any
+    # value. Cost per program is dominated by the `[BLOCK_SIZE_M, BLOCK_SIZE_K]`
+    # one-hot `tl.where` / `tl.reduce_or`, which Triton emits at full tile width
+    # whether or not those rows are in range. A 512-row tile therefore pays for
+    # padding rows at every batch size, and collapses the grid to a single
+    # workgroup for anything up to 512 tokens. A 32-row tile, matching
+    # `BLOCK_SIZE_K`, keeps the tile small and the grid wide.
+    BLOCK_SIZE_M = 32
     BLOCK_SIZE_K = 32
 
     bm_cols = triton.cdiv(num_local_experts, BLOCK_SIZE_K)  # n_bitpacks

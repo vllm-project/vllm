@@ -436,3 +436,72 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
     torch.testing.assert_close(gather_new.dst_indx, gather_ref.dst_indx)
     torch.testing.assert_close(scatter_new.src_indx, scatter_ref.src_indx)
     torch.testing.assert_close(scatter_new.dst_indx, scatter_ref.dst_indx)
+
+
+@pytest.mark.parametrize("n_tokens", [1, 31, 33, 512, 513, 1024])
+@pytest.mark.parametrize("n_experts,topk", [(32, 4), (64, 4), (128, 4), (256, 8)])
+@pytest.mark.parametrize("has_invalid", [False, True])
+def test_pack_bitmatrix_independent_of_block_size_m(
+    n_tokens, n_experts, topk, has_invalid
+):
+    """The packed bitmatrix must not depend on the row-tile width.
+
+    `BLOCK_SIZE_M` only tiles the row loop and the kernel masks its tail on both the
+    load and the store, so every tile width has to produce the same bits. That is what
+    makes the launch-config choice in `make_routing_data` a free parameter rather than
+    a numerics decision. Row counts that are not multiples of the tile are the
+    interesting ones, since they are the only ones that exercise the mask.
+    """
+    import triton
+
+    from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
+        pack_bitmatrix,
+    )
+
+    block_size_k = 32
+    torch.manual_seed(0)
+    topk_ids = torch.stack(
+        [torch.randperm(n_experts, device="cuda")[:topk] for _ in range(n_tokens)]
+    ).to(torch.int16)
+    if has_invalid:
+        # Under expert parallelism the expert-map remap leaves -1 in slots whose
+        # expert is not on this rank, and the kernel guards those explicitly.
+        topk_ids[torch.rand(topk_ids.shape, device="cuda") < 0.25] = -1
+
+    # A tile wider than the batch runs programs for rows that do not exist. Guard
+    # rows carrying a sentinel catch a kernel that writes them anyway, which is the
+    # property that licenses choosing the tile width freely.
+    guard_rows = 1024
+    sentinel = 0xDEADBEEF
+
+    def pack(block_size_m: int) -> torch.Tensor:
+        bm_cols = triton.cdiv(n_experts, block_size_k)
+        buf = torch.full(
+            (n_tokens + guard_rows, bm_cols),
+            sentinel,
+            dtype=torch.uint32,
+            device="cuda",
+        )
+        buf[:n_tokens] = 0
+        pack_bitmatrix[(triton.cdiv(n_tokens, block_size_m),)](
+            buf,
+            topk_ids,
+            n_tokens,
+            bm_cols,
+            topk,
+            BLOCK_SIZE_M=block_size_m,
+            BLOCK_SIZE_K=block_size_k,
+        )
+        assert (buf[n_tokens:] == sentinel).all(), (
+            f"wrote past n_rows at BLOCK_SIZE_M={block_size_m}"
+        )
+        return buf[:n_tokens].clone()
+
+    reference = pack(512)
+    # An all-zero result would make the comparison below pass for the wrong reason.
+    # `torch.any` has no uint32 CUDA kernel, hence the comparison to zero first.
+    assert (reference != 0).any()
+    for block_size_m in (8, 16, 32, 64, 128, 256, 1024):
+        assert torch.equal(pack(block_size_m), reference), (
+            f"bitmatrix differs at BLOCK_SIZE_M={block_size_m}"
+        )
