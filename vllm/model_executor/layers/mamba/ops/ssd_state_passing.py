@@ -8,8 +8,13 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    pin_autotune_config,
+)
 from vllm.triton_utils import tl, triton
+
+_BATCH_INVARIANT_CONFIG = triton.Config({"BLOCK_SIZE": 256})
 
 
 @triton.autotune(
@@ -97,6 +102,9 @@ def _state_passing_fwd_kernel(
         states_ptrs += stride_states_chunk
         dA_cs_ptr += stride_dA_cs_chunk
         out_ptrs += stride_out_chunk
+
+
+pin_autotune_config(_state_passing_fwd_kernel, _BATCH_INVARIANT_CONFIG)
 
 
 def _state_passing_fwd(
