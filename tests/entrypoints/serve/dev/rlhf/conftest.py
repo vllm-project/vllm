@@ -15,7 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -139,36 +138,6 @@ def server(
 
 
 # ---------------------------------------------------------------------------
-# Polling helper (200-lie workaround)
-# ---------------------------------------------------------------------------
-
-
-def poll_until(
-    predicate: Callable[[], bool],
-    timeout: float = 10.0,
-    interval: float = 0.5,
-) -> bool:
-    """Poll predicate() until it returns True or timeout expires.
-
-    Workaround for the vLLM sleep/wake "200-lie" — the HTTP endpoints may
-    return 200 before the underlying operation is complete, so callers that
-    need to verify state *after* an operation can use this helper instead of
-    assuming the 200 means completion.
-
-    Returns True if predicate became true within timeout, False otherwise.
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if predicate():
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
-
-
-# ---------------------------------------------------------------------------
 # HTTP helpers — generation
 # ---------------------------------------------------------------------------
 
@@ -183,27 +152,6 @@ def gen(url, prompt="The capital of France is", max_tokens=8, timeout=30):
                 "prompt": prompt,
                 "max_tokens": max_tokens,
                 "temperature": 0,
-            },
-            timeout=timeout,
-        )
-        return r.json()
-    except Exception:
-        return None
-
-
-def gen_with_logprobs(
-    url, prompt="The capital of France is", max_tokens=8, logprobs=5, timeout=30
-):
-    """Fire a /v1/completions request with logprobs; return JSON or None."""
-    try:
-        r = requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-                "logprobs": logprobs,
             },
             timeout=timeout,
         )
@@ -399,37 +347,3 @@ def get_world_size(url, include_dp=True):
         params={"include_dp": include_dp},
         timeout=5,
     )
-
-
-# ---------------------------------------------------------------------------
-# GPU / metrics helpers
-# ---------------------------------------------------------------------------
-
-
-def gpu_free_bytes(device: int = 0) -> int:
-    """Read GPU free bytes via subprocess to avoid import-time torch init."""
-    out = subprocess.check_output(
-        [
-            sys.executable,
-            "-c",
-            f"import torch; f,_=torch.accelerator.get_memory_info({device}); print(f)",
-        ],
-        timeout=10,
-    )
-    return int(out.strip())
-
-
-def sleep_metrics(url):
-    """Return (awake, weights_offloaded, discard_all) from /metrics."""
-    try:
-        from prometheus_client.parser import text_string_to_metric_families
-    except ImportError:
-        return None, None, None
-
-    r = requests.get(f"{url}/metrics", timeout=5)
-    vals: dict = {}
-    for family in text_string_to_metric_families(r.text):
-        if family.name == "vllm:engine_sleep_state":
-            for s in family.samples:
-                vals[s.labels.get("sleep_state", "")] = s.value
-    return vals.get("awake"), vals.get("weights_offloaded"), vals.get("discard_all")
