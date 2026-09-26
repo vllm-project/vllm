@@ -37,7 +37,7 @@ from vllm.distributed.aux_output_connector.worker import (
     get_aux_output_connector,
 )
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
@@ -101,6 +101,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     ModelCudaGraphManager,
     has_compiled_submodule,
     make_cudagraph_stats,
+    make_forward_batch_descriptor,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
@@ -1903,11 +1904,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
-            batch_descriptor = BatchDescriptor(
+            batch_descriptor = make_forward_batch_descriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
+                num_reqs=input_batch.num_reqs_after_padding,
+                uniform_token_count=uniform_tok_count,
+                num_ubatches=len(ubatch_slices) if ubatch_slices is not None else 1,
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
+                fallback=True,
             )
+            assert batch_descriptor is not None
 
             with set_forward_context(
                 attn_metadata,

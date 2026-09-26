@@ -77,6 +77,33 @@ class BatchExecutionDescriptor:
     num_ubatches: int = 1
 
 
+def make_forward_batch_descriptor(
+    *,
+    num_tokens: int,
+    num_reqs: int | None,
+    uniform_token_count: int | None,
+    num_ubatches: int,
+    has_lora: bool,
+    num_active_loras: int,
+    fallback: bool,
+) -> BatchDescriptor | None:
+    if uniform_token_count == 1 and num_reqs == num_tokens and num_ubatches == 1:
+        return BatchDescriptor(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            uniform=True,
+            has_lora=has_lora,
+            num_active_loras=num_active_loras,
+        )
+    if fallback:
+        return BatchDescriptor(
+            num_tokens=num_tokens,
+            has_lora=has_lora,
+            num_active_loras=num_active_loras,
+        )
+    return None
+
+
 def make_cudagraph_stats(
     batch_desc: BatchExecutionDescriptor, num_tokens: int
 ) -> CUDAGraphStat:
@@ -713,13 +740,15 @@ class ModelCudaGraphManager(CudaGraphManager):
             input_buffers.is_padding.fill_(True)
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
-                batch_descriptor = None
-                if cg_mode == CUDAGraphMode.PIECEWISE:
-                    batch_descriptor = BatchDescriptor(
-                        num_tokens=num_tokens,
-                        has_lora=has_lora,
-                        num_active_loras=desc.num_active_loras,
-                    )
+                batch_descriptor = make_forward_batch_descriptor(
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                    uniform_token_count=desc.uniform_token_count,
+                    num_ubatches=desc.num_ubatches,
+                    has_lora=has_lora,
+                    num_active_loras=desc.num_active_loras,
+                    fallback=cg_mode == CUDAGraphMode.PIECEWISE,
+                )
                 with set_forward_context(
                     attn_metadata,
                     self.vllm_config,

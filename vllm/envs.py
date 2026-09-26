@@ -270,6 +270,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_ROCM_USE_RDNA_ALL_REDUCE: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1896,6 +1897,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))
     ),
     # Whether to use pytorch symmetric memory for allreduce
+    # Opt-in graph-only HIP all-reduce for gfx1100/gfx1201 TP2/TP4.
+    "VLLM_ROCM_USE_RDNA_ALL_REDUCE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_USE_RDNA_ALL_REDUCE", "0"))
+    ),
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
     ),

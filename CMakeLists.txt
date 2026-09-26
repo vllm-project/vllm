@@ -1483,6 +1483,21 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/attention.cu")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
+  # Keep RDNA ISA out of code objects for other ROCm architectures.
+  set(VLLM_RDNA_AR_ARCHES ${VLLM_GPU_ARCHES})
+  list(FILTER VLLM_RDNA_AR_ARCHES INCLUDE REGEX "^gfx(1100|1200|1201)$")
+  if(VLLM_RDNA_AR_ARCHES)
+    set(VLLM_RDNA_AR_SRC "csrc/rocm/rdna_custom_all_reduce.cu")
+    add_library(_rocm_C_rdna_ar OBJECT ${VLLM_RDNA_AR_SRC})
+    set_source_files_properties(${VLLM_RDNA_AR_SRC} PROPERTIES LANGUAGE HIP)
+    set_target_properties(_rocm_C_rdna_ar PROPERTIES
+      HIP_ARCHITECTURES "${VLLM_RDNA_AR_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_compile_options(_rocm_C_rdna_ar PRIVATE
+      $<$<COMPILE_LANGUAGE:HIP>:${VLLM_ROCM_EXT_FLAGS}>)
+    target_link_libraries(_rocm_C_rdna_ar PRIVATE torch)
+  endif()
+
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
@@ -1537,6 +1552,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
   else()
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
+  endif()
+
+  if(TARGET _rocm_C_rdna_ar)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_ar)
   endif()
 
   if(VLLM_ROCM_HAS_GFX1100)

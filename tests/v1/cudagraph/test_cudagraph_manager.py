@@ -17,6 +17,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.device_communicators import pynccl_allocator
+from vllm.forward_context import BatchDescriptor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -51,6 +52,68 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.speculative_config = None
     vllm_config.num_speculative_tokens = 0
     return vllm_config
+
+
+def test_forward_batch_descriptor_marks_only_single_token_decode():
+    descriptor = gpu_cudagraph_utils.make_forward_batch_descriptor(
+        num_tokens=16,
+        num_reqs=16,
+        uniform_token_count=1,
+        num_ubatches=1,
+        has_lora=False,
+        num_active_loras=0,
+        fallback=False,
+    )
+
+    assert descriptor == BatchDescriptor(
+        num_tokens=16,
+        num_reqs=16,
+        uniform=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_reqs", "uniform_token_count", "num_ubatches"),
+    [
+        (None, None, 1),
+        (16, None, 1),
+        (8, 1, 1),
+        (8, 2, 1),
+        (16, 1, 2),
+    ],
+)
+def test_forward_batch_descriptor_rejects_non_decode_semantics(
+    num_reqs, uniform_token_count, num_ubatches
+):
+    descriptor = gpu_cudagraph_utils.make_forward_batch_descriptor(
+        num_tokens=16,
+        num_reqs=num_reqs,
+        uniform_token_count=uniform_token_count,
+        num_ubatches=num_ubatches,
+        has_lora=False,
+        num_active_loras=0,
+        fallback=False,
+    )
+
+    assert descriptor is None
+
+
+def test_forward_batch_descriptor_preserves_generic_fallback():
+    descriptor = gpu_cudagraph_utils.make_forward_batch_descriptor(
+        num_tokens=16,
+        num_reqs=None,
+        uniform_token_count=None,
+        num_ubatches=1,
+        has_lora=True,
+        num_active_loras=2,
+        fallback=True,
+    )
+
+    assert descriptor == BatchDescriptor(
+        num_tokens=16,
+        has_lora=True,
+        num_active_loras=2,
+    )
 
 
 def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
