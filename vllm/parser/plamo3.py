@@ -112,10 +112,10 @@ def plamo3_config(thinking: bool = True) -> ParserEngineConfig:
             ),
             (ParserState.TOOL_PREAMBLE, "TOOL_REQUEST_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_PREAMBLE, "TOOL_NAME_START"): Transition(
                 ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_NAME, "TOOL_NAME_END"): Transition(
                 ParserState.TOOL_PREAMBLE,

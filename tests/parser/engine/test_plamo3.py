@@ -332,6 +332,28 @@ def test_arguments_are_available_before_outer_closer(mock_tokenizer, mock_reques
     )
 
 
+def test_missing_tool_request_start_does_not_break_streaming(
+    parser_cls, mock_tokenizer, mock_request
+):
+    output = (
+        BEGIN_TOOL_REQUESTS
+        + BEGIN_TOOL_NAME
+        + "weather"
+        + END_TOOL_NAME
+        + BEGIN_TOOL_ARGUMENTS
+        + "{}"
+        + END_TOOL_ARGUMENTS
+        + END_TOOL_REQUESTS
+    )
+    delta = parser_cls(mock_tokenizer).parse_delta(
+        output, [], mock_request, finished=False
+    )
+    assert delta is not None
+    assert collect_output([delta]).tool_calls == [
+        {"name": "weather", "arguments": "{}"}
+    ]
+
+
 def test_reusing_parser_drops_pending_names(mock_tokenizer, mock_request):
     parser = Plamo3Parser(mock_tokenizer)
     parser.parse(
