@@ -991,6 +991,10 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            pp_handler.enable_deferred_collectives()
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
@@ -1202,6 +1206,13 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    def flush_pending_collectives(self) -> None:
+        if not self.use_v2_model_runner:
+            return
+        pp_handler = self.model_runner.pp_handler  # type: ignore[attr-defined]
+        if pp_handler is not None:
+            pp_handler.flush_pending_collectives()
+
     @torch.inference_mode()
     @with_gpu_sync_check
     def execute_model(
@@ -1216,6 +1227,11 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if not forward_pass and self.use_v2_model_runner:
+            # SchedulerOutput is replicated across PP ranks, so this flush
+            # boundary is group-uniform. The runner's zero-token launch is an
+            # additional safety net for direct runner invocations.
+            self.flush_pending_collectives()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config

@@ -693,8 +693,7 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
-    """A resolved pause promises an idle device: the barrier must run before
-    caches are cleared and before the caller is unblocked."""
+    """A pause flushes PP receives before its device and cache barriers."""
     core = _pausable_engine_core_proc()
     core.engines_running = deferred
     order: list[str] = []
@@ -710,4 +709,8 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
         assert result.result(timeout=0) is None
     else:
         assert result is None
-    assert order == ["synchronize_device", "reset_caches"]
+    assert order == [
+        "flush_pending_collectives",
+        "synchronize_device",
+        "reset_caches",
+    ]
