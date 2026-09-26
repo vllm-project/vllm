@@ -47,6 +47,14 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    snapshot_endpoint: str | None = None
+    """The zmq ROUTER endpoint serving compacted snapshots of the live KV
+    cache state. Enables publisher identities and idle heartbeats on the live
+    stream. A snapshot includes its publisher identity and the sequence number
+    of the last recorded batch it covers. Consumers load it into a private
+    index, then resume with contiguous live batches from the same publisher.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

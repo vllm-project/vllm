@@ -294,6 +294,11 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
+  - tests/distributed/test_kv_events_snapshot.py
+  - tests/distributed/test_kv_snapshot_bootstrap.py
+  - tests/distributed/test_kv_cache_events.py
+  - examples/features/kv_events/kv_events_snapshot_subscriber.py
+  - vllm/config/kv_events.py
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
   commands:
@@ -301,6 +306,7 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
+  - pytest -v -s distributed/test_kv_events_snapshot.py distributed/test_kv_snapshot_bootstrap.py distributed/test_kv_cache_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
