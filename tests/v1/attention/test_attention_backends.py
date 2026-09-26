@@ -19,7 +19,12 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.config import ModelConfig, set_current_vllm_config
+from vllm.config import (
+    DiffusionConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    set_current_vllm_config,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -1068,6 +1073,87 @@ def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
     assert q_lens is None
     assert q_cu_seq_lens is not None
     assert q_cu_seq_lens.tolist() == qo_indptr_values
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer with CUDA is required.",
+)
+@pytest.mark.parametrize(
+    "runner_type,spec_kind,has_upper_bound,expected_copies",
+    [
+        ("generate", None, True, 0),
+        ("pooling", None, True, 0),
+        ("generate", None, False, 1),
+        ("generate", "spec_decode", True, 1),
+        ("generate", "diffusion", True, 1),
+    ],
+)
+def test_flashinfer_avoids_seq_lens_copy_without_spec_tokens(
+    monkeypatch, runner_type, spec_kind, has_upper_bound, expected_copies
+):
+    """Planning reuses the host seq_lens bound only when it is exact.
+
+    Without speculative token accounting (no spec-decode drafts, no dLLM
+    canvas tokens) scheduled tokens always land in KV, so the CPU upper bound
+    is exact regardless of runner type. Any speculative accounting keeps the
+    bound optimistic (rejected tokens are in-flight) and forces the copy.
+    """
+    import unittest.mock
+
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_per_layer_parameters",
+        lambda *args: {
+            "layer.0": PerLayerParameters(
+                window_left=-1, logits_soft_cap=0.0, sm_scale=0.125
+            )
+        },
+    )
+
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B", max_model_len=64, max_num_seqs=3
+    )
+    config.model_config.runner_type = runner_type
+    config.attention_config.use_trtllm_attention = False
+    if spec_kind == "spec_decode":
+        config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=3
+        )
+    elif spec_kind == "diffusion":
+        config.diffusion_config = DiffusionConfig(canvas_length=8)
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    # Include a one-token final chunk and both partial and full KV pages.
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[17, 20, 32], query_lens=[1, 4, 16]), 16, device
+    )
+    if not has_upper_bound:
+        common_attn_metadata.seq_lens_cpu_upper_bound = None
+    elif spec_kind is not None:
+        # Simulate rejected speculative tokens: CPU says 18, GPU says 17.
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        common_attn_metadata.seq_lens_cpu_upper_bound[0] += 1
+
+    with set_current_vllm_config(config):
+        builder = flashinfer_backend.FlashInferMetadataBuilder(
+            create_standard_kv_cache_spec(config), ["layer.0"], config, device
+        )
+        with unittest.mock.patch.object(
+            common_attn_metadata.seq_lens,
+            "cpu",
+            wraps=common_attn_metadata.seq_lens.cpu,
+        ) as copy_to_cpu:
+            metadata = builder.build(0, common_attn_metadata)
+
+    assert copy_to_cpu.call_count == expected_copies
+    assert metadata.num_decodes == 1
+    assert metadata.num_prefills == 2
+    assert builder.paged_kv_indptr.cpu[:4].tolist() == [0, 2, 4, 6]
+    assert builder.paged_kv_last_page_len.cpu[:3].tolist() == [1, 4, 16]
 
 
 @pytest.mark.skipif(
