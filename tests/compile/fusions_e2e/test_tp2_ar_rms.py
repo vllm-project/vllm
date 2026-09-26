@@ -133,6 +133,7 @@ def test_tp2_ar_rms_fp8_fusions(
 
     matches_check = [
         "rms_quant_fusion",
+        "manual_act_quant_fusion",
         "norm_rope_fusion",
         "attn_quant_fusion",
         "ar_rms_fusion",
@@ -188,11 +189,7 @@ def test_tp2_ar_rms_fp4_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
-    if nvfp4_kernel_exposes_input_quant_key():
-        pytest.skip(
-            "NVFP4 kernel exposes input_quant_key; manual fusion fires "
-            "instead of compiler pass-based fusion"
-        )
+    use_manual_fusion = nvfp4_kernel_exposes_input_quant_key()
 
     matches = matches_fn(n_layers)
 
@@ -217,6 +214,8 @@ def test_tp2_ar_rms_fp4_fusions(
         "attn_quant_fusion",
         "ar_rms_fusion",
     ]
+    if use_manual_fusion:
+        matches_check.append("manual_act_quant_fusion")
 
     run_e2e_fusion_test(
         model_name,
