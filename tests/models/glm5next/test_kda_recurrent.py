@@ -193,3 +193,72 @@ def test_fused_recurrent_kda_rejects_unaddressable_layouts():
         broken["cu_seqlens"] = None if q.shape[0] > 1 else inputs["cu_seqlens"]
         with pytest.raises(AssertionError, match=r"torch.Size"):
             run_kernel(broken, state)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("num_seqs,num_heads", [(1024, 64), (2048, 48)])
+def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: int):
+    """Regression test for the launch grid.
+
+    GLM-5.3-Flash has 64 KDA value heads; at TP=1 (every DP rank) a decode
+    batch of 1024 sequences needs 1024 * 64 = 65536 (sequence, head)
+    programs. The kernel used to put that product into gridDim.z, whose CUDA
+    limit is 65535, so the launch failed with ``Triton Error [CUDA]: invalid
+    argument`` at CUDA-graph capture and DP deployments could not start. The
+    grid now carries the product in gridDim.x. Small head dims keep the test
+    cheap; the shape that matters is the number of programs. Every (sequence,
+    head) pair is independent, so the full batch must be bitwise identical to
+    the same batch run in two halves.
+    """
+    torch.manual_seed(0)
+    dev = torch.device("cuda")
+    head_dim = 16
+    pool = num_seqs + 8
+    q = torch.randn(1, num_seqs, num_heads, head_dim, device=dev, dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = torch.randn_like(q)
+    beta = torch.randn(1, num_seqs, num_heads, device=dev, dtype=torch.bfloat16)
+    state = torch.randn(
+        pool, num_heads, head_dim, head_dim, device=dev, dtype=torch.float32
+    )
+    cu = torch.arange(0, num_seqs + 1, device=dev, dtype=torch.int32)
+    # slot 0 is NULL_BLOCK_ID and is skipped by the kernel: use slots 1..
+    idx = (torch.randperm(pool - 1, device=dev)[:num_seqs] + 1).to(torch.int32)
+    a_log = torch.randn(num_heads, device=dev, dtype=torch.float32)
+    g_bias = torch.randn(num_heads, head_dim, device=dev, dtype=torch.float32)
+
+    def run(sl: slice, cu_: torch.Tensor, st: torch.Tensor, out: torch.Tensor):
+        fused_recurrent_kda(
+            q=q[:, sl],
+            k=k[:, sl],
+            v=v[:, sl],
+            g=g[:, sl],
+            beta=beta[:, sl],
+            initial_state=st,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_,
+            ssm_state_indices=idx[sl],
+            sigmoid_beta=True,
+            a_log=a_log,
+            g_bias=g_bias,
+            compute_gate=True,
+            lower_bound=-5.0,
+            out=out,
+        )
+
+    full_state = state.clone()
+    full_out = torch.zeros_like(k)
+    run(slice(0, num_seqs), cu, full_state, full_out)
+
+    half = num_seqs // 2
+    ref_state = state.clone()
+    ref_out = torch.zeros_like(k)
+    for s, e in ((0, half), (half, num_seqs)):
+        cu_h = torch.arange(0, e - s + 1, device=dev, dtype=torch.int32)
+        part = torch.zeros_like(k[:, s:e])
+        run(slice(s, e), cu_h, ref_state, part)
+        ref_out[:, s:e] = part
+    torch.cuda.synchronize()
+    assert torch.equal(full_out, ref_out)
+    assert torch.equal(full_state, ref_state)
