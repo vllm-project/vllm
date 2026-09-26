@@ -208,7 +208,10 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
 
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+    def verify_and_update_config(
+        vllm_config: "VllmConfig",
+        fallback_to_triton: bool = False,
+    ) -> None:
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
@@ -220,7 +223,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         requests to this per-layer FA3/FA4 selection. For other configurations,
         force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
-        When FA4 is not available, fall back to Triton.
+        When FA4 is not available, leave backend selection to the standard
+        attention selector unless fallback_to_triton is set.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -261,7 +265,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
                         "for all layers to avoid mixed FA3/FA4 penalty.",
                         head_dims,
                     )
-        elif vllm_config.attention_config.backend is None:
+        elif fallback_to_triton and vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
@@ -280,9 +284,9 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
-        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
-        # TRITON_ATTN fallback for heterogeneous head dims).
-        Gemma4Config.verify_and_update_config(vllm_config)
+        # Inherit Gemma4's attention backend selection, keeping the Triton
+        # fallback for mixed causal/bidirectional attention.
+        Gemma4Config.verify_and_update_config(vllm_config, fallback_to_triton=True)
 
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
