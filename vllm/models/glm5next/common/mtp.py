@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -216,6 +217,13 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.model = Glm5NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # GLM checkpoints tie the MTP input embedding to the target's
+        # ``embed_tokens``, which the target only instantiates on the first PP
+        # stage. The drafter lives on the last stage, so under pipeline
+        # parallelism it cannot alias the target's embedding (see
+        # ``maybe_share_target_embed``) and must load its own copy from the
+        # target weight instead. With PP=1 the target's embedding is shared.
+        self.has_own_embed_tokens = not get_pp_group().is_first_rank
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -324,6 +332,18 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # prefix to match.
             if name.startswith("model.language_model."):
                 name = name.replace("model.language_model.", "model.", 1)
+            if name == "model.embed_tokens.weight":
+                # The target's input embedding (the checkpoint carries no
+                # per-MTP-layer copy). Load it only when this PP stage lacks
+                # the target's; otherwise leave it for the spec-decode loader
+                # to alias, which avoids a second 1.2 GiB copy.
+                if not self.has_own_embed_tokens:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+                continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
