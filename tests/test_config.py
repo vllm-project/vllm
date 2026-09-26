@@ -92,6 +92,16 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
     assert len(calls) == 2
 
 
+def test_dspark_adaptive_verification_separates_graph_cache():
+    config = object.__new__(SpeculativeConfig)
+    config.method = "dspark"
+    config.draft_model_config = None
+    config.enable_adaptive_verification = False
+    fixed_hash = config.compute_hash()
+    config.enable_adaptive_verification = True
+    assert config.compute_hash() != fixed_hash
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -878,6 +888,8 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ("FULL_AND_PIECEWISE", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "NEVER", "NONE"),
+        ("FULL_AND_PIECEWISE", True, "UNIFORM_BATCH", "FULL_AND_PIECEWISE"),
+        ("FULL", True, "UNIFORM_BATCH", "FULL_DECODE_ONLY"),
     ],
 )
 def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider(

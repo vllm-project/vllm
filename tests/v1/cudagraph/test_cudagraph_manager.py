@@ -294,6 +294,7 @@ def _make_spec_decode_manager(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    varlen_decode: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -316,6 +317,7 @@ def _make_spec_decode_manager(
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
+        varlen_decode=varlen_decode,
     )
     manager._graphs_captured = True
     return manager
@@ -371,6 +373,28 @@ def test_mixed_batch_never_selects_a_uniform_decode_graph(monkeypatch):
     assert desc.cg_mode == CUDAGraphMode.PIECEWISE
     assert desc.uniform_token_count is None
     assert desc.num_tokens == 16
+
+
+def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
+    """A varlen decode graph replays any decode batch within its query-length
+    bound. The runner passes no bound for a batch with a prefill, which must not
+    replay one however short the prefill is."""
+    manager = _make_spec_decode_manager(monkeypatch, varlen_decode=True)
+
+    def dispatch(max_query_len):
+        return manager.dispatch(
+            num_reqs=3,
+            num_tokens=6,
+            uniform_token_count=None,
+            num_active_loras=0,
+            max_query_len=max_query_len,
+        )
+
+    desc = dispatch(_DECODE_QUERY_LEN)
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.max_query_len == _DECODE_QUERY_LEN
+    assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
+    assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):

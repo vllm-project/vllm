@@ -552,16 +552,6 @@ class TestMLP(torch.nn.Module):
         return x
 
 
-def make_naive_shared_experts(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
-) -> torch.nn.Module:
-    w1 = torch.randn((K, N * 2), device=DEVICE, dtype=in_dtype) / 15
-    w2 = torch.randn((N, K), device=DEVICE, dtype=in_dtype) / 15
-    return TestMLP(w1, w2, out_dtype=in_dtype)
-
-
 class RealMLP(torch.nn.Module):
     def __init__(
         self,
@@ -665,25 +655,6 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-    )
-
-
-def make_shared_experts(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
-    quant_dtype: torch.dtype | str | None = None,
-) -> torch.nn.Module:
-    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        1,
-        N,
-        K,
-        in_dtype=in_dtype,
-        quant_dtype=quant_dtype,
-    )
-
-    return make_shared_experts_with_weights(
-        N, K, in_dtype, w1, w2, w1_s=w1_s, w2_s=w2_s, quant_dtype=quant_dtype
     )
 
 
