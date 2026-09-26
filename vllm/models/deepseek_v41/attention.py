@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepseekV4 MLA Attention Layer
-"""
+"""DeepseekV4 MLA Attention Layer"""
 
 import math
 from abc import ABC, abstractmethod
@@ -28,6 +26,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
@@ -35,6 +34,7 @@ from vllm.models.deepseek_v41.common.ops import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -290,13 +290,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
-        # Vision variant: image spans are visible bidirectionally, widening
-        # prefill SWA index rows by up to max_image_tokens columns.
-        self.max_image_tokens = (
-            getattr(config, "vision_max_n_token", 0)
-            if getattr(config, "vision_n_layers", 0) > 0
-            else 0
-        )
         # ---- v4.1 sparse-attention topology ----
         # compress_ratios has one entry per layer (MTP layers included):
         # 0 = pure sliding window, 1 = full-length compressed cache,
@@ -398,6 +391,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             return_bias=False,
             prefix=f"{prefix}.wo_b",
         )
+        # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
+        # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
+        self.gemm_rs: GemmRsAr | None = None
 
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
@@ -521,6 +517,34 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "decodes only on SM100."
             )
 
+        swa_bounded_replay = cache_config.swa_bounded_replay
+        if swa_bounded_replay and not vllm_config.use_v2_model_runner:
+            logger.warning_once(
+                "SWA bounded replay needs model runner V2 (only it skips the "
+                "paged-KV writes of replayed tokens); the sliding-window cache "
+                "takes part in prefix caching instead."
+            )
+            swa_bounded_replay = False
+        if (
+            swa_bounded_replay
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            logger.warning_once(
+                "SWA bounded replay is off under prefill context parallelism "
+                "(the replayed tokens' slot padding knows the rank-local batch "
+                "only); the sliding-window cache takes part in prefix caching "
+                "instead."
+            )
+            swa_bounded_replay = False
+        if swa_bounded_replay and current_platform.is_rocm():
+            logger.warning_once(
+                "SWA bounded replay is off on ROCm (the sparse SWA metadata "
+                "builders forward replay_start, but the window clamp it relies "
+                "on lives in the FlashInfer and FlashMLA prefill kernels, so "
+                "the padded slots fault); the sliding-window cache takes part "
+                "in prefix caching instead."
+            )
+            swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -531,6 +555,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             block_size=32,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
+            bounded_replay=swa_bounded_replay,
         )
 
         # The attention layer itself was already registered with the
@@ -578,7 +603,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
                 window_size=self.window_size,
                 block_size=self.swa_cache_layer.block_size,
-                max_image_tokens=self.max_image_tokens,
             )
 
             if self.compress_ratio > 1:
@@ -652,6 +676,41 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
         return self._o_proj(attn_out, positions)
+
+    def bind_gemm_rs(self) -> None:
+        """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
+
+        The decoder layer calls this after the model initialized the
+        process-wide GEMM-RS workspace and before weights load: the
+        eligibility check inspects the projection's linear kernel and weight
+        shape, which online quantization may later re-layout.
+        """
+        from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+            get_gemm_rs_ar,
+        )
+
+        # The layer owns the reduction under sequence parallel.
+        assert not self.wo_b.reduce_results
+        gemm_rs = get_gemm_rs_ar()
+        if gemm_rs.can_run(self.wo_b):
+            self.gemm_rs = gemm_rs
+        else:
+            gemm_rs.warn_incompatible_projection()
+
+    def _wo_b_proj(self, z: torch.Tensor) -> torch.Tensor:
+        """Apply ``wo_b``; with GEMM-RS bound, also reduce-scatter the result.
+
+        Every ``_o_proj`` implementation projects through this so the decoder
+        layer sees one contract: when ``gemm_rs`` is bound the output is
+        already the local sequence-parallel shard, otherwise it is the
+        unreduced TP partial.
+        """
+        if self.gemm_rs is None:
+            return self.wo_b(z)
+        if self.gemm_rs.should_run(z):
+            return self.gemm_rs.apply(z, self.wo_b)
+        # Small batches stay on the unfused path, which is faster there.
+        return sp_reduce_scatter(self.wo_b(z))
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor

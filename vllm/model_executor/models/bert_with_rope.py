@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -18,7 +18,11 @@ from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fused_moe import activation_without_mul, fused_topk
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    activation_without_mul,
+    fused_topk,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -46,7 +50,7 @@ from .interfaces_base import default_pooling_type
 
 
 class BertWithRopeEmbedding(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         if config.position_embedding_type not in ["rope", "rotary"]:
             raise ValueError(
@@ -254,9 +258,7 @@ class NomicMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = ReplicatedLinear(
-            self.hidden_size, self.num_total_experts, bias=False
-        )
+        self.router = GateLinear(self.hidden_size, self.num_total_experts)
         self.w1 = nn.Parameter(
             torch.empty(
                 self.num_total_experts,
@@ -345,7 +347,7 @@ class NomicMoE(nn.Module):
 class BertWithRopeBlock(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         moe: bool = False,

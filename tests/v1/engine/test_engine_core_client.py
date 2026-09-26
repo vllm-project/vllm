@@ -214,6 +214,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
+    client._kv_event_sources = {}
     return client
 
 
@@ -1392,11 +1393,9 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
 @create_new_process_for_each_test()
 def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
+    """Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
     is empty. This ensures the engine frontend does not need access to GPUs.
     """
-
     from vllm.v1.engine.core import EngineCoreProc
     from vllm.v1.executor.abstract import Executor
 
@@ -1454,3 +1453,95 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         )
 
         engine_core_proc.shutdown()
+
+
+def _ready_response_with_weight_transfer(weight_transfer_config):
+    """Build a ready response against a mock executor."""
+    from vllm.v1.engine.core import EngineCoreProc
+
+    executor = MagicMock()
+    executor.supports_draft_weight_updates.return_value = True
+
+    proc = MagicMock()
+    proc.model_executor = executor
+    proc.vllm_config = MagicMock()
+    proc.vllm_config.weight_transfer_config = weight_transfer_config
+    proc.vllm_config.lora_config = None
+    proc.vllm_config.model_config.enable_sleep_mode = False
+    proc.scheduler = MagicMock()
+
+    response = EngineCoreProc._make_ready_response(proc)
+    return response, executor
+
+
+def test_ready_response_skips_draft_rpc_without_weight_transfer():
+    """No weight-transfer config: the executor must not be consulted."""
+    response, executor = _ready_response_with_weight_transfer(None)
+
+    executor.supports_draft_weight_updates.assert_not_called()
+    assert response.supports_draft_weight_updates is False
+
+
+def test_ready_response_queries_executor_with_weight_transfer():
+    """Weight transfer configured: the executor is still consulted."""
+    weight_transfer_config = MagicMock()
+    weight_transfer_config.backend = "nixl"
+
+    response, executor = _ready_response_with_weight_transfer(weight_transfer_config)
+
+    executor.supports_draft_weight_updates.assert_called_once()
+    assert response.supports_draft_weight_updates is True
+
+
+def test_apply_ready_response_retains_kv_event_sources():
+    """Each engine's resolved publisher config is kept by DP rank; engines
+    without KV events contribute nothing."""
+    import msgspec
+
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
+    client._kv_event_sources = {}
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+    )
+
+    def ready(rank: int, config: KVEventsConfig | None) -> bytes:
+        return msgspec.msgpack.encode(
+            EngineCoreReadyResponse(
+                max_model_len=8192,
+                num_gpu_blocks=100,
+                block_size=16,
+                dp_stats_address=None,
+                dtype="bfloat16",
+                vllm_version="test",
+                world_size=2,
+                data_parallel_size=2,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                decode_context_parallel_size=1,
+                data_parallel_rank=rank,
+                max_num_seqs=256,
+                max_num_batched_tokens=8192,
+                instance_id="test-instance",
+                supports_lora=False,
+                max_loras=0,
+                kv_events_config=config,
+            )
+        )
+
+    rank1 = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:41233"
+    )
+    client._apply_ready_response(ready(1, rank1))
+    client._apply_ready_response(ready(0, None))
+    assert client.get_kv_event_sources() == {1: rank1}
+
+    # A rank that comes back (elastic re-add) reports its new port.
+    rank1_again = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:47001"
+    )
+    client._apply_ready_response(ready(1, rank1_again))
+    assert client.get_kv_event_sources() == {1: rank1_again}

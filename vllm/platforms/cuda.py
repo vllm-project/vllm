@@ -269,9 +269,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cuda.set_device(device)
         # With this trick we can force the device to be set eagerly
         # see https://github.com/pytorch/pytorch/issues/155668
@@ -305,10 +303,6 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
-    def log_warnings(cls):
-        pass
-
-    @classmethod
     def is_pin_memory_available(cls) -> bool:
         if in_wsl():
             # WSL1 has no CUDA support, so being on the CUDA platform under
@@ -334,12 +328,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.data_parallel_size > 1
-        ):
-            raise ValueError("PCP does not support data parallelism on CUDA yet.")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -842,9 +830,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """
-        query if the set of gpus are fully connected by nvlink (1 hop)
-        """
+        """Query if the set of gpus are fully connected by nvlink (1 hop)."""
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
@@ -1023,11 +1009,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 len(set(device_names)) > 1
                 and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
             ):
-                logger.warning(
+                logger.warning_once(
                     "Detected different devices in the system: %s. Please"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
                     "avoid unexpected behavior.",
                     ", ".join(device_names),
+                    scope="process",
                 )
 
 
@@ -1079,5 +1066,3 @@ finally:
         pynvml.nvmlShutdown()
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
-
-CudaPlatform.log_warnings()

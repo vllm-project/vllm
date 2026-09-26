@@ -13,7 +13,7 @@ use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
-use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection, ToolStrictLevel};
 
 pub mod hf;
 
@@ -21,6 +21,7 @@ pub mod hf;
 pub struct NewChatOutputProcessorOptions<'a> {
     pub tool_call_parser: &'a ParserSelection,
     pub reasoning_parser: &'a ParserSelection,
+    pub tool_strict_level: ToolStrictLevel,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.
@@ -78,8 +79,8 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default chat template override, provided either as an
     /// inline template or as a path to a template file.
     pub chat_template: Option<String>,
-    /// Optional server-default keyword arguments merged into every
-    /// chat-template render before request-level `chat_template_kwargs`.
+    /// Server-default keyword arguments. HF merges these before request kwargs;
+    /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.

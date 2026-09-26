@@ -241,7 +241,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="nccl",
+                backend="gloo" if current_platform.is_cpu() else "nccl",
             )
             initialize_model_parallel(1, 1)
             yield
@@ -503,6 +503,36 @@ class HfRunner:
                     )
                     if model_cls is not None:
                         _fix_v4_tied_weights_keys(model_cls)
+
+            from transformers.integrations import is_deepspeed_zero3_enabled
+
+            # On ROCm, avoid a converted CPU copy when downcasting FP32 references.
+            # Same-dtype CPU loads can stay lazily mapped and use less host RAM.
+            # Leave customized, remote, and quantized loading unchanged.
+            if (
+                current_platform.is_rocm()
+                and self.device == "cuda"
+                and auto_cls is AutoModelForCausalLM
+                and revision is None
+                and model_kwargs.keys() == {"dtype"}
+                and self.config.dtype == torch.float32
+                and model_kwargs["dtype"] in (torch.float16, torch.bfloat16)
+                and not (trust_remote_code and hasattr(self.config, "auto_map"))
+                and getattr(self.config, "quantization_config", None) is None
+                and getattr(
+                    self.config.get_text_config(decoder=True),
+                    "quantization_config",
+                    None,
+                )
+                is None
+                and not is_deepspeed_zero3_enabled()
+            ):
+                model_kwargs = {
+                    **model_kwargs,
+                    "device_map": torch.device(
+                        "cuda", torch.accelerator.current_device_index()
+                    ),
+                }
 
             model = cast(
                 nn.Module,
@@ -898,16 +928,13 @@ class HfRunner:
             # shutdown. This is helpful in cases where the HfRunner is
             # initialized after significant GPU memory is already occupied,
             # e.g. in
-            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # tests/basic_correctness/models/test_basic_correctness.py::test_models_distributed
             # where vllm worker processes are still alive and holding GPU
             # memory when hf_runner.__exit__ is called.
-            from tests.utils import (
-                get_physical_device_indices,
-                record_gpu_memory_usage_stats,
-            )
+            from tests.utils import record_gpu_memory_usage_stats
 
             if (device_count := current_platform.device_count()) > 0:
-                devices = get_physical_device_indices(devices=list(range(device_count)))
+                devices = list(range(device_count))
                 mem_usage_stats = record_gpu_memory_usage_stats(devices=devices)
                 self.threshold_ratios = {
                     device: 0.05 + mem_used / mem_tot
@@ -935,7 +962,7 @@ def hf_runner():
 
 
 def _default_block_size() -> int:
-    if torch.xpu.is_available():
+    if current_platform.is_xpu():
         return 64
     if current_platform.is_cpu():
         return 128
@@ -955,6 +982,8 @@ class VllmRunner:
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
     - `enforce_eager`: Set to `False` to test CUDA graph.
+    - `kernel_config.enable_jit_warmup`: Set to `False` to reduce test startup
+      time.
     """
 
     def __init__(
@@ -982,6 +1011,8 @@ class VllmRunner:
             if default_torch_num_threads is None
             else set_default_torch_num_threads(default_torch_num_threads)
         )
+
+        kwargs.setdefault("kernel_config", {"enable_jit_warmup": False})
 
         if not kwargs.get("compilation_config", None):
             # Note(@tdoublep): This is set to 4 because some tests (e.g., hybrid
@@ -1399,16 +1430,20 @@ def temporary_enable_log_propagate():
     import logging
 
     logger = logging.getLogger("vllm")
+    previous_propagate = logger.propagate
     logger.propagate = True
     yield
-    logger.propagate = False
+    logger.propagate = previous_propagate
 
 
 @pytest.fixture()
 def caplog_vllm(temporary_enable_log_propagate, caplog):
-    # To capture vllm log, we should enable propagate=True temporarily
-    # because caplog depends on logs propagated to the root logger.
-    yield caplog
+    # caplog depends on logs propagated to the root logger. The vLLM logger
+    # inherits this INFO level until runtime initialization configures it.
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        yield caplog
 
 
 @pytest.fixture()
@@ -1757,6 +1792,24 @@ def disable_deepgemm_ue8m0(monkeypatch):
         # Clear cache so the next time it is used it is processed with the
         # default VLLM_USE_DEEP_GEMM_E8M0  setting.
         is_deep_gemm_e8m0_used.cache_clear()
+
+
+@pytest.fixture
+def gpu_memory_cleared():
+    """Wait for prior tests to release GPU memory on gfx950."""
+    if not current_platform.is_rocm():
+        return
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_ratio=0.08,
+            timeout_s=30,
+            stable_duration_s=1,
+        )
 
 
 def _should_clean_gpu_memory_between_tests() -> bool:

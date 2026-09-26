@@ -483,7 +483,7 @@ class FlashInferBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
         # on Blackwell); advertise them only when usable so selection never
         # picks a large kernel block we cannot serve.
@@ -1593,9 +1593,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs: int,
         page_size: int,
     ) -> torch.Tensor:
-        """
-        Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
-        attention.
+        """Compute paged_kv_indptr, paged_kv_indices and paged_kv_last_page_len.
 
         Results are stored in self.paged_kv_indptr,
         self.paged_kv_indices, self.paged_kv_last_page_len buffers.
@@ -1952,8 +1950,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
                 )
                 max_q_len_prefill = int(query_lens_prefill_cpu.max().item())
+                prefill_block_tables = block_table_tensor[prefill_start:]
+                if (
+                    self.q_data_type_prefill != FP8_DTYPE
+                    and self.cache_dtype.startswith("fp8")
+                ):
+                    seq_lens_cpu_upper_bound = (
+                        common_attn_metadata.seq_lens_cpu_upper_bound
+                    )
+                    max_prefill_seq_len = max_seq_len
+                    if seq_lens_cpu_upper_bound is not None:
+                        max_prefill_seq_len = int(
+                            seq_lens_cpu_upper_bound[prefill_start:num_reqs]
+                            .max()
+                            .item()
+                        )
+                    # Dequantization allocates one page per table entry and
+                    # indexes rows by their logical width.
+                    prefill_block_tables = canonicalize_singleton_dim_strides(
+                        prefill_block_tables[
+                            :, : cdiv(max_prefill_seq_len, page_size)
+                        ].contiguous()
+                    )
                 attn_metadata.prefill = TRTLLMPrefill(
-                    block_tables=block_table_tensor[prefill_start:],
+                    block_tables=prefill_block_tables,
                     seq_lens=prefill_seq_lens,
                     cum_seq_lens_q=qo_indptr_prefill_gpu,
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
@@ -2394,6 +2414,7 @@ class FlashInferImpl(AttentionImpl):
         """Forward pass with FlashInfer.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size], or None for a
                 KV-sharing decoder layer.
@@ -2401,8 +2422,15 @@ class FlashInferImpl(AttentionImpl):
                 KV-sharing decoder layer.
             kv_cache: [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization. Enables the
+                attention+quantization fusion path when provided.
+            output_block_scale: Block scale for fused output quantization,
+                required for nvfp4 output and rejected for fp8 output.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if attn_metadata is None:
             # Profiling run.
@@ -3126,8 +3154,7 @@ def fast_plan_decode(
     fixed_split_size: int = -1,
     disable_split_kv: bool = False,
 ) -> None:
-    """
-    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
+    """A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
     cudagraph capture/replay, while the no cudagraph version turns back
     to the original plan.
     using original plan after passing host-side buffers:

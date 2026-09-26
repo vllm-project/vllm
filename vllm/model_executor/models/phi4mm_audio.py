@@ -18,7 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.models.phi4mm_utils import (
     AbsolutePositionalEncoding,
@@ -136,6 +136,7 @@ class ConformerEncoderLayer(nn.Module):
             1 = typical Multi-Head Attention,
             1 < attn_group_sizes < attention_heads = Grouped-Query Attention
             attn_group_sizes = attention_heads = Multi-Query Attention
+
     """
 
     def __init__(
@@ -232,6 +233,7 @@ class ConformerEncoderLayer(nn.Module):
             mask: mask for x (batch, max_time_in)
             relative_attention_bias: bias added to attention logits w.r.t.
                 relative positions (1, n_head, time1, time2)
+
         """
         x = x + 0.5 * self.feed_forward_in(x)
         norm_x = self.layer_norm_att(x)
@@ -254,7 +256,7 @@ class ConformerEncoderLayer(nn.Module):
 
 
 class TransformerEncoderBase(abc.ABC, nn.Module):
-    """The Base class for Transformer based encoders
+    """The Base class for Transformer based encoders.
 
     Please set causal = True in streaming model
     Args:
@@ -459,7 +461,6 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         left_chunk: int | list[int] | None = None,
     ) -> tuple[int, int]:
         """If chunk size is a list, we will randomly select a chunk size."""
-
         if chunk_size is None:
             chunk_size = self.chunk_size
         if left_chunk is None:
@@ -595,7 +596,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             torch.Tensor,
         ]
     ):
-        """Forwarding the inputs through the top embedding layers
+        """Forwarding the inputs through the top embedding layers.
 
         Args:
             xs_pad: torch.Tensor
@@ -606,6 +607,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                             non-causal layers
             left_chunk_nc: (optional, default is None) # of left chunks for
                             non-causal layers
+
         """
         # pylint: disable=R0915
         # get new lens.
@@ -975,13 +977,14 @@ class ConformerEncoder(TransformerEncoderBase):
     def forward(
         self, xs_pad: torch.Tensor, masks: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Conformer Forward function
+        """Conformer Forward function.
 
         Args:
             xs_pad: torch.Tensor
                 input tensor
             masks: torch.Tensor
                 post-embedding input lengths
+
         """
         xs_pad = self.encoder_embedding(xs_pad)
         input_tensor, pos_k, pos_v, hs_mask, masks = self.forward_embeddings(
@@ -1065,7 +1068,7 @@ class ConformerEncoder(TransformerEncoderBase):
 
 
 class WindowQformer(nn.Module):
-    """Window-level Qformer"""
+    """Window-level Qformer."""
 
     def __init__(
         self,
@@ -1107,7 +1110,7 @@ class WindowQformer(nn.Module):
         mask: torch.Tensor | None,
         embed_len: int | None = None,
     ) -> tuple[torch.Tensor, int | None]:
-        """forward decoder"""
+        """Forward decoder."""
         # audio_embed: N x T x D => N x D x T
 
         audio_embed = audio_embed.transpose(1, 2)
@@ -1149,7 +1152,7 @@ class WindowQformer(nn.Module):
 class AudioEmbedding(nn.Module):
     """Image embedding."""
 
-    def __init__(self, config: PretrainedConfig, **kwargs: Any) -> None:
+    def __init__(self, config: PreTrainedConfig, **kwargs: Any) -> None:
         super().__init__()
         self.config = config
         # n_embed or hidden_size for text LM
@@ -1265,9 +1268,9 @@ class AudioEmbedding(nn.Module):
         audio_attention_mask: torch.Tensor | None = None,
         audio_projection_mode: str = "speech",
     ) -> torch.Tensor:
-        """
-        arguments:
-            input_embeds: audio features (B, T, D)  B: num audios in a sequence
+        """arguments:
+        input_embeds: audio features (B, T, D)  B: num audios in a sequence
+
         """
         if self.freeze_audio_processor:
             with torch.no_grad():
@@ -1319,12 +1322,12 @@ class AudioEmbedding(nn.Module):
         audio_attention_mask: torch.Tensor | None = None,
         audio_projection_mode: str = "speech",
     ) -> torch.Tensor:
-        """
-        arguments:
+        """arguments:
             audio_features: audio features (T, D)
 
-        returns:
+        Returns:
             audio_embeds: audio embeddings (num_audio_tokens, hidden_dim)
+
         """
         audio_embeds = self.get_audio_features(
             audio_features.unsqueeze(0),

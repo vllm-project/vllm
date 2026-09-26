@@ -88,9 +88,14 @@ def build_cost_tables_from_curves(
     """Build cost tables: graph-padded below the capture limit, smooth above.
 
     Args:
+        draft_curve: (size, cost) samples for the draft model.
+        verify_curve: (size, cost) samples for the verify model.
+        max_num_reqs: Largest request count to build a table for.
+        max_batch_tokens: Largest token count to build a table for.
         cudagraph_limit: Largest cudagraph-captured size. At or below it,
             execution pads up to the next captured size, so cost is a step
             function. Above it there is no padding, so cost is continuous.
+
     """
 
     def build_table(limit: int, curve: list[tuple[int, float]]) -> np.ndarray:
@@ -250,9 +255,7 @@ class AdaptiveVerificationManager:
         logger.debug("DSpark cost tables: %s", self.cost_tables)
 
     def record_confidences(
-        self,
-        confidence_probs: torch.Tensor,
-        input_batch: "InputBatch",
+        self, confidence_probs: torch.Tensor, input_batch: "InputBatch"
     ) -> None:
         """Publish this step's raw confidences for the ranking kernel and start
         copying them to the CPU, where a later step's budget reads them."""
@@ -300,9 +303,9 @@ class AdaptiveVerificationManager:
         )
         num_non_draft_tokens = scheduled_tokens - scheduled_drafts
         slots = np.fromiter(
-            (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
+            map(self.req_states.req_id_to_index.__getitem__, req_ids),
             dtype=np.int32,
-            count=len(req_ids),
+            count=num_reqs,
         )
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
@@ -464,8 +467,7 @@ def maybe_create_adaptive_verification_manager(
     # The selector rejects unsupported backends, but models that
     # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
     backend = get_query_lens_mismatch_unsupported_backend(
-        attn_groups,
-        checked_layer_names=target_layer_names,
+        attn_groups, checked_layer_names=target_layer_names
     )
     if backend is not None:
         raise ValueError(
