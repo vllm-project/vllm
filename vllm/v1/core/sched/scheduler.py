@@ -394,7 +394,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(self.hash_block_size)
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -2216,7 +2216,14 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
-                        routed_experts=routed_experts,
+                        routed_experts=(
+                            routed_experts
+                            if not isinstance(routed_experts, list)
+                            else None
+                        ),
+                        aux_output_keys=(
+                            routed_experts if isinstance(routed_experts, list) else None
+                        ),
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
@@ -2903,6 +2910,8 @@ class Scheduler(SchedulerInterface):
 
     def shutdown(self) -> None:
         logger.debug_once("[shutdown] Scheduler: start")
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.close()
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:

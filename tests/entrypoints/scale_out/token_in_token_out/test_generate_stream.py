@@ -208,6 +208,45 @@ def test_placeholder_ranges_from_engine_input():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_serve_tokens_returns_terminal_aux_output_keys_without_inline_r3(stream):
+    engine = _mock_engine()
+    keys = ["prefix-block", "request-tail"]
+
+    async def generate(*args, **kwargs):
+        output = _make_request_output(
+            "req-1", token_ids=[10], finish_reason="length", finished=True
+        )
+        output.outputs[0].aux_output_keys = keys
+        yield output
+
+    engine.generate = MagicMock(side_effect=generate)
+    response = await _build_serving_tokens(engine).serve_tokens(
+        GenerateRequest(
+            token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(max_tokens=1),
+            model=MODEL_NAME,
+            stream=stream,
+        )
+    )
+    if stream:
+        chunks = _parse_sse_chunks([chunk async for chunk in response])
+        choices = [
+            choice
+            for chunk in chunks
+            if isinstance(chunk, dict)
+            for choice in chunk["choices"]
+        ]
+        choice = next(choice for choice in choices if choice["finish_reason"])
+    else:
+        assert isinstance(response, GenerateResponse)
+        choice = response.choices[0].model_dump()
+    assert choice["aux_output_keys"] == keys
+    assert "artifact_keys" not in choice
+    assert choice["routed_experts"] is None
+
+
+@pytest.mark.asyncio
 async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     engine = _mock_engine()
 

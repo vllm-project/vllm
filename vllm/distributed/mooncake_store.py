@@ -68,12 +68,12 @@ class MooncakeStoreConfig:
         )
 
     @staticmethod
-    def load_from_config() -> "MooncakeStoreConfig":
-        config_path = os.getenv("MOONCAKE_CONFIG_PATH")
+    def load_from_config(
+        env_var: str = "MOONCAKE_CONFIG_PATH",
+    ) -> "MooncakeStoreConfig":
+        config_path = os.getenv(env_var)
         if not config_path:
-            raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
-            )
+            raise ValueError(f"The environment variable '{env_var}' is not set.")
         return MooncakeStoreConfig.from_file(config_path)
 
 

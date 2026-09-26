@@ -235,6 +235,7 @@ class EngineCoreOutput(
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    aux_output_keys: list[str] | None = None
 
     @property
     def finished(self) -> bool:

@@ -188,6 +188,7 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
+        self.aux_output_keys: list[str] | None = None
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
 
         # Stream Interval
@@ -449,6 +450,7 @@ class RequestState:
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            aux_output_keys=self.aux_output_keys if finished else None,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -688,6 +690,10 @@ class OutputProcessor:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
                 )
+            if engine_core_output.aux_output_keys is not None:
+                if req_state.aux_output_keys is None:
+                    req_state.aux_output_keys = []
+                req_state.aux_output_keys.extend(engine_core_output.aux_output_keys)
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
