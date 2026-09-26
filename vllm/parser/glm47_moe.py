@@ -48,14 +48,17 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
+# A plain ``.*?`` here backtracks past the first ``</arg_key>`` to reach the
+# following ``<arg_value>``, absorbing a stray tag into the key. Match runs of
+# non-``<`` text instead, so the group cannot cross its own delimiter.
+_ARG_KEY = r"<arg_key>(?P<key>[^<]*+(?:<(?!/?arg_key>)[^<]*+)*+)(?:</arg_key>\s*)+"
+
 _ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*?)</arg_value>",
+    _ARG_KEY + r"<arg_value>(?P<value>.*?)</arg_value>",
     re.DOTALL,
 )
 _PARTIAL_ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*)$",
+    _ARG_KEY + r"<arg_value>(?P<value>.*)$",
     re.DOTALL,
 )
 
