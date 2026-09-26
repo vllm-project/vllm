@@ -560,6 +560,9 @@ void shm_allreduce_sum(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num) {
     case 4:
       shm_cc_ops::all_reduce_sum_impl<scalar_t, 4>(ctx, data, elem_num);
       break;
+    case 6:
+      shm_cc_ops::all_reduce_sum_impl<scalar_t, 6>(ctx, data, elem_num);
+      break;
     case 8:
       shm_cc_ops::all_reduce_sum_impl<scalar_t, 8>(ctx, data, elem_num);
       break;
@@ -780,26 +783,28 @@ void shm_gather(int64_t handle, torch::Tensor& data,
                 const std::optional<std::vector<torch::Tensor>>& outputs,
                 int64_t dst) {
   TORCH_CHECK(data.is_contiguous())
-  VLLM_DISPATCH_FLOATING_TYPES(data.scalar_type(), "shm_gather_impl", [&] {
-    CPU_KERNEL_GUARD_IN(shm_gather_impl)
+  AT_DISPATCH_ALL_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, data.scalar_type(),
+      "shm_gather_impl", [&] {
+        CPU_KERNEL_GUARD_IN(shm_gather_impl)
 
-    if (outputs.has_value()) {
-      TORCH_CHECK_LE(outputs->size(), MAX_SHM_RANK_NUM);
-      scalar_t* output_ptrs[MAX_SHM_RANK_NUM] = {nullptr};
-      for (int i = 0; i < outputs->size(); ++i) {
-        output_ptrs[i] = outputs->at(i).data_ptr<scalar_t>();
-      }
-      shm_gather_impl(SHMManager::get_singleton_instance(handle)->get_shm_ctx(),
-                      data.data_ptr<scalar_t>(), data.numel(), output_ptrs,
-                      dst);
-    } else {
-      shm_gather_impl(SHMManager::get_singleton_instance(handle)->get_shm_ctx(),
-                      data.data_ptr<scalar_t>(), data.numel(), (scalar_t**)(0),
-                      dst);
-    }
+        if (outputs.has_value()) {
+          TORCH_CHECK_LE(outputs->size(), MAX_SHM_RANK_NUM);
+          scalar_t* output_ptrs[MAX_SHM_RANK_NUM] = {nullptr};
+          for (int i = 0; i < outputs->size(); ++i) {
+            output_ptrs[i] = outputs->at(i).data_ptr<scalar_t>();
+          }
+          shm_gather_impl(
+              SHMManager::get_singleton_instance(handle)->get_shm_ctx(),
+              data.data_ptr<scalar_t>(), data.numel(), output_ptrs, dst);
+        } else {
+          shm_gather_impl(
+              SHMManager::get_singleton_instance(handle)->get_shm_ctx(),
+              data.data_ptr<scalar_t>(), data.numel(), (scalar_t**)(0), dst);
+        }
 
-    CPU_KERNEL_GUARD_OUT(shm_gather_impl)
-  });
+        CPU_KERNEL_GUARD_OUT(shm_gather_impl)
+      });
 }
 
 void shm_all_gather(int64_t handle, const torch::Tensor& data,
@@ -812,19 +817,21 @@ void shm_all_gather(int64_t handle, const torch::Tensor& data,
   TORCH_CHECK_EQ(output_elem_num % input_elem_num, 0);
   const int world_size = output_elem_num / input_elem_num;
 
-  VLLM_DISPATCH_FLOATING_TYPES(data.scalar_type(), "shm_all_gather_impl", [&] {
-    CPU_KERNEL_GUARD_IN(shm_all_gather_impl)
-    auto ctx = SHMManager::get_singleton_instance(handle)->get_shm_ctx();
-    TORCH_CHECK_EQ(ctx->group_size, world_size);
+  AT_DISPATCH_ALL_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, data.scalar_type(),
+      "shm_all_gather_impl", [&] {
+        CPU_KERNEL_GUARD_IN(shm_all_gather_impl)
+        auto ctx = SHMManager::get_singleton_instance(handle)->get_shm_ctx();
+        TORCH_CHECK_EQ(ctx->group_size, world_size);
 
-    scalar_t* output_ptrs[MAX_SHM_RANK_NUM] = {nullptr};
-    for (int i = 0; i < world_size; ++i) {
-      output_ptrs[i] = output.data_ptr<scalar_t>() + i * input_elem_num;
-    }
-    shm_gather_impl(ctx, data.data_ptr<scalar_t>(), data.numel(), output_ptrs,
-                    ctx->rank);
-    CPU_KERNEL_GUARD_OUT(shm_all_gather_impl)
-  });
+        scalar_t* output_ptrs[MAX_SHM_RANK_NUM] = {nullptr};
+        for (int i = 0; i < world_size; ++i) {
+          output_ptrs[i] = output.data_ptr<scalar_t>() + i * input_elem_num;
+        }
+        shm_gather_impl(ctx, data.data_ptr<scalar_t>(), data.numel(),
+                        output_ptrs, ctx->rank);
+        CPU_KERNEL_GUARD_OUT(shm_all_gather_impl)
+      });
 }
 
 void shm_allreduce(int64_t handle, torch::Tensor& data) {
