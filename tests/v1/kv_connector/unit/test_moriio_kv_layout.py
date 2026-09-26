@@ -661,14 +661,32 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_local_block_ids_longer_than_remote_raises_value_error():
-    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+def test_local_block_ids_longer_than_remote_raises():
+    # A longer local list is a genuine bug here and must fail loudly; the WRITE
+    # producer save path trims lookahead blocks before they reach this layer.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)  # interleaved
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="longer than remote_block_ids"):
         moriio_layout.compute_block_transfer_offsets(
-            "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
+            "layer",
+            cache,
+            worker.layer_to_spec,
+            [1, 3, 6, 7],
+            [4, 5],
+            _remote_meta().num_blocks,
         )
+
+
+def test_shorter_local_block_ids_still_transfers_only_what_decode_allocated():
+    # READ-mode partial transfer keeps its shorter-local behavior.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    short = moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1], [4, 5], _remote_meta().num_blocks
+    )
+    assert len(short[0]) == 1
 
 
 @pytest.mark.parametrize(

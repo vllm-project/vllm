@@ -551,26 +551,31 @@ class MoRIIOConnectorScheduler:
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
-        # add 1 to conservatively account for boundary overlap eg window isn't fully
-        # aligned with blocks.
+        # +1 conservatively covers window/block boundary overlap.
         self.blocks_per_sw = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
-        # In WRITE mode and chunked prefill, we perform the write after the last chunk.
-        # Hence we need to track once we are in the last chunk. We do this by computing
-        # len(block_ids[g]) * block_size[g] for a full attn group g, as hybrid groups
-        # may be clipped and hence not reflect the full sequence length. Here we store
-        # g and block_size[g] for later.
-        self._full_attn_group_idx = 0
-        self._full_attn_block_size = self.block_size
-        for gi, group in enumerate(kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, FullAttentionSpec):
-                self._full_attn_group_idx = gi
-                self._full_attn_block_size = getattr(
-                    group.kv_cache_spec, "block_size", self.block_size
-                )
-                break
+        # Per-group block size over transfer_groups (matching blocks_per_sw and
+        # the connector's block payload), used to clamp each full-attention group
+        # to its prompt length on the WRITE save path.
+        self._group_block_sizes = [
+            getattr(g.kv_cache_spec, "block_size", self.block_size)
+            for g in kv_cache_config.transfer_groups
+        ]
+        # The WRITE-mode prompt-block clamp only covers full-attention groups, so
+        # MoRIIO + speculative decoding is not yet safe on sliding-window /
+        # hybrid models. TODO: lift once SWA + spec is validated end-to-end.
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and vllm_config.speculative_config is not None
+            and any(bps != 0 for bps in self.blocks_per_sw)
+        ):
+            raise NotImplementedError(
+                "MoRIIO with speculative decoding is not yet supported for "
+                "sliding-window / hybrid models: the prompt-block clamp is only "
+                "validated for full-attention KV groups."
+            )
 
         self.host_ip = resolve_host_ip(
             self.kv_transfer_config.kv_connector_extra_config
@@ -1143,6 +1148,45 @@ class MoRIIOConnectorScheduler:
 
             params["do_remote_prefill"] = False
 
+    def _clamp_to_prompt_blocks(self, req: "Request", block_ids: BlockIds) -> BlockIds:
+        """Drop trailing speculative-lookahead blocks the consumer never
+        allocated, keeping each full-attention group's prompt blocks.
+
+        Args:
+            req: Request being saved.
+            block_ids: Per-KV-cache-group local block ids.
+
+        Returns:
+            ``block_ids`` with every full-attention group truncated to
+            ``ceil(num_prompt_tokens / block_size)`` leading blocks;
+            sliding-window groups are left unchanged.
+
+        """
+        clamped = list(block_ids)
+        changed = False
+        for g, group_blocks in enumerate(block_ids):
+            if self.blocks_per_sw[g] != 0:
+                continue
+            num_prompt_blocks = math.ceil(
+                req.num_prompt_tokens / self._group_block_sizes[g]
+            )
+            if len(group_blocks) > num_prompt_blocks:
+                clamped[g] = group_blocks[:num_prompt_blocks]
+                changed = True
+        return clamped if changed else block_ids
+
+    def _is_final_prefill_chunk(
+        self, req: "Request", scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Whether this step completes the prompt.
+
+        ``build_connector_meta`` runs before ``_update_after_schedule``, so
+        ``num_computed_tokens`` excludes the current chunk; add this step's
+        scheduled tokens. Token progress is lookahead-safe unlike block counts.
+        """
+        num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
+        return req.num_computed_tokens + num_scheduled >= req.num_prompt_tokens
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -1156,38 +1200,36 @@ class MoRIIOConnectorScheduler:
             # It places the request metadata into the saving queue.
 
             for i, req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
+                # Non-disagg requests aren't registered here; skip them
+                # instead of KeyError-ing.
+                if req_id not in self._reqs_need_pending_save:
+                    continue
+                req, existing_blocks = self._reqs_need_pending_save[req_id]
+                # The final chunk may allocate no new blocks (the previous chunk
+                # reserved speculative-lookahead slack), so new_block_ids is None;
+                # still fall through to the final-chunk check below.
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
-
                 if new_block_ids is not None:
-                    # A non-disagg request (no kv_transfer_params, e.g. smoke
-                    # test) is never registered in _reqs_need_pending_save;
-                    # indexing it unconditionally would KeyError and crash the
-                    # EngineCore. Skip it silently.
-                    if req_id not in self._reqs_need_pending_save:
-                        continue
-                    req, existing_blocks = self._reqs_need_pending_save[req_id]
-                    updated_blocks = [
+                    existing_blocks = [
                         existing_blocks[g] + new_block_ids[g]
                         for g in range(len(new_block_ids))
                     ]
-                    self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    saved_tokens = (
-                        len(updated_blocks[self._full_attn_group_idx])
-                        * self._full_attn_block_size
-                    )
-                    if saved_tokens >= req.num_prompt_tokens:
-                        # Final chunk: live kv_transfer_params may be cleared,
-                        # so prefer the snapshot from update_state_after_alloc.
-                        kv_params = self._req_kv_params.pop(
-                            req_id, req.kv_transfer_params or {}
-                        )
-                        meta.add_new_req(
-                            request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
-                            kv_transfer_params=kv_params,
-                            write_mode=True,
-                        )
-                        del self._reqs_need_pending_save[req_id]
+                    self._reqs_need_pending_save[req_id] = (req, existing_blocks)
+                if not self._is_final_prefill_chunk(req, scheduler_output):
+                    continue
+                # Live kv_transfer_params may be cleared; prefer the
+                # update_state_after_alloc snapshot.
+                kv_params = self._req_kv_params.pop(
+                    req_id, req.kv_transfer_params or {}
+                )
+                save_block_ids = self._clamp_to_prompt_blocks(req, existing_blocks)
+                meta.add_new_req(
+                    request_id=req_id,
+                    local_block_ids=save_block_ids,
+                    kv_transfer_params=kv_params,
+                    write_mode=True,
+                )
+                del self._reqs_need_pending_save[req_id]
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -1200,16 +1242,13 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            tokens_covered = (
-                len(block_ids[self._full_attn_group_idx]) * self._full_attn_block_size
-            )
-            if req.num_prompt_tokens > tokens_covered:
-                # not last chunk prefill
+            if not self._is_final_prefill_chunk(req, scheduler_output):
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
+            save_block_ids = self._clamp_to_prompt_blocks(req, block_ids)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
             )
