@@ -2320,10 +2320,7 @@ class Qwen3VLForConditionalGeneration(
             pixel_values = image_input["pixel_values"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual,
-                    pixel_values,
-                    grid_thw.tolist(),
-                    rope_type="rope_3d",
+                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
                 )
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
@@ -2346,10 +2343,7 @@ class Qwen3VLForConditionalGeneration(
             if self.use_data_parallel:
                 grid_thw_list = grid_thw.tolist()
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual,
-                    pixel_values_videos,
-                    grid_thw_list,
-                    rope_type="rope_3d",
+                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
                 )
             else:
                 video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
