@@ -174,6 +174,20 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             },
             "outlines",
         ),
+        # Property *named* patternProperties is not the keyword; multipleOf
+        # still excludes xgrammar, so auto should keep guidance (#58694).
+        (
+            {
+                "type": "object",
+                "properties": {
+                    "patternProperties": {"type": "string"},
+                    "n": {"type": "number", "multipleOf": 3},
+                },
+                "required": ["patternProperties", "n"],
+                "additionalProperties": False,
+            },
+            "guidance",
+        ),
     ],
 )
 def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend):
@@ -185,3 +199,62 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         tokenizer=object(),
     )
     assert params.structured_outputs._backend == expected_backend
+
+
+@pytest.mark.parametrize(
+    "schema, unsupported",
+    [
+        # Property name only — false positive before #58694.
+        (
+            {
+                "type": "object",
+                "properties": {
+                    "patternProperties": {"type": "string"},
+                    "n": {"type": "number", "multipleOf": 3},
+                },
+                "required": ["patternProperties", "n"],
+                "additionalProperties": False,
+            },
+            False,
+        ),
+        ({"const": {"patternProperties": "x"}}, False),
+        (
+            {
+                "type": "string",
+                "$defs": {
+                    "unused": {
+                        "type": "object",
+                        "patternProperties": {"^x": True},
+                    }
+                },
+            },
+            False,
+        ),
+        (
+            {
+                "type": "object",
+                "patternProperties": {"^x": {"type": "string"}},
+            },
+            True,
+        ),
+        (
+            {
+                "$ref": "#/$defs/used",
+                "$defs": {
+                    "used": {
+                        "type": "object",
+                        "patternProperties": {"^x": {"type": "string"}},
+                    }
+                },
+            },
+            True,
+        ),
+    ],
+)
+def test_guidance_pattern_properties_gate(schema, unsupported):
+    """Guidance skips only a real patternProperties keyword on a live schema node."""
+    from vllm.v1.structured_output.backend_guidance import (
+        has_guidance_unsupported_json_features,
+    )
+
+    assert has_guidance_unsupported_json_features(schema) is unsupported

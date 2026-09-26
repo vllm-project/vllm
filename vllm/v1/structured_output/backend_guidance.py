@@ -47,30 +47,91 @@ def _walk_json_for_additional_properties(data: object):
             _walk_json_for_additional_properties(item)
 
 
+# Nested-schema applicator keywords. Literals and $defs/definitions are omitted;
+# definition catalogs are only entered through $ref.
+_SCHEMA_VALUE_KEYS = frozenset(
+    {
+        "additionalItems",
+        "additionalProperties",
+        "contains",
+        "else",
+        "if",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+_SCHEMA_LIST_KEYS = frozenset({"allOf", "anyOf", "items", "oneOf", "prefixItems"})
+_SCHEMA_MAP_KEYS = frozenset({"dependentSchemas", "properties"})
+
+
+def _resolve_local_ref(root: dict[str, Any], ref: str) -> Any | None:
+    """Resolve a same-document `$ref` (`#/a/~1b`). Non-local refs → None."""
+    if not ref.startswith("#"):
+        return None
+    fragment = ref[1:]
+    if fragment in ("", "/"):
+        return root
+    if not fragment.startswith("/"):
+        return None
+
+    node: Any = root
+    for raw in fragment[1:].split("/"):
+        token = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and token in node:
+            node = node[token]
+        elif isinstance(node, list):
+            try:
+                index = int(token)
+            except ValueError:
+                return None
+            if not 0 <= index < len(node):
+                return None
+            node = node[index]
+        else:
+            return None
+    return node
+
+
+def _iter_subschemas(node: dict[str, Any]):
+    """Yield child schemas; skip literals and unreferenced $defs/definitions."""
+    for key, value in node.items():
+        if key in _SCHEMA_VALUE_KEYS:
+            yield value
+        elif key in _SCHEMA_LIST_KEYS:
+            yield from value if isinstance(value, list) else (value,)
+        elif key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
+            yield from value.values()
+
+
 def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
-    """Check if JSON schema contains features unsupported by guidance/llguidance."""
+    """True if a live schema node uses `patternProperties` (unsupported by llguidance).
 
-    def check_object(obj: dict[str, Any]) -> bool:
-        if not isinstance(obj, dict):
+    Property names, const/enum/default/examples, and unreferenced
+    `$defs`/`definitions` do not count. Local `$ref` targets are followed
+    with cycle tracking.
+    """
+
+    def check(node: Any, visited: set[int]) -> bool:
+        if not isinstance(node, dict):
             return False
+        node_id = id(node)
+        if node_id in visited:
+            return False
+        visited.add(node_id)
 
-        # patternProperties is not supported by llguidance
-        if "patternProperties" in obj:
+        if "patternProperties" in node:
             return True
 
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
+        ref = node.get("$ref")
+        if isinstance(ref, str) and check(_resolve_local_ref(schema, ref), visited):
+            return True
 
-        return False
+        return any(check(child, visited) for child in _iter_subschemas(node))
 
-    return check_object(schema)
+    return check(schema, set())
 
 
 def process_for_additional_properties(
