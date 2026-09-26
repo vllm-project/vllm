@@ -364,17 +364,6 @@ class AliceAIModel(Qwen3NextModel):
             float(config.rms_norm_eps),
             prefix=f"{prefix}.attnres_final",
         )
-        spec_config = vllm_config.speculative_config
-        needs_pre_final_hidden = spec_config is not None and spec_config.method == "mtp"
-        if needs_pre_final_hidden:
-            # AliceAI MTP was trained on hidden states before the target's final norm.
-            self._mtp_hidden_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                config.hidden_size,
-                dtype=vllm_config.model_config.dtype,
-            )
-        else:
-            self._mtp_hidden_buffer = None
 
     def _init_residual_bank(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual_bank = hidden_states.new_empty(
@@ -422,9 +411,6 @@ class AliceAIModel(Qwen3NextModel):
         hidden_states = self.attnres_final(
             residual_bank, num_completed_sources, partial
         )
-        if self._mtp_hidden_buffer is not None:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states)
         return self.norm(hidden_states)
 
 
@@ -454,9 +440,6 @@ class AliceAIForCausalLM(Qwen3NextForCausalLM):
             raise NotImplementedError("AliceAI CPU offloading requires UVA")
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, model_cls=AliceAIModel)
-
-    def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
-        return self.model._mtp_hidden_buffer
 
     @classmethod
     def get_mamba_state_dtype_from_config(
