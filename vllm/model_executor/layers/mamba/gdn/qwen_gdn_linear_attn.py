@@ -28,6 +28,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
@@ -43,6 +44,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.utils import bf16_mm_shape_supported
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -59,6 +61,11 @@ from vllm.third_party.flash_linear_attention.ops import (
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import (
+    flashinfer_bf16_mm,
+    is_flashinfer_bf16_gemm_supported,
+)
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -368,6 +375,82 @@ class ChunkGatedDeltaRule(CustomOp):
         return o, final_state
 
 
+# flashinfer's mm_bf16 accepts 1 <= m <= 32.
+_BA_PROJ_MAX_TOKENS = 32
+_BA_PROJ_BACKEND = "auto"
+# cuBLAS has a dedicated GEMV path at one token and is faster there.
+_BA_PROJ_MIN_TOKENS = 2
+# 2 * num_v_heads is 96 or less for every shipped Qwen GDN model.
+_BA_PROJ_MAX_N = 96
+
+
+def _ba_proj_flashinfer_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
+    """Whether flashinfer's bf16 mm is usable and faster for this shape."""
+    return (
+        x.size(0) >= _BA_PROJ_MIN_TOKENS
+        and weight.shape[0] <= _BA_PROJ_MAX_N
+        and bf16_mm_shape_supported(x, weight, None)
+    )
+
+
+def _ba_gemv_eligible(layer, max_tokens: int, lora_enabled: bool) -> bool:
+    """Whether the b/a projection may bypass ``layer``.
+
+    Declines anything the layer applies beyond a plain bf16 matmul. The weight
+    is read last: AWQ/GPTQ layers have no ``weight``.
+    """
+    if max_tokens <= 0 or envs.VLLM_BATCH_INVARIANT or lora_enabled:
+        return False
+    # The cuBLAS heuristic gap this works around is sm_12x only; on sm_10x
+    # cuBLAS already picks a good kernel and flashinfer is 0.93-1.13x.
+    if not current_platform.is_device_capability_family(120):
+        return False
+    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        return False
+    if not is_flashinfer_bf16_gemm_supported(_BA_PROJ_BACKEND):
+        return False
+    if getattr(layer, "bias", None) is not None:
+        return False
+    weight = getattr(layer, "weight", None)
+    return isinstance(weight, torch.Tensor) and weight.dim() == 2
+
+
+def gdn_ba_proj(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    layer_name: LayerNameType,
+    max_tokens: int,
+) -> torch.Tensor:
+    """in_proj_ba, dispatching on the runtime token count.
+
+    A custom op rather than a Python branch: the model is compiled without
+    shape guards, so the branch would be frozen at the tracing shape.
+    """
+    if x.size(0) <= max_tokens and _ba_proj_flashinfer_ok(x, weight):
+        return flashinfer_bf16_mm(x, weight.t(), None, False, _BA_PROJ_BACKEND)
+    forward_context: ForwardContext = get_forward_context()
+    layer = forward_context.no_compile_layers[_resolve_layer_name(layer_name)]
+    out, _ = layer.in_proj_ba(x)
+    return out
+
+
+def gdn_ba_proj_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    layer_name: LayerNameType,
+    max_tokens: int,
+) -> torch.Tensor:
+    return x.new_empty((x.size(0), weight.size(0)))
+
+
+direct_register_custom_op(
+    op_name="gdn_ba_proj",
+    op_func=gdn_ba_proj,
+    mutates_args=[],
+    fake_impl=gdn_ba_proj_fake,
+)
+
+
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
@@ -449,6 +532,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+
+        # cuBLAS picks a degenerate kernel for this narrow-N shape at 2-4
+        # tokens; opt in to flashinfer while M stays that small.
+        self.ba_gemv_max_tokens = min(
+            envs.VLLM_GDN_BA_GEMV_MAX_TOKENS, _BA_PROJ_MAX_TOKENS
+        )
+        self.use_ba_gemv = _ba_gemv_eligible(
+            self.in_proj_ba,
+            self.ba_gemv_max_tokens,
+            lora_enabled=vllm_config.lora_config is not None,
+        )
+        logger.info_once(
+            "GDN ba_gemv: %s (max_tokens=%d, quant=%s)",
+            "enabled" if self.use_ba_gemv else "disabled",
+            self.ba_gemv_max_tokens,
+            type(self.in_proj_ba.quant_method).__name__,
+        )
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -906,7 +1006,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 1: Input Projection
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        if self.use_ba_gemv:
+            ba = torch.ops.vllm.gdn_ba_proj(
+                hidden_states,
+                self.in_proj_ba.weight,
+                _encode_layer_name(self.prefix),
+                self.ba_gemv_max_tokens,
+            )
+        else:
+            ba, _ = self.in_proj_ba(hidden_states)
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
