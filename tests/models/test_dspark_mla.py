@@ -104,6 +104,46 @@ def test_dspark_markov_head_is_replicated(
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("custom", ["available", "unsupported", "absent"])
+@pytest.mark.parametrize("shape", [(3, 8), (2, 3, 8)])
+def test_draft_logits_keep_vocab_order_and_remove_padding(monkeypatch, custom, shape):
+    from vllm.model_executor.layers import logits_processor
+
+    shards = [
+        torch.arange(torch.tensor(shape).prod(), dtype=torch.float32).reshape(shape)
+        + i * 100
+        for i in range(4)
+    ]
+    communicator = SimpleNamespace()
+    if custom != "absent":
+        communicator.custom_all_gather = lambda x: (
+            torch.cat(shards, dim=0) if custom == "available" else None
+        )
+    monkeypatch.setattr(
+        logits_processor,
+        "get_tp_group",
+        lambda: SimpleNamespace(world_size=4, device_communicator=communicator),
+    )
+    monkeypatch.setattr(
+        logits_processor,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=None),
+    )
+    monkeypatch.setattr(
+        logits_processor,
+        "tensor_model_parallel_all_gather",
+        lambda x: torch.cat(shards, dim=-1),
+    )
+    processor = LogitsProcessor(32, org_vocab_size=29)
+    processor.use_all_gather = True
+    head = SimpleNamespace(
+        tp_size=4, quant_method=SimpleNamespace(apply=lambda layer, x, bias: x)
+    )
+    actual = processor(head, shards[0])
+    torch.testing.assert_close(actual, torch.cat(shards, dim=-1)[..., :29])
+
+
+@pytest.mark.cpu_test
 def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
     markov_head_calls = []
     context_kv_proj_calls = []
