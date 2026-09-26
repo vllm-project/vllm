@@ -63,6 +63,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -325,7 +326,8 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
-    def forward(
+    # Cross-attention takes encoder states instead of self-attention metadata.
+    def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
@@ -872,7 +874,7 @@ class WhisperForConditionalGeneration(
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: TokenizerLike,
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
@@ -908,8 +910,8 @@ class WhisperForConditionalGeneration(
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
-    ) -> str | None:
+        tokenizer: TokenizerLike,
+    ) -> str:
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
@@ -1004,6 +1006,7 @@ class WhisperForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         # Split concatenated encoder outputs into one tensor per audio input
         enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        assert enc_output is not None
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
 
@@ -1021,8 +1024,12 @@ class WhisperForConditionalGeneration(
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
 
+        def to_dtype(value: object) -> torch.Tensor:
+            assert isinstance(value, torch.Tensor)
+            return value.to(self.dtype)
+
         if input_features is not None:
-            input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
+            input_features = json_map_leaves(to_dtype, input_features)
 
         return WhisperAudioInputs(input_features=input_features)
 
