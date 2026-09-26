@@ -212,6 +212,11 @@ class Llama3JsonToolParser(ToolParser):
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug("not enough tokens to parse into JSON yet")
+                # If no tool call has started yet, this is not a tool call at all
+                # (e.g. a plain JSON answer that starts with '{') and must be
+                # streamed back as content instead of being dropped.
+                if self.current_tool_id < 0:
+                    return DeltaMessage(content=delta_text)
                 return None
 
             # select as the current tool call the one we're on the state at
