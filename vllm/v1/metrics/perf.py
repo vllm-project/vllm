@@ -1584,7 +1584,14 @@ class ModelMetrics:
                 time.monotonic() - t0,
                 ctx.num_prefill_requests,
                 ctx.num_decode_requests,
-                asdict(ctx),
+                # context_breakdown is dict[str, int] on the wire; the
+                # per-request records ExecutionContext carries since #55624
+                # are lists, and the typed decoder rejects the whole payload
+                # when they ride along (#58596). Filter by type so a future
+                # non-int field cannot take the server down again.
+                {
+                    key: val for key, val in asdict(ctx).items() if isinstance(val, int)
+                },
                 num_flops_breakdown,
                 read_bytes_breakdown,
                 write_bytes_breakdown,

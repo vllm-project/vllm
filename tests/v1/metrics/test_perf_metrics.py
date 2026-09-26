@@ -30,6 +30,7 @@ from vllm.v1.metrics.perf import (
     MLAAttentionMetrics,
     ModelMetrics,
     ParsedArgs,
+    PerfStats,
     SlidingWindowAttentionParser,
     UnembedMetrics,
 )
@@ -1748,3 +1749,58 @@ def test_attention_metrics_per_gpu_layers_sum_to_whole_model():
 
     for key, value in whole.items():
         assert per_gpu[key] * pp_size == pytest.approx(value, rel=1e-9)
+
+
+def test_debug_perf_stats_survive_typed_decoder(monkeypatch):
+    """VLLM_DEBUG_MFU_METRICS=1 stats must survive the typed msgpack decoder.
+
+    ExecutionContext carries per-request records (lists) since #55624; when
+    they rode along in context_breakdown the frontend's typed decoder rejected
+    the payload and the first request took the server down (#58596).
+    """
+    from vllm.v1.core.sched.output import (
+        CachedRequestData,
+        NewRequestData,
+        SchedulerOutput,
+    )
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    monkeypatch.setenv("VLLM_DEBUG_MFU_METRICS", "1")
+
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_hidden_layers=12,
+        vocab_size=32000,
+        intermediate_size=8192,
+    )
+    model_metrics = ModelMetrics(create_mock_vllm_config(hf_config))
+
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_new_reqs.append(
+        NewRequestData(
+            req_id="req-0",
+            prompt_token_ids=[1, 2, 3, 4],
+            mm_features=[],
+            sampling_params=None,
+            pooling_params=None,
+            block_ids=([0],),
+            num_computed_tokens=0,
+            lora_request=None,
+        )
+    )
+    scheduler_output.num_scheduled_tokens["req-0"] = 4
+    scheduler_output.total_num_scheduled_tokens = 4
+    scheduler_output.scheduled_cached_reqs = CachedRequestData.make_empty()
+
+    stats = model_metrics.get_step_perf_stats_per_gpu(scheduler_output)
+    assert stats.debug_stats is not None
+
+    decoded = MsgpackDecoder(PerfStats).decode(MsgpackEncoder().encode(stats))
+    assert decoded.debug_stats is not None
+    assert decoded.debug_stats.context_breakdown is not None
+    assert all(
+        isinstance(v, int)
+        for v in decoded.debug_stats.context_breakdown.values()
+    )
+    assert "requests" not in decoded.debug_stats.context_breakdown
