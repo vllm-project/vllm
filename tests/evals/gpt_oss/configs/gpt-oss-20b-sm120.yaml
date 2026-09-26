@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 model_name: "openai/gpt-oss-20b"
+# DGX Spark's GPU memory is unified with system RAM, so free memory on startup
+# is never close to the reported total. The default utilization of 0.92 asks for
+# more than is ever available and the engine refuses to start.
+server_args: "--gpu-memory-utilization 0.6"
 metric_threshold: 0.568
 reasoning_effort: "low"
