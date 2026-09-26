@@ -1694,6 +1694,29 @@ class TestClientErrorResponses:
             "messages": [{"role": "user", "content": "Hello"}],
         }
 
+    @pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+    @pytest.mark.parametrize("malformed_json", [False, True])
+    def test_request_validation_uses_anthropic_envelope(self, path, malformed_json):
+        """Failures before serving must use the same envelope as route errors."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        app = self._make_api_app(handler)
+        with TestClient(app) as client:
+            # A missing messages field and invalid JSON both bypass the route.
+            content = '{"model":' if malformed_json else '{"model": "test-model"}'
+            response = client.post(
+                path, content=content, headers={"Content-Type": "application/json"}
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert set(body["error"]) == {"type", "message"}
+        expected = "JSON decode error" if malformed_json else "messages"
+        assert expected in body["error"]["message"]
+        handler.create_messages.assert_not_awaited()
+        handler.count_tokens.assert_not_awaited()
+
     @staticmethod
     def _conversion_error() -> ValidationError:
         """A real pydantic ValidationError like the one ChatCompletionRequest
