@@ -24,6 +24,11 @@ pub enum ApiError {
     JsonParseError { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
+    /// The requested endpoint is not yet implemented in this frontend.
+    NotImplemented {
+        message: String,
+        param: Option<&'static str>,
+    },
 }
 
 impl ApiError {
@@ -34,6 +39,7 @@ impl ApiError {
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
         }
     }
 
@@ -64,6 +70,12 @@ impl ApiError {
                 error_type: "invalid_request_error".to_string(),
                 param: None,
                 code: Some("json_parse_error".to_string()),
+            },
+            Self::NotImplemented { message, param } => ErrorDetail {
+                message: message.clone(),
+                error_type: "not_implemented_error".to_string(),
+                param: param.map(|p| p.to_string()),
+                code: Some("not_implemented".to_string()),
             },
         };
 
