@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
@@ -673,8 +672,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
-        # Decoder-side SWA bounded replay: the layers past the last KV source
-        # prefill only each request's trailing window (decoder_replay_layers.py).
+        # Decoder-side SWA bounded replay: in eager prefill steps the layers past
+        # the last KV source run on each request's trailing window only
+        # (decoder_replay_layers.py).
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
         cut = max(config.kv_source_layer_ids)
@@ -687,7 +687,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
-                self._new_replay_outputs,
                 [
                     buf
                     for buf in (self.topk_indices_buffer, self.candidate_block_buffer)
@@ -695,8 +694,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 ],
             )
             logger.info_once(
-                "Decoder SWA bounded replay: layers %d-%d prefill only each "
-                "request's last %d tokens.",
+                "Decoder SWA bounded replay: in eager prefill steps, layers "
+                "%d-%d run on each request's last %d tokens only.",
                 cut + 1,
                 self.end_layer - 1,
                 config.sliding_window,
@@ -1058,31 +1057,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
         )
 
-    def _new_replay_outputs(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        input_ids: torch.Tensor | None,
-        pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """Zeroed outputs of ``_run_replay_layers`` for these inputs. The aux
-        layers are set after construction, by the speculator."""
-        num_aux = sum(
-            layer_id >= self.decoder_replay_start
-            for layer_id in self.aux_hidden_state_layers
-        )
-        return (
-            torch.zeros_like(residual),
-            torch.zeros_like(pre_mix),
-            *(
-                residual.new_zeros((residual.shape[0], self.config.hidden_size))
-                for _ in range(num_aux)
-            ),
-        )
-
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
         """Whether this rank may trim the layers after ``cut``; warns when not."""
         parallel_config = vllm_config.parallel_config
@@ -1108,14 +1082,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         elif any(i > cut for i in getattr(self.config, "engram_layer_ids", ())):
             reason = "an Engram layer sits after the last KV source layer"
-        elif (
-            vllm_config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
-            and not is_breakable_cudagraph_enabled()
-        ):
-            reason = (
-                "the replay layers run eagerly, which under piecewise CUDA graphs "
-                "needs breakable captures (VLLM_USE_BREAKABLE_CUDAGRAPH=1)"
-            )
         elif draft_config is not None and (
             draft_window is None
             or draft_window > window
