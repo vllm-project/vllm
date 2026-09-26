@@ -152,11 +152,16 @@ steps:
       commands:
       - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
+# Each heavy test has its own subdirectory and named job; cudagraph/ runs in
+# the CUDAGraph Compatibility step below. The Smoke job runs every test file
+# at the compile/fullgraph/ root, so new root files run there by default. Each
+# file runs in its own pytest process to avoid
+# https://github.com/vllm-project/vllm/issues/28965.
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness Granite Inductor"
   device: h200_35gb
-  key: pytorch-fullgraph-test
-  timeout_in_minutes: 90
-  source_file_dependencies:
+  key: pytorch-fullgraph-basic-correctness-granite-inductor
+  timeout_in_minutes: 30
+  source_file_dependencies: &pytorch-fullgraph-deps
   - vllm/__init__.py
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
@@ -185,17 +190,93 @@ steps:
   - tests/compile
   - csrc/
   commands:
-  # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
-  # as it is a heavy test that is covered in other steps.
-  # Use `find` to launch multiple instances of pytest so that
-  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  - pytest -s -v compile/fullgraph/basic_correctness/granite_inductor
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) PyTorch Fullgraph"
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness Granite Inductor"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 90
+      timeout_in_minutes: 20
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness BGE Multilingual Gemma2 Inductor"
+  device: h200_35gb
+  key: pytorch-fullgraph-basic-correctness-bge-multilingual-gemma2-inductor
+  timeout_in_minutes: 30
+  source_file_dependencies: *pytorch-fullgraph-deps
+  commands:
+  - pytest -s -v compile/fullgraph/basic_correctness/bge_inductor
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness BGE Multilingual Gemma2 Inductor"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 20
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Basic Correctness Eager"
+  device: h200_35gb
+  key: pytorch-fullgraph-basic-correctness-eager
+  timeout_in_minutes: 25
+  source_file_dependencies: *pytorch-fullgraph-deps
+  commands:
+  - pytest -s -v compile/fullgraph/basic_correctness/eager
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Basic Correctness Eager"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 20
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Full Graph Models"
+  device: h200_35gb
+  key: pytorch-fullgraph-full-graph
+  timeout_in_minutes: 40
+  source_file_dependencies: *pytorch-fullgraph-deps
+  commands:
+  - pytest -s -v compile/fullgraph/full_graph
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Full Graph Models"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 30
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Smoke"
+  device: h200_35gb
+  key: pytorch-fullgraph-smoke
+  timeout_in_minutes: 30
+  source_file_dependencies: *pytorch-fullgraph-deps
+  commands:
+  - "find compile/fullgraph/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph Smoke"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 20
       # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
       # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
       env:
@@ -239,7 +320,7 @@ steps:
   - vllm/v1/
   - tests/compile
   commands:
-  - pytest -s -v compile/fullgraph/test_full_cudagraph.py
+  - pytest -s -v compile/fullgraph/cudagraph
 
 - label: ":nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check"
   key: pytorch-nightly-dependency-override-check
