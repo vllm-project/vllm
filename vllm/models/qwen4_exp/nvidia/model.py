@@ -75,6 +75,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from ..common.mtp import make_mtp_hidden_buffer
 from ..config import ATTENTION_LAYER_TYPES, QSA_LAYER_TYPE, Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
@@ -442,25 +443,11 @@ class Qwen4ExpModel(nn.Module):
         else:
             self.hyper_connection_mixer = None
 
-        spec_config = vllm_config.speculative_config
-        # MTP HC multi-stream outputs: when speculative method=="mtp" and the
-        # model uses HC with hc_count>1, retain the pre-final-mixer multi-stream
-        # hidden state [T, hc_count*H] so the MTP drafter can feed a real
-        # multi-stream backbone hidden on its first step (scheme A). Derived
-        # purely from config (NOT node identity) so P/D nodes stay consistent.
-        needs_mtp_hidden = (
-            spec_config is not None
-            and getattr(spec_config, "method", None) == "mtp"
-            and get_pp_group().is_last_rank
+        self._mtp_hidden_buffer = make_mtp_hidden_buffer(
+            vllm_config,
+            config,
+            is_last_rank=get_pp_group().is_last_rank,
         )
-        if needs_mtp_hidden:
-            self._mtp_hidden_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                config.hc_count * config.hidden_size,
-                dtype=vllm_config.model_config.dtype,
-            )
-        else:
-            self._mtp_hidden_buffer = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

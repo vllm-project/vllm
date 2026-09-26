@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+import vllm.model_executor.warmup.qwen_triton_warmup as qwen_triton_warmup_module
 from vllm.model_executor.warmup.qwen_triton_warmup import (
     _FLA_POST_CONV_WARMUP_LENGTHS,
     _QwenGDNWarmupConfig,
@@ -53,3 +56,57 @@ def test_qwen_gdn_prefill_warmup_kernels_compile_on_gpu() -> None:
     _warm_fused_post_conv_kernel(device, config)
     assert _FLA_POST_CONV_WARMUP_LENGTHS == (1, 2, 16)
     torch.accelerator.synchronize(device)
+
+
+def _warmup_runner() -> SimpleNamespace:
+    return SimpleNamespace(
+        device=torch.device("cpu"),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        max_num_tokens=1,
+        is_pooling_model=False,
+    )
+
+
+def _warmup_model_config(model_type: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type=model_type),
+        hf_config=SimpleNamespace(model_type=model_type),
+        dtype=torch.bfloat16,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "dispatched"),
+    [
+        ("qwen4_exp", True),
+        ("qwen4_exp_text", True),
+        ("qwen3_next", True),
+        # The drafter never reaches this warmup: the worker passes its own
+        # model_config, which is the target's.
+        ("qwen4_exp_mtp", False),
+        ("llama", False),
+    ],
+)
+def test_qwen_triton_warmup_dispatch_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    model_type: str,
+    dispatched: bool,
+) -> None:
+    """Which model types reach the Qwen Triton warmup at all.
+
+    Stops at the gate: the kernels themselves need a GPU and are covered by the
+    CUDA test above.
+    """
+    reached: list[object] = []
+
+    def _record(static_forward_context: object) -> None:
+        reached.append(static_forward_context)
+        return None
+
+    monkeypatch.setattr(qwen_triton_warmup_module, "_qwen_gdn_warmup_config", _record)
+
+    qwen_triton_warmup_module.qwen_triton_warmup(
+        _warmup_runner(), _warmup_model_config(model_type)
+    )
+
+    assert bool(reached) is dispatched
