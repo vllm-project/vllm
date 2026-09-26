@@ -263,12 +263,6 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # The ROCm flattened-query support above is validated for the
-        # DeepSeek-V4 adaptive DSpark path only.
-        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
-
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
@@ -822,7 +816,10 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_rocm()
         and model_config is not None
-        and "DeepseekV4ForCausalLM" in model_config.architectures
+        and (
+            "DeepseekV4ForCausalLM" in model_config.architectures
+            or "DeepseekV41ForCausalLM" in model_config.architectures
+        )
     )
 
 

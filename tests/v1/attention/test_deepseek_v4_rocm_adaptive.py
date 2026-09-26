@@ -10,6 +10,10 @@ from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4ROCMAiterMLASparseMetadataBuilder,
     DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
 )
+from vllm.models.deepseek_v41.amd import rocm as v41_rocm
+from vllm.models.deepseek_v41.amd.rocm import (
+    DeepseekV41ROCMAiterMLASparseMetadataBuilder,
+)
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.attention.backends.mla.indexer import (
@@ -51,7 +55,7 @@ def _make_indexer_builder(*, adaptive: bool, capacity: int = 12):
 
 
 @pytest.mark.cpu_test
-def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
+def test_deepseek_rocm_adaptive_builders_support_varlen_full_graphs():
     adaptive_config = SimpleNamespace(
         speculative_config=SimpleNamespace(enable_adaptive_verification=True)
     )
@@ -62,6 +66,8 @@ def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
     for builder_cls in (
         DeepseekV4ROCMAiterMLASparseMetadataBuilder,
         DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+        DeepseekV41ROCMAiterMLASparseMetadataBuilder,
+        v41_rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
     ):
         assert (
             builder_cls.get_cudagraph_support(adaptive_config, SimpleNamespace())
@@ -74,20 +80,25 @@ def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
 
 
 @pytest.mark.cpu_test
-def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    ("architecture", "backend_cls"),
+    [
+        ("DeepseekV4ForCausalLM", DeepseekV4IndexerBackend),
+        ("DeepseekV41ForCausalLM", DeepseekV41IndexerBackend),
+    ],
+)
+def test_deepseek_rocm_adaptive_indexer_support(
+    monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+    backend_cls: type[DeepseekV4IndexerBackend],
+):
     _mock_rocm_platform(monkeypatch)
-    adaptive_config = _make_indexer_config(
-        architecture="DeepseekV4ForCausalLM", adaptive=True
-    )
-    fixed_config = _make_indexer_config(
-        architecture="DeepseekV4ForCausalLM", adaptive=False
-    )
+    adaptive_config = _make_indexer_config(architecture=architecture, adaptive=True)
+    fixed_config = _make_indexer_config(architecture=architecture, adaptive=False)
 
-    assert DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch()
+    assert backend_cls.supports_device_cpu_query_lens_mismatch()
     assert indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
-    assert (
-        DeepseekV4IndexerBackend.get_builder_cls() is DeepseekV32IndexerMetadataBuilder
-    )
+    assert backend_cls.get_builder_cls() is DeepseekV32IndexerMetadataBuilder
     assert indexer._use_flattening(adaptive_config)
     assert (
         DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
@@ -107,9 +118,9 @@ def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPat
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "architecture",
-    ["DeepseekV32ForCausalLM", "DeepseekV41ForCausalLM", "GlmMoeDsaForCausalLM"],
+    ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"],
 )
-def test_rocm_adaptive_indexer_flattening_is_scoped_to_deepseek_v4(
+def test_rocm_adaptive_indexer_flattening_rejects_other_architectures(
     monkeypatch: pytest.MonkeyPatch,
     architecture: str,
 ):
@@ -124,9 +135,6 @@ def test_rocm_adaptive_indexer_flattening_is_scoped_to_deepseek_v4(
         )
         == AttentionCGSupport.UNIFORM_BATCH
     )
-
-    if architecture == "DeepseekV41ForCausalLM":
-        assert not DeepseekV41IndexerBackend.supports_device_cpu_query_lens_mismatch()
 
 
 @pytest.mark.cpu_test
