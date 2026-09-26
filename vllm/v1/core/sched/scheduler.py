@@ -2092,6 +2092,7 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
+            new_sampled_logprobs = None
             new_sampling_mask = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
@@ -2180,7 +2181,12 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.num_logprobs is not None
                 and logprobs
             ):
-                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+                if request.sampling_params.sampled_logprobs_only:
+                    new_sampled_logprobs = logprobs.sampled_logprobs(
+                        req_index, len(new_token_ids)
+                    )
+                else:
+                    new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
@@ -2202,6 +2208,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
+                        new_sampled_logprobs=new_sampled_logprobs,
                         new_sampling_mask=new_sampling_mask,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,

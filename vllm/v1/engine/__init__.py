@@ -236,6 +236,11 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    # Sampled-token logprob per new token for requests with
+    # ``sampled_logprobs_only``; replaces ``new_logprobs`` for them. Appended
+    # last so `array_like` positional serialization stays compatible.
+    new_sampled_logprobs: list[float] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

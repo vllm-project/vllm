@@ -67,6 +67,9 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    # Sampled-token logprob per generated token for requests that set
+    # ``SamplingParams.sampled_logprobs_only``; ``logprobs`` is None then.
+    sampled_logprobs: list[float] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None

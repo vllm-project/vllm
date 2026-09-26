@@ -64,3 +64,52 @@ def test_accepts_exactly_sized_row():
 
     pos = processor.logprobs[0]
     assert set(pos.keys()) == {7, 11, 13}
+
+
+def test_sampled_logprobs_only_keeps_a_float_list_and_no_entries():
+    """``sampled_logprobs_only`` requests receive one float per token from
+    the scheduler and never build Logprob entries or detokenize."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+
+    params = SamplingParams(logprobs=0, sampled_logprobs_only=True)
+    request = EngineCoreRequest(
+        request_id="r",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    processor = LogprobsProcessor.from_new_request(tokenizer=None, request=request)
+    assert processor.logprobs is None
+    assert processor.sampled_logprobs == []
+    assert processor.cumulative_logprob == 0.0
+
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="r", new_token_ids=[7, 8], new_sampled_logprobs=[-0.5, -1.25]
+        )
+    )
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="r", new_token_ids=[9], new_sampled_logprobs=[-0.25]
+        )
+    )
+    assert processor.sampled_logprobs == [-0.5, -1.25, -0.25]
+    assert processor.cumulative_logprob == -2.0
+    assert processor.logprobs is None
+
+
+def test_sampled_logprobs_only_requires_logprobs_zero():
+    import pytest
+
+    from vllm.sampling_params import SamplingParams
+
+    with pytest.raises(ValueError, match="sampled_logprobs_only"):
+        SamplingParams(logprobs=2, sampled_logprobs_only=True)
+    with pytest.raises(ValueError, match="sampled_logprobs_only"):
+        SamplingParams(sampled_logprobs_only=True)
