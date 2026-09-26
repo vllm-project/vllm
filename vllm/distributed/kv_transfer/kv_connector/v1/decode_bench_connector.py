@@ -322,6 +322,13 @@ class DecodeBenchConnectorScheduler:
         """
         req_id = request.request_id
 
+        # Allocation succeeded, so this request has completed its one allowed
+        # synthetic-prefill lookup even when there were no prompt tokens to
+        # fill. In particular, a one-token prompt reports zero external tokens.
+        # Remembering that zero-token fill prevents a later preemption from
+        # treating generated output as a new prompt and overwriting its KV.
+        self._filled_requests.add(req_id)
+
         if num_external_tokens == 0:
             return
 

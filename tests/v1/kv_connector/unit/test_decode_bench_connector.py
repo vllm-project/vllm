@@ -589,11 +589,20 @@ def test_decode_bench_connector_single_token():
     # Should not fill anything (need at least 2 tokens: 1 to fill, 1 to decode)
     token_ids = [1]
 
-    runner.new_request(token_ids)
+    request = runner.new_request(token_ids)
 
     # Run step - should NOT fill KV cache
     _, metadata = runner.run_single_step()
     assert len(metadata.reqs_to_fill) == 0
+
+    # A one-token prompt still completes the connector's one-time lookup.
+    # If the request is later preempted, its generated tokens must not be
+    # mistaken for a new synthetic prompt and filled with dummy KV.
+    assert request.num_tokens > 1
+    assert runner.scheduler_connector.get_num_new_matched_tokens(request, 0) == (
+        0,
+        False,
+    )
 
 
 def test_decode_bench_connector_two_tokens():
