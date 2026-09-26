@@ -16,7 +16,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
@@ -95,13 +95,47 @@ def _create_vllm_config_for_dsd(
     ]
     + [
         pytest.param(3, True, "real-prefill", False, id="same-shape-real-prefill"),
-        pytest.param(3, True, "recurrent", False, id="recurrent-target"),
+        pytest.param(3, False, "recurrent", True, id="cached-recurrent-tail"),
+        pytest.param(
+            3, True, "recurrent", True, id="cached-recurrent-tail-with-decode"
+        ),
+        pytest.param(
+            3, True, "resumed-recurrent", True, id="resumed-cached-recurrent-tail"
+        ),
         pytest.param(
             3, True, "uncached-recurrent", False, id="uncached-recurrent-tail"
         ),
-        pytest.param(3, True, "attention-free", False, id="attention-free-target"),
-        pytest.param(3, True, "recurrent-draft", False, id="recurrent-draft"),
-        pytest.param(3, True, "attention-free-draft", False, id="attention-free-draft"),
+        pytest.param(
+            3,
+            True,
+            "uncached-resumed-recurrent",
+            False,
+            id="resumed-uncached-recurrent-tail",
+        ),
+        pytest.param(
+            3, True, "attention-free", True, id="cached-attention-free-target"
+        ),
+        pytest.param(3, True, "recurrent-draft", True, id="cached-recurrent-draft"),
+        pytest.param(
+            3, True, "attention-free-draft", True, id="cached-attention-free-draft"
+        ),
+        pytest.param(
+            3,
+            True,
+            "uncached-attention-free",
+            False,
+            id="uncached-attention-free-target",
+        ),
+        pytest.param(
+            3, True, "uncached-recurrent-draft", False, id="uncached-recurrent-draft"
+        ),
+        pytest.param(
+            3,
+            True,
+            "uncached-attention-free-draft",
+            False,
+            id="uncached-attention-free-draft",
+        ),
         pytest.param(3, True, "adaptive", False, id="adaptive-layout"),
         pytest.param(3, True, "pcp", False, id="pcp-layout"),
         pytest.param(3, True, "multiple-bonus", False, id="multiple-bonus-tokens"),
@@ -182,7 +216,29 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
         output.num_scheduled_tokens["decode"] -= 1
         output.scheduled_spec_decode_tokens["decode"].pop()
     output.total_num_scheduled_tokens = sum(output.num_scheduled_tokens.values())
-    prompt_len = 1 if case in ("uncached-tail", "uncached-recurrent") else 4096
+    prompt_len = 1 if case.startswith("uncached-") else 4096
+    output.scheduled_new_reqs = [
+        NewRequestData(
+            req_id="tail",
+            prompt_token_ids=[1] * prompt_len,
+            mm_features=[],
+            sampling_params=None,
+            pooling_params=None,
+            block_ids=([],),
+            num_computed_tokens=prompt_len - remaining_prompt_tokens,
+            lora_request=None,
+        )
+    ]
+    if mixed:
+        output.scheduled_cached_reqs.req_ids.append("decode")
+        output.scheduled_cached_reqs.num_computed_tokens.append(100)
+    if "resumed" in case:
+        output.scheduled_new_reqs.clear()
+        output.scheduled_cached_reqs.req_ids.append("tail")
+        output.scheduled_cached_reqs.resumed_req_ids.add("tail")
+        output.scheduled_cached_reqs.num_computed_tokens.append(
+            prompt_len - remaining_prompt_tokens
+        )
 
     runner = object.__new__(GPUModelRunner)
     for method in (
@@ -205,13 +261,13 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
     runner.speculative_config = SimpleNamespace(
         num_speculative_tokens=k,
         draft_model_config=SimpleNamespace(
-            is_hybrid=case == "recurrent-draft",
-            is_attention_free=case == "attention-free-draft",
+            is_hybrid=case.endswith("recurrent-draft"),
+            is_attention_free=case.endswith("attention-free-draft"),
         ),
     )
     runner.model_config = SimpleNamespace(
-        is_hybrid=case in ("recurrent", "uncached-recurrent"),
-        is_attention_free=case == "attention-free",
+        is_hybrid="recurrent" in case and not case.endswith("draft"),
+        is_attention_free=case.endswith("attention-free"),
     )
     runner.model_state = SimpleNamespace(
         num_new_sampled_tokens_per_step=2 if case == "multiple-bonus" else 1

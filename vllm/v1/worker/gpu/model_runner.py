@@ -1254,14 +1254,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
+        has_prefill_for_dispatch = (
+            batch_state.has_prefill
+            and not self._can_run_padded_prompt_tail_as_decode(scheduler_output)
+        )
         return batch_state, get_uniform_decode_token_count(
             num_reqs,
             num_toks,
             max_query_len,
-            has_prefill=(
-                batch_state.has_prefill
-                and not self._can_run_padded_prompt_tail_as_decode(scheduler_output)
-            ),
+            has_prefill=has_prefill_for_dispatch,
         )
 
     def _can_run_padded_prompt_tail_as_decode(
@@ -1277,14 +1278,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             return False
 
-        # Recurrent models need state-aware admission: uncached prompt tails
-        # still require prefill kernels even when their query shape matches.
+        # A one-token uncached prompt can also be padded alongside running
+        # decodes. Recurrent backends still need prefill state initialization.
         if any(
             config.is_hybrid or config.is_attention_free
             for config in (
                 self.model_config,
                 self.speculative_config.draft_model_config,
             )
+        ) and (
+            any(
+                req.num_computed_tokens == 0
+                for req in scheduler_output.scheduled_new_reqs
+            )
+            or 0 in scheduler_output.scheduled_cached_reqs.num_computed_tokens
         ):
             return False
 
