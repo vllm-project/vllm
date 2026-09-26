@@ -20,16 +20,16 @@ or just on the low or high end.
 
 | Fusion                                                                         | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Fullgraph | `num_tokens` |
 | ------------------------------------------------------------------------------ | ---------------------------- | ---------------------------------------------- | ------------------------------ | ------------------ | --------- | ------------ |
-| [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
-| [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
-| [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
-| [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
+| [AllReduce + RMSNorm](#allreduce-rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
+| [Attention + Quant](#attention-quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
+| [MLA Attention + Quant](#attention-quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
+| [RoPE + KV-Cache Update](#rope-kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
+| [QK Norm + RoPE](#qk-norm-rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
-| [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
-| [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
-| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
-| [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
+| [AsyncTP GEMM + collective](#asynctp-gemm-collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
+| [RMSNorm + Quant](#rmsnorm-quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
+| [SiLU+Mul + Quant](#silumul-quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
+| [RMSNorm + Padding](#rmsnorm-padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
 | [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
 
 ## Support Matrix
@@ -53,7 +53,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_mla_dual_rms_norm`     | —                                        | —                                        | —                                        | —             | BF16                                     |
 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
-fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
+fused quantization output. See the [`fuse_attn_quant` section](#attention-quantization-fuse_attn_quant)
 for per-backend details.
 
 † `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
