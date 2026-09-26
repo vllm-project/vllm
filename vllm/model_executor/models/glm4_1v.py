@@ -1878,10 +1878,7 @@ class Glm4vForConditionalGeneration(
             pixel_values = image_input["pixel_values"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual,
-                    pixel_values,
-                    grid_thw.tolist(),
-                    rope_type="rope_3d",
+                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
                 )
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
