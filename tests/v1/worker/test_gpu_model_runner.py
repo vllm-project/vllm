@@ -482,6 +482,39 @@ def test_preferred_block_size_rejects_backends_with_no_common_size():
         Platform._preferred_block_size_for_backends(classes, 16, None)
 
 
+def test_kernel_block_granularity_is_the_lcm():
+    # 24 is not a multiple of 16, so a max()-based regression returns 24.
+    a, b = _mock_backend([MultipleOf(16)]), _mock_backend([24])
+    assert Platform._kernel_block_granularity([a, b]) == 48
+    assert Platform._kernel_block_granularity([a]) == 16
+
+
+@pytest.mark.parametrize("cpu", [False, True])
+def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
+    # Alignment that lands on a size an exact-size sibling rejects must fail
+    # here, not later in select_common_block_size().
+    backends = [_mock_backend([MultipleOf(16)]), _mock_backend([16], exact=True)]
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
+    )
+
+    def bump(cls, vllm_config, backend_classes):
+        vllm_config.cache_config.block_size = 32
+
+    monkeypatch.setattr(Platform, "_align_hybrid_block_size", classmethod(bump))
+    cache_config = SimpleNamespace(
+        block_size=16, user_specified_block_size=True, kv_cache_dtype_skip_layers=None
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config, model_config=SimpleNamespace(is_hybrid=True)
+    )
+    from vllm.platforms.cpu import CpuPlatform  # overrides the method; must check too
+
+    platform = CpuPlatform if cpu else Platform
+    with pytest.raises(ValueError, match="MOCK_EXACT"):
+        platform.update_block_size_for_backend(vllm_config)
+
+
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
     model.get_mm_lora_token_counts.side_effect = (
