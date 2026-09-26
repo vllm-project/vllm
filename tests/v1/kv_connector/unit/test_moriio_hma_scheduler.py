@@ -653,7 +653,7 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=2)
     # Pure-attention WRITE: no N-1 drop; full length minus already-computed.
@@ -661,23 +661,33 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     assert is_async is True
 
 
+def test_get_num_new_matched_tokens_write_without_remote_prefill_is_noop():
+    sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.WRITE, _has_mamba=False)
+    req = SimpleNamespace(
+        num_prompt_tokens=10,
+        prompt_token_ids=list(range(10)),
+        kv_transfer_params=None,
+    )
+    assert sched.get_num_new_matched_tokens(req, num_computed_tokens=2) == (0, False)
+
+
 @pytest.mark.parametrize(
-    ("mode", "num_computed_tokens", "expected", "is_async"),
+    ("mode", "num_computed_tokens", "expected", "is_async", "params"),
     [
-        (MoRIIOMode.READ, 0, 9, False),
-        (MoRIIOMode.READ, 10, 0, False),
-        (MoRIIOMode.WRITE, 2, 8, True),
+        (MoRIIOMode.READ, 0, 9, False, None),
+        (MoRIIOMode.READ, 10, 0, False, None),
+        (MoRIIOMode.WRITE, 2, 8, True, {"do_remote_prefill": True}),
     ],
 )
 def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
-    mode, num_computed_tokens, expected, is_async
+    mode, num_computed_tokens, expected, is_async, params
 ):
     sched = _FakeScheduler(is_producer=False, mode=mode, _has_mamba=True)
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=None,
         prompt_embeds=object(),
-        kv_transfer_params=None,
+        kv_transfer_params=params,
     )
 
     assert sched.get_num_new_matched_tokens(req, num_computed_tokens) == (
