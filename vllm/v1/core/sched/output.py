@@ -55,6 +55,10 @@ class NewRequestData:
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
+    mamba_checkpoint_position: int | None = None
+    mamba_checkpoint_source_block_ids: tuple[int, ...] | None = None
+    mamba_prefix_producer_id: str | None = None
+
     @classmethod
     def from_request(
         cls,
@@ -80,6 +84,9 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            mamba_checkpoint_position=request.mamba_checkpoint_position,
+            mamba_checkpoint_source_block_ids=request.mamba_checkpoint_source_block_ids,
+            mamba_prefix_producer_id=request.mamba_prefix_producer_id,
         )
 
     @property
@@ -309,6 +316,8 @@ class SchedulerOutput:
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
+
+    mamba_prefix_producer_ids: dict[str, str] | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
