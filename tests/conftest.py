@@ -363,6 +363,17 @@ def _fix_v4_tied_weights_keys(model_cls: type) -> None:
         setattr(model_cls, "_tied_weights_keys", result)
 
 
+@contextlib.contextmanager
+def _hf_deterministic_algorithms_on_xpu():
+    old_value = torch.are_deterministic_algorithms_enabled()
+    if current_platform.is_xpu():
+        torch.use_deterministic_algorithms(True)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(old_value)
+
+
 class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
@@ -881,15 +892,16 @@ class HfRunner:
         for inputs in all_inputs:
             generate_kwargs = dict(kwargs)
             generate_kwargs.setdefault("tokenizer", self.tokenizer)
-            output: "GenerateOutput" = self.model.generate(
-                **self.wrap_device(inputs),
-                use_cache=use_cache,
-                do_sample=False,
-                max_new_tokens=max_tokens,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
-                **generate_kwargs,
-            )
+            with _hf_deterministic_algorithms_on_xpu():
+                output: "GenerateOutput" = self.model.generate(
+                    **self.wrap_device(inputs),
+                    use_cache=use_cache,
+                    do_sample=False,
+                    max_new_tokens=max_tokens,
+                    output_hidden_states=True,
+                    return_dict_in_generate=True,
+                    **generate_kwargs,
+                )
 
             # Encoder-decoder models return decoder_hidden_states instead of
             # hidden_states
