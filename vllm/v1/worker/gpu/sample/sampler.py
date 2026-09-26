@@ -82,6 +82,7 @@ class Sampler:
         self.trace_replay_state = (
             TraceReplayState(req_states) if enable_trace_replay else None
         )
+        self.needs_stored_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
@@ -94,13 +95,23 @@ class Sampler:
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
-        needs_processing |= self.thinking_budget_state.add_request(
+        states = self.sampling_states
+        needs_processing = states.add_request(req_idx, sampling_params)
+        # Temperature and min_p never rewrite the stored logits; top-k/top-p
+        # and the stages below do.
+        needs_stored_processing = needs_processing and bool(
+            states.top_k.np[req_idx] != states.vocab_size
+            or states.top_p.np[req_idx] != 1.0
+        )
+        needs_stored_processing |= self.thinking_budget_state.add_request(
             req_idx, sampling_params
         )
         for processor in self.logits_processors:
-            needs_processing |= processor.add_request(req_idx, sampling_params)
-        self.needs_logits_processing[req_idx] = needs_processing
+            needs_stored_processing |= processor.add_request(req_idx, sampling_params)
+        self.needs_stored_logits_processing[req_idx] = needs_stored_processing
+        self.needs_logits_processing[req_idx] = (
+            needs_processing or needs_stored_processing
+        )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -231,12 +242,18 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         skip_top_k_top_p: bool = False,
+        use_head_dtype: bool = False,
     ) -> torch.Tensor:
-        if not np.any(self.needs_logits_processing[idx_mapping_np]):
+        needs_processing = (
+            self.needs_stored_logits_processing
+            if use_head_dtype
+            else self.needs_logits_processing
+        )
+        if not np.any(needs_processing[idx_mapping_np]):
             return logits
 
-        # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        if not use_head_dtype:
+            logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         ctx = LogitsContext(
             expanded_idx_mapping=expanded_idx_mapping,
@@ -256,20 +273,27 @@ class Sampler:
         # or weaken it by scaling.
         self.thinking_budget_state.apply(logits, ctx)
 
-        # Apply temperature in place.
-        self.sampling_states.apply_temperature(
-            logits, expanded_idx_mapping, idx_mapping_np
-        )
-
-        # Apply min_p in place.
-        self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
+        if not use_head_dtype:
+            # In head-dtype mode temperature is applied by each consumer on load
+            # instead, and min_p is rejected for speculative decoding.
+            self.sampling_states.apply_temperature(
+                logits, expanded_idx_mapping, idx_mapping_np
+            )
+            self.sampling_states.apply_min_p(
+                logits, expanded_idx_mapping, idx_mapping_np
+            )
 
         if skip_top_k_top_p:
             return logits
 
         # Apply top_k and/or top_p. This might or might not return a new tensor.
+        temperatures = (
+            self.sampling_states.temperature.gpu[expanded_idx_mapping]
+            if use_head_dtype
+            else None
+        )
         return self.sampling_states.apply_top_k_top_p(
-            logits, expanded_idx_mapping, idx_mapping_np
+            logits, expanded_idx_mapping, idx_mapping_np, temperatures
         )
 
     def sample(
