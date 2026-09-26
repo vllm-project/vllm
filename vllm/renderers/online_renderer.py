@@ -106,11 +106,29 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     Disaggregated serving carries the prefill stage's ids in
     ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
+
+    Returns None without checking the ids when ``echo`` is set, since echo
+    needs ``messages`` to be rendered. Otherwise raises VLLMValidationError if
+    the ids are malformed.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
         return None
-    return kv.pop("prompt_token_ids", None) or None
+    ids = kv.pop("prompt_token_ids", None)
+    if ids is None or getattr(request, "echo", False):
+        return None
+    # bool is an int subclass, hence the exact type check.
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or any(type(x) is not int or x < 0 for x in ids)
+    ):
+        raise VLLMValidationError(
+            "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
+            "of non-negative integers.",
+            parameter="kv_transfer_params",
+        )
+    return ids
 
 
 class OnlineRenderer:

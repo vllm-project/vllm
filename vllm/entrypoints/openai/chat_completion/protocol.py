@@ -20,6 +20,7 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MM_PARSER_MAP,
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
@@ -57,6 +58,13 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+# Content part types that carry text rather than multimodal data.
+_TEXT_CONTENT_PART_TYPES = frozenset(
+    {"text", "input_text", "output_text", "refusal", "thinking", "tool_reference"}
+)
+# Keys that mark a content part as multimodal, whatever its ``type``.
+_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -978,6 +986,35 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_prompt_token_ids_with_media(cls, data):
+        # The forwarded ids would drop media in ``messages``, so ignore them. Runs
+        # before validation, which can turn content into a one-shot iterator.
+        if not isinstance(data, dict):
+            return data
+        kv_transfer_params = data.get("kv_transfer_params")
+        messages = data.get("messages")
+        if (
+            not isinstance(kv_transfer_params, dict)
+            or kv_transfer_params.get("prompt_token_ids") is None
+            or not isinstance(messages, list)
+        ):
+            return data
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and (
+                    any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
+                    or not isinstance(part_type := part.get("type", "text"), str)
+                    or part_type not in _TEXT_CONTENT_PART_TYPES
+                ):
+                    kv_transfer_params.pop("prompt_token_ids")
+                    return data
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_system_message_content_type(cls, data):
         """Warn if system messages contain non-text content.
 
@@ -1116,6 +1153,17 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "when using `logprob_token_ids`, `logprobs` must be set to true.",
                 parameter="logprob_token_ids",
+            )
+        kv_transfer_params = data.get("kv_transfer_params")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions do not support "
+                "`kv_transfer_params['prompt_token_ids']`: one pre-tokenized "
+                "prompt cannot serve several conversations.",
+                parameter="kv_transfer_params",
             )
         response_format = data.get("response_format")
         if response_format is not None:
