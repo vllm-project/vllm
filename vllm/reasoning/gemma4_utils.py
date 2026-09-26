@@ -11,7 +11,7 @@ inference backend (vLLM, HuggingFace, TGI, etc.).
 
 For the OpenAI-compatible API reasoning parser (streaming +
 non-streaming), see ``vllm.reasoning.gemma4_reasoning_parser``.
-For tool call parsing, see ``vllm.tool_parsers.gemma4_utils``.
+For tool call parsing, use ``tokenizer.parse_response()`` from Transformers v5.
 
 Usage with vLLM offline inference::
 
