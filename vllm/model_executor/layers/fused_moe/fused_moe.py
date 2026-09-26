@@ -1285,8 +1285,12 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    # The CUDA kernel uses split-K atomic additions into a 16-bit output, so
+    # the accumulation order is not deterministic. The Triton fallback stores
+    # each fully accumulated output element once.
     return (
         current_platform.is_cuda()
+        and not envs.VLLM_BATCH_INVARIANT
         and bit == 4
         and group_size in [32, 64, 128]
         and num_valid_tokens / num_experts <= 6
