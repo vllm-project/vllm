@@ -83,6 +83,9 @@ pub enum FinishReason {
     Error,
     /// A repetitive token pattern was detected.
     Repetition(Option<StopReason>),
+    /// The engine refused the request for a reason stated in `stop_reason`;
+    /// a client error converted to 400 Bad Request.
+    Rejected(Option<StopReason>),
 }
 
 impl FinishReason {
@@ -101,6 +104,7 @@ impl FinishReason {
             Self::Abort => "abort",
             Self::Error => "error",
             Self::Repetition(_) => "repetition",
+            Self::Rejected(_) => "rejected",
         }
     }
 
@@ -135,6 +139,7 @@ fn finish_reason_from_engine(
         EngineCoreFinishReason::Abort => FinishReason::Abort,
         EngineCoreFinishReason::Error => FinishReason::Error,
         EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
+        EngineCoreFinishReason::Rejected => FinishReason::Rejected(stop_reason),
     })
 }
 
