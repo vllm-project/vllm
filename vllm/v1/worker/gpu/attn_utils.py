@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -18,6 +21,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
+from vllm.v1.hisparse.binding import (
+    init_hisparse_kv_cache,
+    resolve_hisparse_block_size,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -30,11 +37,12 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
-    bind_kv_cache,
+    bind_kv_cache_to_layers,
     prepare_kernel_block_sizes,
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
     from vllm.v1.worker.gpu.cudagraph_utils import (
         BatchExecutionDescriptor,
         CudaGraphManager,
@@ -87,6 +95,7 @@ class FastPrefillHelper:
         cu_num_logits_np: np.ndarray,
         has_prefill: bool,
         batch_desc: "BatchExecutionDescriptor",
+        num_active_loras: int = 0,
     ) -> FastPrefillBatchMetadata | None:
         if (
             not has_prefill
@@ -108,7 +117,7 @@ class FastPrefillHelper:
             num_reqs=num_reqs,
             num_tokens=num_logits,
             uniform_token_count=None,
-            num_active_loras=0,
+            num_active_loras=num_active_loras,
         )
         num_logits_padded = min(desc.num_tokens, self.max_num_tokens)
         return FastPrefillBatchMetadata(
@@ -132,6 +141,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             if isinstance(spec, AttentionSpec):
                 spec = attn_module.get_attn_backend().customize_spec(spec)
             kv_cache_spec[layer_name] = spec
+    resolve_hisparse_block_size(vllm_config, kv_cache_spec, attn_layers)
     return kv_cache_spec
 
 
@@ -198,6 +208,9 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+            attn_groups.append([])
+            continue
         if active_layer_names is not None:
             layer_names = list(active_layer_names.intersection(layer_names))
 
@@ -316,22 +329,34 @@ def get_query_lens_mismatch_unsupported_backend(
 
 
 def init_kv_cache(
-    runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
     device: torch.device,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     kv_cache_allocation_context: AbstractContextManager | None = None,
+    *,
+    block_tables: "BlockTables | None" = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
-        kv_caches = allocate_kv_cache(
-            kv_cache_config,
-            device,
-            vllm_config.cache_config.get_resolved_kv_cache_layout(),
-            kernel_block_sizes,
-        )
+        if vllm_config.attention_config.hisparse_config is not None:
+            assert block_tables is not None
+            kv_caches = init_hisparse_kv_cache(
+                kv_cache_config,
+                device,
+                kernel_block_sizes,
+                vllm_config,
+                forward_context,
+                block_tables,
+            )
+        else:
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                device,
+                vllm_config.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
+            )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
@@ -342,10 +367,12 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
-    bind_kv_cache(
-        kv_caches,
+    bindable_caches = {
+        name: cache for name, cache in kv_caches.items() if name in forward_context
+    }
+    bind_kv_cache_to_layers(
+        bindable_caches,
         forward_context,
-        runner_kv_caches,
         num_attn_module,
         kv_cache_groups=kv_cache_config.kv_cache_groups,
     )
@@ -377,6 +404,7 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     is_prefilling: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
@@ -386,16 +414,24 @@ def build_attn_metadata(
     rswa_prefix_lens: torch.Tensor | None = None,
     ubatch_idx: int = 0,
     fast_prefill: FastPrefillBatchMetadata | None = None,
+    req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
+    if dcp_local_seq_lens_cpu_upper_bound is not None:
+        dcp_local_seq_lens_cpu_upper_bound = dcp_local_seq_lens_cpu_upper_bound[
+            :num_reqs
+        ]
     if seq_lens_cpu_upper_bound is not None:
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
+    token_to_req_indices: torch.Tensor | None = None
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
+        if not attn_groups[i]:
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Per-group causal for hybrid drafters (mixed SWA/full attention).
@@ -432,10 +468,13 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             positions=positions,
             is_prefilling=group_is_prefilling,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
+            req_idx=req_idx,
+            _token_to_req_indices_cache=token_to_req_indices,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -461,6 +500,7 @@ def build_attn_metadata(
                 )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+        token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
     return attn_metadata
 
 

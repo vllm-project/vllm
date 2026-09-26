@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GSM8K evaluation using vLLM server and isolated GSM8K script.
+"""GSM8K evaluation using vLLM server and isolated GSM8K script.
 Replacement for lm-eval-harness with better performance and control.
 
 Usage:
@@ -129,6 +128,12 @@ def test_gsm8k_correctness(config_filename):
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
                 "The quantization scheme is not supported on non-GFX950 platforms."
             )
+    if "--all2all-backend=moonep" in eval_config.get("server_args", ""):
+        from vllm.utils.import_utils import has_moonep
+
+        if not has_moonep():
+            pytest.skip("Skipping MoonEP config: the moonep package is not installed.")
+
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []

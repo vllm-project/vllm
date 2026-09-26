@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepseekV4 MLA Attention Layer
-"""
+"""DeepseekV4 MLA Attention Layer."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -45,11 +43,13 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -172,14 +172,20 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: "torch.Tensor | QuantizedActivation",
     ) -> None:
         """Platform-specific sparse MLA forward; writes attention into ``output``."""
         raise NotImplementedError
 
     @abstractmethod
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific)."""
+    def _o_proj(
+        self, o: "torch.Tensor | QuantizedActivation", positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+
+        ``o`` is the live heads of the bf16 attention output, or the
+        QuantizedActivation of a layer whose ``_alloc_attn_out`` returns one.
+        """
         raise NotImplementedError
 
     def _uses_fp8_ds_mla_layout(self) -> bool:
@@ -317,7 +323,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # graph and MRV1 produces garbage (#51430).
             self._prepare_and_attn_fn = self._prepare_and_attn_eager
 
-        # Will be None on ROCm for now.
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -420,7 +425,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
-            from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
 
             _FUSED_Q_KV_RMSNORM_KERNEL.register_warmup()
@@ -447,7 +451,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     )
 
                     _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
-                    if not has_cutedsl():
+                    if has_cutedsl():
+                        from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
+                            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+                        )
+
+                        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL.register_warmup()
+                    else:
                         _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL.register_warmup()
                 elif backend_name == "FLASHINFER_MLA_SPARSE_DSV4":
                     from vllm.models.deepseek_v4.common.ops.cache_utils import (
@@ -464,14 +474,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Pre-allocate attention output with FlashMLA-padded head count.
-        # The op writes into `o_padded`; we slice to n_local_heads after.
-        num_tokens = hidden_states.shape[0]
-        o_padded = torch.empty(
-            (num_tokens, self.padded_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # The eager attention region writes into a caller-owned buffer
+        # (breakable_cudagraph needs in-place outputs).
+        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
@@ -489,12 +494,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             indexer_kv_score,
             indexer_weights,
             positions,
-            o_padded,
+            attn_out,
         )
-        o = o_padded[:, : self.n_local_heads, :]
+        if isinstance(attn_out, torch.Tensor):
+            attn_out = attn_out[:, : self.n_local_heads, :]
+        return self._o_proj(attn_out, positions)
 
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+    def _alloc_attn_out(
+        self, num_tokens: int, hidden_states: torch.Tensor
+    ) -> "torch.Tensor | QuantizedActivation":
+        """The buffer ``forward_mqa`` fills.
+
+        A bf16 ``[num_tokens, padded_heads, head_dim]`` buffer by default, whose
+        padding heads are sliced off before ``_o_proj``. A layer whose kernel
+        also does the inverse RoPE and the FP8 cast returns a
+        QuantizedActivation instead and gets it back in ``_o_proj`` whole.
+        """
+        return torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
@@ -526,7 +546,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         indexer_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: torch.Tensor,
+        o_padded: "torch.Tensor | QuantizedActivation",
     ) -> None:
         """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
 
@@ -555,7 +575,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         indexer_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: torch.Tensor,
+        o_padded: "torch.Tensor | QuantizedActivation",
     ) -> None:
         """Attention input preparation followed by the sparse indexer and MLA.
 
@@ -578,7 +598,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # Keep Q projection and KV insertion on the default stream. The indexer
         # and MLA compressor use aux streams 0 and 1; aux 2 is internal to the
-        # indexer. ROCm runs the same work sequentially without aux streams.
+        # indexer.
         if indexer is not None:
             assert compressor is not None
             q, (indexer_inputs, _) = execute_in_parallel(
@@ -665,7 +685,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
-        # On ROCm, aux_streams is None and execute_in_parallel runs serially.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None:
@@ -721,7 +740,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        out: torch.Tensor,
+        out: "torch.Tensor | QuantizedActivation",
     ) -> None:
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None
@@ -734,7 +753,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         # MLA attention writes into the pre-allocated `out` buffer
-        # ([num_tokens, padded_heads, head_dim]).
+        # (see _alloc_attn_out).
         self.forward_mqa(q, kv, positions, out)
 
     def _fused_qnorm_rope_kv_insert(
@@ -934,6 +953,21 @@ class DeepseekV4Indexer(nn.Module):
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",
         )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+
+            if current_platform.is_cuda() and has_cutedsl():
+                from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
+                    _INDEXER_Q_FP8_KERNEL,
+                    _INDEXER_Q_MXFP4_KERNEL,
+                )
+
+                indexer_q_kernel = (
+                    _INDEXER_Q_MXFP4_KERNEL
+                    if self.use_fp4_kv
+                    else _INDEXER_Q_FP8_KERNEL
+                )
+                indexer_q_kernel.register_warmup()
 
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(
@@ -1016,7 +1050,6 @@ class DeepseekV4Indexer(nn.Module):
         ]
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
 
             if not has_cutedsl() and not current_platform.is_xpu():
@@ -1035,11 +1068,12 @@ class DeepseekV4Indexer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
-        compressed_kv_score: torch.Tensor,
+        compressed_kv_score: torch.Tensor | None,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
+        skip_compressor: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         compressor = self.compressor
 
@@ -1052,7 +1086,8 @@ class DeepseekV4Indexer(nn.Module):
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
-                compressor(compressed_kv_score, positions, rotary_emb)
+                if not skip_compressor:
+                    compressor(compressed_kv_score, positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
                 num_tokens = (
                     indexer_metadata.num_decode_tokens
@@ -1082,15 +1117,18 @@ class DeepseekV4Indexer(nn.Module):
                 use_fp4=self.use_fp4_kv,
             )
 
-        # compressor returns None and writes K to the indexer KV cache; the
-        # join orders that write before indexer_op (skip_k_cache_insert=True).
-        (q_quant, weights), _ = maybe_execute_in_parallel(
-            wq_b_and_q_quant,
-            lambda: compressor(compressed_kv_score, positions, rotary_emb),
-            self.ln_events[0],
-            self.ln_events[1],
-            self.aux_stream,
-        )
+        if not skip_compressor:
+            # compressor returns None and writes K to the indexer KV cache; the
+            # join orders that write before indexer_op (skip_k_cache_insert=True).
+            (q_quant, weights), _ = maybe_execute_in_parallel(
+                wq_b_and_q_quant,
+                lambda: compressor(compressed_kv_score, positions, rotary_emb),
+                self.ln_events[0],
+                self.ln_events[1],
+                self.aux_stream,
+            )
+        else:
+            q_quant, weights = wq_b_and_q_quant()
         if isinstance(q_quant, tuple):
             q, q_scale = q_quant
         else:
