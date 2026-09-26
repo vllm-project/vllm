@@ -117,6 +117,7 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
+        self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         self.use_fused_pre_indexer = _supports_fused_pre_indexer(
             rotary_emb,
             self.index_head_dim,
@@ -422,6 +423,8 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 decode_query_len,
                 block_indices[decode_slice],
+                compressed_metadata.max_seq_len,
+                self.topk_backend,
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.
