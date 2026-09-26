@@ -202,3 +202,97 @@ def test_triton_unified_attn_diffkv_vs_reference(
     )
 
     torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "seq_lens,num_tokens,num_query_heads,expect_split",
+    [
+        # DFlash k=3 at the TP2 global-layer shape, filling the 8-row scratch.
+        # Only the last query of the 3841-token request reaches its final
+        # KV segment.
+        ([(4, 16411), (4, 3841)], 8, 32, True),
+        # CUDA graph padding: a padded request and rows owned by no request.
+        ([(2, 16411), (2, 3841), (0, 0)], 8, 32, True),
+        # Graph capture sets seq_lens to 1, leaving most queries without keys.
+        ([(4, 1), (4, 1)], 8, 32, True),
+        # One token more than the scratch holds.
+        ([(4, 16411), (4, 3841)], 9, 32, False),
+        # BLOCK_Q is 1, but each CTA spans two query tokens.
+        ([(4, 16411)], 4, 24, False),
+    ],
+)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@torch.inference_mode()
+def test_diffkv_multitoken_splitkv(
+    seq_lens: list[tuple[int, int]],
+    num_tokens: int,
+    num_query_heads: int,
+    expect_split: bool,
+    block_size: int,
+) -> None:
+    """Split-KV must match the 2D kernel for the multi-token batches it takes."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_kv_heads, head_size_qk, head_size_v = 2, 192, 128
+    seq_threshold_3D = 8
+
+    query = torch.randn(num_tokens, num_query_heads, head_size_qk, dtype=torch.bfloat16)
+    kv_cache = torch.randn(
+        NUM_BLOCKS,
+        block_size,
+        num_kv_heads,
+        head_size_qk + head_size_v,
+        dtype=torch.bfloat16,
+    )
+    max_num_blocks_per_seq = (max(kv_lens) + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
+
+    segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
+        seq_threshold_3D, num_query_heads, head_size_v
+    )
+    for buf in (segm_output, segm_max, segm_expsum):
+        buf.fill_(float("nan"))
+
+    def run(threshold: int) -> torch.Tensor:
+        # Rows owned by no request must keep their contents.
+        out = torch.full(
+            (num_tokens, num_query_heads, head_size_v), 99.0, dtype=torch.bfloat16
+        )
+        unified_attention_diffkv(
+            q=query,
+            k=kv_cache[..., :head_size_qk],
+            v=kv_cache[..., head_size_qk:],
+            out=out,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=kv_lens_t,
+            softmax_scale=head_size_qk**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            softcap=0,
+            max_seqlen_q=max(query_lens),
+            seq_threshold_3D=threshold,
+            num_par_softmax_segments=NUM_PAR_SOFTMAX_SEGMENTS,
+            softmax_segm_output=segm_output,
+            softmax_segm_max=segm_max,
+            softmax_segm_expsum=segm_expsum,
+        )
+        return out
+
+    ref_out = run(0)
+    triton_out = run(seq_threshold_3D)
+    # Only a split-KV launch writes the NaN-filled scratch.
+    assert torch.isfinite(segm_max).any().item() == expect_split
+    # Outputs over 16K random keys are ~1e-2, so a 2e-2 atol would hide a
+    # dropped KV segment.
+    torch.testing.assert_close(triton_out, ref_out, atol=1e-3, rtol=1e-2)
