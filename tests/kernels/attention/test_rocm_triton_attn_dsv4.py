@@ -871,42 +871,53 @@ def test_rocm_ragged_graph_buffer_view_tracks_source_width(
 
     monkeypatch.setattr(rocm_mod, "_ON_GFX950", on_gfx950)
 
-    indices_buffer = torch.full((16,), -1, dtype=torch.int32)
-    indptr_buffer = torch.full((3,), -1, dtype=torch.int32)
-    first_indices = torch.tensor([3, 5, 7], dtype=torch.int32)
-    first_indptr = torch.tensor([0, 1, 3], dtype=torch.int32)
-    first_view, first_indptr_view = rocm_mod._copy_ragged_to_graph_buffers(
-        first_indices,
-        first_indptr,
+    num_rows = 2
+    dense_width = 4
+    max_entries_per_row = 8
+    indices_buffer = torch.full((16,), -1, dtype=torch.int32, device="cuda")
+    indptr_buffer = torch.full((3,), -1, dtype=torch.int32, device="cuda")
+
+    first_dense = torch.tensor(
+        [[3, -1, -1, -1], [5, 7, -1, -1]], dtype=torch.int32, device="cuda"
+    )
+    first_lens = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
+    first_view, first_indptr_view = rocm_mod._build_ragged_into_graph_buffers(
+        first_dense,
+        first_lens,
         indices_buffer,
         indptr_buffer,
-        num_rows=2,
-        max_entries_per_row=8,
+        num_rows,
+        max_entries_per_row,
     )
 
-    second_indices = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
-    second_indptr = torch.tensor([0, 2, 6], dtype=torch.int32)
-    second_view, second_indptr_view = rocm_mod._copy_ragged_to_graph_buffers(
-        second_indices,
-        second_indptr,
+    second_dense = torch.tensor(
+        [[1, 2, -1, -1], [3, 4, 5, 6]], dtype=torch.int32, device="cuda"
+    )
+    second_lens = torch.tensor([2, 4], dtype=torch.int32, device="cuda")
+    second_view, second_indptr_view = rocm_mod._build_ragged_into_graph_buffers(
+        second_dense,
+        second_lens,
         indices_buffer,
         indptr_buffer,
-        num_rows=2,
-        max_entries_per_row=8,
+        num_rows,
+        max_entries_per_row,
     )
 
-    expected_first_entries = (
-        first_indices.numel() if on_gfx950 else indices_buffer.numel()
+    # On gfx950 the packed width is exposed to the sync-free split selector;
+    # elsewhere the full buffer capacity is.
+    expected_entries = (
+        num_rows * dense_width if on_gfx950 else num_rows * max_entries_per_row
     )
-    expected_second_entries = (
-        second_indices.numel() if on_gfx950 else indices_buffer.numel()
-    )
-    assert first_view.numel() == expected_first_entries
-    assert second_view.numel() == expected_second_entries
+    assert first_view.numel() == expected_entries
+    assert second_view.numel() == expected_entries
     assert first_view.data_ptr() == second_view.data_ptr() == indices_buffer.data_ptr()
     assert first_indptr_view.data_ptr() == second_indptr_view.data_ptr()
-    assert torch.equal(second_view[: second_indices.numel()], second_indices)
-    assert torch.equal(second_indptr_view, second_indptr)
+    assert torch.equal(
+        second_view[:6], torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32).cuda()
+    )
+    assert torch.equal(
+        second_indptr_view, torch.tensor([0, 2, 6], dtype=torch.int32).cuda()
+    )
 
 
 def test_rocm_capture_metadata_sets_adaptive_marker(monkeypatch) -> None:
