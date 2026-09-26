@@ -325,3 +325,69 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.parametrize("PAGE_SIZE", [1, 16])
+def test_decode_attention_mla_fp8_kv_cache_smem(PAGE_SIZE):
+    """MLA decode with an fp8 KV cache must launch on small-shared-memory GPUs.
+
+    Regression test for the num_stages guard in _decode_grouped_att_m_fwd.
+    MLA with D_QK=576 pins BLOCK_DMODEL=512 and BLOCK_DPE=64, so the
+    ``BLOCK_DMODEL >= 1024`` branch never fired. With a bf16 KV cache the tile
+    still fits at num_stages=2, but an fp8 KV cache adds dequant staging and
+    needs 102400 bytes -- 1024 over the 101376-byte opt-in limit on consumer
+    and workstation Blackwell (GB10 / DGX Spark, RTX PRO 6000), so every decode
+    died with ``triton.runtime.errors.OutOfResources``.
+
+    The bf16 case is covered by test_decode_attention_cross_layer_view; this
+    test adds the fp8 variant of the same tile.
+    """
+    B, H_Q, H_KV, D_QK, D_V = 3, 16, 1, 576, 512
+    seq_len = 1027
+    CACHE_SIZE = 16384
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    num_kv_splits = 8
+    num_pages = CACHE_SIZE // PAGE_SIZE
+
+    num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
+    req_to_page = torch.randint(
+        0, num_pages, (B, num_pages_per_batch), device=DEVICE_TYPE
+    )
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
+
+    k_bf16 = torch.randn(
+        num_pages, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    k_fp8, k_scale = _quantize_to_fp8(k_bf16)
+    # MLA: the value cache is a prefix view of the key cache.
+    v_fp8 = k_fp8[..., :D_V]
+    v_scale = k_scale
+
+    o = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+    lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    attn_logits = torch.empty(
+        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+    )
+
+    # Before the fix this raised OutOfResources instead of running.
+    decode_attention_fwd(
+        q,
+        k_fp8,
+        v_fp8,
+        o,
+        lse,
+        req_to_page,
+        b_seq_len,
+        attn_logits,
+        num_kv_splits,
+        sm_scale,
+        PAGE_SIZE,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        is_mla=True,
+    )
+
+    assert torch.isfinite(o).all()
+    assert torch.isfinite(lse).all()
