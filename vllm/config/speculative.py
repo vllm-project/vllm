@@ -634,6 +634,11 @@ class SpeculativeConfig:
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
 
+        # Parallel drafting includes speculative depth in static query shapes.
+        # Keep it in the key so artifacts cannot be reused across depths.
+        if self.parallel_drafting:
+            factors.append(self.num_speculative_tokens)
+
         if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
             # The specific layers used also affect the computation graph.
