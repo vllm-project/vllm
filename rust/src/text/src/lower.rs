@@ -280,11 +280,11 @@ fn tokenize_bad_words(
     Ok((!all_token_ids.is_empty()).then_some(all_token_ids))
 }
 
-/// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's
-/// `get_max_tokens()` in `vllm/entrypoints/utils.py`.
+/// Resolve the effective `max_tokens` for generation.
 ///
-/// Takes the minimum of all available limits: user-specified, generation-config
-/// default, and `max_model_len - prompt_len`.
+/// An omitted user value still clamps to `max_model_len - prompt_len`, matching
+/// Python `get_max_tokens()`. An explicit `max_tokens` that does not fit is
+/// rejected, matching the Python OpenAI renderer's context-length check.
 pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
     default_max_tokens: Option<u32>,
@@ -299,6 +299,17 @@ pub fn resolve_max_tokens(
     } else {
         max_model_len - prompt_len
     };
+
+    if let Some(max_tokens) = user_max_tokens
+        && max_tokens > model_max_tokens
+    {
+        return Err(Error::RequestedOutputExceedsContext {
+            max_model_len,
+            max_tokens,
+            prompt_len,
+            total: u64::from(prompt_len) + u64::from(max_tokens),
+        });
+    }
 
     let request_max_tokens = user_max_tokens.or(default_max_tokens);
     Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
@@ -1281,9 +1292,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_max_tokens_caps_by_model_len() {
+    fn resolve_max_tokens_rejects_explicit_request_over_remaining_context() {
         let result = resolve_max_tokens(Some(150), None, 200, 100);
-        assert_eq!(result.unwrap(), 100);
+        assert!(matches!(
+            result,
+            Err(Error::RequestedOutputExceedsContext {
+                max_model_len: 200,
+                max_tokens: 150,
+                prompt_len: 100,
+                total: 250,
+            })
+        ));
     }
 
     #[test]
