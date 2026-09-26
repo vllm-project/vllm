@@ -1057,11 +1057,19 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or self.use_mooncake_ep_kernels
+        )
 
     @property
     def needs_round_robin_routing_tables(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or self.use_mooncake_ep_kernels
+        )
 
     @property
     def use_ag_rs_all2all_kernels(self):
@@ -1080,6 +1088,10 @@ class FusedMoEParallelConfig:
     @property
     def use_nixl_ep_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
+
+    @property
+    def use_mooncake_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mooncake_ep"
 
     @property
     def use_deepep_v2_kernels(self):
@@ -1517,6 +1529,10 @@ class FusedMoEConfig:
     @property
     def use_nixl_ep_kernels(self):
         return self.moe_parallel_config.use_nixl_ep_kernels
+
+    @property
+    def use_mooncake_ep_kernels(self):
+        return self.moe_parallel_config.use_mooncake_ep_kernels
 
     @property
     def use_deepep_v2_kernels(self):

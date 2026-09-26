@@ -37,6 +37,7 @@ from vllm.utils.import_utils import (
     has_deep_ep_v2,
     has_moonep,
     has_mori,
+    has_mooncake_ep,
     has_nixl_ep,
 )
 
@@ -119,6 +120,11 @@ if current_platform.is_cuda_alike():
             MOONEP_DEFAULT_NUM_SMS,
             MOONEP_DEFAULT_TOKEN_PADDING,
             MoonEPPrepareAndFinalize,
+        )
+    if has_mooncake_ep():
+        from .prepare_finalize.mooncake_ep import (
+            MOONCAKE_EP_QUANT_BLOCK_SHAPE,
+            MooncakeEPPrepareAndFinalize,
         )
 
 
@@ -428,6 +434,26 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+
+    elif moe.use_mooncake_ep_kernels:
+        assert quant_config is not None
+        handle = all2all_manager.get_handle(
+            {
+                "max_num_tokens_per_dp_rank": moe.max_num_tokens,
+                "token_hidden_size": moe.hidden_dim,
+                "num_local_experts": moe.num_local_experts,
+            }
+        )
+        use_fp8_dispatch = (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == MOONCAKE_EP_QUANT_BLOCK_SHAPE
+        )
+        prepare_finalize = MooncakeEPPrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
         )
 
     return prepare_finalize

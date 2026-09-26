@@ -26,6 +26,7 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,
+    has_mooncake_ep,
 )
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -606,6 +607,68 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         state.buffer.clean_mask_buffer()
         torch.accelerator.synchronize()
         NixlEPAll2AllManager._last_mask = None
+
+
+@dataclass
+class _MooncakeEPBufferState:
+    buffer: Any
+    max_num_ep_ranks: int
+
+
+class MooncakeEPAll2AllManager(All2AllManagerBase):
+    """All2All manager for the Mooncake EP backend."""
+
+    _buffer: _MooncakeEPBufferState | None = None
+    _lock = threading.RLock()
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        assert has_mooncake_ep(), (
+            "Mooncake EP package not found. Install the Mooncake EP wheel."
+        )
+        super().__init__(cpu_group, tcp_store_group)
+        self.device_group = device_group
+
+    @property
+    def max_num_ep_ranks(self) -> int:
+        assert self._buffer is not None
+        return self._buffer.max_num_ep_ranks
+
+    def get_handle(self, kwargs):
+        with self._lock:
+            if self._buffer is None:
+                from mooncake.mooncake_ep_buffer import Buffer
+
+                max_tokens = kwargs["max_num_tokens_per_dp_rank"]
+                hidden = kwargs["token_hidden_size"]
+                num_local_experts = kwargs["num_local_experts"]
+                num_experts = num_local_experts * self.world_size
+                size_hint = Buffer.get_ep_buffer_size_hint(
+                    max_tokens, hidden, self.world_size, num_experts
+                )
+                self._buffer = _MooncakeEPBufferState(
+                    buffer=Buffer(self.device_group or self.cpu_group, size_hint),
+                    max_num_ep_ranks=self.world_size,
+                )
+            return self._buffer.buffer
+
+    def dispatch(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Mooncake EP is called through its prepare/finalize adapter"
+        )
+
+    def combine(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Mooncake EP is called through its prepare/finalize adapter"
+        )
+
+    def destroy(self):
+        # The native buffer is process-group scoped and is released with the
+        # process. Avoid tearing it down during elastic manager recreation.
+        if self._buffer is not None:
+            self._buffer.buffer = None  # type: ignore[assignment]
+
+    def max_sms_used(self) -> int:
+        return 0
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):

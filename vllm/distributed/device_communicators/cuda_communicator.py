@@ -228,6 +228,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = NixlEPAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "mooncake_ep":
+                from .all2all import MooncakeEPAll2AllManager
+
+                self.all2all_manager = MooncakeEPAll2AllManager(
+                    self.cpu_group, tcp_store_group, device_group=self.device_group
+                )
             elif (
                 self.all2all_backend == "flashinfer_all2allv"
                 or self.all2all_backend == "flashinfer_nvlink_two_sided"
