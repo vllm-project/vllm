@@ -748,6 +748,7 @@ class TestInitializeToolSessions:
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
                 self._messages = []
+                self.request = None
                 self._needs_tool_call = True
 
             def append_output(self, output) -> None:
@@ -803,6 +804,53 @@ class TestInitializeToolSessions:
         )
         assert followup_engine_input.get("cache_salt") == "request-salt"
         assert followup_engine_input["prompt_token_ids"] == [3, 4]
+
+    @pytest.mark.asyncio
+    async def test_harmony_tool_followup_respects_max_output_tokens(
+        self, serving_responses_instance
+    ):
+        class ToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self, request):
+                self._messages = []
+                self.request = request
+                self._needs_tool_call = True
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return self._needs_tool_call
+
+            async def call_tool(self):
+                self._needs_tool_call = False
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        max_tokens_per_turn = []
+
+        async def generate_output(engine_input, sampling_params, *args, **kwargs):
+            max_tokens_per_turn.append(sampling_params.max_tokens)
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = ToolCallingHarmonyContext(
+            ResponsesRequest(input="test", max_output_tokens=10)
+        )
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+        ):
+            pass
+
+        assert max_tokens_per_turn == [10, 10]
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
