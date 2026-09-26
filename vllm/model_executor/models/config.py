@@ -25,6 +25,51 @@ class VerifyAndUpdateConfig:
         return
 
 
+class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        if getattr(hf_config, "kda_allow_negative_eigenvalues", None) is not False:
+            raise NotImplementedError(
+                "AliceAI requires kda_allow_negative_eigenvalues=false"
+            )
+        if getattr(hf_config, "router_score_function", None) != "sigmoid":
+            raise ValueError("AliceAI requires router_score_function='sigmoid'")
+        if getattr(hf_config, "router_bias_correction", None) is not True:
+            raise ValueError("AliceAI requires router_bias_correction=true")
+        mtp_layers = getattr(hf_config, "mtp_num_hidden_layers", 0)
+        if mtp_layers:
+            logger.warning(
+                "AliceAI checkpoint declares %s MTP layer(s), but this "
+                "implementation ignores the MTP configuration and weights; "
+                "MTP speculative decoding is unavailable.",
+                mtp_layers,
+            )
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise NotImplementedError(
+                "AliceAI does not support pipeline parallelism; "
+                "pipeline_parallel_size=1 is required"
+            )
+
+        speculative_config = vllm_config.speculative_config
+        speculative_method = (
+            speculative_config.method if speculative_config is not None else None
+        )
+        if speculative_method in {
+            "dflash",
+            "dspark",
+            "eagle3",
+            "extract_hidden_states",
+        }:
+            raise NotImplementedError(
+                "AliceAI does not support speculative method "
+                f"{speculative_method!r} because it requires auxiliary hidden states"
+            )
+
+
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -1017,6 +1062,7 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "AliceAIForCausalLM": AliceAIForCausalLMConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
