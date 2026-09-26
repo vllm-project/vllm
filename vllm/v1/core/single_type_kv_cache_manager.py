@@ -1473,6 +1473,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
             self._num_retired_blocks: dict[str, int] = {}
+            self._protected_upto: dict[str, int | None] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
             # checkpoint position and reserved block index for the current
@@ -1623,6 +1624,21 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return mask
 
+    @staticmethod
+    def _is_prompt_boundary(block: KVCacheBlock, protected_upto: int | None) -> bool:
+        """True for a cache-registered state a later request can resume at.
+
+        Only a hash written while the prompt was still being processed counts.
+        Decode re-keys the tail block on every step through
+        ``_cache_partial_tail_block``; protecting those would grow the retained
+        set without bound and would override
+        ``prefix_cache_retention_interval``.
+        """
+        if protected_upto is None or block.block_hash is None:
+            return False
+        hashed_at = block.block_hash_num_tokens
+        return hashed_at is not None and hashed_at <= protected_upto
+
     def _remove_blocks_in_range(
         self, request_id: str, first_block: int, last_block: int
     ) -> None:
@@ -1633,10 +1649,20 @@ class MambaManager(SingleTypeKVCacheManager):
         last_block = min(last_block, len(blocks))
         if first_block >= last_block:
             return
+        protected_upto = self._protected_upto.get(request_id)
         freed: list[KVCacheBlock] = []
         # Mamba prefill leaves null gaps between states awaiting retirement.
         for i in range(last_block - 1, first_block - 1, -1):
             if blocks[i].is_null:
+                continue
+            if self._is_prompt_boundary(blocks[i], protected_upto):
+                # Registered in the prefix cache while the prompt was still
+                # being processed, so keep it. For Mamba, "skipped" means this
+                # request's next forward pass does not need the state, not that
+                # no one does: a later request sharing the prefix resumes from
+                # exactly this block. Retiring
+                # it drops the boundary sparse retention keeps on purpose, and
+                # the attention match then survives with nothing to serve it.
                 continue
             freed.append(blocks[i])
             blocks[i] = self._null_block
@@ -1651,6 +1677,8 @@ class MambaManager(SingleTypeKVCacheManager):
         num_prompt_tokens: int | None = None,
     ) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+
+        self._protected_upto[request_id] = num_prompt_tokens
 
         super().remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
@@ -1963,6 +1991,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
+            self._protected_upto.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
