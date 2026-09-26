@@ -712,6 +712,75 @@ def test_kda_spec_invalid_accepted_count_is_fail_closed(
 
 
 @pytest.mark.parametrize(
+    ("impl", "uniform_sequence_length"),
+    [
+        pytest.param("nvidia", None, id="nvidia"),
+        pytest.param("amd", None, id="amd-dynamic-length"),
+        pytest.param("amd", 3, id="amd-static-length"),
+    ],
+)
+@pytest.mark.parametrize(("invalid_seq", "num_accepted"), [(0, 4), (1, 0)])
+@torch.inference_mode()
+def test_kda_spec_invalid_accepted_count_spares_neighbor(
+    impl: str,
+    uniform_sequence_length: int | None,
+    invalid_seq: int,
+    num_accepted: int,
+):
+    """An invalid count fails closed for its own sequence and spares the other."""
+    H, D, L = 2, 128, 3
+    T = 2 * L
+    torch.manual_seed(2026)
+
+    q = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    gate = -torch.rand_like(q)
+    beta = torch.rand(1, T, H, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor([0, L, T], dtype=torch.int32, device=DEVICE)
+    # Unbounded, (0, 4) loads state_indices[1, 0] and (1, 0) loads
+    # state_indices[0, -1]: the other sequence's state, inside allocated storage.
+    state_indices = torch.arange(1, T + 1, dtype=torch.int32, device=DEVICE)
+    state_indices = state_indices.view(2, L)
+    state = torch.randn(T + 1, H, D, D, dtype=torch.float32, device=DEVICE)
+    extra_args = (
+        {"uniform_sequence_length": uniform_sequence_length}
+        if uniform_sequence_length is not None
+        else {}
+    )
+
+    def run(accepted: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        return SPEC_DECODE_FWD_IMPLS[impl](
+            q=q,
+            k=k,
+            v=v,
+            g=gate,
+            beta=beta,
+            initial_state=state.clone(),
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=state_indices,
+            num_accepted_tokens=torch.tensor(
+                accepted, dtype=torch.int32, device=DEVICE
+            ),
+            out=torch.full_like(v, torch.nan),
+            **extra_args,
+        )
+
+    reference, reference_state = run([2, 2])
+    accepted = [2, 2]
+    accepted[invalid_seq] = num_accepted
+    actual, actual_state = run(accepted)
+
+    expected = reference.clone()
+    expected[:, invalid_seq * L : (invalid_seq + 1) * L] = 0
+    expected_state = reference_state.clone()
+    own_rows = state_indices[invalid_seq].long()
+    expected_state[own_rows] = state[own_rows]
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_state, expected_state)
+
+
+@pytest.mark.parametrize(
     (
         "conv_state_dim_first",
         "use_request_indices",
