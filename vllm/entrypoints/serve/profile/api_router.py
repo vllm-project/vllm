@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Annotated, Any
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Body, FastAPI, Request
 from fastapi.responses import Response
 
 from vllm.config import ProfilerConfig
@@ -19,9 +20,12 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.post("/start_profile")
-async def start_profile(raw_request: Request):
+async def start_profile(
+    raw_request: Request,
+    profiler_kwargs: Annotated[dict[str, Any] | None, Body()] = None,
+):
     logger.info("Starting profiler...")
-    await engine_client(raw_request).start_profile()
+    await engine_client(raw_request).start_profile(profiler_kwargs=profiler_kwargs)
     logger.info("Profiler started.")
     return Response(status_code=200)
 

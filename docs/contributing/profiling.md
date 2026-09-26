@@ -71,6 +71,12 @@ Or use http request:
 # We need first call /start_profile api to start profile.
 $ curl -X POST http://localhost:8000/start_profile
 
+# Or optionally pass profiler_kwargs as a JSON payload to forward or override
+# keyword arguments passed to the underlying profiler (e.g. torch.profiler.profile):
+$ curl -X POST http://localhost:8000/start_profile \
+    -H "Content-Type: application/json" \
+    -d '{"record_shapes": true, "with_stack": true}'
+
 # Call model generate.
 curl -X POST http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \

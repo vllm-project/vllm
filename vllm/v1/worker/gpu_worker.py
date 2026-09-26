@@ -1303,7 +1303,12 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        profiler_kwargs: dict | None = None,
+    ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1334,8 +1339,8 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
+                    profiler_kwargs=profiler_kwargs,
                 )
-
             self.profiler.start()
         else:
             if self.profiler is None:
@@ -1344,11 +1349,12 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler == "proton" and not (
+                if self.profiler_config.profiler in ("proton", "torch") and not (
                     self.profiler.has_cuda_graph_session
                 ):
-                    # Proton output names are fixed when the wrapper is constructed.
-                    # Recreate it so the next profile_prefix is honored.
+                    # Output names and profiler_kwargs are fixed when the wrapper
+                    # is constructed. Recreate it so the next profile_prefix and
+                    # profiler_kwargs are honored.
                     self.profiler = None
 
     def execute_dummy_batch(self) -> None:

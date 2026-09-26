@@ -111,7 +111,7 @@ LoRA dynamic loading & unloading is enabled in the API server. This should ONLY 
 
 For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
 
-- `/start_profile` - Start PyTorch profiler
+- `/start_profile` - Start PyTorch profiler (accepts an optional JSON body `profiler_kwargs` to pass keyword arguments to the underlying profiler)
 - `/stop_profile` - Stop PyTorch profiler
 
 ### SageMaker APIs

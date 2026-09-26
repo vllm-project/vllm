@@ -162,8 +162,18 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        *,
+        profiler_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Start profiling the engine.
+
+        Args:
+            profiler_kwargs: Optional dictionary of keyword arguments to pass to
+                the underlying profiler.
+
+        """
         ...
 
     @abstractmethod
