@@ -75,12 +75,14 @@ def test_prefill_kv_computed_with_cache():
         max_tokens_param=100,
         req_stats=req_stats,
         num_cached_tokens=1200,
+        priority=1,
     )
 
     finished_req = iteration_stats.finished_requests[0]
     assert finished_req.num_prompt_tokens == 10000
     assert finished_req.num_cached_tokens == 1200
     assert finished_req.request_id == "test-req-001"
+    assert finished_req.priority == 1
 
     # Verify calculation: prefill KV = prompt tokens - cached tokens
     prefill_kv_computed = finished_req.num_prompt_tokens - max(
@@ -288,3 +290,34 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_finished_request_priority():
+    """Test that priority is correctly stored in FinishedRequestStats."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.5
+    req_stats.last_token_ts = 1.0
+    req_stats.num_generation_tokens = 10
+
+    # Default priority (0) when not specified
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="test-req-default",
+        num_prompt_tokens=100,
+        max_tokens_param=10,
+        req_stats=req_stats,
+    )
+    assert iteration_stats.finished_requests[0].priority == 0
+
+    # Explicit priority
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="test-req-priority",
+        num_prompt_tokens=100,
+        max_tokens_param=10,
+        req_stats=req_stats,
+        priority=5,
+    )
+    assert iteration_stats.finished_requests[1].priority == 5

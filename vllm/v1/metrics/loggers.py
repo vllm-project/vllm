@@ -5,12 +5,14 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Any, get_args
 
 from prometheus_client import Counter, Gauge, Histogram
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphLogging
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.distributed.ec_transfer.ec_connector.metrics import (
     ECConnectorLogging,
     ECConnectorProm,
@@ -32,7 +34,7 @@ from vllm.v1.metrics.stats import (
     PromptTokenStats,
     SchedulerStats,
 )
-from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.metrics.utils import PromMetric, create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -40,6 +42,39 @@ logger = init_logger(__name__)
 # User-facing reason labels for waiting request breakdown
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
+
+
+def bucket_priority(priority: int) -> str:
+    """Bucket a request priority into a bounded Prometheus label value.
+
+    Priority scheduling accepts arbitrary integers (lower value means higher
+    priority). Using the raw value as a label would let clients blow up
+    Prometheus cardinality (e.g. deadline-based priorities). Values are
+    therefore bucketed, while the three conventional values are preserved
+    exactly because they carry semantic meaning:
+
+        -1 -> high priority
+         0 -> default priority
+         1 -> low priority
+
+    Everything more urgent than -1 collapses into "<-1" and everything less
+    urgent than 1 collapses into ">1", bounding cardinality to five values.
+
+    Args:
+        priority: The request priority value.
+
+    Returns:
+        A bounded string label describing the priority.
+
+    """
+    if priority == 0:
+        return "0"
+    if priority == -1:
+        return "-1"
+    if priority == 1:
+        return "1"
+    return "<-1" if priority < -1 else ">1"
+
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
@@ -486,6 +521,27 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         }
         per_engine_labelvalues = self.per_engine_labelvalues
 
+        # When priority scheduling is enabled, finished-request metrics carry
+        # an additional "priority" label (labeled lazily at record time, since
+        # the priority value is only known per-request).
+        self.priority_scheduling = vllm_config.scheduler_config.policy == "priority"
+        self._model_name = model_name
+        finished_labelnames = (
+            labelnames + ["priority"] if self.priority_scheduling else labelnames
+        )
+
+        def _finished_metric(metric: PromMetric):
+            """Create a finished-request metric.
+
+            In priority scheduling mode the raw metric is stored (labeled
+            lazily at record time with an additional 'priority' label).
+            In FCFS mode pre-labeled children are created per engine index,
+            matching the existing behavior.
+            """
+            if self.priority_scheduling:
+                return metric
+            return create_metric_per_engine(metric, per_engine_labelvalues)
+
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config,
             labelnames,
@@ -524,6 +580,45 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_scheduler_waiting = create_metric_per_engine(
             gauge_scheduler_waiting, per_engine_labelvalues
         )
+
+        # Scheduler policy in use, exposed as an enum-style gauge: one series
+        # per known policy, the active policy set to 1 and the rest to 0.
+        gauge_scheduler_policy = self._gauge_cls(
+            name="vllm:scheduler_policy_info",
+            documentation=(
+                "Scheduler policy in use. One series per policy "
+                "(e.g. 'fcfs', 'priority'); the active policy is set to 1."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["policy"],
+        )
+        active_policy = vllm_config.scheduler_config.policy
+        for idx in engine_indexes:
+            for policy in get_args(SchedulerPolicy):
+                gauge_scheduler_policy.labels(model_name, str(idx), policy).set(
+                    1 if policy == active_policy else 0
+                )
+        self.gauge_scheduler_policy = gauge_scheduler_policy
+
+        # Distribution of finished-request priorities (raw priority numbers,
+        # lower value means higher priority). Only meaningful under priority
+        # scheduling, so it is only registered in that mode to keep FCFS
+        # output unchanged.
+        if self.priority_scheduling:
+            histogram_request_priority = self._histogram_cls(
+                name="vllm:request_priority",
+                documentation=(
+                    "Histogram of finished-request priorities "
+                    "(lower value means higher priority)."
+                ),
+                buckets=[-1000, -100, -10, -1, 0, 1, 10, 100, 1000],
+                labelnames=labelnames,
+            )
+            self.histogram_request_priority = create_metric_per_engine(
+                histogram_request_priority, per_engine_labelvalues
+            )
+        else:
+            self.histogram_request_priority = {}
 
         gauge_waiting_by_reason = self._gauge_cls(
             name="vllm:num_requests_waiting_by_reason",
@@ -726,18 +821,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
+        self._counter_request_success_base: Counter | None = None
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
-            labelnames=labelnames + ["finished_reason"],
+            labelnames=finished_labelnames + ["finished_reason"],
         )
-        for reason in FinishReason:
-            self.counter_request_success[reason] = {
-                idx: counter_request_success_base.labels(
-                    model_name, str(idx), str(reason)
-                )
-                for idx in engine_indexes
-            }
+        if self.priority_scheduling:
+            # Store raw metric; labeled lazily at record time with priority.
+            self._counter_request_success_base = counter_request_success_base
+        else:
+            for reason in FinishReason:
+                self.counter_request_success[reason] = {
+                    idx: counter_request_success_base.labels(
+                        model_name, str(idx), str(reason)
+                    )
+                    for idx in engine_indexes
+                }
 
         request_tokens_buckets = histogram_buckets(
             "request_tokens", max_model_len=max_model_len
@@ -756,20 +856,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_num_prompt_tokens_request = create_metric_per_engine(
-            histogram_num_prompt_tokens_request, per_engine_labelvalues
+        self.histogram_num_prompt_tokens_request = _finished_metric(
+            histogram_num_prompt_tokens_request
         )
 
         histogram_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_num_generation_tokens_request = create_metric_per_engine(
-            histogram_num_generation_tokens_request, per_engine_labelvalues
+        self.histogram_num_generation_tokens_request = _finished_metric(
+            histogram_num_generation_tokens_request
         )
 
         # TODO: This metric might be incorrect in case of using multiple
@@ -809,10 +909,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:request_params_max_tokens",
             documentation="Histogram of the max_tokens request parameter.",
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_max_tokens_request = create_metric_per_engine(
-            histogram_max_tokens_request, per_engine_labelvalues
+        self.histogram_max_tokens_request = _finished_metric(
+            histogram_max_tokens_request
         )
 
         #
@@ -822,10 +922,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
             buckets=time_to_first_token_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_time_to_first_token = create_metric_per_engine(
-            histogram_time_to_first_token, per_engine_labelvalues
+        self.histogram_time_to_first_token = _finished_metric(
+            histogram_time_to_first_token
         )
 
         histogram_inter_token_latency = self._histogram_cls(
@@ -842,70 +942,68 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:request_time_per_output_token_seconds",
             documentation="Histogram of time_per_output_token_seconds per request.",
             buckets=inter_token_latency_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_request_time_per_output_token = create_metric_per_engine(
-            histogram_request_time_per_output_token, per_engine_labelvalues
+        self.histogram_request_time_per_output_token = _finished_metric(
+            histogram_request_time_per_output_token
         )
 
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_e2e_time_request = create_metric_per_engine(
-            histogram_e2e_time_request, per_engine_labelvalues
-        )
+        self.histogram_e2e_time_request = _finished_metric(histogram_e2e_time_request)
 
         histogram_queue_time_request = self._histogram_cls(
             name="vllm:request_queue_time_seconds",
             documentation="Histogram of time spent in WAITING phase for request.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_queue_time_request = create_metric_per_engine(
-            histogram_queue_time_request, per_engine_labelvalues
+        self.histogram_queue_time_request = _finished_metric(
+            histogram_queue_time_request
         )
 
         histogram_inference_time_request = self._histogram_cls(
             name="vllm:request_inference_time_seconds",
             documentation="Histogram of time spent in RUNNING phase for request.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_inference_time_request = create_metric_per_engine(
-            histogram_inference_time_request, per_engine_labelvalues
+        self.histogram_inference_time_request = _finished_metric(
+            histogram_inference_time_request
         )
 
         histogram_prefill_time_request = self._histogram_cls(
             name="vllm:request_prefill_time_seconds",
             documentation="Histogram of time spent in PREFILL phase for request.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_prefill_time_request = create_metric_per_engine(
-            histogram_prefill_time_request, per_engine_labelvalues
+        self.histogram_prefill_time_request = _finished_metric(
+            histogram_prefill_time_request
         )
 
         histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
             documentation="Histogram of time spent in DECODE phase for request.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_decode_time_request = create_metric_per_engine(
-            histogram_decode_time_request, per_engine_labelvalues
+        self.histogram_decode_time_request = _finished_metric(
+            histogram_decode_time_request
         )
 
         histogram_request_num_preemptions = self._histogram_cls(
             name="vllm:request_num_preemptions",
             documentation="Histogram of the number of times a request was preempted.",
             buckets=request_num_preemptions_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_request_num_preemptions = create_metric_per_engine(
-            histogram_request_num_preemptions, per_engine_labelvalues
+        self.histogram_request_num_preemptions = _finished_metric(
+            histogram_request_num_preemptions
         )
 
         histogram_prefill_kv_computed_request = self._histogram_cls(
@@ -915,10 +1013,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "(excluding cached tokens)."
             ),
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_prefill_kv_computed_request = create_metric_per_engine(
-            histogram_prefill_kv_computed_request, per_engine_labelvalues
+        self.histogram_prefill_kv_computed_request = _finished_metric(
+            histogram_prefill_kv_computed_request
         )
 
         #
@@ -1023,6 +1121,33 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             metrics_info = config_obj.metrics_info()
             metrics_info["engine"] = str(engine_index)
             info_gauge.labels(**metrics_info).set(1)
+
+    def _finished_child(
+        self, metric: Any, engine_idx: int, priority: int
+    ) -> PromMetric:
+        """Resolve the per-request child of a finished-request metric.
+
+        In priority scheduling mode the raw metric is labeled at record time
+        with ``(model_name, engine, bucketed_priority)``. In FCFS mode the
+        pre-labeled per-engine child is returned. Centralizing this keeps the
+        ``observe``/``inc`` call sites in :meth:`record` identical across both
+        modes.
+
+        Args:
+            metric: Either a raw Prometheus metric (priority mode) or a
+                ``{engine_idx: child}`` mapping (FCFS mode).
+            engine_idx: The engine index producing the observation.
+            priority: The request priority (ignored in FCFS mode).
+
+        Returns:
+            The labeled metric child to observe/increment.
+
+        """
+        if self.priority_scheduling:
+            return metric.labels(
+                self._model_name, str(engine_idx), bucket_priority(priority)
+            )
+        return metric[engine_idx]
 
     def record(
         self,
@@ -1145,53 +1270,69 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
         for n_param in iteration_stats.n_params_iter:
             self.histogram_n_request[engine_idx].observe(n_param)
-        for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
-            self.counter_request_success[finished_request.finish_reason][
-                engine_idx
-            ].inc()
-            self.histogram_e2e_time_request[engine_idx].observe(
-                finished_request.e2e_latency
-            )
-            self.histogram_queue_time_request[engine_idx].observe(
-                finished_request.queued_time
-            )
-            self.histogram_prefill_time_request[engine_idx].observe(
-                finished_request.prefill_time
-            )
-            self.histogram_inference_time_request[engine_idx].observe(
-                finished_request.inference_time
-            )
-            self.histogram_decode_time_request[engine_idx].observe(
-                finished_request.decode_time
-            )
-            self.histogram_request_num_preemptions[engine_idx].observe(
-                finished_request.num_preemptions
-            )
-            # Calculate prefill KV compute (excludes cached tokens)
-            prefill_kv_computed = finished_request.num_prompt_tokens - max(
-                finished_request.num_cached_tokens, 0
-            )
-            self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
-            )
-            self.histogram_num_prompt_tokens_request[engine_idx].observe(
-                finished_request.num_prompt_tokens
-            )
-            self.histogram_num_generation_tokens_request[engine_idx].observe(
-                finished_request.num_generation_tokens
-            )
-            self.histogram_request_time_per_output_token[engine_idx].observe(
-                finished_request.mean_time_per_output_token
-            )
-            if finished_request.max_tokens_param:
-                self.histogram_max_tokens_request[engine_idx].observe(
-                    finished_request.max_tokens_param
+            fr = finished_request
+            priority = fr.priority
+
+            if self.priority_scheduling:
+                assert self._counter_request_success_base is not None
+                self.histogram_request_priority[engine_idx].observe(priority)
+                success_counter = self._counter_request_success_base.labels(
+                    self._model_name,
+                    str(engine_idx),
+                    bucket_priority(priority),
+                    str(fr.finish_reason),
                 )
+            else:
+                success_counter = self.counter_request_success[fr.finish_reason][
+                    engine_idx
+                ]
+            success_counter.inc()
+
+            # Prefill KV compute excludes cached tokens.
+            prefill_kv_computed = fr.num_prompt_tokens - max(fr.num_cached_tokens, 0)
+
+            self._finished_child(
+                self.histogram_e2e_time_request, engine_idx, priority
+            ).observe(fr.e2e_latency)
+            self._finished_child(
+                self.histogram_queue_time_request, engine_idx, priority
+            ).observe(fr.queued_time)
+            self._finished_child(
+                self.histogram_prefill_time_request, engine_idx, priority
+            ).observe(fr.prefill_time)
+            self._finished_child(
+                self.histogram_inference_time_request, engine_idx, priority
+            ).observe(fr.inference_time)
+            self._finished_child(
+                self.histogram_decode_time_request, engine_idx, priority
+            ).observe(fr.decode_time)
+            self._finished_child(
+                self.histogram_request_num_preemptions, engine_idx, priority
+            ).observe(fr.num_preemptions)
+            self._finished_child(
+                self.histogram_prefill_kv_computed_request, engine_idx, priority
+            ).observe(prefill_kv_computed)
+            self._finished_child(
+                self.histogram_num_prompt_tokens_request, engine_idx, priority
+            ).observe(fr.num_prompt_tokens)
+            self._finished_child(
+                self.histogram_num_generation_tokens_request, engine_idx, priority
+            ).observe(fr.num_generation_tokens)
+            self._finished_child(
+                self.histogram_request_time_per_output_token, engine_idx, priority
+            ).observe(fr.mean_time_per_output_token)
+            if fr.first_token_latency > 0:
+                self._finished_child(
+                    self.histogram_time_to_first_token, engine_idx, priority
+                ).observe(fr.first_token_latency)
+            if fr.max_tokens_param:
+                self._finished_child(
+                    self.histogram_max_tokens_request, engine_idx, priority
+                ).observe(fr.max_tokens_param)
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
