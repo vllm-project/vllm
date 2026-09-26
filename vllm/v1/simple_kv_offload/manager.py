@@ -1029,7 +1029,9 @@ class SimpleCPUOffloadScheduler:
         for i, (gpu_block_id, cpu_block) in enumerate(zip(gpu_block_ids, cpu_blocks)):
             gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
             primary_hash = gpu_block.block_hash
-            assert primary_hash is not None
+            if primary_hash is None:
+                # Mamba copy-on-write can move hashes off a pinned source block.
+                continue
             self.cpu_block_pool._insert_block_hash(
                 primary_hash,
                 cpu_block,

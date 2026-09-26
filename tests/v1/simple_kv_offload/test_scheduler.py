@@ -533,6 +533,33 @@ def test_prompt_logprobs_skip_cpu_cache_lookup() -> None:
     assert all(block.ref_cnt == 0 for block in pinned_blocks)
 
 
+@pytest.mark.parametrize("lazy", [False, True])
+def test_store_completion_skips_moved_hashes(lazy: bool) -> None:
+    """Hash migration must not abort a store batch or leak transfer refs."""
+    fix = make_scheduler(lazy=lazy)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    req = make_request(num_blocks=2)
+    gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks=2)
+    cpu_blocks = sched.cpu_block_pool.get_new_blocks(2)
+    gpu_pool.touch(gpu_blocks)
+    moved_hash = gpu_blocks[0].block_hash
+    valid_hash = gpu_blocks[1].block_hash
+    destination = gpu_pool.get_new_blocks(1)[0]
+    gpu_pool.move_block_hashes(gpu_blocks[0], destination)
+
+    sched._process_store_completion(
+        [block.block_id for block in gpu_blocks],
+        [block.block_id for block in cpu_blocks],
+    )
+
+    assert destination.block_hash == moved_hash
+    assert cpu_blocks[0].block_hash is None
+    assert cpu_blocks[1].block_hash == valid_hash
+    assert all(block.ref_cnt == 0 for block in cpu_blocks)
+    assert all(block.ref_cnt == 1 for block in gpu_blocks)
+
+
 def test_eager_store_preserves_secondary_block_hashes() -> None:
     """CPU copies retain fine-grained hashes owned by the GPU block."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
