@@ -213,17 +213,26 @@ class DeepSeekV3ToolParser(ToolParser):
                 if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
                     logger.debug("attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
-                    if '"}' not in delta_text:
+                if self.prev_tool_call_arr[self.current_tool_id].get("arguments"):
+                    # the tool call is complete: extract the final arguments
+                    # from the full tool call text and emit whatever has not
+                    # been streamed yet. Reconstructing the tail from
+                    # delta_text is not reliable, since the arguments need
+                    # not end with `"}` (numbers, booleans, null, arrays,
+                    # nested objects).
+                    expected_args = None
+                    if tool_call_portion is not None:
+                        matches = self.stream_tool_call_portion_regex.match(
+                            tool_call_portion
+                        )
+                        if matches:
+                            expected_args = matches.group("function_arguments")
+                    if expected_args is None:
                         return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
+                    already_streamed = self.streamed_args_for_tool[self.current_tool_id]
+                    diff = expected_args[len(already_streamed) :]
+                    if not diff:
+                        return None
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s",
