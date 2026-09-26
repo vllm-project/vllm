@@ -8,11 +8,13 @@ and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
 intermediate_size 704) that exercises the non-256-aligned padding path.
 """
 
+from dataclasses import replace
+
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_test_quant_config
+from tests.kernels.moe.utils import check_deferred_moe_finalize, make_test_quant_config
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
@@ -31,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
@@ -90,6 +93,36 @@ if _SITU_OP_NAME not in op_registry:
 
 SILU_WITH_CLAMP = op_registry[_CLAMP_OP_NAME]
 SITU = op_registry[_SITU_OP_NAME]
+
+
+def _make_trtllm_fp4_moe_kernel(
+    moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
+) -> mk.FusedMoEKernel:
+    experts = TrtLlmNvFp4ExpertsModular(
+        moe_config=moe_config, quant_config=quant_config
+    )
+    # Mimic the production weight-loader path so per-expert tensors that
+    # are normally precomputed in process_weights_after_loading (g1_scale_c
+    # and the rescaled gemm1_clamp_limit) get materialized. The test's
+    # synthetic quant_config has g1_alphas/g2_alphas already at their
+    # post-fusion values, so we set w13_weight_scale_2 to alias g1_alphas
+    # (same tensor) and use input_scale=1 to make the in-place
+    # weight_scale_2 *= input_scale step a no-op.
+    fake_layer = torch.nn.Module()
+    fake_layer.w13_weight_scale_2 = quant_config.g1_alphas
+    fake_layer.w2_weight_scale_2 = quant_config.g2_alphas
+    fake_layer.w13_input_scale = torch.ones_like(quant_config.g1_alphas)
+    fake_layer.w2_input_scale = torch.ones_like(quant_config.g2_alphas)
+    experts.process_weights_after_loading(fake_layer)
+    return mk.FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        experts,
+    )
 
 
 ACTIVATION_CASES = [
@@ -191,34 +224,11 @@ def test_trtllm_fp4_moe_no_graph(
             ),
         )
 
-        trtllm_inner = TrtLlmNvFp4ExpertsModular(
-            moe_config=moe_config, quant_config=quant_config
-        )
-        # Mimic the production weight-loader path so per-expert tensors that
-        # are normally precomputed in process_weights_after_loading (g1_scale_c
-        # and the rescaled gemm1_clamp_limit) get materialized. The test's
-        # synthetic quant_config has g1_alphas/g2_alphas already at their
-        # post-fusion values, so we set w13_weight_scale_2 to alias g1_alphas
-        # (same tensor) and use input_scale=1 to make the in-place
-        # weight_scale_2 *= input_scale step a no-op.
-        fake_layer = torch.nn.Module()
-        fake_layer.w13_weight_scale_2 = quant_config.g1_alphas
-        fake_layer.w2_weight_scale_2 = quant_config.g2_alphas
-        fake_layer.w13_input_scale = torch.ones_like(quant_config.g1_alphas)
-        fake_layer.w2_input_scale = torch.ones_like(quant_config.g2_alphas)
-        trtllm_inner.process_weights_after_loading(fake_layer)
+        trtllm_experts = _make_trtllm_fp4_moe_kernel(moe_config, quant_config)
         if activation == MoEActivation.SITU:
-            torch.testing.assert_close(trtllm_inner.g1_scale_c, quant_config.a2_gscale)
-
-        trtllm_experts = mk.FusedMoEKernel(
-            maybe_make_prepare_finalize(
-                moe=moe_config,
-                quant_config=quant_config,
-                allow_new_interface=True,
-                use_monolithic=False,
-            ),
-            trtllm_inner,
-        )
+            torch.testing.assert_close(
+                trtllm_experts.fused_experts.g1_scale_c, quant_config.a2_gscale
+            )
 
         trtllm_output = trtllm_experts.apply(
             hidden_states=a,
@@ -275,6 +285,124 @@ def test_trtllm_fp4_moe_no_graph(
         )
 
         torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
+
+
+@torch.inference_mode()
+def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
+    """Weight reloads rerun post-processing on the same experts object; the
+    g1_alphas fold of clamp/beta must start from the unfolded values."""
+    e, n, k = 8, 256, 256
+    clamp, beta = 7.0, 1.0
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        _, _, quant_config = make_test_quant_config(
+            e,
+            n,
+            k,
+            in_dtype=torch.bfloat16,
+            quant_dtype="nvfp4",
+            block_shape=None,
+            per_act_token_quant=False,
+            is_scale_swizzled=False,
+        )
+        quant_config.gemm1_clamp_limit = clamp
+        quant_config.gemm1_beta = beta
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=2,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=16,
+        )
+        experts = TrtLlmNvFp4ExpertsModular(
+            moe_config=moe_config, quant_config=quant_config
+        )
+        g1_alphas = quant_config.g1_alphas
+        assert g1_alphas is not None
+        layer = torch.nn.Module()
+        layer.w13_weight_scale_2 = g1_alphas
+        layer.w2_weight_scale_2 = quant_config.g2_alphas
+        layer.w13_input_scale = torch.ones_like(g1_alphas)
+        layer.w2_input_scale = torch.ones_like(g1_alphas)
+
+        for new_alphas in (0.5, 0.25):
+            g1_alphas.fill_(new_alphas)
+            experts.process_weights_after_loading(layer)
+            expected = torch.full_like(g1_alphas, 1.0 / new_alphas)
+            torch.testing.assert_close(experts.gemm1_clamp_limit, clamp * expected)
+            torch.testing.assert_close(experts.gemm1_beta, beta * expected)
+
+
+@pytest.mark.parametrize("m,chunk_size", [(1, None), (16, None), (16, 5)])
+@torch.inference_mode()
+def test_trtllm_fp4_moe_deferred_finalize(
+    m: int,
+    chunk_size: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_init,
+):
+    """TRTLLM-Gen NvFP4 modular experts can leave the top-k finalize to the caller."""
+    e, topk, n, k = 128, 8, 1024, 1024
+    dtype = torch.bfloat16
+    if chunk_size is not None:
+        monkeypatch.setattr(
+            TrtLlmNvFp4ExpertsModular, "_get_chunk_size", lambda self: chunk_size
+        )
+
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_q, w2_q, quant_config = make_test_quant_config(
+            e, n, k, in_dtype=dtype, quant_dtype="nvfp4", is_scale_swizzled=False
+        )
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+        # One rank of a TP group, which deferral needs.
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=2 * n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+            ),
+            in_dtype=dtype,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = _make_trtllm_fp4_moe_kernel(moe_config, quant_config)
+
+        check_deferred_moe_finalize(
+            moe_config,
+            lambda: kernel.apply(
+                hidden_states=a,
+                w1=w1_q,
+                w2=w2_q,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ),
+            router_weights=topk_weights,
+            chunked=chunk_size is not None,
+        )
 
 
 if __name__ == "__main__":
