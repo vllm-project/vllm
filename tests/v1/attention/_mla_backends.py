@@ -6,8 +6,8 @@
 Not collected by pytest (the leading underscore keeps it out of ``test_*.py``
 discovery); it holds the batch specs, mock attention layers, KV-cache
 prepopulation and the backend-correctness runner shared by
-``mla/backends/test_mla_backends.py``, ``mla/test_mla_backend_correctness.py``
-and the sparse MLA tests.
+``mla/backends/test_mla_backends.py``,
+``mla/correctness/test_mla_backend_correctness.py`` and the sparse MLA tests.
 
 Known Issues:
 - FLASH_ATTN_MLA backend occasionally produces NaN values in
@@ -106,79 +106,50 @@ MLA_DIMENSIONS_TO_TEST = [
 ]
 
 
-# The batch specs `test_backend_correctness` sweeps.
-BACKEND_CORRECTNESS_BATCH_SPEC_NAMES = [
-    "small_decode",
-    "small_prefill",
-    "mixed_small",
-    "medium_decode",
-    "medium_prefill",
-    "mixed_medium",
-    "large_decode",
-    "large_prefill",
-    "single_decode",
-    "single_prefill",
-    "spec_decode_small",
-    "spec_decode_medium",
-]
-
-
-def _invalid_reasons(
-    prefill_backend: MLAPrefillBackendEnum, qk_nope_head_dim: int, v_head_dim: int
-) -> list[str]:
-    """Why this prefill backend cannot run these MLA dimensions here, if it cannot."""
-    if prefill_backend not in PREFILL_BACKENDS_TO_TEST:
-        return [f"not exercised on {current_platform.device_type}"]
+def _prefill_backend_dimension_params():
     device_capability = current_platform.get_device_capability()
-    if device_capability is None:
-        return ["device capability unavailable"]
-    try:
-        return prefill_backend.get_class().validate_configuration(
-            device_capability,
-            MLAPrefillSelectorConfig(
-                dtype=torch.bfloat16,
-                mla_dimensions=MLADimensions(
-                    qk_nope_head_dim=qk_nope_head_dim,
-                    qk_rope_head_dim=64,
-                    v_head_dim=v_head_dim,
-                ),
-            ),
-        )
-    except ImportError:
-        return ["ImportError"]
-
-
-def prefill_backend_dimension_params(prefill_backend: MLAPrefillBackendEnum):
-    """Params for one MLA prefill backend across the MLA dimensions.
-
-    A param is always emitted, carrying a skip mark when the combination is
-    unavailable on this device, so the correctness matrix collects the same
-    cases on every lane and no shard can come up empty.
-    """
     params = []
-    for dim_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-        invalid_reasons = _invalid_reasons(
-            prefill_backend, qk_nope_head_dim, v_head_dim
-        )
-        marks = []
-        if invalid_reasons:
-            marks.append(
-                pytest.mark.skip(
-                    reason=(
-                        f"Prefill backend {prefill_backend.name} unavailable: "
-                        f"{invalid_reasons}"
+    for prefill_backend in PREFILL_BACKENDS_TO_TEST:
+        for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
+            if device_capability is None:
+                invalid_reasons = ["device capability unavailable"]
+            else:
+                try:
+                    invalid_reasons = (
+                        prefill_backend.get_class().validate_configuration(
+                            device_capability,
+                            MLAPrefillSelectorConfig(
+                                dtype=torch.bfloat16,
+                                mla_dimensions=MLADimensions(
+                                    qk_nope_head_dim=qk_nope_head_dim,
+                                    qk_rope_head_dim=64,
+                                    v_head_dim=v_head_dim,
+                                ),
+                            ),
+                        )
+                    )
+                except ImportError:
+                    invalid_reasons = ["ImportError"]
+
+            marks = []
+            if invalid_reasons:
+                marks.append(
+                    pytest.mark.skip(
+                        reason=(
+                            f"Prefill backend {prefill_backend.name} unavailable: "
+                            f"{invalid_reasons}"
+                        )
                     )
                 )
+            params.append(
+                pytest.param(
+                    prefill_backend,
+                    qk_nope_head_dim,
+                    v_head_dim,
+                    id=f"{dimensions_id}-{prefill_backend}",
+                    marks=marks,
+                )
             )
-        params.append(
-            pytest.param(
-                prefill_backend,
-                qk_nope_head_dim,
-                v_head_dim,
-                id=f"{dim_id}-{prefill_backend}",
-                marks=marks,
-            )
-        )
     return params
 
 
@@ -835,7 +806,7 @@ def run_attention_backend(
         return output
 
 
-def run_backend_correctness(
+def _run_backend_correctness(
     default_vllm_config,
     dist_init,
     workspace_init,

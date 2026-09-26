@@ -1,38 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA backend correctness across every GPU MLA prefill backend.
-
-The test bodies live in ``tests/v1/attention/_mla_backends.py``. Every GPU
-prefill backend in ``MLAPrefillBackendEnum`` is parametrized here, so a newly
-added backend is collected automatically; one that cannot run on this device
-collects a skip-marked case instead of disappearing from the matrix.
-"""
 
 import pytest
 
 from tests.v1.attention._mla_backends import (
-    BACKEND_CORRECTNESS_BATCH_SPEC_NAMES,
-    prefill_backend_dimension_params,
-    run_backend_correctness,
+    _prefill_backend_dimension_params,
+    _run_backend_correctness,
 )
 from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackendEnum
 
-PREFILL_BACKEND_DIMENSIONS = [
-    param
-    for prefill_backend in MLAPrefillBackendEnum
-    if prefill_backend not in (MLAPrefillBackendEnum.CPU, MLAPrefillBackendEnum.CUSTOM)
-    for param in prefill_backend_dimension_params(prefill_backend)
-]
 
-
-@pytest.mark.parametrize("batch_spec_name", BACKEND_CORRECTNESS_BATCH_SPEC_NAMES)
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_small",
+        "medium_decode",
+        "medium_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "single_decode",
+        "single_prefill",
+        "spec_decode_small",
+        "spec_decode_medium",
+    ],
+)
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
     ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
-    PREFILL_BACKEND_DIMENSIONS,
+    _prefill_backend_dimension_params(),
 )
 def test_backend_correctness(
     default_vllm_config,
@@ -48,7 +49,7 @@ def test_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
 ):
-    run_backend_correctness(
+    _run_backend_correctness(
         default_vllm_config,
         dist_init,
         workspace_init,
@@ -66,7 +67,7 @@ def test_backend_correctness(
 
 @pytest.mark.parametrize(
     ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
-    PREFILL_BACKEND_DIMENSIONS,
+    _prefill_backend_dimension_params(),
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_chunked_context_backend_correctness(
@@ -79,7 +80,7 @@ def test_chunked_context_backend_correctness(
     kv_cache_dtype: str,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
-    run_backend_correctness(
+    _run_backend_correctness(
         default_vllm_config,
         dist_init,
         workspace_init,

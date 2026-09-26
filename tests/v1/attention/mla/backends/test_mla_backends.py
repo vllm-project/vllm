@@ -3,7 +3,7 @@
 """Tests for v1 MLA backends without GPUModelRunner dependency.
 
 The parametrized backend-correctness matrix lives in
-``../test_mla_backend_correctness.py``, over the shared bodies in
+``../correctness/test_mla_backend_correctness.py``, over the shared bodies in
 ``tests/v1/attention/_mla_backends.py``.
 """
 
