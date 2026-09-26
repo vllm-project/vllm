@@ -40,7 +40,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
-    PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -51,6 +50,7 @@ from vllm.utils.serial_utils import numpy2base64
 from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
+    rebuild_mm_placeholders,
 )
 from .protocol import (
     GenerateRequest,
@@ -185,13 +185,7 @@ class ServingTokens(GenerateBaseServing):
                 [prompt]
             )
         elif features := request.features:
-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
-                for modality, ranges in features.mm_placeholders.items()
-            }
+            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
 
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.

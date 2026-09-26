@@ -199,8 +199,8 @@ def test_placeholder_ranges_from_engine_input():
 
     assert placeholders is not None
     assert [item.model_dump() for item in placeholders["image"]] == [
-        {"offset": 1, "length": 5},
-        {"offset": 8, "length": 2},
+        {"offset": 1, "length": 5, "is_embed": None},
+        {"offset": 8, "length": 2, "is_embed": None},
     ]
 
     text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
@@ -533,7 +533,7 @@ MM_ENGINE_INPUT: Any = {
     "prompt_token_ids": [1, 2, 2, 2, 3],
     "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=3)]},
 }
-MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3}]}
+MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3, "is_embed": None}]}
 
 
 def _build_mm_serving_tokens(engine: AsyncLLM) -> ServingTokens:
