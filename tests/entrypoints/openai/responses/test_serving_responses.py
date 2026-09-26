@@ -63,6 +63,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
@@ -1968,3 +1969,100 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+
+def _new_truncation_renderer(preprocess_side_effect) -> OnlineRenderer:
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.preprocess_chat = AsyncMock(side_effect=preprocess_side_effect)
+    return renderer
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_auto_truncation_drops_oldest_items():
+    """`truncation: "auto"` drops whole input items, keeping instructions."""
+    attempts: list[list[dict]] = []
+
+    async def preprocess_side_effect(request, messages, **kwargs):
+        attempts.append([dict(message) for message in messages])
+        if len(messages) > 2:
+            raise VLLMValidationError(
+                "This model's maximum context length is 100 tokens. "
+                "However, the prompt contains too many input tokens.",
+                parameter="input_tokens",
+                value=101,
+            )
+        return [], [tokens_input([1, 2, 3])]
+
+    renderer = _new_truncation_renderer(preprocess_side_effect)
+    request = ResponsesRequest(
+        input=[
+            {"role": "user", "content": "first filler"},
+            {"role": "user", "content": "second filler"},
+            {"role": "user", "content": "what is your name?"},
+        ],
+        instructions="You are ZEBRA-7.",
+        truncation="auto",
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert not isinstance(result, ErrorResponse)
+    # The system message (instructions) and the final message survive;
+    # the oldest items are dropped from the beginning of the conversation.
+    assert result.messages == [
+        {"role": "system", "content": "You are ZEBRA-7."},
+        {"role": "user", "content": "what is your name?"},
+    ]
+    assert result.engine_input["prompt_token_ids"] == [1, 2, 3]
+    # One item is dropped per render attempt, oldest first.
+    assert [len(attempt) for attempt in attempts] == [4, 3, 2]
+    # Token-level truncation stays disabled while items are being dropped.
+    for call in renderer.preprocess_chat.await_args_list:
+        assert call.kwargs["tok_params"] is not None
+        assert call.kwargs["tok_params"].truncate_prompt_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_auto_truncation_surfaces_error_when_undroppable():
+    """A prompt that cannot fit without mandatory items returns a 400 error."""
+
+    async def preprocess_side_effect(request, messages, **kwargs):
+        raise VLLMValidationError(
+            "This model's maximum context length is 100 tokens.",
+            parameter="input_tokens",
+            value=101,
+        )
+
+    renderer = _new_truncation_renderer(preprocess_side_effect)
+    request = ResponsesRequest(
+        input="what is your name?",
+        instructions="You are ZEBRA-7.",
+        truncation="auto",
+    )
+
+    with pytest.raises(VLLMValidationError, match="maximum context length"):
+        await renderer.render_responses(request)
+    # Only the system message and the final message exist: nothing to drop.
+    assert renderer.preprocess_chat.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_disabled_truncation_uses_default_tok_params():
+    """`truncation: "disabled"` must not inject a tokenization override."""
+
+    async def preprocess_side_effect(request, messages, **kwargs):
+        return [], [tokens_input([1])]
+
+    renderer = _new_truncation_renderer(preprocess_side_effect)
+    request = ResponsesRequest(input="hello", truncation="disabled")
+
+    result = await renderer.render_responses(request)
+
+    assert not isinstance(result, ErrorResponse)
+    assert result.messages == [{"role": "user", "content": "hello"}]
+    assert renderer.preprocess_chat.await_args.kwargs["tok_params"] is None
