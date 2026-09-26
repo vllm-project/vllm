@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
@@ -93,6 +94,36 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
+_EXPERT_LOAD_LOGIT_BIAS: dict[str, Callable[[int], torch.Tensor]] = {
+    "uniform": lambda n_experts: torch.zeros(n_experts),
+    "zipf": lambda n_experts: -torch.log(
+        torch.arange(1, n_experts + 1, dtype=torch.float32)
+    ),
+}
+EXPERT_LOAD_DISTRIBUTIONS = tuple(_EXPERT_LOAD_LOGIT_BIAS)
+
+
+def generate_gating_output(
+    num_iters: int, num_tokens: int, num_experts: int, *, distribution: str
+) -> torch.Tensor:
+    """Per-iteration gating logits fed to fused_topk. 'uniform' (this
+    script's existing default) draws iid gating logits, so every expert is
+    equally likely to land in an unbatched token's top-k. 'zipf' adds a
+    per-expert bias of -log(rank) on top of the same noise: since
+    softmax(logit) is scaled by exp(bias), this puts roughly 1/rank of the
+    selection mass on the rank'th expert, modeling the skewed expert load
+    real serving traffic produces instead of this benchmark's current
+    near-uniform-only routing.
+    """
+    if distribution not in _EXPERT_LOAD_LOGIT_BIAS:
+        raise ValueError(
+            f"unknown --expert-load-distribution {distribution!r}; "
+            f"expected one of {EXPERT_LOAD_DISTRIBUTIONS}"
+        )
+    bias = _EXPERT_LOAD_LOGIT_BIAS[distribution](num_experts)
+    return torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32) + bias
+
+
 def benchmark_config(
     config: BenchmarkConfig,
     num_tokens: int,
@@ -107,6 +138,7 @@ def benchmark_config(
     num_iters: int = 100,
     block_quant_shape: list[int] = None,
     use_deep_gemm: bool = False,
+    distribution: str = "uniform",
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
@@ -162,7 +194,9 @@ def benchmark_config(
         w2 = torch.randn(
             num_experts, hidden_size, shard_intermediate_size // 2, dtype=init_dtype
         )
-    gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32)
+    gating_output = generate_gating_output(
+        num_iters, num_tokens, num_experts, distribution=distribution
+    )
 
     w1_scale = None
     w2_scale = None
@@ -543,6 +577,7 @@ class BenchmarkWorker:
         use_int4_w4a16: bool = False,
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
+        distribution: str = "uniform",
     ) -> tuple[dict[str, int], float]:
         # local import to allow serialization by ray
 
@@ -586,6 +621,7 @@ class BenchmarkWorker:
             num_iters=100,
             block_quant_shape=block_quant_shape,
             use_deep_gemm=use_deep_gemm,
+            distribution=distribution,
         )
         return config, kernel_time
 
@@ -603,6 +639,7 @@ class BenchmarkWorker:
         search_space: list[dict[str, int]],
         block_quant_shape: list[int],
         use_deep_gemm: bool,
+        distribution: str,
     ) -> dict[str, int]:
         # local import to allow serialization by ray
         from vllm.platforms import current_platform
@@ -646,6 +683,7 @@ class BenchmarkWorker:
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
+                        distribution=distribution,
                     )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
@@ -767,6 +805,7 @@ def get_model_params(config):
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "DeepseekForCausalLM",
         "GlmMoeDsaForCausalLM",
         "Glm4MoeForCausalLM",
         "Glm4MoeLiteForCausalLM",
@@ -1012,6 +1051,7 @@ def main(args: argparse.Namespace):
                     search_space,
                     block_quant_shape,
                     use_deep_gemm,
+                    args.expert_load_distribution,
                 )
                 for batch_size in batch_sizes
             ],
@@ -1050,6 +1090,7 @@ def main(args: argparse.Namespace):
                     use_int4_w4a16,
                     block_quant_shape,
                     use_deep_gemm,
+                    args.expert_load_distribution,
                 )
                 for batch_size in batch_sizes
             ],
@@ -1082,6 +1123,19 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
+    parser.add_argument(
+        "--expert-load-distribution",
+        type=str,
+        choices=list(EXPERT_LOAD_DISTRIBUTIONS),
+        default="uniform",
+        help=(
+            "Synthetic router gating-logit distribution used to generate "
+            "benchmark tokens. 'uniform' (default) matches this script's "
+            "existing behavior. 'zipf' biases lower-index experts toward "
+            "disproportionately more selection mass, modeling the skewed "
+            "expert load real serving traffic produces."
+        ),
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)
     args = parser.parse_args()
