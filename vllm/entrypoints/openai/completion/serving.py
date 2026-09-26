@@ -335,7 +335,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
-                        if request.return_token_ids:
+                        # #24405 cleared prompt_text whenever return_token_ids
+                        # was set because detokenization was skipped then and
+                        # prompt may be None (token-id / embeds). Only fall
+                        # back when text is missing; do not wipe a real
+                        # string prompt when echo needs it (#57996).
+                        if prompt_text is None:
                             prompt_text = ""
                         assert prompt_text is not None
                         if request.max_tokens == 0:
@@ -529,7 +534,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                 assert request.max_tokens is not None
                 if request.echo:
-                    if request.return_token_ids:
+                    # #24405 cleared prompt_text whenever return_token_ids was
+                    # set because detokenization was skipped then and prompt
+                    # may be None (token-id / embeds). Only fall back when
+                    # text is missing; do not wipe a real string prompt when
+                    # echo needs it (#57996).
+                    if prompt_text is None:
                         prompt_text = ""
                     assert prompt_text is not None
                     if request.max_tokens == 0:
