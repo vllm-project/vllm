@@ -1,8 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
 import pytest
 
-from vllm.sampling_params import RepetitionDetectionParams, SamplingParams
+from vllm.sampling_params import (
+    _MAX_ABSOLUTE_MIN_COUNT,
+    _MAX_ABSOLUTE_PATTERN_SIZE,
+    RepetitionDetectionParams,
+    SamplingParams,
+    VLLMValidationError,
+)
 from vllm.v1.core.sched.utils import check_sequence_repetition, check_stop
 from vllm.v1.request import Request, RequestStatus
 
@@ -288,3 +296,143 @@ class TestRepetitionDetectionIntegration:
         )
         request.append_output_token_ids([10, 20, 10, 20, 10, 20])
         assert not check_stop(request, max_model_len=1024)
+
+
+# ============================================================================
+# CAP / VALIDATION TESTS - server-side limits on repetition detection
+# ============================================================================
+
+
+def _mock_model_config(max_rep_cap: int = 2048) -> MagicMock:
+    """Minimal mock satisfying SamplingParams.verify() for cap tests."""
+    cfg = MagicMock()
+    cfg.max_logprobs = 20
+    cfg.get_vocab_size.return_value = 32000
+    cfg.max_repetition_detection_pattern_size = max_rep_cap
+    cfg.is_diffusion = False
+    cfg.logits_processors = None
+    return cfg
+
+
+class TestRepetitionDetectionCaps:
+    """Tests for server-side caps on repetition detection parameters."""
+
+    def test_max_pattern_size_exceeds_server_cap(self):
+        params = SamplingParams(
+            max_tokens=100,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=4096,
+                min_pattern_size=1,
+                min_count=2,
+            ),
+        )
+        with pytest.raises(VLLMValidationError, match="exceeds the server"):
+            params._validate_repetition_detection(_mock_model_config(max_rep_cap=2048))
+
+    def test_max_pattern_size_within_server_cap(self):
+        params = SamplingParams(
+            max_tokens=100,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=1024,
+                min_pattern_size=1,
+                min_count=2,
+            ),
+        )
+        params._validate_repetition_detection(_mock_model_config(max_rep_cap=2048))
+
+    def test_server_disabled_repetition_detection(self):
+        params = SamplingParams(
+            max_tokens=100,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=5,
+                min_pattern_size=1,
+                min_count=2,
+            ),
+        )
+        with pytest.raises(VLLMValidationError, match="disabled"):
+            params._validate_repetition_detection(_mock_model_config(max_rep_cap=0))
+
+    def test_server_uncapped_repetition_detection(self):
+        params = SamplingParams(
+            max_tokens=100,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=60000,
+                min_pattern_size=1,
+                min_count=2,
+            ),
+        )
+        params._validate_repetition_detection(_mock_model_config(max_rep_cap=-1))
+
+    def test_disabled_detection_skips_validation(self):
+        params = SamplingParams(max_tokens=100)
+        params._validate_repetition_detection(_mock_model_config(max_rep_cap=0))
+
+    def test_scan_work_budget_exceeded(self):
+        params = SamplingParams(
+            max_tokens=100,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=2048,
+                min_pattern_size=1,
+                min_count=100,
+            ),
+        )
+        with pytest.raises(VLLMValidationError, match="scan work"):
+            params._validate_repetition_detection(_mock_model_config(max_rep_cap=2048))
+
+    def test_scan_work_budget_ok(self):
+        params = SamplingParams(
+            max_tokens=100,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=2048,
+                min_pattern_size=1,
+                min_count=5,
+            ),
+        )
+        params._validate_repetition_detection(_mock_model_config(max_rep_cap=2048))
+
+
+class TestRepetitionDetectionAbsoluteCaps:
+    """Tests for hard absolute limits in RepetitionDetectionParams."""
+
+    def test_absolute_hard_cap_max_pattern_size(self):
+        with pytest.raises(ValueError, match="max_pattern_size must be"):
+            RepetitionDetectionParams(
+                max_pattern_size=_MAX_ABSOLUTE_PATTERN_SIZE + 1,
+                min_pattern_size=1,
+                min_count=2,
+            )
+
+    def test_absolute_hard_cap_min_count(self):
+        with pytest.raises(ValueError, match="min_count must be"):
+            RepetitionDetectionParams(
+                max_pattern_size=10,
+                min_pattern_size=1,
+                min_count=_MAX_ABSOLUTE_MIN_COUNT + 1,
+            )
+
+    def test_values_at_absolute_limit_accepted(self):
+        params = RepetitionDetectionParams(
+            max_pattern_size=_MAX_ABSOLUTE_PATTERN_SIZE,
+            min_pattern_size=1,
+            min_count=_MAX_ABSOLUTE_MIN_COUNT,
+        )
+        assert params.max_pattern_size == _MAX_ABSOLUTE_PATTERN_SIZE
+        assert params.min_count == _MAX_ABSOLUTE_MIN_COUNT
+
+    def test_normal_small_window_still_works(self):
+        token_ids = [1, 2, 3, 1, 2, 3, 1, 2, 3]
+        params = RepetitionDetectionParams(
+            max_pattern_size=5,
+            min_pattern_size=2,
+            min_count=3,
+        )
+        assert check_sequence_repetition(token_ids, params)
+
+    def test_scheduler_defense_rejects_oversized_window(self):
+        token_ids = list(range(200000))
+        params = RepetitionDetectionParams(
+            max_pattern_size=_MAX_ABSOLUTE_PATTERN_SIZE,
+            min_pattern_size=1,
+            min_count=_MAX_ABSOLUTE_MIN_COUNT,
+        )
+        assert not check_sequence_repetition(token_ids, params)
