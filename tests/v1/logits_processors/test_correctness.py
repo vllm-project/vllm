@@ -58,6 +58,21 @@ STR_NO_LOGITPROC = "none"
 # Thinking budget uses ``ThinkingBudgetStateHolder`` (not a logits processor).
 STR_THINKING_BUDGET = "thinking_budget"
 
+
+def test_builtin_argmax_noop_tracks_active_state() -> None:
+    device = torch.device("cpu")
+    logit_bias = LogitBiasLogitsProcessor(None, device, False)
+    min_tokens = MinTokensLogitsProcessor(None, device, False)
+
+    assert logit_bias.is_argmax_noop()
+    assert min_tokens.is_argmax_noop()
+
+    logit_bias.biases[0] = {7: 1.0}
+    min_tokens.min_toks[0] = (2, [], {1})
+    assert not logit_bias.is_argmax_noop()
+    assert not min_tokens.is_argmax_noop()
+
+
 # Thinking token budget testing constants
 THINKING_TOKEN_BUDGET = 5
 THINK_START_TOKEN_ID = 999

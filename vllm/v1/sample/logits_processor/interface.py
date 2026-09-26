@@ -93,6 +93,15 @@ class LogitsProcessor(ABC):
         """
         raise NotImplementedError
 
+    def is_argmax_noop(self) -> bool:
+        """Return whether this processor can be skipped for greedy argmax.
+
+        Argmax-invariant processors are always safe to skip. Processors that
+        can change argmax may override this when their current batch state is
+        empty.
+        """
+        return self.is_argmax_invariant()
+
     @abstractmethod
     def update_state(
         self,

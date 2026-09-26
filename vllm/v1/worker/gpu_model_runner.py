@@ -465,7 +465,8 @@ class ExecuteModelState(NamedTuple):
     sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
-    logits: torch.Tensor
+    logits: torch.Tensor | None
+    greedy_token_ids: torch.Tensor | None
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
@@ -3664,6 +3665,48 @@ class GPUModelRunner(
         )
         return sampler_output
 
+    def _can_use_local_argmax(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sample_hidden_states: torch.Tensor,
+    ) -> bool:
+        """Use vocabulary-parallel argmax only when it is exactly equivalent."""
+        metadata = self.input_batch.sampling_metadata
+        model = self.get_model()
+        if (
+            not hasattr(model, "get_top_tokens")
+            or get_tp_group().world_size == 1
+            or self.parallel_config.pipeline_parallel_size != 1
+            or self.broadcast_pp_output
+            or self.speculative_config is not None
+            or sample_hidden_states.numel() == 0
+            or not metadata.all_greedy
+            or metadata.max_num_logprobs is not None
+            or metadata.logprob_token_ids
+            or not metadata.no_penalties
+            or metadata.allowed_token_ids_mask is not None
+            or metadata.bad_words_token_ids
+            or self.num_prompt_logprobs
+            or envs.VLLM_COMPUTE_NANS_IN_LOGITS
+        ):
+            return False
+
+        holder = metadata.thinking_budget_state_holder
+        if holder is not None and holder.has_tracked_requests():
+            return False
+        if any(
+            not processor.is_argmax_noop() for processor in metadata.logitsprocs.all
+        ):
+            return False
+
+        for req_id in self.input_batch.req_ids:
+            params = self.requests[req_id].sampling_params
+            if params is None or params.structured_outputs is not None:
+                return False
+            if getattr(params, "trace_decode_token_ids", None):
+                return False
+        return not scheduler_output.has_structured_output_requests
+
     def _bookkeeping_sync(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4441,6 +4484,7 @@ class GPUModelRunner(
                 hidden_states = model_output
                 aux_hidden_states = None
 
+            greedy_token_ids = None
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -4459,7 +4503,17 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                if self._can_use_local_argmax(scheduler_output, sample_hidden_states):
+                    logger.info_once(
+                        "Using vocabulary-parallel local argmax for plain "
+                        "greedy sampling"
+                    )
+                    greedy_token_ids = self.get_model().get_top_tokens(
+                        sample_hidden_states
+                    )
+                    logits = None
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4493,6 +4547,7 @@ class GPUModelRunner(
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             logits,
+            greedy_token_ids,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -4544,6 +4599,7 @@ class GPUModelRunner(
         (
             scheduler_output,
             logits,
+            greedy_token_ids,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -4558,12 +4614,20 @@ class GPUModelRunner(
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
+            assert greedy_token_ids is None
+            assert logits is not None
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if greedy_token_ids is None:
+                sampler_output = self._sample(logits, spec_decode_metadata)
+            else:
+                sampler_output = SamplerOutput(
+                    sampled_token_ids=greedy_token_ids.to(torch.int32).unsqueeze(-1),
+                    logprobs_tensors=None,
+                )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
