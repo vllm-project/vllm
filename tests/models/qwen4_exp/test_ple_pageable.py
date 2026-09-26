@@ -561,3 +561,34 @@ def test_prefetcher_staging_survives_short_then_long_steps():
             time.sleep(0.01)
     assert prefetcher.slots[0][0].shape[0] == 4096
     assert prefetcher.skipped == 0
+
+
+# ---------------------------------------------------------------- readahead fill
+
+
+def _table(tmp_path) -> MappedTable:
+    model = _checkpoint(tmp_path, [{0: 3, 3: 2}, {1: 3, 2: 3}])
+    layout = discover_table_layout(_files(model), 1, 11, ROW, torch.float8_e4m3fn, 4)
+    return MappedTable(layout, torch.device("cpu"))
+
+
+def test_fill_populates_the_rows(tmp_path):
+    table = _table(tmp_path)
+    rows = np.array([10, 0, 4, 7])
+    assert table._fill([(table.views[r // 3], np.array([r % 3])) for r in rows])
+    got = np.stack([table.views[r // 3][r % 3] for r in rows])
+    np.testing.assert_array_equal(got, _reference({0: 3, 1: 3, 2: 3, 3: 2})[rows])
+
+
+def test_touch_falls_back_when_populate_is_unsupported(tmp_path):
+    """Before Linux 5.14 MADV_POPULATE_READ fails: touch the rows instead."""
+    table = _table(tmp_path)
+
+    class _NoPopulate:
+        def madvise(self, addr, length, advice):
+            return -1 if advice == 22 else 0
+
+    table._libc = _NoPopulate()
+    table.touch(np.arange(11), pool=None)
+    assert not table._can_populate
+    table.touch(np.arange(11), pool=None)  # the plain touch from now on

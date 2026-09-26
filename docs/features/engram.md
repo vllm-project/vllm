@@ -124,6 +124,13 @@ vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
   --engram-config '{"checkpoint_mapped": true}'
 ```
 
+Right after a start the table is cold: loading the weights streams them
+through the page cache and evicts most of it. A decode step's rows are known
+only once the previous step has sampled, so the GPU reaches the missing pages
+as soon as the CPU prefetch does. The prefetch therefore requests readahead for
+all of a step's pages at once, and the GPU's faults wait on reads that are
+already in flight instead of issuing them one at a time.
+
 `checkpoint_mapped` overrides `cpu_offload`, is incompatible with
 `dp_shared_memory` (mapped pages are already shared between processes) and with
 `embedding_across_dp`, and requires a safetensors checkpoint whose PLE table is
