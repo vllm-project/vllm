@@ -32,6 +32,7 @@ from vllm.model_executor.layers.mhc import (
     MHCFusedPostPreOp,
     MHCPreDelayedOp,
     MHCPreOp,
+    _apply_mhc_norm,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
@@ -1647,3 +1648,111 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+def _mhc_pre_inputs(
+    num_tokens: int, hidden_size: int, hc_mult: int, dtype=torch.bfloat16
+):
+    """Inputs shaped the way mhc_pre_torch's own assertions require."""
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+    hc_hidden = hc_mult * hidden_size
+    residual = (torch.randn(num_tokens, hc_mult, hidden_size) * 0.02).to(dtype)
+    fn = (torch.randn(hc_mult3, hc_hidden) * 0.02).to(torch.float32)
+    hc_scale = (torch.randn(3) * 0.1).to(torch.float32)
+    hc_base = (torch.randn(hc_mult3) * 0.1).to(torch.float32)
+    return residual, fn, hc_scale, hc_base
+
+
+def _forward(op, path, monkeypatch, *args, **kwargs):
+    """forward_native, or forward_hip on ROCm without AITER or TileLang."""
+    if path == "native":
+        return op.forward_native(*args, **kwargs)
+    monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_FUSED", False)
+    monkeypatch.setattr(mhc_layers, "_aiter_mhc_supported", lambda *a, **k: False)
+    return op.forward_hip(*args, **kwargs)
+
+
+@pytest.mark.parametrize("path", ["native", "hip_fallback"])
+@pytest.mark.parametrize("num_tokens", [1, 8])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_pre_unfused_applies_norm_once(
+    path, num_tokens, hidden_size, hc_mult, default_vllm_config, monkeypatch
+):
+    """The unfused paths must return layer_input normalized exactly once.
+
+    forward_oot falls back to forward_native, and so does forward_hip without
+    AITER or TileLang. Missing the norm is silent -- no NaN, no exception, just
+    an un-normalized residual mix fed into attention and MLP/MoE -- and applying
+    it twice is just as silent.
+    """
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base = _mhc_pre_inputs(num_tokens, hidden_size, hc_mult)
+    norm_weight = (torch.randn(hidden_size) * 0.1 + 1.0).to(torch.bfloat16)
+    norm_eps = 1e-6
+
+    op = MHCPreOp()
+    args = (residual, fn, hc_scale, hc_base)
+    kwargs = dict(
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+        n_splits=1,
+        norm_eps=norm_eps,
+    )
+    # Without a norm weight the raw mix comes back untouched.
+    _, _, raw_mix = op.forward_native(*args, norm_weight=None, **kwargs)
+    _, _, layer_input = _forward(
+        op, path, monkeypatch, *args, norm_weight=norm_weight, **kwargs
+    )
+    expected = _apply_mhc_norm(raw_mix, norm_weight, norm_eps)
+
+    # Guard against a vacuous assertion: the norm must actually change the mix.
+    assert not torch.allclose(raw_mix.float(), expected.float(), atol=1e-4)
+    torch.testing.assert_close(
+        layer_input.float(), expected.float(), atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.parametrize("path", ["native", "hip_fallback"])
+@pytest.mark.parametrize("num_tokens", [1, 8])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_fused_post_pre_unfused_applies_norm_once(
+    path, num_tokens, hidden_size, hc_mult, default_vllm_config, monkeypatch
+):
+    """Same contract for the fused post+pre op."""
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base = _mhc_pre_inputs(num_tokens, hidden_size, hc_mult)
+    x = (torch.randn(num_tokens, hidden_size) * 0.02).to(torch.bfloat16)
+    # post_layer_mix broadcasts against x.unsqueeze(-2) -> [T, 1, hidden]
+    post_layer_mix = (torch.randn(num_tokens, hc_mult, 1) * 0.1).to(torch.float32)
+    comb_res_mix = (torch.randn(num_tokens, hc_mult, hc_mult) * 0.1).to(torch.float32)
+    norm_weight = (torch.randn(hidden_size) * 0.1 + 1.0).to(torch.bfloat16)
+    norm_eps = 1e-6
+
+    op = MHCFusedPostPreOp()
+    args = (x, residual, post_layer_mix, comb_res_mix, fn, hc_scale, hc_base)
+    kwargs = dict(
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+        n_splits=1,
+        tile_n=1,
+        norm_eps=norm_eps,
+    )
+    *_, raw_mix = op.forward_native(*args, norm_weight=None, **kwargs)
+    *_, layer_input = _forward(
+        op, path, monkeypatch, *args, norm_weight=norm_weight, **kwargs
+    )
+    expected = _apply_mhc_norm(raw_mix, norm_weight, norm_eps)
+
+    assert not torch.allclose(raw_mix.float(), expected.float(), atol=1e-4)
+    torch.testing.assert_close(
+        layer_input.float(), expected.float(), atol=1e-2, rtol=1e-2
+    )
