@@ -73,3 +73,8 @@ def init_entrypoints_middleware(
             raise ValueError(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
+
+    if envs.VLLM_LOGGING_TRACE_CONTEXT:
+        from .trace_context import TraceContextMiddleware
+
+        app.add_middleware(TraceContextMiddleware)

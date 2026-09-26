@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
+    VLLM_LOGGING_TRACE_CONTEXT: bool = False
     NO_COLOR: bool = False
     FORCE_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
@@ -849,6 +850,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Controls colored logging output. Options: "auto" (default, colors when terminal),
     # "1" (always use colors), "0" (never use colors)
     "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
+    # Include the current OpenTelemetry span context in default vLLM logs.
+    "VLLM_LOGGING_TRACE_CONTEXT": lambda: bool(
+        int(os.getenv("VLLM_LOGGING_TRACE_CONTEXT", "0"))
+    ),
     # Standard unix flag for disabling ANSI color codes
     "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
     # De-facto standard flag for forcing ANSI color codes (e.g. non-tty case)
@@ -2324,6 +2329,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_STREAM",
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
+        "VLLM_LOGGING_TRACE_CONTEXT",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
