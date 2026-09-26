@@ -202,9 +202,12 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             "unsupported_pattern_properties_combinations",
         ],
     )
-    def test_unsupported_json_features_by_type(self, schema_type, request):
+    @pytest.mark.parametrize("omit_type", [False, True])
+    def test_unsupported_json_features_by_type(self, schema_type, omit_type, request):
         schemas = request.getfixturevalue(schema_type)
         for schema in schemas:
+            if omit_type:
+                schema = {key: value for key, value in schema.items() if key != "type"}
             assert has_xgrammar_unsupported_json_features(schema), (
                 f"Schema should be unsupported: {schema}"
             )
@@ -265,6 +268,96 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             ],
         )
         def test_supported_list_type_json_features(self, schema):
+            assert not has_xgrammar_unsupported_json_features(schema)
+
+    class TestPR57592Regressions:
+        @pytest.mark.parametrize(
+            "keyword",
+            ["properties", "$defs", "definitions", "dependentSchemas", "dependencies"],
+        )
+        def test_schema_maps_do_not_treat_property_names_as_constraints(self, keyword):
+            """Names in schema maps are not validation keywords."""
+            schema = {
+                keyword: {
+                    "pattern": {"type": "string"},
+                    "maxLength": {"type": "integer"},
+                }
+            }
+            assert not has_xgrammar_unsupported_json_features(schema)
+
+        @pytest.mark.parametrize(
+            "keyword", ["const", "enum", "default", "examples", "x-metadata"]
+        )
+        def test_schema_data_is_not_checked_as_a_subschema(self, keyword):
+            """Literal values and annotations may contain schema-shaped data."""
+            value = {"type": "integer", "multipleOf": 2}
+            schema = {keyword: [value] if keyword in ("enum", "examples") else value}
+            assert not has_xgrammar_unsupported_json_features(schema)
+
+        @pytest.mark.parametrize(
+            "schema",
+            [
+                {"properties": {"code": {"pattern": "^a+$", "maxLength": 3}}},
+                {
+                    "$defs": {"code": {"pattern": "^a+$", "maxLength": 3}},
+                    "$ref": "#/$defs/code",
+                },
+                {"items": {"pattern": "^a+$", "maxLength": 3}},
+                {"items": [{"pattern": "^a+$", "maxLength": 3}]},
+                {"prefixItems": [{"pattern": "^a+$", "maxLength": 3}]},
+                {"additionalProperties": {"pattern": "^a+$", "maxLength": 3}},
+                {"anyOf": [{"pattern": "^a+$", "maxLength": 3}, {"type": "null"}]},
+            ],
+        )
+        def test_implicit_type_constraints_in_subschemas_are_detected(self, schema):
+            assert has_xgrammar_unsupported_json_features(schema)
+
+        @pytest.mark.parametrize("omit_type", [False, True])
+        @pytest.mark.parametrize(
+            "container, reference",
+            [
+                ("x-schema", "#/x-schema"),
+                ("default", "#/default"),
+                ("examples", "#/examples/0"),
+                ("x/schema~", "#/x~1schema~0"),
+                ("x schema", "#/x%20schema"),
+            ],
+        )
+        def test_referenced_schema_data_is_checked(
+            self, container, reference, omit_type
+        ):
+            """A reference makes an otherwise literal value a schema to check."""
+            target = {"pattern": "^a+$", "maxLength": 3}
+            if not omit_type:
+                target["type"] = "string"
+            schema = {
+                "$ref": reference,
+                container: [target] if container == "examples" else target,
+            }
+            assert has_xgrammar_unsupported_json_features(schema)
+
+        @pytest.mark.parametrize("unsupported", [False, True])
+        def test_recursive_referenced_schema_is_checked(self, unsupported):
+            properties: dict[str, dict[str, str | int]] = {
+                "next": {"$ref": "#/x-schema"}
+            }
+            if unsupported:
+                properties["code"] = {"pattern": "^a+$", "maxLength": 3}
+            schema = {"$ref": "#/x-schema", "x-schema": {"properties": properties}}
+            assert has_xgrammar_unsupported_json_features(schema) is unsupported
+
+        @pytest.mark.parametrize(
+            "schema",
+            [
+                True,
+                False,
+                {"properties": {"a": True, "b": False}},
+                {"type": "integer", "pattern": "^a+$", "maxLength": 3},
+            ],
+        )
+        def test_boolean_schemas_and_inapplicable_constraints_are_supported(
+            self, schema
+        ):
             assert not has_xgrammar_unsupported_json_features(schema)
 
 
