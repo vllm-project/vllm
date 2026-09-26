@@ -4,6 +4,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +32,11 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import from_layer
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBaseImpl,
+    build_mla_chunked_context_metadata,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -58,6 +64,131 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA MLA cache gather")
+@torch.inference_mode()
+@pytest.mark.parametrize("context_rows", [2, 6])
+def test_mla_cached_projection_applies_updated_adapters(
+    default_vllm_config, dist_init, context_rows
+):
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16
+    config = LoRAConfig(max_loras=1, max_lora_rank=8, lora_dtype=dtype)
+    with torch.device(device):
+        base = ColumnParallelLinear(512, 32, bias=False, params_dtype=dtype)
+    base.weight.zero_()
+    # The backend holds the original projection before module-tree wrapping.
+    impl = SimpleNamespace()
+    MLACommonBaseImpl.__init__(impl, 1, 512, 1.0, 1, "auto", 512, 16, 0, 16, 16, base)
+    impl._concat_k_nope_k_pe = MethodType(MLACommonBaseImpl._concat_k_nope_k_pe, impl)
+    layer = ColumnParallelLinearWithLoRA(base)
+    layer.create_lora_weights(1, config)
+    punica = get_punica_wrapper(16, 4, device, lora_config=config)
+    layer.set_mapping(punica)
+    punica.update_metadata(LoRAMapping([1, 1], [1], is_prefill=True), [1], 1, 512)
+    chunked = build_mla_chunked_context_metadata(
+        context_lens_cpu=torch.tensor([context_rows], dtype=torch.int32),
+        prefill_query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
+        chunked_prefill_workspace=torch.empty((16, 512), dtype=dtype, device=device),
+        chunked_prefill_workspace_size=16,
+        block_size=16,
+        align_chunk_to_block=True,
+        device=device,
+        dcp_world_size=1,
+        dcp_local_block_size=1,
+        dcp_virtual_block_size=1,
+    )
+    captured = []
+
+    def capture_projection(*, chunk, q, k, v):
+        captured.append(torch.cat((k, v), dim=-1).squeeze(1).clone())
+        return torch.zeros((2, 1, 16), dtype=dtype, device=device), torch.zeros(
+            (1, 2), device=device
+        )
+
+    metadata = SimpleNamespace(
+        prefill=SimpleNamespace(
+            prefill_backend=SimpleNamespace(
+                run_prefill_context_chunk=capture_projection
+            ),
+            chunked_context=chunked,
+            q_data_type=dtype,
+            block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
+        )
+    )
+    method = MLACommonBaseImpl._compute_prefill_context
+    a = torch.full((8, 512), 0.125, dtype=dtype, device=device)
+    cache = torch.ones((1, 16, 512), dtype=dtype, device=device)
+    for value in (0.125, 0.25):
+        b = torch.full((32, 8), value, dtype=dtype, device=device)
+        layer.set_lora(0, a, b)
+        fresh = torch.ones((2, 512), dtype=dtype, device=device)
+        expected = (
+            torch.ones((context_rows, 512), device=device) @ a.float().T @ b.float().T
+        ).to(dtype)
+        torch.testing.assert_close(layer(fresh)[0], expected[:2], rtol=0, atol=0)
+        method(
+            impl,
+            torch.zeros((2, 1, 16), dtype=dtype, device=device),
+            cache,
+            metadata,
+            torch.ones((), device=device),
+            kv_b_proj_lora=layer,
+            request_lora_mapping=torch.zeros(1, dtype=torch.long, device=device),
+        )
+        output = captured[-1]
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("head_dimension", [False, True])
+@torch.inference_mode()
+def test_mla_prefill_projection_uses_explicit_adapter_slots(
+    default_vllm_config, dist_init, use_graph, head_dimension
+):
+    config = LoRAConfig(max_loras=2, max_lora_rank=8, lora_dtype=torch.bfloat16)
+    with torch.device("cuda"):
+        base = ColumnParallelLinear(64, 32, bias=False, params_dtype=torch.bfloat16)
+        base.weight.fill_(0.015625)
+        layer = from_layer(base, 2, config, [])
+        x = torch.ones(6, 64, dtype=torch.bfloat16)
+        mapping = torch.tensor([0, 1, -1, 1, 0, -1])
+        baseline = base(x)[0]
+        output = baseline.clone()
+
+        def project():
+            output.copy_(baseline)
+            layer.apply_mla_kv_b_lora_linear(
+                x.unsqueeze(1) if head_dimension else x, output, mapping
+            )
+
+        project()
+        graph = None
+        if use_graph:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                project()
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                project()
+        for value in (0.125, 0.25):
+            expected = baseline.clone()
+            for slot in range(2):
+                a = torch.full((8, 64), 0.125, dtype=torch.bfloat16)
+                b = torch.full((32, 8), value * (slot + 1), dtype=torch.bfloat16)
+                layer.set_lora(slot, a, b)
+                expected[mapping == slot] += (
+                    x[mapping == slot].float() @ a.float().T @ b.float().T
+                ).to(expected.dtype)
+            if graph is None:
+                project()
+            else:
+                graph.replay()
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 def test_lora_linear_requires_unquantized_input() -> None:
