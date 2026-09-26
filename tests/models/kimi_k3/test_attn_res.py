@@ -17,6 +17,26 @@ EPS = 1e-5
 attn_res_module = importlib.import_module("vllm.models.kimi_k3.nvidia.ops.attn_res")
 
 
+def _on_rocm_below_10() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_rocm_version
+
+    return (get_rocm_version() or (0,)) < (10,)
+
+
+# The Triton bundled with ROCm < 10 (3.7.x) crashes in the AMD
+# CanonicalizePointers pass on the kernel's tl.where over pointer tensors. Only
+# the num_blocks > 0 loop contains it. ROCm serves AttnRes from
+# vllm/models/kimi_k3/amd/ops/attn_res.py instead, so nothing real is lost.
+_OLD_ROCM = _on_rocm_below_10()
+
+
+def _skip_on_old_rocm(num_blocks: int) -> None:
+    if _OLD_ROCM and num_blocks > 0:
+        pytest.skip("Triton on ROCm < 10 cannot compile this kernel's pointer select")
+
+
 def _randn_with_row_padding(*shape: int, padding: int = 0) -> torch.Tensor:
     storage = torch.randn(
         *shape[:-1],
@@ -79,6 +99,7 @@ def test_attn_res(
 ):
     if backend == "nvidia" and not current_platform.is_device_capability_family(100):
         pytest.skip("NVIDIA AttnRes requires the SM100 family")
+    _skip_on_old_rocm(num_blocks)
 
     prefix = _randn_with_row_padding(num_tokens, HIDDEN_SIZE, padding=row_padding)
     delta = (
@@ -133,6 +154,7 @@ def test_attn_res(
 
 @pytest.mark.parametrize("num_blocks", range(MAX_BLOCKS + 1))
 def test_attn_res_block_counts(num_blocks: int):
+    _skip_on_old_rocm(num_blocks)
     prefix = torch.randn(1, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     blocks = torch.randn(
         1, MAX_BLOCKS, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
@@ -169,6 +191,7 @@ def test_attn_res_block_counts(num_blocks: int):
 
 
 def test_attn_res_without_output_norm():
+    _skip_on_old_rocm(MAX_BLOCKS)
     prefix = torch.randn(7, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     delta = torch.randn_like(prefix)
     blocks = torch.randn(
