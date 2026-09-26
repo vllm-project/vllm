@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
     get_num_attention_heads_from_layers,
+    split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
@@ -540,6 +541,11 @@ class FlashAttentionMetadata:
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
 
+    # FA2 mixed batches: the leading single-token decodes run as a separate
+    # max_seqlen_q=1 call; the remaining requests use prefill_query_start_loc.
+    num_split_decodes: int = 0
+    prefill_query_start_loc: torch.Tensor | None = None
+
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
@@ -743,6 +749,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # fields are not refreshed in-place between graph replays. Keep the
         # fused path disabled until DCP gets a full replay-safe refresh model.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+
+        # FA2 has no tile scheduler: its grid is ceil(max_seqlen_q / 64) CTAs
+        # per request, so decodes in a mixed batch launch mostly empty CTAs and
+        # miss the max_seqlen_q=1 packed-GQA/split-KV path. Run them separately.
+        self.split_mixed_batch = fa_version == 2 and self.dcp_world_size == 1
+        if self.split_mixed_batch:
+            self._init_reorder_batch_threshold(1)
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -989,6 +1002,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
         scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
+        num_split_decodes = 0
+        prefill_query_start_loc = None
+        if self.split_mixed_batch and max_query_len > 1 and not use_cascade:
+            num_split_decodes, num_split_prefills, _, _ = split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=1
+            )
+            if num_split_decodes and num_split_prefills:
+                prefill_query_start_loc = (
+                    query_start_loc[num_split_decodes:] - num_split_decodes
+                )
+            else:
+                num_split_decodes = 0
+
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
 
@@ -1006,6 +1032,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_prefill_reqs=num_prefill_reqs,
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
+            num_split_decodes=num_split_decodes,
+            prefill_query_start_loc=prefill_query_start_loc,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             scheduler_metadata=scheduler_metadata,
@@ -1450,32 +1478,58 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table = block_table[:, :num_pages]
                     num_splits = 1
 
-                _FA4_DENSE_ATTENTION_KERNEL(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=causal,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=sliding_window_size,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=q_descale,
-                    k_descale=k_descale,
-                    v_descale=v_descale,
-                    dynamic_causal=dynamic_causal,
-                    num_splits=num_splits,
-                    s_aux=self.sinks,
-                    mask_mod=rswa_mask_mod_fn or mm_mask_mod,
-                    aux_tensors=rswa_aux or mm_aux,
-                )
+                # (token range, cu_seqlens_q, max_seqlen_q, request slice)
+                segments = [
+                    (
+                        slice(0, num_actual_tokens),
+                        cu_seqlens_q,
+                        max_seqlen_q,
+                        slice(None),
+                    )
+                ]
+                if num_decodes := attn_metadata.num_split_decodes:
+                    assert attn_metadata.prefill_query_start_loc is not None
+                    segments = [
+                        (
+                            slice(0, num_decodes),
+                            cu_seqlens_q[: num_decodes + 1],
+                            1,
+                            slice(None, num_decodes),
+                        ),
+                        (
+                            slice(num_decodes, num_actual_tokens),
+                            attn_metadata.prefill_query_start_loc,
+                            max_seqlen_q,
+                            slice(num_decodes, None),
+                        ),
+                    ]
+                for tokens, seg_cu_seqlens_q, seg_max_seqlen_q, reqs in segments:
+                    _FA4_DENSE_ATTENTION_KERNEL(
+                        q=query[tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[tokens],
+                        cu_seqlens_q=seg_cu_seqlens_q,
+                        max_seqlen_q=seg_max_seqlen_q,
+                        seqused_k=seqused_k[reqs],
+                        max_seqlen_k=max_seqlen_k,
+                        softmax_scale=self.scale,
+                        causal=causal,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=sliding_window_size,
+                        block_table=block_table[reqs],
+                        softcap=self.logits_soft_cap,
+                        scheduler_metadata=scheduler_metadata,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=q_descale[reqs] if q_descale is not None else None,
+                        k_descale=k_descale[reqs],
+                        v_descale=v_descale[reqs],
+                        dynamic_causal=dynamic_causal,
+                        num_splits=num_splits,
+                        s_aux=self.sinks,
+                        mask_mod=rswa_mask_mod_fn or mm_mask_mod,
+                        aux_tensors=rswa_aux or mm_aux,
+                    )
                 return output
 
         # Cascade attention (rare case).
