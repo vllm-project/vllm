@@ -518,6 +518,65 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
+def _rocm_aiter_topk_gating_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
+) -> None:
+    # Fused shared-expert scoring and non-contiguous gating rows are only
+    # handled by the legacy topk_softmax launcher.
+    if (
+        num_shared_experts
+        or shared_expert_scoring_func
+        or (not gating_output.is_contiguous())
+        # At E=512/k=10, topk_gating wins through T=4096 but its current
+        # one-row generic prefill path regresses at 8K+ tokens. Preserve the
+        # legacy throughput path for those large prefills.
+        or gating_output.shape[0] > 4096
+    ):
+        _rocm_aiter_topk_softmax_impl(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
+        )
+        return
+
+    from aiter.ops.topk import topk_gating
+
+    # Newer AITER builds renormalize the selected softmax mass inside this
+    # launch, preserving vLLM's `renormalize=True` semantics without a second
+    # pointwise kernel.
+    topk_gating(
+        topk_weights,
+        topk_indices,
+        gating_output,
+        correction_bias=None,
+        need_renorm=renormalize,
+        routed_scaling_factor=1.0,
+        score_func="softmax",
+    )
+
+
+def _rocm_aiter_topk_gating_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
+) -> None:
+    pass
+
+
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -1917,6 +1976,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
+        VLLM_ROCM_USE_AITER_TOPK_GATING: Controls AITER topk_gating vs legacy topk_softmax.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
@@ -1950,7 +2010,7 @@ class rocm_aiter_ops:
     Operations:
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
-        - Routing: topk_softmax, biased_grouped_topk, grouped_topk
+        - Routing: topk_softmax, topk_gating, biased_grouped_topk, grouped_topk
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
@@ -1987,6 +2047,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    _TOPK_GATING_ENABLED = envs.VLLM_ROCM_USE_AITER_TOPK_GATING
     _MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -2016,6 +2077,7 @@ class rocm_aiter_ops:
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        cls._TOPK_GATING_ENABLED = envs.VLLM_ROCM_USE_AITER_TOPK_GATING
         cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -2123,6 +2185,12 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_topk_gating_enabled(cls) -> bool:
+        """Use AITER ``topk_gating`` for softmax routing."""
+        return cls.is_fused_moe_enabled() and cls._TOPK_GATING_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -2520,6 +2588,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_softmax",
                 op_func=_rocm_aiter_topk_softmax_impl,
                 mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_topk_gating",
+                op_func=_rocm_aiter_topk_gating_impl,
+                mutates_args=["topk_weights", "topk_indices"],
+                fake_impl=_rocm_aiter_topk_gating_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -3031,6 +3107,27 @@ class rocm_aiter_ops:
         shared_expert_scoring_func: str = "",
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_softmax(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
+        )
+        return topk_weights, topk_indices
+
+    @staticmethod
+    def topk_gating(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+        num_shared_experts: int = 0,
+        shared_expert_scoring_func: str = "",
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_gating(
             topk_weights,
             topk_indices,
             token_expert_indices,

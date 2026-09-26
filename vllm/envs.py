@@ -152,6 +152,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_USE_AITER_TOPK_GATING: bool = True
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1362,6 +1363,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
+    ),
+    # Route softmax MoE top-k through AITER's newer `topk_gating` family
+    # (register-scan / multiwave kernels) instead of the legacy
+    # `topkGatingSoftmax` launcher. Non-contiguous gating rows, fused
+    # shared-expert scoring, and batches with T > 4096 still use the
+    # legacy launcher. Default on; set 0 to restore it everywhere.
+    "VLLM_ROCM_USE_AITER_TOPK_GATING": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TOPK_GATING", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
