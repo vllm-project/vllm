@@ -43,6 +43,18 @@ class Watermarker(ABC):
     def context_width(self) -> int:
         raise NotImplementedError
 
+    @property
+    def supports_greedy(self) -> bool:
+        """Whether this watermarker can be applied to greedy (temperature=0) requests.
+
+        Logit-bias watermarkers (e.g. SBW) can watermark greedy decoding: the
+        bias shifts the argmax toward green tokens. Noise-based watermarkers
+        (e.g. Gumbel) cannot: the added noise would corrupt the greedy argmax.
+
+        Defaults to False (safe); override to True in bias-based watermarkers.
+        """
+        return False
+
     def sample(
         self,
         logits: torch.Tensor,

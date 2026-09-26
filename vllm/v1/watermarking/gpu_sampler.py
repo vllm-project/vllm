@@ -8,7 +8,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -39,16 +38,73 @@ class GPUWatermarkSampler(Sampler):
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         super().add_request(req_idx, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
-        if sampling_params.watermarking and sampling_params.temperature == 0:
+        if (
+            sampling_params.watermarking
+            and sampling_params.temperature == 0
+            and not self.watermarker.supports_greedy
+        ):
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
-                "(temperature=0) cannot be watermarked. This request will use "
-                "ordinary greedy sampling."
+                "(temperature=0) is not supported by this watermarker. "
+                "This request will use ordinary greedy sampling."
             )
 
     def apply_staged_writes(self) -> None:
         super().apply_staged_writes()
         self.watermarking.copy_to_uva()
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        return_logprobs: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply SBW bias on raw logits before sampling-param processing.
+
+        Bias-based watermarkers (supports_greedy=True) must see raw logits so
+        that the green-list bias is applied before top-k/top-p filtering.  A
+        green token just outside top-k can therefore be promoted into the
+        candidate set by +delta, matching the semantics of the standalone
+        vllm_sbw LogitsProcessor reference implementation.
+
+        Noise-based watermarkers (Gumbel) are unaffected: their watermark is
+        applied inside _sample_random after top-k/top-p, as before.
+        """
+        if self.watermarker.supports_greedy:
+            watermarking = self.watermarking.np[idx_mapping_np]
+            if np.any(watermarking):
+                contexts = self._get_contexts(expanded_idx_mapping)
+                # Per-row delta: 0.0 for non-watermarked rows so they are
+                # unaffected; self.watermarker.delta for watermarked rows.
+                enabled_gpu = self.watermarking.gpu[expanded_idx_mapping]
+                delta_vec = torch.where(
+                    enabled_gpu,
+                    torch.full(
+                        (1,),
+                        self.watermarker.delta,  # type: ignore[attr-defined]
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    ),
+                    torch.zeros(1, dtype=logits.dtype, device=logits.device),
+                )
+                logits = self.watermarker.bias(  # type: ignore[attr-defined]
+                    logits, contexts, delta_vec
+                )
+        return super().sample(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            input_ids,
+            expanded_local_pos,
+            return_logprobs,
+        )
 
     def _sample_random(
         self,
@@ -60,7 +116,24 @@ class GPUWatermarkSampler(Sampler):
         top_p: torch.Tensor | None,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        enabled = self.watermarking.np[idx_mapping_np] & (
+        if self.watermarker.supports_greedy:
+            # Bias-based watermarkers (e.g. SBW): bias was already applied on
+            # raw logits in sample() before apply_sampling_params ran.
+            # top-k/top-p filtering and sampling are handled by the base class.
+            return super()._sample_random(
+                processed_logits,
+                expanded_idx_mapping,
+                idx_mapping_np,
+                pos,
+                top_k,
+                top_p,
+                use_flashinfer,
+            )
+
+        # Noise-based watermarkers (e.g. Gumbel): filter first, then the
+        # watermarker adds noise and samples.
+        watermarking = self.watermarking.np[idx_mapping_np]
+        enabled = watermarking & (
             self.sampling_states.temperature.np[idx_mapping_np] != 0
         )
         if not np.any(enabled):
@@ -74,6 +147,8 @@ class GPUWatermarkSampler(Sampler):
                 use_fused_sampler,
             )
 
+        from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
@@ -86,12 +161,12 @@ class GPUWatermarkSampler(Sampler):
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
         skip_mask = None
         if needs_mixed_sampling:
-            watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
+            watermarking_gpu = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
             )
             if repeated_contexts is not None:
-                watermarking &= ~repeated_contexts
-            skip_mask = ~watermarking
+                watermarking_gpu &= ~repeated_contexts
+            skip_mask = ~watermarking_gpu
 
         random_sampler = RandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,

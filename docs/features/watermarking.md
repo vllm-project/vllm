@@ -166,6 +166,48 @@ vllm serve MODEL \
   --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.1}'
 ```
 
+### SBW (Stateless Bernoulli Watermarking)
+
+SBW biases the logit of each candidate token by `+delta` if it belongs to a
+pseudorandomly chosen green list, then delegates token selection to the normal
+sampler. Green-list membership for token `v` at step `t` is determined by a
+single Philox 4x32-10 call: `CBRNG(v, seed_t) < gamma`, where `seed_t` is
+derived from the recent token context and `gamma` is the green-list fraction.
+
+Because SBW adds a logit bias rather than noise, greedy requests
+(`temperature=0`) are watermarked: the bias shifts the argmax toward green
+tokens. SBW also has native speculative-decoding support.
+
+Reference: Ceppi & Sanchez, "Flip, Don't Shuffle: Watermarking LLMs at the
+Speed of Inference", EMNLP 2026. <https://arxiv.org/abs/2609.03844>
+
+Two seeding schemes are available via `sbw_scheme`:
+
+- `selfhash` (default): anchored minhash PRF. The seed depends on both the
+  context tokens and the candidate token. Default `context_width` is 4.
+- `lefthash`: additive PRF. One seed per context row, independent of the
+  candidate token. Faster but less robust to substitution attacks. Default
+  `context_width` is 1, equivalent to SBW-1 from the paper.
+
+`sbw_gamma` sets the green-list fraction and defaults to 0.5. `sbw_delta`
+sets the logit bias for green tokens and defaults to 2.0.
+
+Example configuration:
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"sbw","key":42}'
+```
+
+With speculative decoding:
+
+```bash
+vllm serve MODEL \
+  --speculative-config \
+  '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
+  --watermark-config '{"algorithm":"sbw","key":42}'
+```
+
 ### SynthID-Text
 
 [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
@@ -201,6 +243,17 @@ from vllm.v1.watermarking import GumbelWatermarkDetector
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 token_ids = tokenizer.encode(text, add_special_tokens=False)
 result = GumbelWatermarkDetector(key=42, prf="philox").detect(token_ids)
+print(result.p_value, result.is_watermarked)
+```
+
+For SBW, use `SBWWatermarkDetector` with the same key, scheme, and gamma used
+at generation time:
+
+```python
+from vllm.v1.watermarking import SBWWatermarkDetector
+
+token_ids = tokenizer.encode(text, add_special_tokens=False)
+result = SBWWatermarkDetector(key=42, scheme="selfhash", gamma=0.25).detect(token_ids)
 print(result.p_value, result.is_watermarked)
 ```
 
@@ -246,6 +299,11 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
+- Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
+  bypass watermarking and emit a warning once per worker.
+- High `sbw_delta` values bias token selection away from the model distribution,
+  which can reduce output quality. The default of 2.0 is a reasonable starting
+  point; lower values reduce the effect on quality at the cost of weaker signal.
 - Beam search expands candidates from model log probabilities and does not apply
   Gumbel-max watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use
