@@ -61,6 +61,8 @@ use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod responses;
+
 fn request_output(
     request_id: &str,
     new_token_ids: Vec<u32>,
