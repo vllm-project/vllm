@@ -32,7 +32,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, rms_norm_add_rms_norm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -320,11 +320,12 @@ class Gemma4MTPDecoderLayer(nn.Module):
             **kwargs,
         )
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
-        residual = hidden_states
-
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states, residual = rms_norm_add_rms_norm(
+            self.post_attention_layernorm,
+            self.pre_feedforward_layernorm,
+            hidden_states,
+            residual,
+        )
         hidden_states = self.mlp(hidden_states)
 
         hidden_states = self.post_feedforward_layernorm(hidden_states)
