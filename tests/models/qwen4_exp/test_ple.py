@@ -489,6 +489,32 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
     assert torch.equal(output, expected)
 
 
+def test_pinned_embedding_forward_requires_prior_start_prefetch() -> None:
+    """Forward before any start_prefetch must fail loudly, not read garbage."""
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = None
+    embedding._prefetch_stream = None
+    embedding._output_dim = 6
+    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="prior start_prefetch"):
+        embedding(hidden_states)
+
+
+def test_pinned_embedding_finalize_requires_prior_start_prefetch() -> None:
+    """_finalize_prefetch before any start_prefetch must fail loudly."""
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = None
+    embedding._prefetch_stream = None
+    embedding.tp_size = 1
+    output = torch.zeros(2, 6, dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="prior start_prefetch"):
+        embedding._finalize_prefetch(torch.empty(4, 2, 3), output)
+
+
 def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
@@ -601,6 +627,67 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_pinned_embedding_start_prefetch_allocates_lazily_and_feeds_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_prefetch lazily allocates the stream/buffer, then forward consumes it.
+
+    Exercises the full pinned-prefetch contract end to end: first call
+    allocates the side stream and buffer with the constructor geometry,
+    and forward finalizes the lookup into the returned output.
+    """
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEPinnedHostEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+            num_ngram_heads=2,
+            max_total_tokens=4,
+        )
+    assert embedding._prefetch_buffer is None
+    assert embedding._prefetch_stream is None
+
+    loaded_weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    loaded_weight = loaded_weight.to(torch.bfloat16)
+    copy_ple_embedding_shard_(
+        embedding.weight,
+        loaded_weight,
+        checkpoint_start=0,
+        tp_start=0,
+        tp_end=4,
+    )
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16, device="cuda:0")
+    embedding.start_prefetch(hidden_states, ngram_ids)
+
+    buffer = embedding._prefetch_buffer
+    assert buffer is not None
+    assert buffer.shape == (4, 2, 3)
+    assert buffer.dtype == torch.bfloat16
+    assert buffer.device.type == "cuda"
+    assert embedding._prefetch_stream is not None
+
+    output = embedding(hidden_states)
+
+    expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
@@ -1877,6 +1964,25 @@ def test_amd_fp8_embedding_loads_checkpoint_shards_and_global_scale(
     torch.testing.assert_close(
         dequantized.cpu(), loaded_weight.to(torch.bfloat16) * 0.25, rtol=0, atol=0
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
+def test_amd_pinned_embedding_prefetch_machinery_is_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned embedding must not allocate the prefetch stream/buffer in init.
+
+    Paths that never prefetch (AMD uses the synchronous pinned-lookup op)
+    keep the stream/buffer unallocated for the process lifetime. NVIDIA's
+    first ``start_prefetch`` — the eager profile run, always before cudagraph
+    capture — allocates them lazily.
+    """
+    module, _ = _build_amd_ngram_embedding(
+        monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=False
+    )
+    embedding = module.ngram_embedding
+    assert embedding._prefetch_buffer is None
+    assert embedding._prefetch_stream is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
