@@ -163,10 +163,18 @@ class InputProcessor:
                 self.vllm_config.reasoning_config is None
                 or not self.vllm_config.reasoning_config.enabled
             ):
+                parser = getattr(
+                    self.vllm_config.reasoning_config, "reasoning_parser", ""
+                )
+                reason = (
+                    f"reasoning parser {parser!r} defines none"
+                    if parser
+                    else "none are configured"
+                )
                 raise VLLMValidationError(
-                    "thinking_token_budget is set but reasoning_config is "
-                    "not configured. Please set --reasoning-parser "
-                    "and/or --reasoning-config to use thinking_token_budget."
+                    f"thinking_token_budget needs the reasoning start and end "
+                    f"strings, and {reason}. Pass --reasoning-config with both "
+                    "strings to use thinking_token_budget."
                 )
             if (
                 params.trace_decode_token_ids
