@@ -32,9 +32,8 @@ Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-Cpn
 
 ## 2  Usage Example
 
-### ExampleConnector
-
-The following scripts demonstrate the workflow with **ExampleConnector**:
+The current reference pathway is **ECExampleConnector** (the EC counterpart of `ExampleConnector`, renamed from `ECSharedStorageConnector` in [#30201](https://github.com/vllm-project/vllm/pull/30201)).  
+Below ready-to-run scripts shows the workflow:
 
 1 Encoder instance + 1 PD instance:
 `examples/disaggregated/disaggregated_encoder/disagg_1e1pd_example.sh`
