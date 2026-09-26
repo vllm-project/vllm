@@ -506,6 +506,8 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
+        promoted_partial = False
+        removed_hashes: list[BlockHashWithGroupId] = []
         if replace_existing_hashes:
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
@@ -518,6 +520,7 @@ class BlockPool:
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
+            promoted_partial = True
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
@@ -527,6 +530,19 @@ class BlockPool:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
             )
+            if promoted_partial or self._parent_hash_is_removed(
+                parent_hash, removed_hashes
+            ):
+                # Naming this boundary as the parent would hand consumers a hash
+                # that this same event batch drops: either the entry is promoted
+                # away from it, or reusing the block removed it. Re-anchor on the
+                # last block-aligned ancestor instead, whose hash was emitted as a
+                # stored full block in an earlier batch.
+                parent_hash, block_start = (
+                    self._get_promoted_partial_block_parent_hash_and_start(
+                        request, num_tokens, block_size
+                    )
+                )
             parent_block_hash = (
                 maybe_convert_block_hash(parent_hash)
                 if parent_hash is not None
@@ -588,6 +604,40 @@ class BlockPool:
         )
         block_start = (num_hash_blocks - 1) * self.hash_block_size
         return parent_hash, block_start
+
+    def _get_promoted_partial_block_parent_hash_and_start(
+        self,
+        request: Request,
+        num_tokens: int,
+        block_size: int,
+    ) -> tuple[BlockHash | None, int]:
+        # A promoted partial entry removes the previous partial boundary in
+        # the same event batch. That boundary is the new boundary's natural
+        # parent, so naming it would hand consumers a parent the batch also
+        # drops. Instead anchor the store at the owning block's start: the
+        # hash chain at that block-aligned boundary was emitted as a stored
+        # full block in an earlier batch and is never removed here.
+        block_start = (num_tokens // block_size) * block_size
+        parent_hash = (
+            request.block_hashes[block_start // self.hash_block_size - 1]
+            if block_start > 0
+            else None
+        )
+        return parent_hash, block_start
+
+    @staticmethod
+    def _parent_hash_is_removed(
+        parent_hash: BlockHash | None,
+        removed_hashes: list[BlockHashWithGroupId],
+    ) -> bool:
+        """Whether this batch also removes the hash we would name as the parent."""
+        if parent_hash is None or not removed_hashes:
+            return False
+        parent = maybe_convert_block_hash(parent_hash)
+        return any(
+            maybe_convert_block_hash(get_block_hash(block_hash)) == parent
+            for block_hash in removed_hashes
+        )
 
     def _remove_cached_block_hashes(
         self,
