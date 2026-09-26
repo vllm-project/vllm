@@ -274,11 +274,12 @@ class _MockTokenizer:
 
     def convert_ids_to_tokens(
         self, ids: list[int], skip_special_tokens: bool = False
-    ) -> list[str]:
-        return [self._raw[tid] for tid in ids]
+    ) -> list[str | None]:
+        # Real tokenizers return None for an id outside the vocabulary.
+        return [self._raw.get(tid) for tid in ids]
 
     def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
-        return "".join(self._decoded[tid] for tid in ids)
+        return "".join(self._decoded.get(tid, "") for tid in ids)
 
 
 def test_sentencepiece_leading_space_preserved():
@@ -357,3 +358,23 @@ def test_logprobs_count_stable_across_k():
     assert len(top4) == 4
     assert len(top10) == 10
     assert top4[" true"] == top10[" true"]
+
+
+def test_out_of_vocab_id_does_not_raise():
+    """An id past the end of the vocabulary must not blow up.
+
+    convert_ids_to_tokens() returns None for such an id. This is reachable
+    whenever a model's config vocab_size exceeds the tokenizer's piece count,
+    for example a vocabulary padded for tensor parallelism, or dummy weights.
+    Without the guard, _restore_leading_spaces() iterates None and raises
+    TypeError inside AsyncLLM.output_handler, which kills the output handler
+    for every in-flight request rather than failing the one request.
+    """
+    tok = _MockTokenizer(
+        raw_tokens={0: "\u2581Hello", 1: "\u2581world"},
+        decoded_tokens={0: "Hello", 1: "world"},
+    )
+
+    result = convert_ids_list_to_tokens(tok, [0, 1, 7])
+
+    assert result == [" Hello", " world", ""]
