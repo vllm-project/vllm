@@ -342,6 +342,117 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     return check_object(schema)
 
 
+def _resolve_local_json_ref(root: dict[str, Any], ref: str) -> Any:
+    """Resolve a local JSON pointer (``#/$defs/foo``) against `root`.
+
+    Returns None if the pointer is remote or dangling; both are left to
+    xgrammar, which already reports them with a usable message.
+    """
+    if not ref.startswith("#"):
+        return None
+    pointer = ref[1:].strip("/")
+    node: Any = root
+    if not pointer:
+        return node
+    for part in pointer.split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def has_non_terminating_ref_cycle(schema: dict[str, Any]) -> bool:
+    """Check whether a JSON schema contains a `$ref` cycle with no base case.
+
+    A cycle such as ``{"$ref": "#/$defs/n", "$defs": {"n": {"$ref":
+    "#/$defs/n"}}}`` describes a language with no finite member. xgrammar
+    compiles it without complaint, but the resulting grammar allows no token
+    at all, so the request is admitted, scheduled, and then killed on its
+    first token with "Failed to advance FSM". Rejecting it here turns that
+    mid-generation 500 into a request-time 400 (#57725).
+
+    The check is deliberately narrow: it only rejects a schema whose `$ref`
+    chain cycles without ever reaching a construct that emits a token, which
+    is precisely the case xgrammar compiles into an empty language. Ordinary
+    recursion - a self-referential object or array, with or without a base
+    case - always emits a token before recursing and is left alone.
+    """
+    if not isinstance(schema, dict):
+        return False
+
+    refs: set[str] = set()
+
+    def collect_refs(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                refs.add(ref)
+            for value in node.values():
+                collect_refs(value)
+        elif isinstance(node, list):
+            for value in node:
+                collect_refs(value)
+
+    collect_refs(schema)
+    if not refs:
+        return False
+
+    # Least fixpoint: assume every `$ref` is non-terminating, then promote a
+    # ref to terminating once its target is shown to be. Refs that never get
+    # promoted are the ones with no base case.
+    terminating: dict[str, bool] = dict.fromkeys(refs, False)
+
+    def terminates(node: Any) -> bool:
+        if not isinstance(node, dict):
+            # Boolean schemas and non-schema values impose no constraint we
+            # can reason about; assume they terminate rather than reject.
+            return True
+
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            # An unresolvable ref is xgrammar's to report, not ours.
+            return terminating.get(ref, True)
+
+        for key in ("anyOf", "oneOf"):
+            branches = node.get(key)
+            if (
+                isinstance(branches, list)
+                and branches
+                and not any(terminates(branch) for branch in branches)
+            ):
+                return False
+
+        # "allOf" is deliberately not inspected: xgrammar does not fully
+        # compose multi-branch allOf (it warns "Support for allOf with
+        # multiple options is still ongoing") and still admits a first token
+        # for a cyclic branch, so treating it as non-terminating here would
+        # reject a schema the engine currently serves.
+
+        # Anything else - an object, an array, a scalar type - emits at least
+        # one token before it can recurse, so the FSM has a legal first token
+        # and this check does not apply. A schema like {"type": "object",
+        # "properties": {"c": {"$ref": "#/$defs/n"}}, "required": ["c"]} is
+        # also unsatisfiable, but it fails by running to max_tokens rather
+        # than by rejecting token 0, so it is deliberately out of scope here.
+        return True
+
+    # Each pass promotes at least one ref or the set has stabilised.
+    for _ in range(len(refs)):
+        changed = False
+        for ref in refs:
+            if terminating[ref]:
+                continue
+            target = _resolve_local_json_ref(schema, ref)
+            if target is None or terminates(target):
+                terminating[ref] = True
+                changed = True
+        if not changed:
+            break
+
+    return not terminates(schema)
+
+
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
@@ -395,6 +506,17 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         if has_xgrammar_unsupported_json_features(schema):
             raise VLLMValidationError(
                 "The provided JSON schema contains features not supported by xgrammar."
+            )
+
+        # xgrammar compiles a `$ref` cycle with no base case into a grammar
+        # that matches nothing, which only surfaces as an FSM failure on the
+        # first token. Reject it here so the caller gets a 400 (#57725).
+        if has_non_terminating_ref_cycle(schema):
+            raise VLLMValidationError(
+                "The provided JSON schema contains a '$ref' cycle with no base "
+                "case, so no output can ever satisfy it. Give the recursion a "
+                "terminating branch, for example by making the recursive "
+                "property optional or adding a non-recursive 'anyOf' branch."
             )
 
         try:
