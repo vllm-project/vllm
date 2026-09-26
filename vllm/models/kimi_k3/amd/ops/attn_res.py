@@ -41,6 +41,7 @@ def _attn_res_kernel(
     QUANT_MAX: tl.constexpr,
     BLOCK_L: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    LOOP_STAGES: tl.constexpr,
 ):
     row_idx = tl.program_id(0).to(tl.int64)
     tl.assume(row_idx >= 0)
@@ -105,7 +106,9 @@ def _attn_res_kernel(
         mixed = tl.zeros((BLOCK_D,), tl.float32)
 
         num_sources = num_blocks + 1
-        for source_tile in range(tl.cdiv(num_sources, BLOCK_L)):
+        for source_tile in tl.range(
+            0, tl.cdiv(num_sources, BLOCK_L), num_stages=LOOP_STAGES
+        ):
             source_offsets = source_tile * BLOCK_L + tl.arange(0, BLOCK_L)
             source_mask = source_offsets < num_sources
             is_prefix = source_offsets == num_blocks
@@ -129,12 +132,17 @@ def _attn_res_kernel(
             reciprocal_std = tl.rsqrt(
                 tl.sum(values * values, axis=1) * (1.0 / hidden_size) + eps
             )
-            logits = tl.sum(values * input_qk_weight[None, :], axis=1) * reciprocal_std
+            # Scaled by log2(e) so the softmax can use exp2.
+            logits = (
+                tl.sum(values * input_qk_weight[None, :], axis=1)
+                * reciprocal_std
+                * 1.4426950408889634
+            )
             scores = tl.where(source_mask, logits, -float("inf"))
 
             new_max_logit = tl.maximum(max_logit, tl.max(scores, axis=0))
-            old_scale = tl.exp(max_logit - new_max_logit)
-            block_scales = tl.exp(scores - new_max_logit)
+            old_scale = tl.exp2(max_logit - new_max_logit)
+            block_scales = tl.exp2(scores - new_max_logit)
             denominator = denominator * old_scale + tl.sum(block_scales, axis=0)
             mixed = mixed * old_scale + tl.sum(block_scales[:, None] * values, axis=0)
             max_logit = new_max_logit
@@ -200,11 +208,17 @@ def attn_res(
     if num_tokens == 0:
         return output if scale is None else (output, scale)
 
-    # Source tiling helps decode, while one-source tiles scale better for prefill.
-    if num_tokens >= 256 or num_blocks <= 1:
-        block_l, num_warps = 1, 4
+    # Decode covers every source (num_blocks + the prefix) in one tile, so the
+    # online softmax is a single pass. Prefill keeps one-source tiles and
+    # software-pipelines the source loop instead.
+    if num_tokens >= 256:
+        block_l, num_warps, loop_stages = 1, 4, 2
     else:
-        block_l, num_warps = 4, 8
+        block_l, num_warps, loop_stages = (
+            triton.next_power_of_2(num_blocks + 1),
+            8,
+            1,
+        )
     _attn_res_kernel[(num_tokens,)](
         prefix,
         delta,
@@ -230,6 +244,7 @@ def attn_res(
         QUANT_MAX=0.0 if quant_dtype is None else torch.finfo(quant_dtype).max,
         BLOCK_L=block_l,
         BLOCK_D=triton.next_power_of_2(hidden_size),
+        LOOP_STAGES=loop_stages,
         num_warps=num_warps,
         num_stages=2,
     )
