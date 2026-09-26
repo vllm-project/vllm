@@ -106,17 +106,12 @@ def explore_comb_workloads(
     if workload_iters < 2:
         raise ValueError("`workload_iters` should be at least 2")
 
-    dataset_size = DEFAULT_NUM_PROMPTS
-    if "num_prompts" in bench_comb:
-        dataset_size = int(bench_comb["num_prompts"])  # type: ignore
-    else:
-        for i, arg in enumerate(bench_cmd):
-            if arg == "--num-prompts" and i + 1 < len(bench_cmd):
-                dataset_size = int(bench_cmd[i + 1])
-                break
-            elif arg.startswith("--num-prompts="):
-                dataset_size = int(arg.split("=", 1)[1])
-                break
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--num-prompts", "--num_prompts", type=int, default=DEFAULT_NUM_PROMPTS
+    )
+    bench_args, _ = parser.parse_known_args(bench_comb.apply_to_cmd(bench_cmd))
+    dataset_size = bench_args.num_prompts
 
     print(f"Dataset size: {dataset_size}")
 
