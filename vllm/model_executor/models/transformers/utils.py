@@ -28,6 +28,7 @@ from torch import nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -184,6 +185,34 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
         bias=conv.bias is not None,
         padding_mode=conv.padding_mode,
         params_dtype=conv.weight.dtype,
+    )
+
+
+def replace_layernorm_class(layernorm: nn.LayerNorm) -> nn.Module:
+    """Replace a standard (mean-centered) `nn.LayerNorm` with vLLM's
+    `LayerNorm`.
+
+    Args:
+        layernorm: `nn.LayerNorm` to be replaced.
+
+    Returns:
+        The new `LayerNorm`. If the layernorm is not supported (a subclass with
+        its own behavior, multi-dim `normalized_shape`, or not both
+        elementwise-affine and biased), returns the original module unchanged.
+
+    """
+    if (
+        type(layernorm) is not nn.LayerNorm
+        or len(layernorm.normalized_shape) != 1
+        or not layernorm.elementwise_affine
+        or layernorm.bias is None
+    ):
+        return layernorm
+
+    return LayerNorm(
+        layernorm.normalized_shape[0],
+        eps=layernorm.eps,
+        dtype=layernorm.weight.dtype,
     )
 
 
