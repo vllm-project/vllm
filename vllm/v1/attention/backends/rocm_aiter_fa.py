@@ -521,6 +521,12 @@ class AiterFlashAttentionMetadataBuilder(
             else None
         )
 
+    @property
+    def supports_multi_step_drafting(self) -> bool:
+        # The shuffle layout has no general multi-token fallback when Gluon
+        # declines a batch, so reject it before reaching the kernel assertion.
+        return not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):

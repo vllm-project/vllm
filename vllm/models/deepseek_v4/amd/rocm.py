@@ -449,6 +449,8 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    _supports_multi_step_drafting = True
+
     @classmethod
     def get_cudagraph_support(
         cls,
@@ -530,6 +532,8 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    _supports_multi_step_drafting = True
+
     @classmethod
     def get_cudagraph_support(
         cls,

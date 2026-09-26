@@ -596,6 +596,8 @@ def _maybe_symmetrize_window(
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
+    _supports_multi_step_drafting = True
+
     # FA3:
     # Supports full cudagraphs for all cases.
     #
