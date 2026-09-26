@@ -288,6 +288,43 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
     return chunkk, fits
 
 
+def use_aiter_decode_gemm(n, m, k, dtype, bias):
+    """True when aiter has a tuned decode-GEMM row for this exact shape.
+
+    The skinny kernels below return early for every small-token shape, so
+    aiter's tuned_gemm is unreachable even where its decode kernel is
+    measurably faster. Rather than duplicate a shape table here, ask aiter:
+    the tuned-config lookup answers only for shapes somebody actually tuned,
+    and reports a different backend for everything else.
+
+    Gated on `is_linear_enabled` rather than `is_tgemm_enabled`: the latter is
+    additionally `and on_gfx950()`, which silently excluded gfx942 even once
+    tuned rows for it existed. No architecture check is needed here because the
+    tuned-config key carries `gfx` and `cu_num`, so a row only ever answers for
+    the card it was measured on. On gfx950 the condition is unchanged, since
+    `on_gfx950()` is true there anyway.
+
+    The caller asks only while a CUDA graph is being captured. aiter's dispatch
+    costs about 20 us of CPU per call against about 10 us for the skinny
+    kernels, so in eager mode the decode kernel's GPU win is outweighed by host
+    time on every shape whose kernel runs under ~27 us -- most decode shapes.
+    Under capture that host cost is paid once and replay keeps only the faster
+    kernel. Eager execution, including `enforce_eager` and batch sizes outside
+    the captured set, therefore keeps today's path unchanged.
+    """
+    if not rocm_aiter_ops.is_linear_enabled():
+        return False
+    if dtype not in [torch.float16, torch.bfloat16]:
+        return False
+    try:
+        from aiter.tuned_gemm import get_GEMM_A16W16_config
+
+        cfg = get_GEMM_A16W16_config(n, m, k, bias is not None, str(dtype), str(dtype))
+    except Exception:  # aiter absent, or no configs for this arch
+        return False
+    return cfg is not None and cfg.get("libtype") == "flydsl_decode"
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -332,6 +369,17 @@ def rocm_unquantized_gemm_impl(
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
+
+    # A tuned aiter decode row means somebody measured this exact shape against
+    # the skinny kernels below and the decode kernel won, so take it directly.
+    # Capture is checked here rather than inside the helper so that eager calls,
+    # which never take this branch, do not pay for a Python function call.
+    if torch.cuda.is_current_stream_capturing() and use_aiter_decode_gemm(
+        n, m, k, x.dtype, bias
+    ):
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
