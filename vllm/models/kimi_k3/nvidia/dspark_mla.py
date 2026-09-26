@@ -376,7 +376,9 @@ class K3DSparkModel(nn.Module):
         self,
         cache_layers: list[MultiHeadLatentAttention],
     ) -> bool:
-        if not hasattr(self, "_layers_share_kv_block_layout"):
+        key = tuple(cl.kv_cache.data_ptr() for cl in cache_layers)
+        if getattr(self, "_kv_block_layout_key", None) != key:
+            self._kv_block_layout_key = key
             ref_cache = cache_layers[0].kv_cache
             self._layers_share_kv_block_layout = all(
                 cl.kv_cache.size(1) == ref_cache.size(1)
@@ -390,16 +392,18 @@ class K3DSparkModel(nn.Module):
         self,
         cache_layers: list[MultiHeadLatentAttention],
     ) -> torch.Tensor:
-        # The per-layer KV cache base pointers are stable after allocation, so
-        # build the pointer array once and return it on every call.
-        if not hasattr(self, "_context_cache_ptrs"):
-            ref_cache = cache_layers[0].kv_cache
+        key = tuple(cl.kv_cache.data_ptr() for cl in cache_layers)
+        if getattr(self, "_context_cache_ptrs_key", None) != key:
+            assert not torch.cuda.is_current_stream_capturing()
             cache_ptrs = torch.tensor(
-                [cl.kv_cache.data_ptr() for cl in cache_layers],
-                dtype=torch.int64,
-                device=ref_cache.device,
+                key, dtype=torch.int64, device=cache_layers[0].kv_cache.device
             )
-            self._context_cache_ptrs = cache_ptrs
+            current = getattr(self, "_context_cache_ptrs", None)
+            if current is not None and current.shape == cache_ptrs.shape:
+                current.copy_(cache_ptrs)
+            else:
+                self._context_cache_ptrs = cache_ptrs
+            self._context_cache_ptrs_key = key
         return self._context_cache_ptrs
 
     def forward(
