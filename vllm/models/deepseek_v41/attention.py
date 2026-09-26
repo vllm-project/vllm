@@ -697,7 +697,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         else:
             gemm_rs.warn_incompatible_projection()
 
-    def _wo_b_proj(self, z: torch.Tensor) -> torch.Tensor:
+    def _wo_b_proj(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
         """Apply ``wo_b``; with GEMM-RS bound, also reduce-scatter the result.
 
         Every ``_o_proj`` implementation projects through this so the decoder
@@ -707,7 +707,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """
         if self.gemm_rs is None:
             return self.wo_b(z)
-        if self.gemm_rs.should_run(z):
+        if isinstance(z, torch.Tensor) and self.gemm_rs.should_run(z):
             return self.gemm_rs.apply(z, self.wo_b)
         # Small batches stay on the unfused path, which is faster there.
         return sp_reduce_scatter(self.wo_b(z))
