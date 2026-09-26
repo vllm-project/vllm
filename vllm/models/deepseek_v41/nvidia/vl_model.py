@@ -23,6 +23,7 @@ import torch
 from torch import nn
 
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -130,6 +131,7 @@ class DeepseekV41ForCausalLM(
     """
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
@@ -167,6 +169,12 @@ class DeepseekV41ForCausalLM(
             )
             self.vision.to(dtype=model_config.dtype)
             self.aligner.to(dtype=model_config.dtype)
+            if self.multimodal_config.mm_device_do_normalize:
+                self.vision.patch_embed.input_norm = FusedMMInputNorm(
+                    image_mean=[0.5, 0.5, 0.5],
+                    image_std=[0.5, 0.5, 0.5],
+                    rescale_factor=1 / 255,
+                )
 
         with self._mark_language_model(vllm_config):
             self.language_model = DeepseekV41LLMForCausalLM(
@@ -207,7 +215,7 @@ class DeepseekV41ForCausalLM(
         self,
         image_input: DeepseekV4VLImagePixelInputs,
     ) -> tuple[torch.Tensor, ...]:
-        patches = image_input.patches.to(self.aligner.w1.weight.dtype)
+        patches = image_input.patches
         vit_grid = image_input.vit_grid.tolist()
 
         image_embeds_list: list[torch.Tensor]

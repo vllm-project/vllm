@@ -126,6 +126,8 @@ def load_image(
     max_n_token: int,
     min_pixels: int,
     max_wh_ratio: float | None,
+    do_rescale: bool = True,
+    do_normalize: bool = True,
 ):
     """Transform one PIL image into ViT patches.
 
@@ -151,8 +153,15 @@ def load_image(
         image = image.resize((best_width, best_height))
     else:
         image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
-    x = torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
-    x = ((x - 0.5) / 0.5).to(torch.bfloat16)
+    if do_rescale or do_normalize:
+        x = torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1)
+        if do_rescale:
+            x = x / 255
+        if do_normalize:
+            x = (x - 0.5) / 0.5
+        x = x.to(torch.bfloat16)
+    else:
+        x = torch.from_numpy(np.asarray(image, dtype=np.uint8)).permute(2, 0, 1)
     patches = (
         x.reshape(3, n_vit_h, p, n_vit_w, p)
         .permute(1, 3, 0, 2, 4)
@@ -181,7 +190,13 @@ class DeepseekV4VLImageProcessor:
         self.min_pixels = config.vision_min_pixels
         self.max_wh_ratio = config.vision_max_wh_ratio
 
-    def __call__(self, image: Image.Image):
+    def __call__(
+        self,
+        image: Image.Image,
+        *,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
+    ):
         return load_image(
             image,
             patch_size=self.patch_size,
@@ -189,6 +204,8 @@ class DeepseekV4VLImageProcessor:
             max_n_token=self.max_n_token,
             min_pixels=self.min_pixels,
             max_wh_ratio=self.max_wh_ratio,
+            do_rescale=do_rescale,
+            do_normalize=do_normalize,
         )
 
 
@@ -210,10 +227,18 @@ class DeepseekV4VLProcessor:
       carries ``image_token_id`` in the prompt's token ids.
     """
 
-    def __init__(self, config: DeepseekV41Config) -> None:
+    def __init__(
+        self,
+        config: DeepseekV41Config,
+        *,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
+    ) -> None:
         super().__init__()
         self.config = config
         self.image_processor = DeepseekV4VLImageProcessor(config)
+        self.do_rescale = do_rescale
+        self.do_normalize = do_normalize
 
     def __call__(
         self,
@@ -227,7 +252,9 @@ class DeepseekV4VLProcessor:
         llm_grid_list = []
         types_list = []
         for image in images or []:
-            patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = self.image_processor(image)
+            patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = self.image_processor(
+                image, do_rescale=self.do_rescale, do_normalize=self.do_normalize
+            )
             patches_list.append(patches)
             vit_grid.append((n_vit_h, n_vit_w))
             llm_grid_list.append((n_llm_h, n_llm_w))
@@ -253,7 +280,13 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> DeepseekV4VLProcessor:
         if kwargs:
             raise ValueError(f"Unexpected processor kwargs: {sorted(kwargs)}")
-        return DeepseekV4VLProcessor(self.get_hf_config())
+
+        mm_config = self.ctx.get_mm_config()
+        return DeepseekV4VLProcessor(
+            self.get_hf_config(),
+            do_rescale=not mm_config.mm_device_do_normalize,
+            do_normalize=not mm_config.mm_device_do_normalize,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
