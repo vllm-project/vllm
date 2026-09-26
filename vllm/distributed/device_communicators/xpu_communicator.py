@@ -69,6 +69,24 @@ class XpuCommunicator(DeviceCommunicatorBase):
         dist.all_reduce(output, group=self.device_group)
         return output
 
+    def reset_after_graph_capture(self) -> None:
+        """Issue one tiny eager collective after XPU graph capture.
+
+        oneCCL chains each collective on the previous one's completion event.
+        After a capture, that event belongs to the captured command graph. The
+        large-message all-reduce path (messages above roughly 4-8 MB) submits
+        with an explicit dependency on it, which makes the caller's queue join
+        the graph's recording. Every later replay or wait then fails with
+        "xpuStreamCaptureStatus: Recording" / "wait cannot be called for a queue
+        which is recording to a command graph". One small eager all-reduce
+        replaces that event with an ordinary one; later replays don't touch
+        oneCCL's host-side state, so doing this once per capture is enough.
+        """
+        if self.world_size <= 1 or torch.xpu.is_current_stream_capturing():
+            return
+        flush = torch.zeros(1, dtype=torch.float32, device=self.device)
+        dist.all_reduce(flush, group=self.device_group)
+
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
 
