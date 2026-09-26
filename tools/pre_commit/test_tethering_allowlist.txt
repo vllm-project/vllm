@@ -96,5 +96,6 @@ tests/tools/test_config_validator.py  # logic covered by the validate-config pre
 tests/watermarking/test_detection.py  # watermarking feature (#54053); no job collects tests/watermarking/
 tests/watermarking/test_gumbel.py  # watermarking feature (#54053); no job collects tests/watermarking/
 tests/watermarking/test_prf.py  # watermarking feature (#54053); no job collects tests/watermarking/
+tests/watermarking/test_synthid.py  # SynthID watermarking feature; no job collects tests/watermarking/
 tests/watermarking/test_watermarking.py  # watermarking feature (#54053); no job collects tests/watermarking/
 tests/watermarking/test_watermarking_e2e.py  # watermarking hardening (#56309); no job collects tests/watermarking/
