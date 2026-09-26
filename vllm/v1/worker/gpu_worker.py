@@ -635,6 +635,15 @@ class Worker(WorkerBase):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            after_cudagraph_profile = MemorySnapshot(device=self.device)
+            retained_memory = max(
+                profile_result.after_profile.free_memory
+                - after_cudagraph_profile.free_memory,
+                0,
+            )
+            profile_result.total_consumed += retained_memory
+            profile_result.non_kv_cache_memory += retained_memory
+            profile_result.after_profile = after_cudagraph_profile
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (

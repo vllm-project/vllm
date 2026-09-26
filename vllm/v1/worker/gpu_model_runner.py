@@ -6649,9 +6649,10 @@ class GPUModelRunner(
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
-        shared_memory_estimate = {}
-        per_graph_estimate = {}
+        uncaptured_memory_estimate = 0
         encoder_memory_estimate = 0
+        free_before_graph_cleanup = None
+        sampled_graph_memory = 0
 
         # Cleanup-only guard: CUDA graph capture errors should still propagate
         # because encoder graph capture is opt-in.
@@ -6689,16 +6690,16 @@ class GPUModelRunner(
                         mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
                     )
 
-                    shared_memory_estimate[mode] = first_capture
-                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+                    uncaptured_graphs = len(descs) - len(profile_descs)
+                    uncaptured_memory_estimate += per_graph * uncaptured_graphs
 
                     logger.debug(
-                        "Estimated %s CUDA graph memory: "
-                        "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
+                        "Profiled %s CUDA graph memory: "
+                        "%.2f MiB first-capture, %.2f MiB per-graph; %d uncaptured",
                         mode.name,
                         first_capture / (1 << 20),
-                        len(descs),
                         per_graph / (1 << 20),
+                        uncaptured_graphs,
                     )
 
                 if encoder_cudagraph_manager is not None:
@@ -6713,6 +6714,10 @@ class GPUModelRunner(
                         encoder_memory_estimate / (1 << 20),
                         encoder_graphs,
                     )
+            torch.accelerator.synchronize()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            free_before_graph_cleanup = torch.accelerator.get_memory_info()[0]
         finally:
             set_cudagraph_capturing_enabled(False)
             CUDAGraphWrapper.clear_all_graphs()
@@ -6728,19 +6733,25 @@ class GPUModelRunner(
             for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
                 key_set.clear()
             self.cudagraph_dispatcher.keys_initialized = False
+            if free_before_graph_cleanup is not None:
+                torch.accelerator.synchronize()
+                # Include builder-owned workspace, keeping the dummy KV alive.
+                if hasattr(self, "attn_groups"):
+                    self.attn_groups.clear()
+                gc.collect()
+                torch.accelerator.empty_cache()
+                # Retained workspaces are charged separately by the worker.
+                sampled_graph_memory = max(
+                    torch.accelerator.get_memory_info()[0] - free_before_graph_cleanup,
+                    0,
+                )
             self.maybe_remove_all_loras(self.lora_config)
             self._cleanup_profiling_kv_cache()
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
 
-        # FULL and PIECEWISE graphs share the global pool at runtime and are
-        # never replayed concurrently, so the pool overlays their memory.
-        # Take the max to avoid double-counting the overlap.
-        decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
-            per_graph_estimate.values()
-        )
-        # Encoder graphs use a manager-local pool at runtime, separate from the
-        # decoder pool, so add their estimate instead of overlaying it.
-        total_estimate = decoder_estimate + encoder_memory_estimate
+        # Released graph memory already reflects FULL/PIECEWISE pool sharing
+        # and the separate encoder pool. Only unsampled graphs need extrapolation.
+        total_estimate = sampled_graph_memory + uncaptured_memory_estimate
         logger.info(
             "Estimated CUDA graph memory: %.2f GiB total",
             total_estimate / (1 << 30),
