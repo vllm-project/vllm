@@ -20,7 +20,7 @@ Key Design Principles:
 """
 
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -978,6 +978,36 @@ class TieringOffloadingManager(OffloadingManager):
                 stats.aggregate(tier_stats)
 
         return stats
+
+    @override
+    def config_info(self) -> Sequence[Mapping[str, str | int | float | bool]]:
+        """Compose one info mapping for each tier, primary tier first.
+
+        Every mapping holds the tier label, so two tiers of one type stay
+        apart. A tier fills the labels it owns, and the frontend renders a label
+        of another tier as an empty value. The label names match the names that
+        TieringOffloadingSpec.config_info_keys() declares.
+
+        Returns:
+            One mapping for each tier, primary tier first.
+
+        Raises:
+            ValueError: If the primary tier returns more than one mapping. This
+                manager holds one primary tier, so two mappings would give two
+                series with one tier label.
+
+        """
+        (primary_info,) = self.primary_tier.config_info()
+        primary_tier_info = dict(primary_info)
+        primary_tier_info["tier"] = self._metrics.primary_tier_label[0]
+        tier_infos = [primary_tier_info]
+
+        for tier in self.secondary_tiers:
+            tier_info = dict(tier.config_info())
+            tier_info["tier"] = self._metrics.tier_label(self._tier_index[tier])[0]
+            tier_infos.append(tier_info)
+
+        return tier_infos
 
     @override
     def shutdown(self) -> None:

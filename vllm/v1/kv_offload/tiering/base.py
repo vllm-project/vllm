@@ -4,7 +4,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -358,3 +358,43 @@ class SecondaryTierManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return and reset metric observations collected by this tier."""
         return None
+
+    @classmethod
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this tier.
+
+        The metric holds one series for each tier, and the tier label tells the
+        series apart, so a tier declares its own names only.
+        TieringOffloadingSpec merges the names of every tier into one
+        declaration. Every other rule matches OffloadingSpec.config_info_keys().
+
+        Args:
+            tier_config: Configuration dict of this tier.
+
+        Returns:
+            Tuple of the label names this tier owns. Empty by default.
+
+        """
+        return ()
+
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return static config facts to publish as info metric labels.
+
+        One tier gives one series, so this returns one mapping and not a list.
+        A tier cannot know its own index, so TieringOffloadingManager adds the
+        tier label. A tier fills the names it owns, and the frontend renders a
+        name of another tier as an empty value. Every other rule matches
+        OffloadingManager.config_info(), including the name agreement with
+        TieringOffloadingSpec.config_info_keys().
+
+        A test of the implementation should assert that the names here match
+        config_info_keys() of the same class. The runtime check reads the
+        declaration of all tiers together. It therefore cannot see a name that
+        this tier declares and leaves unfilled, because that empty value reads
+        the same as a name of another tier.
+
+        Returns:
+            One mapping of label name to value. Empty by default.
+
+        """
+        return {}
