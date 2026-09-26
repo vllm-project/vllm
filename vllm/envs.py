@@ -157,6 +157,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER: bool = False
+    VLLM_ROCM_AITER_PAGED_PREFIX: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1379,6 +1381,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # Keep gathered context in FP8 for supported AITER prequantized attention.
+    "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER": lambda: (
+        os.getenv("VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER", "False").lower()
+        in ("true", "1")
+    ),
+    # Attend AITER FA extend tokens to the whole FP8 prefix with one paged
+    # AITER prefill call instead of the loop that gathers 32k context tokens
+    # at a time. Needs VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER, an FP8 KV cache,
+    # one KV head per rank and an attention block size that is a multiple
+    # of 64.
+    "VLLM_ROCM_AITER_PAGED_PREFIX": lambda: (
+        os.getenv("VLLM_ROCM_AITER_PAGED_PREFIX", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
