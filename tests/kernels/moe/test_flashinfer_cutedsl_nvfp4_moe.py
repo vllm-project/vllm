@@ -193,7 +193,6 @@ def test_flashinfer_cutedsl_fp4_moe(
             hidden_states, score, topk, renormalize=False
         )
 
-        activation = MoEActivation.RELU2_NO_MUL
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
