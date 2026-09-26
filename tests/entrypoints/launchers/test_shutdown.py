@@ -14,6 +14,7 @@ import httpx
 import openai
 import psutil
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.network_utils import get_open_port
@@ -125,6 +126,40 @@ async def _concurrent_request_loop(
         for t in tasks:
             if not t.done():
                 t.cancel()
+
+
+def _num_running_requests(metrics_text: str) -> float:
+    """Sum ``vllm:num_requests_running`` across the server's label sets."""
+    total = 0.0
+    for family in text_string_to_metric_families(metrics_text):
+        if family.name == "vllm:num_requests_running":
+            for sample in family.samples:
+                if sample.name == "vllm:num_requests_running":
+                    total += sample.value
+    return total
+
+
+async def _wait_for_running_request(
+    metrics_url: str,
+    timeout: float = _INFLIGHT_REQUEST_START_TIMEOUT,
+) -> float:
+    """Wait until the server reports a running request, returning the delay.
+
+    ``ShutdownState.inflight_requests`` is incremented before the HTTP call is
+    awaited, so it only shows that a client coroutine started. Draining can
+    only complete work the engine has already admitted, so synchronize on the
+    server's own scheduler gauge instead.
+    """
+    start = time.monotonic()
+    deadline = start + timeout
+    async with httpx.AsyncClient() as metrics_client:
+        while time.monotonic() < deadline:
+            response = await metrics_client.get(metrics_url)
+            response.raise_for_status()
+            if _num_running_requests(response.text) > 0:
+                return time.monotonic() - start
+            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
+    pytest.fail(f"No request reached the running state within {timeout}s")
 
 
 @pytest.mark.asyncio
@@ -240,7 +275,11 @@ async def test_wait_timeout_completes_requests():
             _concurrent_request_loop(client, state, sigterm_sent, concurrency=10)
         )
 
-        await asyncio.sleep(0.5)
+        # Drain can only complete requests the engine already admitted, so
+        # wait for the server to report one instead of guessing with a sleep.
+        admission_delay = await _wait_for_running_request(
+            remote_server.url_for("metrics")
+        )
         proc.send_signal(signal.SIGTERM)
         sigterm_sent.set()
 
@@ -257,6 +296,7 @@ async def test_wait_timeout_completes_requests():
         # wait timeout should complete in-flight requests
         assert state.requests_after_sigterm > 0, (
             f"Wait timeout should complete in-flight requests. "
+            f"admission_delay: {admission_delay:.3f}s, "
             f"503: {state.got_503}, 500: {state.got_500}, "
             f"conn_errors: {state.connection_errors}, errors: {state.errors}"
         )
