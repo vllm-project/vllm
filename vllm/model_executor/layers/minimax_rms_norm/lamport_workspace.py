@@ -4,6 +4,7 @@
 
 import array
 import contextlib
+import ctypes
 import struct
 import sys
 import threading
@@ -16,6 +17,7 @@ except ImportError:
     from cuda import cudart
 
 _ALIGN = 1 << 21  # 2 MiB — CUDA IPC allocation alignment
+_IPC_HANDLE_SIZE = 64  # sizeof(cudaIpcMemHandle_t) in the CUDA runtime ABI
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +86,20 @@ class IpcBuffer:
 
         all_handles: list[bytes | None] = [None] * world_size
         torch.distributed.all_gather_object(
-            all_handles, bytes(local_handle.reserved), group=process_group
+            all_handles,
+            ctypes.string_at(local_handle.getPtr(), _IPC_HANDLE_SIZE),
+            group=process_group,
         )
 
         for r in range(world_size):
             if r == rank:
                 self.peer_ptrs[r] = self.local_ptr
             else:
+                peer_handle = all_handles[r]
+                if peer_handle is None or len(peer_handle) != _IPC_HANDLE_SIZE:
+                    raise ValueError(f"Invalid CUDA IPC handle from rank {r}")
                 handle = cudart.cudaIpcMemHandle_t()
-                handle.reserved = all_handles[r]
+                ctypes.memmove(handle.getPtr(), peer_handle, _IPC_HANDLE_SIZE)
                 err, ptr = cudart.cudaIpcOpenMemHandle(
                     handle, cudart.cudaIpcMemLazyEnablePeerAccess
                 )
