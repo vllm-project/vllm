@@ -18,6 +18,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -37,7 +38,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
 )
 from vllm.model_executor.models.vision import (
-    FusedInputNorm,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
@@ -386,9 +386,7 @@ class Glm5NextVisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
-        self.input_norm = (
-            input_norm if input_norm is not None else FusedInputNorm.identity()
-        )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
