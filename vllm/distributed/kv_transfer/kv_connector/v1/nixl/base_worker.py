@@ -102,6 +102,24 @@ logger = init_logger(__name__)
 _SHARED_REGION_GROUP_ID = -1
 
 
+def _cpu_kv_transfer_cores(
+    numa_core_list: list[list[int]],
+    allowed_cores: set[int] | frozenset[int],
+) -> list[int]:
+    """Reserve one CPU per NUMA node within the process's permitted cpuset.
+
+    ``discover_numa_topology`` reads host sysfs and can return CPUs outside a
+    container cgroup cpuset. Intersect first so ``sched_setaffinity`` is never
+    called with an illegal core (``EINVAL``).
+    """
+    reserved: list[int] = []
+    for each_numa_core_list in numa_core_list:
+        allowed_in_node = [c for c in each_numa_core_list if c in allowed_cores]
+        if allowed_in_node:
+            reserved.append(max(allowed_in_node))
+    return reserved
+
+
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     """Sort transfer regions in model-layer order, then by cache name."""
     return tuple(
@@ -701,10 +719,16 @@ class NixlBaseConnectorWorker:
         # reserve different cores for start_load_kv() from model_forward()
         if self.device_type == "cpu":
             numa_core_list = current_platform.discover_numa_topology()
-            # setup one last core in each numa for kv transfer.
-            rsv_cores_for_kv = [
-                max(each_numa_core_list) for each_numa_core_list in numa_core_list
-            ]
+            # Host sysfs NUMA lists ignore cgroup cpuset; intersect first.
+            if hasattr(os, "sched_getaffinity"):
+                allowed_cores = os.sched_getaffinity(0)
+                rsv_cores_for_kv = _cpu_kv_transfer_cores(numa_core_list, allowed_cores)
+            else:
+                rsv_cores_for_kv = [
+                    max(each_numa_core_list)
+                    for each_numa_core_list in numa_core_list
+                    if each_numa_core_list
+                ]
 
             if rsv_cores_for_kv:
                 if not hasattr(os, "sched_setaffinity"):
