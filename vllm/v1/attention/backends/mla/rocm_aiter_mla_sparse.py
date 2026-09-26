@@ -15,6 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -164,8 +167,7 @@ def triton_convert_req_index_to_global_index(
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
 ):
-    """
-    out[token_id, indice_id] =
+    """out[token_id, indice_id] =
         block_table[req_id[token_id],
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE
@@ -274,48 +276,6 @@ def generate_sparse_seqlen_triton(
     return out
 
 
-@triton.jit
-def fetch_id_to_ragged_kernel(
-    in_tensor_ptr,  # [num_seq, topk]
-    cumsum_ptr,  # [num_seq + 1]
-    out_tensor_ptr,  # [max_num_seq * topk]
-    in_tensor_ptr_stride,
-    TOPK: tl.constexpr,
-    TOKEN_NUM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    seq_id = tl.program_id(0)
-    block_id = tl.program_id(1)
-    offset = tl.arange(0, BLOCK_SIZE)
-    token_start = tl.load(cumsum_ptr + seq_id)
-    token_end = tl.load(cumsum_ptr + seq_id + 1)
-    token_num = token_end - token_start
-    row_offset = block_id * BLOCK_SIZE
-    if row_offset >= token_num:
-        return
-    in_tensor_offset = seq_id * in_tensor_ptr_stride + row_offset + offset
-    in_tensor_mask = (row_offset + offset) < TOPK
-    in_tensor_val = tl.load(in_tensor_ptr + in_tensor_offset, mask=in_tensor_mask)
-    out_tensor_offset = token_start + row_offset + offset
-    out_tensor_mask = (out_tensor_offset < token_end) & in_tensor_mask
-    tl.store(out_tensor_ptr + out_tensor_offset, in_tensor_val, mask=out_tensor_mask)
-
-
-def fetch_id_to_ragged_triton(
-    in_tensor: torch.Tensor, cumsum: torch.Tensor, out_tensor: torch.Tensor, topk
-):
-    num_tokens = in_tensor.size(0)
-    block_size = 64
-    num_block_per_row = triton.cdiv(topk, block_size)
-    grid = (
-        num_tokens,
-        num_block_per_row,
-    )
-    fetch_id_to_ragged_kernel[grid](
-        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
-    )
-
-
 class ROCMAiterMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -327,7 +287,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [1, MultipleOf(16)]
 
     @staticmethod
@@ -432,7 +392,7 @@ class ROCMAiterMLASparseMetadataBuilder(
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens = vllm_config.model_config.hf_text_config.index_topk
         attention_context = vllm_config.compilation_config.static_forward_context
         # Sink decode must use AITER's nonpersistent path. In particular,
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic
@@ -750,7 +710,9 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(
+    MLAAttentionImpl[ROCMAiterMLASparseMetadata], SharedTopkIndicesBuffer
+):
     is_sparse = True
     supports_dense_mha_prefill = False
     supports_dcp = False
@@ -795,12 +757,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -808,6 +765,11 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
+
+    def record_logical_topk_ready(self) -> None:
+        # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
+        # but does not participate in sparse-MLA index groups.
+        pass
 
     def _forward_mla(
         self,

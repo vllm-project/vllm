@@ -158,27 +158,27 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/models` - List available models
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
-- `/v1/chat/completions/render` - Render chat completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
-- `/v1/chat/completions/derender` - Derender chat completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/chat/completions/render` - Render chat completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
+- `/v1/chat/completions/derender` - Derender chat completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/completions` - Text completions
-- `/v1/completions/render` - Render completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
-- `/v1/completions/derender` - Derender completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/completions/render` - Render completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
+- `/v1/completions/derender` - Derender completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
 - `/v1/messages` - Anthropic-compatible messages API
-- `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
-- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/inference/v1/generate` - Generate completions (available when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or with `--tokens-only` unless explicitly disabled)
-- `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires both `VLLM_ENABLE_COHERE_API=1` and `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`)
+- `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`)
+- `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
 - `/v2/embed` - Cohere Embed API
 - `/v2/rerank` - Cohere Rerank API
 
@@ -206,11 +206,11 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only` unless `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0`)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
 
 **Utility endpoints:**
 
-- `/tokenize` - Tokenize text (not disabled by `VLLM_ENABLE_SCALE_OUT_ENDPOINTS`)
+- `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
 - `/ping` - SageMaker health check
@@ -288,6 +288,19 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
+
+### Per-request multimodal arguments
+
+API server endpoints reject non-empty per-request `mm_processor_kwargs` and
+`media_io_kwargs` by default. These arguments can change image, video, or audio
+loading, sizing, sampling, and preprocessing behavior, causing excessive CPU,
+GPU, or memory use when controlled by an untrusted client. Server-level
+`--mm-processor-kwargs` and `--media-io-kwargs` remain available for deployment
+configuration.
+
+Only deployments whose API clients are trusted should start the server with
+`--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
+this option on an endpoint exposed to untrusted clients.
 
 ## Tool Server and MCP Security
 

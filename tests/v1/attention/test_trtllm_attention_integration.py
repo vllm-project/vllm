@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+from tests.kernels.attention.test_trtllm_kvfp8_dequant import make_random_kv_cache
 from tests.v1.attention.test_attention_backends import create_and_prepopulate_kv_cache
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -17,7 +18,11 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
+from vllm.utils.torch_utils import (
+    is_strictly_contiguous,
+    nvfp4_kv_cache_full_dim,
+    set_random_seed,
+)
 from vllm.v1.attention.backends.utils import PerLayerParameters
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
 
@@ -33,6 +38,7 @@ from vllm.v1.attention.backends.flashinfer import (  # noqa: E402
     FlashInferMetadataBuilder,
     FlashInferTrtllmAPIDecode,
     TRTLLMPrefill,
+    trtllm_prefill_attn_kvfp8_dequant,
 )
 
 
@@ -83,6 +89,70 @@ def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
     }
 
 
+@pytest.mark.parametrize(
+    "block_size,num_prefills,has_host_lengths,quantize_query",
+    [
+        (16, 1, True, False),
+        (64, 2, True, False),
+        (128, 2, True, False),
+        (16, 2, False, False),
+        (16, 2, True, True),
+    ],
+)
+@torch.inference_mode()
+def test_prefill_dequant_scratch_ignores_unused_capacity(
+    block_size, num_prefills, has_host_lengths, quantize_query, monkeypatch
+):
+    """Bound scratch by attended prefill KV, including cached prefixes."""
+    device = torch.device("cuda")
+    config = create_vllm_config(model_name=MODEL, max_model_len=32768)
+    config.cache_config.cache_dtype = "fp8"
+    config.cache_config.kv_cache_layout = "LBHNC"
+    config.attention_config.use_trtllm_attention = True
+    config.attention_config.disable_flashinfer_q_quantization = not quantize_query
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        _mock_get_per_layer_parameters,
+    )
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+    kv_cache, scale = make_random_kv_cache(32, 2, block_size, 64)
+    batch = BatchSpec(
+        seq_lens=[1024] + [17, 65][-num_prefills:],
+        query_lens=[1] + [2, 8][-num_prefills:],
+    )
+    common = create_common_attn_metadata(batch, block_size, device)
+    if not has_host_lengths:
+        common.seq_lens_cpu_upper_bound = None
+    live_pages = ((65 if has_host_lengths else 1024) + block_size - 1) // block_size
+    with set_current_vllm_config(config):
+        builder = FlashInferMetadataBuilder(spec, ["layer.0"], config, device)
+        for capacity in (64, 256):
+            # Unused columns can contain nonzero page IDs.
+            common.block_table_tensor = torch.randint(
+                1, 32, (batch.batch_size, capacity), dtype=torch.int32, device=device
+            )
+            metadata = builder.build(0, common)
+            assert isinstance(metadata.prefill, TRTLLMPrefill)
+            table = metadata.prefill.block_tables
+            assert is_strictly_contiguous(table)
+            assert (metadata.q_data_type_prefill == current_platform.fp8_dtype()) == (
+                quantize_query
+            )
+            if not quantize_query:
+                converted, _ = trtllm_prefill_attn_kvfp8_dequant(
+                    kv_cache, table, scale, scale, metadata.q_data_type_prefill
+                )
+                assert converted.shape[0] == num_prefills * live_pages + 1
+            width = capacity if quantize_query else live_pages
+            torch.testing.assert_close(table, common.block_table_tensor[1:, :width])
+
+
 def _create_nvfp4_hnd_kv_cache(
     k_contexts,
     v_contexts,
@@ -124,6 +194,7 @@ def _create_nvfp4_hnd_kv_cache(
 
     Returns:
         ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
+
     """
     # First create a bf16 cache so block tables are populated.
     bf16_cache = create_and_prepopulate_kv_cache(

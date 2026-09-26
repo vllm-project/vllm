@@ -25,6 +25,7 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -54,6 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
@@ -442,7 +444,7 @@ class Qwen3_5ForCausalLMBase(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        mm_features: list[object],
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
         positions = torch.arange(len(input_tokens), dtype=torch.long)
         return positions.unsqueeze(0).expand(3, -1), 0
@@ -488,7 +490,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         nn.Module.__init__(self)
         config: Qwen3_5Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -583,8 +585,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                     model. `None` if no videos are passed.
                 - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
                     LLM. `None` if no videos are passed.
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -648,6 +650,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
 
 class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
+    language_model: Qwen3_5ForCausalLM
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -700,14 +705,14 @@ class Qwen3_5MoeForConditionalGeneration(
     Qwen3_5ForConditionalGeneration, Qwen3_5_MoeMixtureOfExperts
 ):
     # For MoE LoRA weights loading
-    is_3d_moe_weight: bool = True
+    is_3d_moe_weight: ClassVar[bool] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
         config: Qwen3_5MoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config

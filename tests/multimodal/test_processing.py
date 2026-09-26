@@ -7,7 +7,7 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SchedulerConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
@@ -32,6 +32,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.utils.collection_utils import flatten_2d_lists
 
+from ..models.utils import build_model_context
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
@@ -968,8 +969,7 @@ def test_hf_processor_call_kwargs(
 
 
 def test_apply_matches_no_match_exits_quickly():
-    """
-    Test that _apply_matches exits quickly when no matches are found.
+    """Test that _apply_matches exits quickly when no matches are found.
 
     Previously, _apply_matches had O(n²) behavior when no match was found
     because it would increment start_idx by 1 each iteration while
@@ -1027,8 +1027,7 @@ def test_iter_token_matches_rejects_negative_start_idx():
 
 
 def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
-    """
-    Test that placeholder scanning stays linear under adversarial candidates.
+    """Test that placeholder scanning stays linear under adversarial candidates.
 
     The fast-forward scan must not rescan the prompt tail per position when
     one candidate's first token never occurs (forcing a full search) while
@@ -1061,8 +1060,7 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
     ],
 )
 def test_find_mm_placeholders_stops_at_missing_item(prompt):
-    """
-    Test that the scan returns no placeholders once it fails to find
+    """Test that the scan returns no placeholders once it fails to find
     an item's placeholder, leaving later items unresolved.
     """
     result = find_mm_placeholders(
@@ -1079,8 +1077,7 @@ def test_find_mm_placeholders_stops_at_missing_item(prompt):
 
 
 class _FakeTokenizer:
-    """
-    Character-level tokenizer where "foo" merges into one token differently
+    """Character-level tokenizer where "foo" merges into one token differently
     depending on whether it is followed by "d", like BPE merging "foo" in
     "food" across the search-text boundary.
     """
@@ -1145,8 +1142,7 @@ def _text_fallback_processor() -> BaseMultiModalProcessor:
 
 
 def test_apply_prompt_updates_falls_back_to_text_matching():
-    """
-    Test that the fallback in `_apply_prompt_updates` finds targets that
+    """Test that the fallback in `_apply_prompt_updates` finds targets that
     tokenize differently inside the prompt ("foo" in "food").
     """
     processor = _text_fallback_processor()
@@ -1166,8 +1162,7 @@ def test_apply_prompt_updates_falls_back_to_text_matching():
 
 
 def test_apply_prompt_updates_falls_back_with_prefix_target():
-    """
-    Test that `PromptIndexTargets.prefix` targets are resolved against the
+    """Test that `PromptIndexTargets.prefix` targets are resolved against the
     decoded text in the fallback path of `_apply_prompt_updates`.
     """
     processor = _text_fallback_processor()
@@ -1192,8 +1187,7 @@ def test_apply_prompt_updates_falls_back_with_prefix_target():
 
 
 def test_apply_prompt_updates_falls_back_with_index_targets():
-    """
-    Test that the text resolvers of `PromptIndexTargets.start`/`end`
+    """Test that the text resolvers of `PromptIndexTargets.start`/`end`
     match against the decoded text when another item forces the
     fallback in `_apply_prompt_updates`.
     """
@@ -1331,3 +1325,74 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
     )
 
     assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # Shifting the key/value boundary: both flatten to the dotted key
+        # "mm_processor_kwargs.abc" followed by no value bytes.
+        ({"ab": "c"}, {"a": "bc"}),
+        # A nested mapping and a caller-supplied dotted key flatten alike.
+        ({"size": {"shortest_edge": 224}}, {"size.shortest_edge": 224}),
+        # A sequence and a mapping keyed by stringified indices flatten alike.
+        ({"fps": [2, 4]}, {"fps": {"0": 2, "1": 4}}),
+        # None contributes the key alone, which a zero-byte value also does.
+        ({"video_pruning_rate": None}, {"video_pruning_rate": ""}),
+        # An empty container contributes nothing, as does omitting the key.
+        ({"size": {}}, {}),
+    ],
+)
+def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
+    """Distinct processor kwargs must not share a multi-modal hash.
+
+    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    values here are caller-controlled. The hash is the identity of the
+    processor cache entry and is mixed into the prefix-cache block key, so two
+    requests sharing one is a cross-request cache hit.
+    """
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    def hash_with(hf_processor_mm_kwargs):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    assert hash_with(left) != hash_with(right)
+
+
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    ctx.model_config.max_model_len = max_model_len
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
+
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
+        )
+
+    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    assert len(result["prompt_token_ids"]) == expected_seq_len

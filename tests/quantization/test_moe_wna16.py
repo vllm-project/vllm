@@ -93,6 +93,40 @@ def test_moe_wna16_accepts_channelwise_gptq_activation_order():
             False,
             "MoeWNA16 checkpoint layout",
         ),
+        (
+            WNA16MoEBackend.RDNA3,
+            AutoGPTQConfig(4, 128, False, True, False, {}, {}),
+            False,
+            False,
+            "compressed-tensors",
+        ),
+        (
+            WNA16MoEBackend.RDNA3,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                symmetric=False,
+                dynamic=False,
+                group_size=128,
+            ),
+            True,
+            False,
+            "asymmetric",
+        ),
+        (
+            WNA16MoEBackend.RDNA3,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.CHANNEL,
+                symmetric=True,
+                dynamic=False,
+            ),
+            False,
+            False,
+            "group-wise scales",
+        ),
     ],
 )
 def test_wna16_oracle_rejects_incompatible_quant_structures(
@@ -195,7 +229,7 @@ def test_moe_wna16_humming_adapter_repacks_uint8_tensors():
 
 
 def test_moe_wna16_uses_humming_quant_config(monkeypatch):
-    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.model_executor.layers.quantization.utils import humming as humming_utils
 
     method = object.__new__(MoeWNA16Method)
     method.wna16_backend = WNA16MoEBackend.HUMMING

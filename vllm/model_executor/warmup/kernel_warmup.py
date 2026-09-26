@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup kernels used during model execution.
+"""Warmup kernels used during model execution.
 This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
@@ -17,14 +16,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    deepseek_v4_mhc_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+    autotune_hisparse_flashinfer_attention,
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
@@ -40,8 +37,8 @@ from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warm
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
 )
-from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
-    spec_decode_rejection_warmup,
+from vllm.model_executor.warmup.watermark_sample_warmup import (
+    watermark_sample_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -139,16 +136,17 @@ def _warmup_bf16x3_router_gemm(
     logger.info_once("Warmed up BF16x3 router GEMM configs: %s.", configs)
 
 
-def _warmup_kimi_k3_gemm_rs_ar() -> None:
-    # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
-    # enabled and initializes its singleton before kernel_warmup runs. Avoid
-    # importing it here so other models do not compile the RS/AR variants.
-    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
+def _warmup_gemm_rs_ar() -> None:
+    # Model construction (Kimi-K3, DeepSeek-V4.1) imports this module only
+    # when GEMM-RS/AR is enabled and initializes its singleton before
+    # kernel_warmup runs. Avoid importing it here so other models do not
+    # compile the RS/AR variants.
+    module = sys.modules.get("vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar")
     if module is None:
         return
     compiled = module.warmup_gemm_rs_ar()
     if compiled:
-        logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
+        logger.info_once("Warmed up %d GEMM-RS/AR variants.", compiled)
 
 
 def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
@@ -174,7 +172,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
-            worker.model_runner.jit_warmup_registry.warmup()
+            registry = (
+                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
+            )
+            registry.warmup()
         except Exception:
             logger.exception(
                 "JIT kernel warmup failed after %.2fs.",
@@ -193,19 +194,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
 
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
-    )
-
     # Run next so input-prep kernels JIT against pristine runner state.
     if enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        spec_decode_rejection_warmup(worker)
+        watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
@@ -217,7 +209,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
-    _warmup_kimi_k3_gemm_rs_ar()
+    _warmup_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
@@ -339,13 +331,16 @@ def _flashinfer_deferred_moe_token_counts(
     return tuple(dict.fromkeys(token_counts))
 
 
-def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+def _flashinfer_autotune_token_counts(
+    runner: "GPUModelRunner", *, include_bf16: bool = True
+) -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
     linear_backend = runner.vllm_config.kernel_config.linear_backend
     if (
-        linear_backend == "flashinfer_cutedsl"
+        include_bf16
+        and linear_backend == "flashinfer_cutedsl"
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
         token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
@@ -353,10 +348,13 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return tuple(dict.fromkeys(token_counts))
 
 
-def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+def _run_flashinfer_autotune_dummy_runs(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
     import vllm.utils.flashinfer as fi_utils
 
-    for num_tokens in _flashinfer_autotune_token_counts(runner):
+    dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
+    for num_tokens in _flashinfer_autotune_token_counts(runner, include_bf16=False):
         tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
         logger.info(
             "Running FlashInfer autotune with %d tokens and token buckets %s.",
@@ -369,12 +367,42 @@ def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
                 skip_eplb=True,
                 is_profile=True,
                 randomize_inputs=True,
+                **dummy_run_kwargs,
             )
 
 
+def _run_flashinfer_bf16_autotune_dummy_run(
+    runner: "GPUModelRunner",
+    *,
+    skip_ops: set[str] | None = None,
+    skip_attn: bool = False,
+) -> None:
+    import vllm.utils.flashinfer as fi_utils
+
+    if (
+        runner.vllm_config.kernel_config.linear_backend != "flashinfer_cutedsl"
+        or runner.scheduler_config.max_num_batched_tokens
+        <= _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    ):
+        return
+
+    num_tokens = _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+    logger.info("Running FlashInfer BF16-only autotune with %d tokens.", num_tokens)
+    # Other ops execute from their existing cache or fallback, without the
+    # BF16 bucket cap. No full-model autotune context may enclose this pass.
+    with fi_utils.autotune_bf16_only(tuning_buckets, skip_ops=skip_ops):
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+            **({"skip_attn": True} if skip_attn else {}),
+        )
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
-    """
-    Autotune FlashInfer operations.
+    """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
     the results. The results are cached transparently and
@@ -431,9 +459,20 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            _run_flashinfer_autotune_dummy_runs(runner)
+            hisparse_enabled = (
+                runner.vllm_config.attention_config.hisparse_config is not None
+            )
+            if hisparse_enabled:
+                # HiSparse hot-buffer attention is bounded by decode batch
+                # size, not the prefill-sized batch used for the full model.
+                autotune_hisparse_flashinfer_attention(runner)
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
+        with torch.inference_mode():
+            _run_flashinfer_bf16_autotune_dummy_run(
+                runner, skip_ops=skip_ops, skip_attn=hisparse_enabled
+            )
     finally:
         set_autotune_process_group(None)
 

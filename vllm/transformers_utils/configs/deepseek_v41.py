@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class DeepseekV41Config(PretrainedConfig):
+class DeepseekV41Config(PreTrainedConfig):
     """DeepSeek V4.1 config.
 
     The HF config nests the text model under ``text_config`` and the vision
     tower under ``vision_config``. The vLLM model code (ported from
     ``deepseek_v4``) reads flat attributes, so both sub-configs are flattened
     onto the top level here: text fields are exposed as-is, vision fields
-    with the ``vision_*`` naming used by ``deepseek_v4_1.common.vision``.
+    with the ``vision_*`` naming used by ``deepseek_v41.common.vision``.
     """
 
     model_type = "deepseek_v41"
@@ -34,7 +34,7 @@ class DeepseekV41Config(PretrainedConfig):
         for key, value in text_config.items():
             if key == "model_type":
                 continue
-            # Don't clobber PretrainedConfig properties (e.g. is_encoder_decoder).
+            # Don't clobber PreTrainedConfig properties (e.g. is_encoder_decoder).
             if isinstance(getattr(type(self), key, None), property):
                 continue
             setattr(self, key, value)
@@ -60,17 +60,3 @@ class DeepseekV41Config(PretrainedConfig):
         self.vision_max_n_token = vision_config.get("max_image_tokens", 1024)
         self.vision_min_pixels = vision_config.get("min_pixels", 295936)
         self.vision_max_wh_ratio = vision_config.get("max_wh_ratio")
-        # The vision variant needs the mm-prefix plumbing (atomic image-span
-        # prefill + sparse-SWA window widening); the base arch-config
-        # convertor reads this config-level attribute.
-        self.is_mm_prefix_lm = vision_n_layers > 0
-        # The sparse-SWA index kernels widen the window within image spans
-        # in-kernel, so mm-prefix ranges longer than sliding_window must be
-        # kept (they are only consumed by those kernels).
-        self.mm_prefix_clamp_sliding_window = vision_n_layers > 0
-        # The visibility span covers the image block [IMAGE_START,
-        # IMAGE_END]; the mm placeholder additionally carries a leading
-        # compressor-alignment pad of ``COMPRESS_PAD_TO - 1 - offset %
-        # COMPRESS_PAD_TO`` tokens (see common/mm_preprocess.py), with
-        # COMPRESS_PAD_TO = 2 for v4.1's ratio-2 compressors.
-        self.mm_prefix_span_leading_pad_modulus = 2 if vision_n_layers > 0 else 0

@@ -53,10 +53,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             return
 
         self.inputs_embeds = torch.zeros(
-            self.max_num_tokens,
-            self.hidden_size,
-            dtype=self.dtype,
-            device=self.device,
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=self.device
         )
 
     # Lifecycle hooks for model-specific optimizations. Subclasses override
@@ -73,8 +70,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     @property
     def advance_draft_positions(self) -> bool:
-        """
-        Whether to increment positions and seq_lens between draft steps.
+        """Whether to increment positions and seq_lens between draft steps.
 
         True for Eagle/standard MTP (each step produces new KV).
         False for Gemma4 MTP (Q-only, shares target KV, constant positions).
@@ -141,10 +137,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            decode_query_len=1,
+            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
         )
 
     def capture(self) -> None:
@@ -255,6 +248,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         # Get the input ids and last token indices for the speculator.
@@ -272,8 +266,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         if self.pcp_manager is not None:
             self.pcp_manager.prepare_draft_prefill(
-                input_batch,
-                self.input_buffers.input_ids[:num_tokens_padded],
+                input_batch, self.input_buffers.input_ids[:num_tokens_padded]
             )
             prefill = self.pcp_manager.draft_prefill_batch
             if prefill is not None:
@@ -532,11 +525,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
                     slot_mappings, self.kv_cache_config
                 )
-                attn_metadata = self._build_draft_attn_metadata(
+                attn_metadata = self._build_uniform_attn_metadata(
                     num_reqs=num_reqs,
-                    num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    # One query per request; exclude DP-only model padding.
-                    num_tokens_padded=batch_desc.num_reqs or num_reqs,
+                    batch_desc=batch_desc,
+                    num_query_per_req=1,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                     step=step,
                 )
@@ -581,11 +573,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
                     slot_mappings, self.kv_cache_config
                 )
-            attn_metadata = self._build_draft_attn_metadata(
+            attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                # One query per request; exclude DP-only model padding.
-                num_tokens_padded=batch_desc.num_reqs or num_reqs,
+                batch_desc=batch_desc,
+                num_query_per_req=1,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=1,
             )
