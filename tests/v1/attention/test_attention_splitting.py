@@ -131,82 +131,46 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
 
 
-def test_make_metadata_with_slice_preserves_mm_prefix_fields(
-    mixed_small_metadata,
-):
-    """DBO slicing must re-key mm ranges and carry is_prefilling.
-
-    mm_req_doc_ranges is keyed by request index, so each ubatch needs local
-    keys; the absolute [start, end] bounds carry over unchanged because
-    fill_mm_prefix_query_ranges resolves them against each side's own context
-    length. is_prefilling feeds short-extend reclassification
-    (treat_short_extends_as_decodes=False), which asserts on its presence.
-    """
-    num_reqs = mixed_small_metadata.num_reqs
-    mixed_small_metadata.mm_req_doc_ranges = {0: [(1, 4)], 2: [(8, 30)]}
-    is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
-    is_prefilling[1:] = True
-    mixed_small_metadata.is_prefilling = is_prefilling
-
-    ubatch_slice = UBatchSlice(slice(1, 3), slice(1, 7))
-    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
-
-    # Request 0 falls outside the slice; request 2 becomes local index 1 with
-    # its absolute bounds untouched.
-    assert result.mm_req_doc_ranges == {1: [(8, 30)]}
-    assert torch.equal(result.is_prefilling, is_prefilling[1:3])
-
-    # Metadata without the fields keeps them absent.
-    mixed_small_metadata.mm_req_doc_ranges = None
-    mixed_small_metadata.is_prefilling = None
-    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
-    assert result.mm_req_doc_ranges is None
-    assert result.is_prefilling is None
-
-
-def test_split_request_keeps_mm_ranges_consistent_for_fill():
-    """A request split across ubatches must fill the same absolute bounds.
-
-    The re-keyed ranges plus each side's own query_start_loc/seq_lens must
-    make fill_mm_prefix_query_ranges assign every scheduled token of the
-    split request the bounds of its containing range, on both sides.
-    """
+def test_make_metadata_with_slice_rekeys_mm_prefix_ranges(mixed_small_metadata):
+    """Ubatch slices re-key mm ranges to local request indices and keep their
+    absolute bounds, so a request split across ubatches fills the same rows."""
     import numpy as np
 
     from vllm.v1.attention.backends.utils import fill_mm_prefix_query_ranges
 
-    # One request: 8 scheduled tokens at absolute positions 12..19 (context
-    # 12, seq 20), fully inside range (4, 18) up to position 18 inclusive.
-    batch_spec = BatchSpec(seq_lens=[20], query_lens=[8], name="split_one")
-    meta = create_common_attn_metadata(batch_spec, block_size=16, device="cpu")
+    meta = mixed_small_metadata
+    ubatch = UBatchSlice(slice(1, 3), slice(1, 7))
+    meta.mm_req_doc_ranges = {0: [(1, 4)], 2: [(8, 30)]}
+    meta.is_prefilling = torch.arange(meta.num_reqs) > 0
+    result = _make_metadata_with_slice(ubatch, meta)
+    assert result.mm_req_doc_ranges == {1: [(8, 30)]}
+    assert torch.equal(result.is_prefilling, meta.is_prefilling[1:3])
+    meta.mm_req_doc_ranges = meta.is_prefilling = None
+    result = _make_metadata_with_slice(ubatch, meta)
+    assert result.mm_req_doc_ranges is None and result.is_prefilling is None
+
+    # One request with tokens 12..19 inside range (4, 18), split 4 + 4.
+    batch = BatchSpec(seq_lens=[20], query_lens=[8], name="split_one")
+    meta = create_common_attn_metadata(batch, block_size=16, device="cpu")
     meta.mm_req_doc_ranges = {0: [(4, 18)]}
     meta.is_prefilling = torch.tensor([True])
 
-    def fill_rows(m):
+    def fill(m) -> list[list[int]]:
         out = np.empty((m.num_actual_tokens, 2), dtype=np.int32)
         n = fill_mm_prefix_query_ranges(
-            out,
-            m.mm_req_doc_ranges,
-            m.query_start_loc_cpu,
-            m.seq_lens_cpu_upper_bound,
+            out, m.mm_req_doc_ranges, m.query_start_loc_cpu, m.seq_lens_cpu_upper_bound
         )
         assert n == m.num_actual_tokens
-        return out[:n].tolist()
+        return out.tolist()
 
-    whole = fill_rows(meta)
-
-    first = _make_metadata_with_slice(UBatchSlice(slice(0, 1), slice(0, 4)), meta)
-    second = _make_metadata_with_slice(UBatchSlice(slice(0, 1), slice(4, 8)), meta)
-    assert first.mm_req_doc_ranges == {0: [(4, 18)]}
-    assert second.mm_req_doc_ranges == {0: [(4, 18)]}
-    assert torch.equal(first.is_prefilling, torch.tensor([True]))
-
-    # Concatenated per-side fills must equal the unsplit fill: same absolute
-    # bounds per token, with the range's inclusive end (18) covered and the
-    # final token (19) outside it.
-    assert fill_rows(first) + fill_rows(second) == whole
-    assert whole[:7] == [[4, 18]] * 7
-    assert whole[7] == [-1, -1]
+    halves = [
+        _make_metadata_with_slice(UBatchSlice(slice(0, 1), tokens), meta)
+        for tokens in (slice(0, 4), slice(4, 8))
+    ]
+    assert all(half.mm_req_doc_ranges == {0: [(4, 18)]} for half in halves)
+    whole = fill(meta)
+    assert whole == [[4, 18]] * 7 + [[-1, -1]]
+    assert fill(halves[0]) + fill(halves[1]) == whole
 
 
 def test_split_attn_metadata_decode_batch(large_decode_metadata):

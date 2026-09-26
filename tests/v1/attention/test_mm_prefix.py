@@ -654,160 +654,91 @@ FLASHINFER_MM_SLIDING_WINDOW = 32
 and clamp-off window formulas produce different outputs on this batch."""
 
 
-def test_flashinfer_mm_prefix_combination_rejections(monkeypatch):
+@pytest.mark.parametrize(
+    ("capability", "head_size", "block_size", "kv_dtype", "sink", "jit", "reason"),
+    [
+        # Plain NVFP4 on pre-SM100 runs on fa2 through the scale-factor tensors.
+        ((8, 0), 128, 16, "nvfp4", False, True, None),
+        # SM100 serves NVFP4 with trtllm-gen, which cannot run a custom variant.
+        ((10, 0), 128, 16, "nvfp4", False, True, "SM100"),
+        # The store-time scale search exists only in trtllm-gen.
+        ((8, 0), 128, 16, "nvfp4_4over6", False, True, "nvfp4_4over6"),
+        ((8, 0), 128, 16, "fp8", False, True, "fp8"),
+        ((8, 0), 128, 16, None, True, True, "sink"),
+        # trtllm-only page sizes fail at selection, not at the first build().
+        ((8, 0), 128, 128, None, False, True, "page size 128"),
+        ((8, 0), 128, 64, None, False, True, None),
+        # Hybrid models select per group, so the probe sees the group's head size.
+        ((8, 0), 256, 16, "float16", False, True, None),
+        ((8, 0), 512, 16, "float16", False, True, None),
+        ((8, 0), 128, 16, None, False, False, "mm-prefix attention"),
+    ],
+)
+def test_flashinfer_mm_prefix_supports_combination(
+    monkeypatch, capability, head_size, block_size, kv_dtype, sink, jit, reason
+):
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends import flashinfer as fi
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     probed: list[tuple] = []
 
-    def fake_probe(dtype_q, dtype_kv, dtype_o, head_dim):
-        probed.append((dtype_q, dtype_kv, dtype_o, head_dim))
-        return True
+    def probe(*args) -> bool:
+        probed.append(args)
+        return jit
 
-    monkeypatch.setattr(fi, "_mm_prefix_jit_available", fake_probe)
+    monkeypatch.setattr(fi, "_mm_prefix_jit_available", probe)
 
-    common = dict(
+    result = fi.FlashInferBackend.supports_combination(
+        head_size=head_size,
         dtype=torch.bfloat16,
+        kv_cache_dtype=kv_dtype,
+        block_size=block_size,
         use_mla=False,
+        has_sink=sink,
         use_sparse=False,
-        device_capability=DeviceCapability(8, 0),
-    )
-    # Plain NVFP4 is served by the fa2 kernels on pre-SM100 devices, where the
-    # variant reads the packed cache through its scale-factor tensors.
-    assert (
-        FlashInferBackend.supports_combination(
-            head_size=128,
-            block_size=16,
-            kv_cache_dtype="nvfp4",
-            has_sink=False,
-            use_mm_prefix=True,
-            **common,
-        )
-        is None
-    )
-    assert probed[-1] == (torch.bfloat16, torch.uint8, torch.bfloat16, 128)
-    # On SM100 the same dtype is served by trtllm-gen, which cannot run a
-    # custom attention variant.
-    assert "SM100" in FlashInferBackend.supports_combination(
-        head_size=128,
-        block_size=16,
-        kv_cache_dtype="nvfp4",
-        has_sink=False,
         use_mm_prefix=True,
-        **{**common, "device_capability": DeviceCapability(10, 0)},
-    )
-    # The store-time scale-search variants exist only in trtllm-gen.
-    assert "nvfp4_4over6" in FlashInferBackend.supports_combination(
-        head_size=128,
-        block_size=16,
-        kv_cache_dtype="nvfp4_4over6",
-        has_sink=False,
-        use_mm_prefix=True,
-        **common,
-    )
-    assert "fp8" in FlashInferBackend.supports_combination(
-        head_size=128,
-        block_size=16,
-        kv_cache_dtype="fp8",
-        has_sink=False,
-        use_mm_prefix=True,
-        **common,
-    )
-    assert "sink" in FlashInferBackend.supports_combination(
-        head_size=128,
-        block_size=16,
-        kv_cache_dtype=None,
-        has_sink=True,
-        use_mm_prefix=True,
-        **common,
-    )
-    # trtllm-only kernel page sizes must be rejected at selection time, not
-    # at the first mm batch's build().
-    assert "page size 128" in FlashInferBackend.supports_combination(
-        head_size=128,
-        block_size=128,
-        kv_cache_dtype=None,
-        has_sink=False,
-        use_mm_prefix=True,
-        **common,
-    )
-    assert (
-        FlashInferBackend.supports_combination(
-            head_size=128,
-            block_size=64,
-            kv_cache_dtype=None,
-            has_sink=False,
-            use_mm_prefix=True,
-            **common,
-        )
-        is None
+        device_capability=DeviceCapability(*capability),
     )
 
-    # Hybrid models select per group: the probe must see each group's own
-    # head size and resolved KV dtype, not one global value.
-    probed.clear()
-    for head_size in (256, 512):
-        assert (
-            FlashInferBackend.supports_combination(
-                head_size=head_size,
-                block_size=16,
-                kv_cache_dtype="float16",
-                has_sink=False,
-                use_mm_prefix=True,
-                **common,
-            )
-            is None
-        )
-    assert probed == [
-        (torch.bfloat16, torch.float16, torch.bfloat16, 256),
-        (torch.bfloat16, torch.float16, torch.bfloat16, 512),
-    ]
-
-    # An unavailable wrapper demotes the backend with a clear reason.
-    monkeypatch.setattr(fi, "_mm_prefix_jit_available", lambda *a: False)
-    assert "mm-prefix attention" in FlashInferBackend.supports_combination(
-        head_size=128,
-        block_size=16,
-        kv_cache_dtype=None,
-        has_sink=False,
-        use_mm_prefix=True,
-        **common,
-    )
+    if reason is not None:
+        assert reason in result
+        return
+    assert result is None
+    expected_kv = {"nvfp4": torch.uint8, "float16": torch.float16}.get(kv_dtype)
+    if expected_kv is not None:
+        assert probed[-1] == (torch.bfloat16, expected_kv, torch.bfloat16, head_size)
 
 
-def test_flashinfer_mm_prefix_validate_configuration_rejects_dcp():
+@pytest.mark.parametrize(
+    ("use_dcp", "use_rswa", "reason"),
+    [(True, False, "DCP"), (False, True, "R-SWA not supported"), (False, False, None)],
+)
+def test_flashinfer_mm_prefix_validate_configuration(use_dcp, use_rswa, reason):
+    """DCP is rejected here; R-SWA is decided by the base class, so the
+    override has to pass the flag through."""
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    def validate(use_dcp: bool = False, use_rswa: bool = False) -> list[str]:
-        return FlashInferBackend.validate_configuration(
-            head_size=128,
-            dtype=torch.bfloat16,
-            kv_cache_dtype=None,
-            block_size=16,
-            use_mla=False,
-            has_sink=False,
-            use_sparse=False,
-            use_mm_prefix=True,
-            use_per_head_quant_scales=False,
-            device_capability=DeviceCapability(8, 0),
-            attn_type="decoder",
-            use_dcp=use_dcp,
-            use_rswa=use_rswa,
-        )
+    reasons = FlashInferBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=None,
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(8, 0),
+        attn_type="decoder",
+        use_dcp=use_dcp,
+        use_rswa=use_rswa,
+    )
 
-    with_dcp = validate(use_dcp=True)
-    assert any("DCP" in reason for reason in with_dcp)
-    without_dcp = validate(use_dcp=False)
-    assert not any("DCP" in reason for reason in without_dcp)
-
-    # R-SWA is decided by the base class, so this override has to keep passing
-    # the flag through rather than swallow it.
-    with_rswa = validate(use_rswa=True)
-    assert any("R-SWA not supported" in reason for reason in with_rswa)
-    without_rswa = validate(use_rswa=False)
-    assert not any("R-SWA" in reason for reason in without_rswa)
+    if reason is None:
+        assert not any("DCP" in r or "R-SWA" in r for r in reasons), reasons
+    else:
+        assert any(reason in r for r in reasons), reasons
 
 
 def _flashinfer_builder_env(sliding_window: int | None):
