@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.models.deepseek_v4.common.vision import (
     build_packed_merge_metadata,
     build_packed_vit_metadata,
@@ -246,7 +247,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
         p = config.vision_patch_size
         input_norm = self.vision.patch_embed.input_norm
-        patch_dtype = dtype if input_norm.is_identity else torch.uint8
+        is_identity = isinstance(input_norm, IdentityInputNorm)
+        patch_dtype = dtype if is_identity else torch.uint8
         patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=patch_dtype)
 
         metadata = build_packed_vit_metadata(
@@ -287,7 +289,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         patches = mm_kwargs["patches"]
         dtype = self.aligner.w1.weight.dtype
         input_norm = self.vision.patch_embed.input_norm
-        patch_dtype = dtype if input_norm.is_identity else torch.uint8
+        is_identity = isinstance(input_norm, IdentityInputNorm)
+        patch_dtype = dtype if is_identity else torch.uint8
         if patches.dtype != patch_dtype:
             patches = patches.to(patch_dtype)
 
