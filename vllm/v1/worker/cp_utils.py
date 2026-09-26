@@ -50,8 +50,8 @@ def check_attention_cp_compatibility(
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "
                     f"but {layer_impl.__class__.__name__} does not. "
-                    "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
+                    "Try a different backend using --attention-backend, "
+                    "or set --decode-context-parallel-size 1 to disable DCP."
                 )
 
 
