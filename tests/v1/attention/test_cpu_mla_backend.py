@@ -25,6 +25,9 @@ from vllm.v1.attention.backends.mla.prefill.cpu_sdpa import (
 from vllm.v1.attention.backends.mla.prefill.selector import (
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.mla.prefill.zen_cpu_sdpa import (
+    ZenCPUSDPAMLAPrefillBackend,
+)
 
 
 def _reference_ragged_attention(
@@ -157,8 +160,10 @@ def test_cpu_mla_backend_smoke(tmp_path) -> None:
 def test_cpu_mla_prefill_backend_selected() -> None:
     # On CPU (no device capability) the MLA prefill backend must be the
     # SDPA-based CPU backend, not flash-attn which is unavailable on CPU.
+    # Accelerator-specific subclasses (e.g. the zentorch-backed Zen CPU
+    # backend) are also valid selections.
     backend_cls = get_mla_prefill_backend(None)
-    assert backend_cls is CPUSDPAMLAPrefillBackend
+    assert issubclass(backend_cls, CPUSDPAMLAPrefillBackend)
 
 
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
@@ -248,3 +253,64 @@ def test_cpu_mla_prefill_context_chunk() -> None:
     assert lse.float().allclose(ref_lse.float(), atol=2e-2)
     assert out.shape == (5, 4, 16)
     assert lse.shape == (4, 5)
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+@pytest.mark.skipif(
+    not ZenCPUSDPAMLAPrefillBackend.is_available(),
+    reason="requires a Zen CPU with the zentorch_sdpa op registered",
+)
+def test_zen_cpu_mla_prefill_new_tokens() -> None:
+    # Runs the zentorch kernel itself. The head dims are deliberately
+    # asymmetric (v_head_dim < qk_head_dim, as in real MLA) so that the V
+    # padding and output slicing are exercised; the generic-CPU cases above
+    # use equal dims and never reach that code.
+    qk_head_dim = 24
+    v_head_dim = 16
+    backend = ZenCPUSDPAMLAPrefillBackend(
+        num_heads=4,
+        scale=0.25,
+        kv_lora_rank=16,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=8,
+        v_head_dim=v_head_dim,
+        vllm_config=None,
+    )
+
+    class _PrefillMeta:
+        query_start_loc = torch.tensor([0, 3, 6], dtype=torch.int32)
+
+    backend.prepare_metadata(_PrefillMeta())
+    q = torch.randn(6, 4, qk_head_dim, dtype=torch.bfloat16)
+    k = torch.randn(6, 4, qk_head_dim, dtype=torch.bfloat16)
+    v = torch.randn(6, 4, v_head_dim, dtype=torch.bfloat16)
+
+    out = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=False)
+    ref, _ = _reference_ragged_attention(
+        q,
+        k,
+        v,
+        _PrefillMeta.query_start_loc,
+        _PrefillMeta.query_start_loc,
+        scale=0.25,
+        causal=True,
+    )
+    assert out.shape == (6, 4, v_head_dim)
+    assert out.float().allclose(ref.float(), atol=2e-2)
+
+    # zentorch_sdpa does not return a usable LSE, so that path must fall back
+    # to the fp32 reference and match the generic backend exactly.
+    generic = CPUSDPAMLAPrefillBackend(
+        num_heads=4,
+        scale=0.25,
+        kv_lora_rank=16,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=8,
+        v_head_dim=v_head_dim,
+        vllm_config=None,
+    )
+    generic.prepare_metadata(_PrefillMeta())
+    zen_out, zen_lse = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=True)
+    gen_out, gen_lse = generic.run_prefill_new_tokens(q, k, v, return_softmax_lse=True)
+    assert torch.equal(zen_out, gen_out)
+    assert torch.equal(zen_lse, gen_lse)
