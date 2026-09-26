@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.entrypoints.offline_utils import _OFFLINE_TOKENIZATION_BATCH_SIZE
 
 
 def _make_mock_llm() -> LLM:
@@ -152,7 +153,7 @@ def test_add_completion_requests_forwards_mm_processor_kwargs() -> None:
     llm._params_to_seq = Mock(return_value=[sampling_params])
     llm._lora_request_to_seq = Mock(return_value=[None])
     llm._priority_to_seq = Mock(return_value=[0])
-    llm._preprocess_cmpl_one = Mock(return_value={"prompt_token_ids": [1]})
+    llm._preprocess_cmpl = Mock(return_value=[{"prompt_token_ids": [1]}])
 
     captured_prompts = []
 
@@ -170,12 +171,51 @@ def test_add_completion_requests_forwards_mm_processor_kwargs() -> None:
     )
 
     assert request_ids == ["req-0"]
-    llm._preprocess_cmpl_one.assert_called_once_with(
-        "prompt",
+    llm._preprocess_cmpl.assert_called_once_with(
+        ["prompt"],
         None,
         mm_processor_kwargs=mm_processor_kwargs,
     )
     assert captured_prompts == [{"prompt_token_ids": [1]}]
+
+
+def test_add_completion_requests_bounds_preprocessing_batches() -> None:
+    llm = _make_mock_llm()
+    sampling_params = SamplingParams(max_tokens=1)
+    prompts = [
+        f"prompt-{index}" for index in range(_OFFLINE_TOKENIZATION_BATCH_SIZE + 1)
+    ]
+
+    llm._params_to_seq = Mock(return_value=[sampling_params] * len(prompts))
+    llm._lora_request_to_seq = Mock(return_value=[None] * len(prompts))
+    llm._priority_to_seq = Mock(return_value=[0] * len(prompts))
+    preprocess_batch_sizes = []
+    added_token_ids = []
+
+    def fake_preprocess(prompt_batch, *_args, **_kwargs):
+        preprocess_batch_sizes.append(len(prompt_batch))
+        return [
+            {"prompt_token_ids": [int(prompt.rsplit("-", 1)[1])]}
+            for prompt in prompt_batch
+        ]
+
+    def fake_render_and_add_requests(*, prompts, **_kwargs):
+        for prompt in prompts:
+            added_token_ids.extend(prompt["prompt_token_ids"])
+        return [f"req-{index}" for index in range(len(added_token_ids))]
+
+    llm._preprocess_cmpl = Mock(side_effect=fake_preprocess)
+    llm._render_and_add_requests = Mock(side_effect=fake_render_and_add_requests)
+
+    request_ids = llm._add_completion_requests(
+        prompts=prompts,
+        params=sampling_params,
+        use_tqdm=False,
+    )
+
+    assert len(request_ids) == len(prompts)
+    assert preprocess_batch_sizes == [_OFFLINE_TOKENIZATION_BATCH_SIZE, 1]
+    assert added_token_ids == list(range(len(prompts)))
 
 
 def test_preprocess_cmpl_applies_mm_processor_kwargs_to_renderer(
