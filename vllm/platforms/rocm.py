@@ -493,12 +493,15 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    # Prefer AITER FlashAttention over the non-AITER ROCM_ATTN whenever AITER
+    # MHA is enabled: with VLLM_ROCM_USE_AITER=1, the documented (and
+    # benchmarked) decode path for MHA models on CDNA is ROCM_AITER_FA.
+    if rocm_aiter_ops.is_mha_enabled():
+        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
-    if rocm_aiter_ops.is_mha_enabled():
-        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
