@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
+from vllm.lora.local_adapter import LocalLoRAPlan
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
     LoRAModelManager,
@@ -242,6 +243,23 @@ class WorkerLoRAManager:
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
+
+    def get_local_adapter_plan(self, peft_helper: PEFTHelper) -> LocalLoRAPlan:
+        """Bind a local adapter to this worker's physical LoRA buffers."""
+        return self._adapter_manager.get_local_adapter_plan(peft_helper)
+
+    def add_local_adapter(
+        self,
+        adapter_id: int,
+        plan: LocalLoRAPlan,
+        factors: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]],
+    ) -> bool:
+        """Stage receiver-local factors in an inactive physical LoRA slot."""
+        return self._adapter_manager.add_local_adapter(adapter_id, plan, factors)
+
+    def activate_adapter(self, adapter_id: int) -> bool:
+        """Activate a staged adapter through the worker manager boundary."""
+        return self._adapter_manager.activate_adapter(adapter_id)
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
