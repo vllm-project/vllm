@@ -15,6 +15,8 @@ These tests cover:
 import argparse
 import asyncio
 import multiprocessing
+import threading
+from collections import deque
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -71,6 +73,8 @@ def _make_async_llm(
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
     llm.admission_stats = None
+    llm._admission_reserved = deque()
+    llm._admission_lock = threading.Lock()
     return llm
 
 
@@ -336,6 +340,58 @@ def test_admission_params_without_explicit_n_count_as_one_slot(params):
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=10)
     with pytest.raises(QueueOverflowError):
         llm.check_admission(getattr(params, "n", 1) or 1)
+
+
+# -- preflight reservation (issue #58192) ---------------------------------
+
+
+def test_preflight_reserves_slots_and_bounds_a_burst():
+    """Preflight must reserve slots so a burst is rejected before render."""
+    llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=0)
+    for _ in range(10):
+        llm.check_admission(1)  # preflight, no request_id
+    assert len(llm._admission_reserved) == 10
+    with pytest.raises(QueueOverflowError):
+        llm.check_admission(1)  # 11th refused up front
+
+
+def test_handover_consumes_preflight_reservation():
+    """Hand-over transfers a slot from reserved to unfinished (no double count)."""
+    llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=0)
+    llm.check_admission(1)  # preflight reserves 1
+    assert len(llm._admission_reserved) == 1
+    # request finishes rendering and hands over: reservation is consumed
+    llm.check_admission(1, request_id="req-1")
+    assert len(llm._admission_reserved) == 0
+    # The slot moved from reserved to unfinished. Bound still enforced:
+    # 1 unfinished + 9 more preflight reservations reaches the cap.
+    llm.output_processor.get_num_unfinished_requests.return_value = 1
+    for _ in range(9):
+        llm.check_admission(1)
+    with pytest.raises(QueueOverflowError):
+        llm.check_admission(1)
+
+
+def test_abandoned_preflight_reservation_times_out():
+    """A request that never hands over must release its slot after TTL."""
+    llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=0)
+    for _ in range(10):
+        llm.check_admission(1)
+    assert len(llm._admission_reserved) == 10
+    with pytest.raises(QueueOverflowError):
+        llm.check_admission(1)
+    # Simulate all reservations having expired (ancient timestamps).
+    llm._admission_reserved = deque(0.0 for _ in range(10))
+    llm.check_admission(1)  # purges expired, then reserves
+    assert len(llm._admission_reserved) == 1
+
+
+def test_preflight_reservation_is_n_aware():
+    llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=0)
+    llm.check_admission(4)  # preflight n=4
+    assert len(llm._admission_reserved) == 4
+    llm.check_admission(4, request_id="parent")  # hand-over n=4
+    assert len(llm._admission_reserved) == 0
 
 
 @pytest.mark.asyncio
