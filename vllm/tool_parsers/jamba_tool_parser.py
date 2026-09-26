@@ -24,7 +24,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import extract_intermediate_diff, is_complete_json
+from vllm.tool_parsers.utils import find_common_prefix, is_complete_json
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
@@ -197,8 +197,12 @@ class JambaToolParser(ToolParser):
                     diff: str | None = current_tool_call.get("arguments")
 
                     if diff:
-                        diff = json.dumps(diff, ensure_ascii=False).replace(
-                            self.streamed_args_for_tool[self.current_tool_id], ""
+                        diff = json.dumps(diff, ensure_ascii=False)
+                        streamed = self.streamed_args_for_tool[self.current_tool_id]
+                        diff = (
+                            diff[len(streamed) :]
+                            if diff.startswith(streamed)
+                            else diff.replace(streamed, "", 1)
                         )
                         delta = DeltaMessage(
                             tool_calls=[
@@ -302,9 +306,20 @@ class JambaToolParser(ToolParser):
                         prev_args_json,
                     )
 
-                    argument_diff = extract_intermediate_diff(
-                        cur_args_json, prev_args_json
+                    streamed_len = len(
+                        self.streamed_args_for_tool[self.current_tool_id]
                     )
+                    if is_complete_json(parsable_arr):
+                        argument_diff = cur_args_json[streamed_len:]
+                    elif cur_args_json != prev_args_json:
+                        # Diff against what has actually been streamed. The
+                        # previous completion can contain argument keys that
+                        # were never sent, e.g. when the first complete pair
+                        # arrives in the same delta as the tool name.
+                        prefix = find_common_prefix(prev_args_json, cur_args_json)
+                        argument_diff = prefix[streamed_len:]
+                    else:
+                        argument_diff = ""
                     logger.debug("got arguments diff: %s", argument_diff)
                     delta = DeltaMessage(
                         tool_calls=[
