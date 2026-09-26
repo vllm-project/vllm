@@ -86,6 +86,19 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         )
         getattr(layer, self.w_q_name).data = weight
 
+        if self.config.has_g_idx and self.w_gidx_name is not None:
+            g_idx_tensor = getattr(layer, self.w_gidx_name)
+            if g_idx_tensor is not None:
+                group_num = getattr(layer, self.w_s_name).size(0)
+                g_min = g_idx_tensor.min().item()
+                g_max = g_idx_tensor.max().item()
+                if g_min < 0 or g_max >= group_num:
+                    raise ValueError(
+                        f"g_idx values must be in [0, {group_num}), "
+                        f"got [{g_min}, {g_max}]. The model checkpoint "
+                        "may be corrupted or malicious."
+                    )
+
     # note assumes that
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
     #  `weight_scale`  is: {input_dim = 0, output_dim = 1}
