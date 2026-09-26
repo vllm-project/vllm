@@ -3120,6 +3120,15 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
+        # Loop detection lives only in V2's ThinkingBudgetState; V1 would
+        # accept the config and never break a loop.
+        reasoning_config = getattr(self, "reasoning_config", None)
+        if (
+            reasoning_config is not None
+            and reasoning_config.loop_break_max_pattern_size > 0
+        ):
+            unsupported.append("reasoning loop breaking")
+
         return unsupported
 
     def _validate_adaptive_verification(self) -> None:
