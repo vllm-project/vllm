@@ -11,7 +11,10 @@ from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+    RejectionSampler,
+    gather_draft_sampled,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -672,7 +675,7 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
 
 
 def test_verify_rejects_unproposed_drafts():
-    """Zero drafts of a request padded before any proposal must be rejected."""
+    """Zero drafts padded onto a step starting in the prefill must be rejected."""
     torch.manual_seed(0)
     device = "cuda"
     num_trials = 256
@@ -694,11 +697,13 @@ def test_verify_rejects_unproposed_drafts():
     inputs["target_logits"].view(num_trials, K + 1, VOCAB_SIZE)[:, 1:] = target_rest
     inputs["draft_sampled"].view(num_trials, K + 1)[:, 1:] = 0
 
-    has_proposed_drafts = torch.zeros(num_trials, dtype=torch.bool, device=device)
+    # Each request's first logit is the last prefill token, as in the first
+    # decode step after a P/D remote KV load.
+    first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
+    prefill_len = first_pos + 1
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = SimpleNamespace(
         apply_sampling_params=lambda logits, *args: logits,
-        req_states=SimpleNamespace(has_proposed_drafts=has_proposed_drafts),
         sampling_states=SimpleNamespace(
             temperature=SimpleNamespace(gpu=inputs["temperature"]),
             seeds=SimpleNamespace(gpu=inputs["seed"]),
@@ -711,11 +716,19 @@ def test_verify_rejects_unproposed_drafts():
     rejection_sampler.watermark_key = None
 
     def verify() -> tuple[torch.Tensor, torch.Tensor]:
+        draft_sampled, pos = gather_draft_sampled(
+            inputs["draft_sampled"],
+            inputs["pos"],
+            torch.arange(num_trials * (K + 1), device=device),
+            inputs["expanded_idx_mapping"],
+            inputs["expanded_local_pos"],
+            prefill_len,
+        )
         _, sampled, num_sampled = rejection_sampler._verify(
             inputs["target_logits"],
             inputs["draft_logits"],
-            inputs["draft_sampled"].clone(),
-            inputs["pos"],
+            draft_sampled,
+            pos,
             inputs["cu_num_logits"],
             inputs["idx_mapping"],
             None,
@@ -730,8 +743,8 @@ def test_verify_rejects_unproposed_drafts():
     # Resampled from the target at row 0, not from a residual.
     assert (sampled[:, 0] != 0).all()
 
-    # Once proposed, block verification accepts the same zero drafts.
-    has_proposed_drafts.fill_(True)
+    # Once past the prefill, block verification accepts the same zero drafts.
+    prefill_len.copy_(first_pos)
     _, num_sampled = verify()
     assert (num_sampled == K + 1).all()
 

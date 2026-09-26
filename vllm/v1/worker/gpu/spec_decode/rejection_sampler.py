@@ -74,6 +74,76 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
+@triton.jit
+def _gather_draft_sampled_kernel(
+    # [num_logits]
+    draft_sampled_ptr,
+    # [num_logits]
+    pos_ptr,
+    # [num_tokens]
+    input_ids_ptr,
+    # [num_tokens]
+    positions_ptr,
+    # [num_logits]
+    logits_indices_ptr,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    # [num_logits]
+    expanded_local_pos_ptr,
+    # [max_num_reqs]
+    prefill_len_ptr,
+    num_logits,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < num_logits
+    token_idx = tl.load(logits_indices_ptr + block, mask=mask)
+    token_id = tl.load(input_ids_ptr + token_idx, mask=mask)
+    pos = tl.load(positions_ptr + token_idx, mask=mask)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + block, mask=mask)
+    local_pos = tl.load(expanded_local_pos_ptr + block, mask=mask)
+    prefill_len = tl.load(prefill_len_ptr + req_state_idx, mask=mask)
+    # Drafts are only proposed after sampling past the prefill, so any draft
+    # slots in a step starting within the prefill are placeholders (e.g. the
+    # padded first step after a P/D remote KV load).
+    is_placeholder = (local_pos > 0) & (pos - local_pos < prefill_len)
+    token_id = tl.where(is_placeholder, -1, token_id)
+    tl.store(draft_sampled_ptr + block, token_id, mask=mask)
+    tl.store(pos_ptr + block, pos, mask=mask)
+
+
+def gather_draft_sampled(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    logits_indices: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+    prefill_len: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather the input token and position of each logits row.
+
+    Draft rows of requests that have not yet sampled past their prefill are
+    set to -1 so that the rejection kernels reject them.
+    """
+    num_logits = logits_indices.shape[0]
+    draft_sampled = input_ids.new_empty(num_logits)
+    pos = positions.new_empty(num_logits)
+    BLOCK_SIZE = 1024
+    _gather_draft_sampled_kernel[(triton.cdiv(num_logits, BLOCK_SIZE),)](
+        draft_sampled,
+        pos,
+        input_ids,
+        positions,
+        logits_indices,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        prefill_len,
+        num_logits,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    return draft_sampled, pos
+
+
 class RejectionSampler:
     def __init__(
         self,
@@ -187,9 +257,6 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
-        # Reject drafts of requests without a proposal (e.g. a padded P/D first step).
-        unproposed = ~self.sampler.req_states.has_proposed_drafts[expanded_idx_mapping]
-        draft_sampled.masked_fill_(unproposed & (expanded_local_pos > 0), -1)
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -299,8 +366,14 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
-        pos = input_batch.positions[input_batch.logits_indices]
+        draft_sampled, pos = gather_draft_sampled(
+            input_batch.input_ids,
+            input_batch.positions,
+            input_batch.logits_indices,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.req_states.prefill_len.gpu,
+        )
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np

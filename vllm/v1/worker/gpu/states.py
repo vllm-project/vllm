@@ -76,10 +76,6 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
-        # Whether draft_tokens holds a proposal from this runner's drafter.
-        self.has_proposed_drafts = torch.zeros(
-            self.max_num_reqs, dtype=torch.bool, device=device
-        )
 
         self.next_prefill_tokens = torch.zeros(
             num_prefill_lookahead, self.max_num_reqs, dtype=torch.int32, device=device
@@ -116,7 +112,6 @@ class RequestState:
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         self.draft_tokens[req_idx].zero_()
-        self.has_proposed_drafts[req_idx] = False
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
