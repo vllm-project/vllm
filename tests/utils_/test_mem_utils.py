@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm_test_utils.monitor import monitor
 
@@ -89,11 +90,27 @@ def test_memory_profiling():
     lib.cudaFree(handle2)
 
 
-def test_memory_snapshot_uses_psutil_on_integrated_gpu():
-    """On integrated (UMA) GPUs, free_memory should come from psutil."""
-    mock_cuda_free = 40 * 1024**3
+@pytest.mark.parametrize(
+    (
+        "is_rocm",
+        "mock_accelerator_free",
+        "mock_psutil_available",
+        "expected_free",
+    ),
+    [
+        (False, 40 * 1024**3, 100 * 1024**3, 100 * 1024**3),
+        (True, 40 * 1024**3, 100 * 1024**3, 40 * 1024**3),
+        (True, 100 * 1024**3, 40 * 1024**3, 40 * 1024**3),
+    ],
+)
+def test_memory_snapshot_on_integrated_gpu(
+    is_rocm: bool,
+    mock_accelerator_free: int,
+    mock_psutil_available: int,
+    expected_free: int,
+):
+    """Integrated GPUs should use their platform-specific available memory."""
     mock_cuda_total = 120 * 1024**3
-    mock_psutil_available = 100 * 1024**3
 
     with (
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
@@ -101,10 +118,11 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
         patch("torch.accelerator") as mock_accelerator,
     ):
         mock_accelerator.get_memory_info.return_value = (
-            mock_cuda_free,
+            mock_accelerator_free,
             mock_cuda_total,
         )
         mock_platform.is_integrated_gpu.return_value = True
+        mock_platform.is_rocm.return_value = is_rocm
         mock_platform.memory_stats.return_value = {
             "allocated_bytes.all.peak": 0,
         }
@@ -117,8 +135,9 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
 
         snapshot = MemorySnapshot(device="cuda:0")
 
-        assert snapshot.free_memory == mock_psutil_available
+        assert snapshot.free_memory == expected_free
         assert snapshot.total_memory == mock_cuda_total
+        assert snapshot.cuda_memory >= 0
         mock_psutil.virtual_memory.assert_called_once()
 
 
