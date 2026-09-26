@@ -41,6 +41,9 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        routed_experts: The router expert indices selected per output token,
+            if the model exposes routing (e.g. MoE); shape
+            ``[seq_len, layer_num, topk]``. None otherwise.
         sampling_mask: The post-processing token support set for each generated
             token, if requested.
         finish_reason: The reason why the sequence is finished.
