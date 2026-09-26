@@ -382,8 +382,11 @@ class BatchDCPPrefillWrapper:
             key,
             value,
             return_lse=True,
+            lse_base="ln",
+            lse_layout="NH",
         )
-        lse_query = log2_lse_to_ln(lse_query.transpose(0, 1).contiguous())
+        # The merge accepts strided HN views, so no transpose copy is needed.
+        lse_query = lse_query.transpose(0, 1)
 
         merge_attn_states(
             out,
