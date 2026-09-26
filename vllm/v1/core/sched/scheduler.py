@@ -393,8 +393,13 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
+        self.enable_omit_prefix_routed_experts = (
+            vllm_config.aux_output_config.enable_omit_prefix_routed_experts
+        )
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(
+                enable_omit_prefix_routed_experts=self.enable_omit_prefix_routed_experts
+            )
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -1255,6 +1260,14 @@ class Scheduler(SchedulerInterface):
                         )
 
                 # Record at admission so unscheduled lookups are not counted.
+                if (
+                    self.enable_omit_prefix_routed_experts
+                    and request.num_cached_tokens < 0
+                ):
+                    assert num_computed_tokens % self.hash_block_size == 0, (
+                        "Routed-expert cache hits must align with artifact blocks"
+                    )
+                    request.num_cached_tokens = num_computed_tokens
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(
                         request, num_new_local_computed_tokens

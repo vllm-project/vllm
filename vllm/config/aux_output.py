@@ -14,6 +14,10 @@ class AuxOutputConfig:
     enable_return_routed_experts: bool = False
     """Capture and return routed-experts auxiliary outputs."""
 
+    enable_omit_prefix_routed_experts: bool = False
+    """Omit cached-prefix routes. Requires routed-expert return and a stable
+    session identity whose previously returned routes are retained by the caller."""
+
     max_bytes: int | None = Field(default=None, gt=0)
     """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
 

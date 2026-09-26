@@ -10,7 +10,7 @@ from logging import Logger
 from string import Template
 from typing import Any
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.routed_expert_session import normalize_routed_expert_cache_salt
 
 logger = init_logger(__name__)
 
@@ -31,6 +32,23 @@ VLLM_SUBCMD_PARSER_EPILOG = (
     "For a flag:               vllm {subcmd} --help=max-model-len  (_ or - accepted)\n"  # noqa: E501
     "Documentation:            https://docs.vllm.ai\n"
 )
+
+
+def apply_routed_expert_session(
+    request: Any, raw_request: Request, *, allow_encoded_session: bool = False
+) -> None:
+    """Normalize session identity before rendering or direct token generation."""
+    config = raw_request.app.state.vllm_config.aux_output_config
+    if not config.enable_omit_prefix_routed_experts:
+        return
+    try:
+        request.cache_salt = normalize_routed_expert_cache_salt(
+            request.cache_salt,
+            raw_request.headers.get("x-session-id"),
+            allow_encoded_session=allow_encoded_session,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def listen_for_disconnect(request: Request) -> None:

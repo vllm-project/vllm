@@ -21,6 +21,7 @@ from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
 from vllm.entrypoints.serve.utils.api_utils import (
+    apply_routed_expert_session,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -61,6 +62,7 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     handler = messages(raw_request)
     if handler is None:
         base_server = raw_request.app.state.serving_tokenization

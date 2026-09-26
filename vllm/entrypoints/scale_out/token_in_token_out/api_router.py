@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
+    apply_routed_expert_session,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -56,6 +57,7 @@ router = APIRouter()
 @with_cancellation
 @load_aware_call
 async def generate(request: GenerateRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request, allow_encoded_session=True)
     handler = generate_tokens(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support generate tokens API")
