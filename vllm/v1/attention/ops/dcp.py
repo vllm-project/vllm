@@ -27,6 +27,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,
     direct_cp_enabled,
@@ -1011,16 +1012,9 @@ def dcp_a2a_lse_reduce(
 
 def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
-    speculative_config = vllm_config.speculative_config
-    speculative_tokens = vllm_config.num_speculative_tokens
-    tokens_per_seq = (
-        1
-        + (
-            2
-            if speculative_config is not None and speculative_config.parallel_drafting
-            else 1
-        )
-        * speculative_tokens
+    # num_speculative_tokens also counts a diffusion canvas.
+    tokens_per_seq = max(
+        1 + vllm_config.num_speculative_tokens, max_decode_query_len(vllm_config)
     )
     return min(
         scheduler_config.max_num_batched_tokens,

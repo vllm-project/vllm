@@ -57,9 +57,7 @@ class ServingRender(BaseServing):
         self.tool_server = tool_server
 
         self._merge_inline_system = (
-            AnthropicServingMessages._detect_merge_inline_system(
-                online_renderer.chat_template
-            )
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
         )
 
         self._placeholder_metadata_parser: MultiModalDataParser | None = None
