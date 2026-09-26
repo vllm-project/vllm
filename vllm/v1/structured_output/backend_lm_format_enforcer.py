@@ -41,6 +41,13 @@ def _cached_build_vllm_token_enforcer_tokenizer_data(
     )
 
 
+def _json_schema_parser_with_timeout(spec_dict: object, spec_text: str):
+    return compile_regex_with_timeout(
+        lambda _: lmformatenforcer.JsonSchemaParser(spec_dict),
+        spec_text,
+    )
+
+
 @dataclass
 class LMFormatEnforcerGrammar(StructuredOutputGrammar):
     token_enforcer: lmformatenforcer.TokenEnforcer
@@ -108,7 +115,9 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
         character_level_parser: lmformatenforcer.CharacterLevelParser
         if request_type == StructuredOutputOptions.JSON:
             spec_dict = json.loads(grammar_spec)
-            character_level_parser = lmformatenforcer.JsonSchemaParser(spec_dict)
+            character_level_parser = _json_schema_parser_with_timeout(
+                spec_dict, grammar_spec
+            )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             character_level_parser = lmformatenforcer.JsonSchemaParser(None)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -171,20 +180,27 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                 f"Failed to compile regex for lm-format-enforcer: {err}"
             ) from err
         return
-    elif so_params.json:
+    elif so_params.json is not None:
         if isinstance(so_params.json, str):
             try:
-                # make sure schema is valid json
-                json.loads(so_params.json)
+                spec_dict = json.loads(so_params.json)
             except json.JSONDecodeError as e:
                 raise VLLMValidationError("Invalid JSON grammar specification.") from e
+            spec_text = so_params.json
         else:
+            spec_dict = so_params.json
             try:
-                json.dumps(so_params.json)
+                spec_text = json.dumps(so_params.json)
             except Exception as e:
                 raise VLLMValidationError(
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
+        try:
+            _json_schema_parser_with_timeout(spec_dict, spec_text)
+        except Exception as err:
+            raise VLLMValidationError(
+                f"Failed to compile JSON schema for lm-format-enforcer: {err}"
+            ) from err
         return
     elif so_params.choice:
         return
