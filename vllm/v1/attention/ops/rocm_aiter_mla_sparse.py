@@ -4241,3 +4241,99 @@ def rocm_sparse_attn_decode(
     if direct_out is None:
         output.copy_(attn_out.to(output.dtype))
     return output.shape[0] if inv_rope_positions is not None else 0
+
+
+@triton.jit(do_not_specialize=["token_offset"])
+def _prefill_topk_global_slots_kernel(
+    out_ptr,
+    lens_ptr,
+    topk_ptr,
+    topk_stride,
+    token_to_req_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    is_valid_token_ptr,
+    block_table_ptr,
+    block_table_stride,
+    token_offset,
+    num_compressed,
+    TOPK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_W: tl.constexpr,
+):
+    row = tl.program_id(0)
+    token = row + token_offset
+    req = tl.load(token_to_req_ptr + token)
+    query_start = tl.load(query_start_loc_ptr + req)
+    query_len = tl.load(query_start_loc_ptr + req + 1) - query_start
+    pos = tl.load(seq_lens_ptr + req) - query_len + token - query_start
+    # Only (pos + 1) // ratio compressed tokens exist yet; the rest of the row
+    # can hold stale indices.
+    row_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOPK)
+    row_len = tl.where(tl.load(is_valid_token_ptr + token), row_len, 0)
+
+    for start in range(0, TOPK, BLOCK_W):
+        cols = start + tl.arange(0, BLOCK_W)
+        live = cols < row_len
+        local = tl.load(topk_ptr + row * topk_stride + cols, mask=live, other=-1)
+        valid = live & (local >= 0) & (local < num_compressed)
+        local = tl.where(valid, local, 0)
+        block = tl.load(
+            block_table_ptr + req * block_table_stride + local // BLOCK_SIZE,
+            mask=valid,
+            other=0,
+        )
+        slot = tl.where(valid, block * BLOCK_SIZE + local % BLOCK_SIZE, -1)
+        tl.store(out_ptr + row * TOPK + cols, slot, mask=cols < TOPK)
+    tl.store(lens_ptr + row, row_len)
+
+
+def build_prefill_topk_ragged_indices(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    is_valid_token: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    compress_ratio: int,
+    num_compressed: int,
+    token_offset: int,
+    num_rows: int = -1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map prefill top-k rows to a ragged stream of compressed-cache slots.
+
+    ``topk_indices`` holds local compressed positions for the prefill tokens,
+    which sit at ``token_offset`` in the batch; ``token_to_req_indices``,
+    ``query_start_loc``, ``seq_lens`` and ``block_table`` are batch-wide.
+    ``block_size`` is the compressed cache's, i.e. already divided by the ratio.
+    """
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+    num_tokens, width = topk_indices.shape
+    dense = torch.empty(
+        (num_tokens, width), dtype=torch.int32, device=topk_indices.device
+    )
+    lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
+    if num_tokens > 0 and width > 0:
+        _prefill_topk_global_slots_kernel[(num_tokens,)](
+            dense,
+            lens,
+            topk_indices,
+            topk_indices.stride(0),
+            token_to_req_indices,
+            query_start_loc,
+            seq_lens,
+            is_valid_token,
+            block_table,
+            block_table.stride(0),
+            token_offset,
+            num_compressed,
+            TOPK=width,
+            COMPRESS_RATIO=compress_ratio,
+            BLOCK_SIZE=block_size,
+            BLOCK_W=min(triton.next_power_of_2(width), 1024),
+        )
+    else:
+        lens.zero_()
+    return build_ragged_indices_from_dense(dense, lens, num_rows=num_rows)
