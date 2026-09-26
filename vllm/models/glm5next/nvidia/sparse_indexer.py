@@ -549,11 +549,12 @@ def sparse_attn_indexer_kpool(
         )
         from vllm.utils.deep_gemm import fp8_fp4_paged_mqa_logits
 
+        padded_seq_lens = (seq_lens + 3) & ~3
         logits = fp8_fp4_paged_mqa_logits(
             (padded_q_quant_cast, padded_q_scale),
             kv_cache,
             padded_weights[:num_padded_tokens],
-            seq_lens,
+            padded_seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_pool_len,
