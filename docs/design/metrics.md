@@ -25,6 +25,8 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 
 - `vllm:num_requests_running` (Gauge) - Number of requests currently running.
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
+- `vllm:num_kv_pinned_requests` (Gauge) - Number of finished requests whose KV blocks are held until an async KV transfer completes (e.g. prefill blocks awaiting a remote decode in P/D disaggregation).
+- `vllm:kv_cache_pinned_usage_perc` (Gauge) - Fraction of KV cache blocks (0–1) held by those requests.
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.

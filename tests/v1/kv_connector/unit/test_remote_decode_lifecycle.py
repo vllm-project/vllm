@@ -114,6 +114,54 @@ def test_basic_lifecycle():
     assert_scheduler_empty(scheduler)
 
 
+def test_kv_pinned_stats():
+    """Blocks held for a remote decode are reported in SchedulerStats until
+    the transfer finishes."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # Both prompts must fit in one step's token budget.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = int(BLOCK_SIZE * 1.5)
+    NUM_BLOCKS_PER_REQ = 2
+    total_blocks = scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1
+    requests = [
+        create_request(
+            request_id=i,
+            block_size=BLOCK_SIZE,
+            max_tokens=1,
+            num_tokens=NUM_TOKENS,
+            do_remote_decode=True,
+        )
+        for i in range(2)
+    ]
+    for request in requests:
+        scheduler.add_request(request)
+
+    def step(model_runner_output):
+        scheduler_output = scheduler.schedule()
+        outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
+        stats = outputs[0].scheduler_stats
+        return stats.num_kv_pinned_reqs, stats.kv_cache_pinned_usage
+
+    def expected(num_pinned_reqs):
+        pinned_blocks = num_pinned_reqs * NUM_BLOCKS_PER_REQ
+        return num_pinned_reqs, pinned_blocks / total_blocks
+
+    # Prefill finishes; both requests pin their blocks for the decoder.
+    assert step(create_model_runner_output(reqs=requests)) == expected(2)
+
+    # Each finished transfer releases that request's blocks.
+    for num_left, request in zip((1, 0), requests):
+        model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+        model_runner_output.kv_connector_output = KVConnectorOutput(
+            finished_sending={request.request_id}
+        )
+        assert step(model_runner_output) == expected(num_left)
+
+    assert_scheduler_empty(scheduler)
+
+
 def test_short_prompt_lifecycle():
     """Test lifecycle of a Remote Decode request with short prompt."""
     vllm_config = create_vllm_config()

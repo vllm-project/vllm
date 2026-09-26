@@ -230,6 +230,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # KV Connector: finished requests whose blocks are held until an async
+        # KV transfer completes (e.g. P blocks awaiting a remote decode's pull).
+        # req_id -> number of pinned blocks.
+        self.kv_pinned_req_blocks: dict[str, int] = {}
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -2533,6 +2537,15 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
+    def get_kv_cache_pinned_usage(self) -> float:
+        """Returns the fraction of the KV cache (0.0-1.0) held by finished
+        requests awaiting an async KV transfer."""
+        if not self.kv_pinned_req_blocks:
+            return 0.0
+        return self.kv_cache_manager.block_pool.get_usage_of_blocks(
+            sum(self.kv_pinned_req_blocks.values())
+        )
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
@@ -2653,6 +2666,12 @@ class Scheduler(SchedulerInterface):
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
+        else:
+            self.kv_pinned_req_blocks[request_id] = sum(
+                not block.is_null
+                for blocks in self.kv_cache_manager.get_blocks(request_id).blocks
+                for block in blocks
+            )
 
         return kv_xfer_params, ec_xfer_params
 
@@ -2660,6 +2679,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+        self.kv_pinned_req_blocks.pop(request.request_id, None)
 
     @property
     def pause_state(self) -> PauseState:
@@ -2872,6 +2892,8 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_kv_pinned_reqs=len(self.kv_pinned_req_blocks),
+            kv_cache_pinned_usage=self.get_kv_cache_pinned_usage(),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
