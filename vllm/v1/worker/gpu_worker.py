@@ -818,6 +818,13 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if not self.use_v2_model_runner:
+            return self._compile_or_warm_up_model()
+        # MRV2 warmup forwards record expert load like real ones.
+        with self.model_runner.eplb.suppress():  # type: ignore
+            return self._compile_or_warm_up_model()
+
+    def _compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if (

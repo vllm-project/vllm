@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
 from typing import Any
 
@@ -24,10 +25,12 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(self: Any, *args, **kwargs) -> Any:
-            result = fn(self, *args, **kwargs)
             if kwargs.get("skip_eplb", False):
-                return result
+                # The router kernel records load before step() is reached.
+                with self.eplb.suppress():
+                    return fn(self, *args, **kwargs)
 
+            result = fn(self, *args, **kwargs)
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
             self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
             return result
@@ -44,6 +47,24 @@ class EPLBController:
         self.state: EplbState | None = None
         self.suppressed = False
         self._has_registered_models = False
+
+    @contextmanager
+    def suppress(self) -> Iterator[None]:
+        """Keep warmup forwards from stepping EPLB or recording expert load."""
+        should_record = (
+            self.state.should_record_tensor if self.state is not None else None
+        )
+        was_suppressed = self.suppressed
+        was_recording = should_record.clone() if should_record is not None else None
+        self.suppressed = True
+        if should_record is not None:
+            should_record.fill_(False)
+        try:
+            yield
+        finally:
+            if should_record is not None and was_recording is not None:
+                should_record.copy_(was_recording)
+            self.suppressed = was_suppressed
 
     def prepare_load(self) -> None:
         self.state = None
