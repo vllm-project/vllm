@@ -23,6 +23,13 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
         or is_quantized_kv_cache(kv_cache_dtype)
     ):
         return False
+    if kv_cache_dtype == "fp8_e5m2":
+        # This kernel stores ``current_platform.fp8_dtype()``, an e4m3 variant on
+        # every platform, while ``chunked_prefill_paged_decode`` and
+        # ``prefix_prefill`` decode an fp8_e5m2 cache as ``torch.float8_e5m2``.
+        # Writing e4m3 bits under an e5m2 label reinterprets them rather than
+        # converting, so refuse the format here instead of storing the wrong bits.
+        return False
     if kv_cache_dtype.startswith("fp8"):
         return current_platform.has_device_capability(89) or current_platform.is_xpu()
     if kv_cache_dtype == "bfloat16":
@@ -395,9 +402,11 @@ def triton_reshape_and_cache_flash(
     page_stride = key_cache.stride()[1]
 
     assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
-        f"Triton reshape-and-cache cannot store kv_cache_dtype={kv_cache_dtype} "
-        f"on this device: an FP8 KV cache needs native fp8e4nv (SM89+). Use "
-        f"--kv-cache-dtype bfloat16 (or float16 on SM75)."
+        f"Triton reshape-and-cache cannot store kv_cache_dtype={kv_cache_dtype}. "
+        f"This kernel stores {current_platform.fp8_dtype()}, so fp8_e5m2 would be "
+        f"reinterpreted rather than converted; an FP8 KV cache also needs native "
+        f"fp8e4nv (SM89+). Use --kv-cache-dtype fp8_e4m3, or bfloat16 "
+        f"(float16 on SM75)."
     )
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()
