@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/basic_correctness/test_basic_correctness.py`.
+Run `pytest tests/basic_correctness/models/test_basic_correctness.py`.
 """
 
 import os
@@ -17,9 +17,9 @@ from vllm import LLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine
 
-from ..conftest import HfRunner, VllmRunner
-from ..models.utils import check_outputs_equal
-from ..utils import multi_gpu_test
+from ...conftest import HfRunner, VllmRunner
+from ...models.utils import check_outputs_equal
+from ...utils import multi_gpu_test
 
 ATTN_BACKEND = ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
