@@ -3,7 +3,7 @@
 
 from collections import OrderedDict
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
@@ -14,6 +14,30 @@ if TYPE_CHECKING:
     from vllm.config import SchedulerConfig
 
 logger = init_logger(__name__)
+
+
+def create_encoder_cache_manager(
+    manager_cls: type[Any],
+    *,
+    cache_size: int,
+    vllm_config: VllmConfig,
+) -> Any:
+    """Create an encoder cache manager using its supported factory interface."""
+    from_vllm_config = getattr(manager_cls, "from_vllm_config", None)
+    if from_vllm_config is not None:
+        return from_vllm_config(
+            cache_size=cache_size,
+            vllm_config=vllm_config,
+        )
+
+    create_manager = getattr(manager_cls, "create_manager", None)
+    if create_manager is not None:
+        return create_manager(
+            cache_size=cache_size,
+            vllm_config=vllm_config,
+        )
+
+    return manager_cls(cache_size=cache_size)
 
 
 class EncoderCacheManager:
