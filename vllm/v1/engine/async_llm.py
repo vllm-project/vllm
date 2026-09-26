@@ -867,6 +867,9 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+            except EngineDeadError as e:
+                logger.error("AsyncLLM output_handler failed: %s", e)
+                output_processor.propagate_error(e)
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
