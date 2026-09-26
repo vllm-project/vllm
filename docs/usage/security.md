@@ -197,16 +197,19 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 **Operational control endpoints (only when `"generate"` task is supported):**
 
-- `/pause` - Pause generation (causes denial of service)
-- `/resume` - Resume generation
-- `/is_paused` - Check if generation is paused
-- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
-- `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
-- `/update_weights` - Update model weights (can alter model behavior)
-- `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+
+**Disaggregated-serving endpoints (only with `--tokens-only`):**
+
+- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work; note that a dev-only RLHF variant also exists when `VLLM_SERVER_DEV_MODE=1`, which aborts all in-flight requests when `request_ids` is empty)
+
+**Fault tolerance endpoints (only when `--enable-fault-tolerance` is set):**
+
+These endpoints are **only available when the `--enable-fault-tolerance` flag is passed**. They are unprotected by `--api-key`:
+
+- `POST /fault_tolerance/apply` - Trigger recovery (the handler currently allowlists `instruction` to `{"retry"}`, so impact is limited to triggering recovery)
+- `GET /fault_tolerance/status` - Recovery status
 
 **Utility endpoints:**
 
@@ -216,6 +219,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics
+- `/metrics` - Prometheus metrics (unprotected by design)
 
 **Tokenizer information endpoint (only when `--enable-tokenizer-info-endpoint` is set):**
 
@@ -235,6 +239,18 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
+- `/pause` - Pause generation (causes denial of service; dev RLHF variant)
+- `/resume` - Resume generation (dev RLHF variant)
+- `/is_paused` - Check if generation is paused (dev RLHF variant)
+- `/abort_requests` - Abort in-flight requests (dev RLHF variant; production `--tokens-only` variant listed under operational control endpoints)
+- `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
+- `/update_weights` - Update model weights (can alter model behavior)
+- `/get_world_size` - Get distributed world size
+- `/start_weight_update` - Start RLHF weight update
+- `/start_draft_weight_update` - Start draft-model RLHF weight update
+- `/finish_weight_update` - Finish RLHF weight update
+- `/update_weight_version` - Update RLHF weight version
+- `/weight_info` - Get RLHF weight information
 
 **Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
 
@@ -250,8 +266,8 @@ These endpoints are only available when profiling is enabled and should only be 
 An attacker who can reach the vLLM HTTP server can:
 
 1. **Bypass authentication** by using endpoints outside the protected path prefixes, such as `/invocations`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank`, to run arbitrary inference without credentials
-2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
-3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
+2. **Cause denial of service** by calling `/scale_elastic_ep` or `--tokens-only` `/abort_requests` without a token (or `/pause` when `VLLM_SERVER_DEV_MODE=1` is set)
+3. **Access operational controls** to manipulate server state (e.g., triggering scaling via `/scale_elastic_ep`, or — when `VLLM_SERVER_DEV_MODE=1` is set — pausing generation or updating model weights via the dev-only RLHF endpoints)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
 5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
 
