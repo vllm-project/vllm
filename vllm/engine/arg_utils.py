@@ -833,7 +833,9 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    gdn_prefill_backend: (
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl"] | None
+    ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
@@ -1868,7 +1870,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl"],
             default=None,
             help="Select GDN prefill backend.",
         )

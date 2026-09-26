@@ -7,6 +7,7 @@ from typing import Literal
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -73,6 +74,7 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    aiter_prefill_metadata: object | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -100,8 +102,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             _resolve_gdn_prefill_backend,
         )
 
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
+        self.gdn_prefill_backend: Literal[
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+        ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -163,6 +168,32 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
+        )
+
+    @staticmethod
+    def _check_chunk_metadata_override(
+        builder_cls: type["GDNAttentionMetadataBuilder"], backend: str
+    ) -> None:
+        """Reject a subclass whose chunk metadata the AITER path would skip.
+
+        AITER brings its own varlen prefill metadata and never calls
+        ``_build_chunk_metadata``, so a builder that overrides it would lose
+        that override without a word. No in-tree subclass can get here --
+        ``_resolve_gdn_prefill_backend`` only selects this backend for models
+        with 128-dim GDN key and value heads, which the KDA builders are not --
+        but a future one should be told rather than quietly ignored.
+        """
+        if backend != "aiter_flydsl":
+            return
+        if (
+            builder_cls._build_chunk_metadata
+            is GDNAttentionMetadataBuilder._build_chunk_metadata
+        ):
+            return
+        raise RuntimeError(
+            f"{builder_cls.__name__} builds its own FLA chunk metadata, which "
+            "the 'aiter_flydsl' GDN prefill backend does not use. Select a "
+            "different gdn_prefill_backend for this model."
         )
 
     def _build_chunk_metadata(
@@ -403,6 +434,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        aiter_prefill_metadata: object | None = None
         if num_prefills > 0:
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
             # kernel (decode-first front slice), so build chunk metadata from the
@@ -424,11 +456,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
 
-            chunk_indices, chunk_offsets = self._build_chunk_metadata(
-                prefill_query_start_loc,
-                prefill_query_start_loc_cpu,
-                query_start_loc.device,
-            )
+            if self.gdn_prefill_backend == "aiter_flydsl":
+                # AITER carries its own reusable varlen metadata and has no use
+                # for FLA's chunk indices, so it replaces them rather than
+                # extending what _build_chunk_metadata returns.
+                assert prefill_query_start_loc_cpu is not None
+                aiter_prefill_metadata = (
+                    rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+                        torch.diff(prefill_query_start_loc_cpu).tolist(),
+                        cu_seqlens=prefill_query_start_loc,
+                    )
+                )
+            else:
+                chunk_indices, chunk_offsets = self._build_chunk_metadata(
+                    prefill_query_start_loc,
+                    prefill_query_start_loc_cpu,
+                    query_start_loc.device,
+                )
 
         if num_prefills > 0:
             context_lens_tensor = m.compute_num_computed_tokens()
@@ -541,6 +585,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
