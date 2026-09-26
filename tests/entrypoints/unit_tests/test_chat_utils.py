@@ -3194,3 +3194,46 @@ def test_validate_chat_template_rejects_invalid_type():
     ) as exc_info:
         validate_chat_template(123)  # type: ignore[arg-type]
     assert exc_info.value.parameter == "chat_template"
+
+
+_MESSAGE_LEVEL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+def test_parse_message_level_tools_passed_through(role):
+    """Message-level tool declarations survive chat message parsing: tools
+    on "system"/"developer" messages pass through for the chat template /
+    encoding layer to expand.
+    """
+    from vllm.entrypoints.chat_utils import _parse_chat_message_content
+
+    result = _parse_chat_message_content(
+        {"role": role, "content": "instructions", "tools": _MESSAGE_LEVEL_TOOLS},
+        MagicMock(),
+        "string",
+        True,
+    )
+    assert result[0]["tools"] == _MESSAGE_LEVEL_TOOLS
+
+
+@pytest.mark.parametrize("role", ["user", "assistant", "tool"])
+def test_parse_message_level_tools_not_passed_for_other_roles(role):
+    """Tools on non-system/developer roles are not passed through."""
+    from vllm.entrypoints.chat_utils import _parse_chat_message_content
+
+    result = _parse_chat_message_content(
+        {"role": role, "content": "text", "tools": _MESSAGE_LEVEL_TOOLS},
+        MagicMock(),
+        "string",
+        True,
+    )
+    assert "tools" not in result[0]

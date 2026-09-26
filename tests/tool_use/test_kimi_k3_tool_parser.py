@@ -604,3 +604,97 @@ def test_chat_params_keeps_template_tool_choice_when_api_auto():
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
     assert chat_params.tool_choice == "auto"
+
+
+def _dynamic_tools_request(*, tool_choice="auto") -> ChatCompletionRequest:
+    """Tools declared only on a system message; ``request.tools`` is empty
+    by design."""
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[
+            {
+                "role": "system",
+                "content": "",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "calc",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "Call the calc tool."},
+        ],
+        tool_choice=tool_choice,
+    )
+
+
+def test_delegating_parser_message_level_tools_required():
+    """Message-level-only tools: the reasoning parser must preserve the raw
+    XTML for the tool parser even though ``request.tools`` is empty
+    (non-stream regression: gating on request-level tools used to strip the
+    tools channel, so the tool call vanished)."""
+    parser = KimiK3DelegatingParser(DummyTokenizer())
+    output = (
+        f"{THINK_OPEN}step{THINK_CLOSE}"
+        + _response("")
+        + _tools(_call("calc", 1, _arg("x", "number", "1")))
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        output,
+        _dynamic_tools_request(tool_choice="required"),
+        enable_auto_tools=True,
+    )
+
+    assert reasoning == "step"
+    assert content is None
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "calc"
+    assert json.loads(tool_calls[0].arguments) == {"x": 1}
+
+
+def test_delegating_parser_message_level_tools_auto():
+    parser = KimiK3DelegatingParser(DummyTokenizer())
+    output = (
+        f"{THINK_OPEN}step{THINK_CLOSE}"
+        + _response("answer")
+        + _tools(_call("calc", 1, _arg("x", "number", "1")))
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        output,
+        _dynamic_tools_request(tool_choice="auto"),
+        enable_auto_tools=True,
+    )
+
+    assert reasoning == "step"
+    assert content == "answer"
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "calc"
+    assert json.loads(tool_calls[0].arguments) == {"x": 1}
+
+
+def test_delegating_parser_message_level_tools_none_strips_channels():
+    """tool_choice='none' keeps the old behavior: the reasoning parser
+    unwraps the response channel itself and no tool parsing happens."""
+    parser = KimiK3DelegatingParser(DummyTokenizer())
+    output = (
+        f"{THINK_OPEN}step{THINK_CLOSE}"
+        + _response("answer")
+        + _tools(_call("calc", 1, _arg("x", "number", "1")))
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        output,
+        _dynamic_tools_request(tool_choice="none"),
+        enable_auto_tools=True,
+    )
+
+    assert reasoning == "step"
+    assert content == "answer"
+    assert not tool_calls
