@@ -17,6 +17,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -123,6 +124,7 @@ class OnlineRenderer:
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
+        trust_request_mm_kwargs: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -155,6 +157,7 @@ class OnlineRenderer:
             default_chat_template_kwargs or {}
         )
         self.trust_request_chat_template = trust_request_chat_template
+        self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
@@ -674,6 +677,11 @@ class OnlineRenderer:
         """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
         model_config = self.model_config
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
+        )
 
         parsed_prompts = [
             (
@@ -710,6 +718,11 @@ class OnlineRenderer:
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
+        )
         mm_config = self.model_config.multimodal_config
 
         default_template_kwargs = merge_kwargs(
