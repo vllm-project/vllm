@@ -2063,18 +2063,23 @@ def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type"),
+    ("model_id", "expected_runner_type", "expected_convert_type", "explicit_convert"),
     [
-        ("distilbert/distilgpt2", "pooling", "embed"),
-        ("intfloat/multilingual-e5-small", "pooling", "none"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
-        ("openai/whisper-small", "pooling", "embed"),
+        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "none", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "none"),
+        ("openai/whisper-small", "pooling", "embed", "embed"),
     ],
 )
-def test_pooling_runner(model_id, expected_runner_type, expected_convert_type):
-    config = ModelConfig(model_id, runner="pooling")
+def test_pooling_runner(
+    model_id,
+    expected_runner_type,
+    expected_convert_type,
+    explicit_convert,
+):
+    config = ModelConfig(model_id, runner="pooling", convert=explicit_convert)
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
