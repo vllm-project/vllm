@@ -2209,6 +2209,11 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def has_fused_rope_mla_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
