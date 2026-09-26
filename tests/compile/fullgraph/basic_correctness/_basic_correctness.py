@@ -5,7 +5,7 @@ import dataclasses
 from vllm.config import CompilationMode
 from vllm.platforms import current_platform
 
-from ...utils import compare_all_settings
+from ....utils import compare_all_settings
 
 ATTN_BACKEND = "FLASH_ATTN" if not current_platform.is_rocm() else "ROCM_ATTN"
 

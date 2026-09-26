@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from ._basic_correctness import (
+from .._basic_correctness import (
     BGE_MULTILINGUAL_GEMMA2_SETTING,
     GRANITE_SETTING,
     run_compile_correctness,
