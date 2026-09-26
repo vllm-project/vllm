@@ -66,6 +66,11 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list
+        # Set once a buffered "{...}" turns out not to be a tool call (no
+        # "name"/"parameters"/"arguments" key once fully parsed) - the rest
+        # of the stream is then passed through as plain content instead of
+        # being silently dropped. See the "plain JSON answer" case in #58824.
+        self._content_passthrough: bool = False
         self.bot_token_id = self.vocab.get(self.bot_token)
         if self.bot_token_id is None:
             raise RuntimeError(
@@ -175,6 +180,9 @@ class Llama3JsonToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        if self._content_passthrough:
+            return DeltaMessage(content=delta_text)
+
         if not (
             current_text.startswith(self.bot_token) or current_text.startswith("{")
         ):
@@ -269,6 +277,19 @@ class Llama3JsonToolParser(ToolParser):
             # - otherwise send nothing
             elif not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
+                if (
+                    not function_name
+                    and self.current_tool_id < len(is_complete)
+                    and is_complete[self.current_tool_id]
+                ):
+                    # The buffered "{...}" finished parsing as JSON but never
+                    # produced a "name" (nor "parameters"/"arguments"), so it
+                    # was never a tool call to begin with - a plain answer
+                    # that happens to start with '{'. Flush everything
+                    # buffered so far as content and stop attempting to
+                    # parse tool calls for the rest of this stream.
+                    self._content_passthrough = True
+                    return DeltaMessage(content=current_text)
                 if function_name:
                     delta = DeltaMessage(
                         tool_calls=[
