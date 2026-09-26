@@ -30,7 +30,6 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
@@ -169,20 +168,18 @@ class ToolParser:
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
-        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ):
-        if self.structural_tag_model is None:
-            return None
-        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
-            return None
-        from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+        """Build a structural tag from the already-adjusted request."""
+        from vllm.tool_parsers.structural_tag_registry import (
+            get_model_structural_tag,
+        )
 
+        assert self.structural_tag_model is not None
         return get_model_structural_tag(
             model=self.structural_tag_model,
             tools=request.tools,
             tool_choice=request.tool_choice,
             reasoning=reasoning,
-            strict_level=strict_level,
         )
 
     def extract_tool_calls(

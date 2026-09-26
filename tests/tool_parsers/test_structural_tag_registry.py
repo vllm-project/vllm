@@ -37,9 +37,43 @@ from vllm.tool_parsers.structural_tag_registry import (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
     ToolChoice,
     get_function_parameters,
-    get_model_structural_tag,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+
+
+def get_model_structural_tag(
+    model,
+    tools,
+    tool_choice,
+    reasoning,
+    strict_level=ToolStrictLevel.AUTO,
+):
+    assert not reasoning
+    if not tools or tool_choice == "none":
+        return None
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = ToolParser
+
+    request_tool_choice = tool_choice if isinstance(tool_choice, str) else "auto"
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=tools,
+        tool_choice=request_tool_choice,
+    )
+    if request_tool_choice != tool_choice:
+        request.tool_choice = tool_choice
+    parser = TestParser(MagicMock(), tools=tools)
+    parser.tool_strict_level = strict_level
+    assert parser.tool_parser is not None
+    parser.tool_parser.structural_tag_model = model
+
+    adjusted_request = parser.adjust_request(request)
+    structured_outputs = adjusted_request.extract_structured_outputs()
+    if structured_outputs is None or structured_outputs.structural_tag is None:
+        return None
+    return StructuralTag.model_validate(json.loads(structured_outputs.structural_tag))
 
 
 @pytest.fixture

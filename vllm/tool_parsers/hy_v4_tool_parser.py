@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 import regex as re
 
-import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -25,7 +24,6 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import partial_tag_overlap
 
 if TYPE_CHECKING:
@@ -995,12 +993,11 @@ class HYV4ToolParser(ToolParser):
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
-        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 
-        Overridden only to pass the per-checkpoint ``token_suffix`` through to
-        the builder; everything else follows the base implementation.
+        Overridden to pass the per-checkpoint ``token_suffix`` through to the
+        builder and skip optional auto tool calls.
 
         Named (forced) tool choice is constrained with the same structural tag:
         because ``supports_required_and_named`` is False, required *and* named
@@ -1011,15 +1008,11 @@ class HYV4ToolParser(ToolParser):
         Args:
             request: The request being adjusted.
             reasoning: Whether the grammar also covers the reasoning phase.
-            strict_level: Server-side floor from ``--tool-strict-level``.
 
         Returns:
             The structural tag, or None when structural tagging does not apply.
 
         """
-        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
-            return None
-
         # Only constrain required / forced tool choice with the structural tag.
         # For "auto", tool calling is optional and most requests never emit a
         # tool call, so applying the grammar to every auto request would make
@@ -1035,16 +1028,17 @@ class HYV4ToolParser(ToolParser):
         ):
             return None
 
-        from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+        from vllm.tool_parsers.structural_tag_registry import (
+            get_model_structural_tag,
+        )
 
         try:
             return get_model_structural_tag(
                 model=self.structural_tag_model,
                 tools=request.tools,
-                tool_choice=request.tool_choice,
+                tool_choice=tool_choice,
                 reasoning=reasoning,
                 token_suffix=self._extractor.token_suffix,
-                strict_level=strict_level,
             )
         except Exception:
             logger.warning(
