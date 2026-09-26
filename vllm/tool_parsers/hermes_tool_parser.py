@@ -87,9 +87,26 @@ class Hermes2ProToolParser(ToolParser):
                 function_call_tuples = self.tool_call_regex.findall(model_output)
 
                 # load the JSON, and then use it to build the Function and
-                # Tool Call
+                # Tool Call.
+                # Reject duplicate keys to prevent streaming/non-streaming
+                # inconsistency: the streaming path uses re.search (first-match)
+                # while json.loads uses last-wins for duplicate keys. Rejecting
+                # duplicates here makes both paths produce identical results.
+                def _reject_duplicate_keys(pairs):
+                    seen = set()
+                    result = {}
+                    for key, value in pairs:
+                        if key in seen:
+                            raise ValueError(f"Duplicate key '{key}' in tool call JSON")
+                        seen.add(key)
+                        result[key] = value
+                    return result
+
                 raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
+                    json.loads(
+                        match[0] if match[0] else match[1],
+                        object_pairs_hook=_reject_duplicate_keys,
+                    )
                     for match in function_call_tuples
                 ]
                 tool_calls = [
