@@ -18,7 +18,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
+from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
@@ -255,12 +255,23 @@ class KimiMLP(nn.Module):
             else:
                 gemm_rs_ar.warn_incompatible_projection()
         if hidden_act == "silu":
-            self.act_fn = SiluAndMul()
+            self._fused_gated = (
+                quant_config is None
+                and current_platform.is_cuda()
+                and current_platform.has_device_capability((10, 0))
+            )
+            self._gated_activation = "silu"
         elif hidden_act == "situ":
             self.act_fn = SituAndMul(
-                beta=activation_situ_beta or 1.0,
+                beta=1.0 if activation_situ_beta is None else activation_situ_beta,
                 linear_beta=activation_situ_linear_beta,
             )
+            self._fused_gated = (
+                quant_config is None
+                and current_platform.is_cuda()
+                and current_platform.has_device_capability((10, 0))
+            )
+            self._gated_activation = "situ"
         else:
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. "
@@ -274,8 +285,38 @@ class KimiMLP(nn.Module):
             # compute this rank's partial for all of them, then reduce-scatter,
             # which sums across TP and restores the sequence sharding.
             x = sp_all_gather(x)
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        if self._fused_gated and not self.shard_sequence_parallel:
+            from vllm.model_executor.kernels.linear.cute_dsl import (
+                cutedsl_bf16_gated_gemm as gated_gemm,
+            )
+
+            weight = self.gate_up_proj.weight
+            if (
+                x.dtype == torch.bfloat16
+                and weight.dtype == torch.bfloat16
+                and x.ndim == 2
+                and x.shape[-1] == weight.shape[-1]
+                and x.shape[-1] % 128 == 0
+            ):
+                x = gated_gemm.cutedsl_bf16_gated_gemm(
+                    x,
+                    weight,
+                    activation=self._gated_activation,
+                    beta=(
+                        self.act_fn.beta if self._gated_activation == "situ" else 1.0
+                    ),
+                    linear_beta=(
+                        self.act_fn.linear_beta
+                        if self._gated_activation == "situ"
+                        else 1.0
+                    ),
+                )
+            else:
+                gate_up, _ = self.gate_up_proj(x)
+                x = self.act_fn(gate_up)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
             return self.gemm_rs_ar.apply(x, self.down_proj)
