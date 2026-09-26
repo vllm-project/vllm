@@ -13,9 +13,11 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -40,6 +42,8 @@ from vllm.v1.worker.utils import (
     bind_kv_cache_to_layers,
     prepare_kernel_block_sizes,
 )
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
@@ -250,10 +254,24 @@ def init_attn_backend(
     # by all backends within that group.
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
+    if current_platform.is_xpu():
+        for kv_cache_group_id, selected_kernel_block_size in enumerate(
+            kernel_block_sizes
+        ):
+            if selected_kernel_block_size % 64 != 0:
+                for attn_group in attn_groups[kv_cache_group_id]:
+                    logger.warning_once(
+                        "On XPU platform, current selected kernel block size is "
+                        "not fully optimized: kernel_block_size=%s, backend=%s, "
+                        "kv_cache_spec=%s",
+                        selected_kernel_block_size,
+                        attn_group.backend,
+                        repr(attn_group.kv_cache_spec),
+                    )
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
-        kernel_block_size = None
+        kernel_block_size: int | None = None
         if kv_cache_group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
