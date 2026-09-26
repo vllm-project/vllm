@@ -217,9 +217,10 @@ class DSparkDeepseekV4Model(nn.Module):
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
             attn = layer.attn
-            kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
+            # kv stays un-normed; _insert_context_kv folds kv_norm into the
+            # uint8 fused insert kernel, or applies it internally otherwise.
             _insert_context_kv(attn, kv, context_positions, slot_mapping)
 
     def forward(
@@ -277,46 +278,75 @@ class DSparkDeepseekV4Model(nn.Module):
         return hidden_states
 
 
+_FUSED_KV_NORM_INSERT_OP = None
+
+
+def _fused_kv_norm_insert_op():
+    """Resolve the norm-fused KV-only insert op once (None if not built)."""
+    global _FUSED_KV_NORM_INSERT_OP
+    if _FUSED_KV_NORM_INSERT_OP is None:
+        _FUSED_KV_NORM_INSERT_OP = getattr(
+            torch.ops._C, "fused_deepseek_v4_kv_norm_rope_quant_insert", False
+        )
+    return _FUSED_KV_NORM_INSERT_OP or None
+
+
 def _insert_context_kv(
     attn: nn.Module,
     kv: torch.Tensor,
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
+    """kv_norm + RoPE + quant + paged-cache insert of raw context KV.
 
-    Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
-    query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
+    ``kv`` is the un-normed projection output. The fp8_ds_mla (uint8) path
+    folds kv_norm into the KV-only insert kernel when the fused op is built;
+    otherwise it norms externally and falls back to the plain KV-only op.
+    Other cache dtypes norm externally and reuse the Q+KV fused ops with
+    ``num_heads_q=0`` (no dummy query allocation).
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
-    n_ctx = kv.shape[0]
-    dummy_q = torch.zeros(
-        (n_ctx, attn.n_local_heads, attn.head_dim),
-        dtype=kv.dtype,
-        device=kv.device,
-    )
     if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
         swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
+        fused_norm_insert = _fused_kv_norm_insert_op()
+        if fused_norm_insert is not None:
+            fused_norm_insert(
+                kv,
+                attn.kv_norm.weight,
+                swa_2d,
+                slot_mapping,
+                positions,
+                cos_sin_cache,
+                attn.eps,
+                block_size,
+            )
+            return
+        kv = attn.kv_norm(kv).contiguous()
+        torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
             kv,
             swa_2d,
             slot_mapping,
             positions,
             cos_sin_cache,
-            attn.padded_heads,
             attn.eps,
             block_size,
         )
-    elif cache_dtype == torch.bfloat16:
+        return
+    kv = attn.kv_norm(kv).contiguous()
+    n_ctx = kv.shape[0]
+    # Full-cache kernel already accepts num_heads_q=0 (one KV slot per token).
+    empty_q = torch.empty(
+        (n_ctx, 0, attn.head_dim),
+        dtype=kv.dtype,
+        device=kv.device,
+    )
+    if cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-            dummy_q,
+            empty_q,
             kv,
             swa_3d,
             slot_mapping,
@@ -324,15 +354,19 @@ def _insert_context_kv(
             cos_sin_cache,
             attn.eps,
             block_size,
+            False,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # TODO(ben): double-check if this is being dispatched correctly for FI backend
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
+        empty_q_fp8 = torch.empty(
+            (n_ctx, 0, attn.head_dim),
+            dtype=torch.float8_e4m3fn,
+            device=kv.device,
+        )
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-            dummy_q,
+            empty_q,
             kv,
-            dummy_q_fp8,
+            empty_q_fp8,
             swa_3d,
             slot_mapping,
             positions,
@@ -341,7 +375,9 @@ def _insert_context_kv(
             attn._flashinfer_fp8_q_scale_inv,
             attn.eps,
             block_size,
+            False,
         )
+
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
