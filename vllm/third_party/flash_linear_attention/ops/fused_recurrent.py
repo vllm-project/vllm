@@ -8,9 +8,13 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
+import functools
+
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 from .op import exp, log
 
@@ -340,6 +344,30 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+@functools.cache
+def _get_packed_decode_launch_config(
+    batch_size: int,
+    num_key_heads: int,
+    num_value_heads: int,
+    key_dim: int,
+    value_dim: int,
+    device_index: int,
+) -> tuple[int, int, int]:
+    tile_value_dim = min(next_power_of_2(value_dim), 32)
+    # The smaller V tile wins for Qwen3.5-0.8B's decode shape on SM120
+    # through B=24; larger profiled batches keep the existing launch.
+    if (
+        num_key_heads == 16
+        and num_value_heads == 16
+        and key_dim == 128
+        and value_dim == 128
+        and batch_size <= 24
+        and current_platform.is_device_capability(120, device_id=device_index)
+    ):
+        tile_value_dim = 16
+    return tile_value_dim, 1, 3
+
+
 def fused_recurrent_gated_delta_rule_packed_decode(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
@@ -438,9 +466,12 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
-    BV = min(triton.next_power_of_2(V), 32)
-    num_stages = 3
-    num_warps = 1
+    device_index = dev.index
+    if device_index is None:
+        device_index = torch.accelerator.current_device_index()
+    BV, num_warps, num_stages = _get_packed_decode_launch_config(
+        B, H, HV, K, V, device_index
+    )
 
     stride_mixed_qkv_tok = mixed_qkv.stride(0)
     stride_a_tok = a.stride(0)
