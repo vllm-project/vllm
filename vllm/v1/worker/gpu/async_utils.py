@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -9,6 +10,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -22,6 +24,37 @@ from vllm.v1.worker.utils import raise_if_nan_logits
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+logger = init_logger(__name__)
+
+_ASYNC_OUTPUT_POLL_INTERVAL_S = 0.01
+
+
+def _synchronize_event(
+    event: torch.cuda.Event,
+    *,
+    event_name: str,
+    timeout_s: float | None = None,
+) -> None:
+    """Wait for a CUDA event without allowing a stuck kernel to hang forever."""
+    if timeout_s is None:
+        timeout_s = envs.VLLM_ASYNC_OUTPUT_TIMEOUT_S
+
+    deadline = time.monotonic() + timeout_s
+    while not event.query():
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            logger.error(
+                "Timed out after %.1f seconds waiting for %s. "
+                "The GPU may be stuck; failing the engine operation.",
+                timeout_s,
+                event_name,
+            )
+            raise TimeoutError(
+                f"Timed out after {timeout_s:.1f} seconds waiting for {event_name}."
+            )
+        time.sleep(min(_ASYNC_OUTPUT_POLL_INTERVAL_S, remaining_s))
 
 
 @dataclass(frozen=True)
@@ -167,7 +200,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        self.copy_event.synchronize()
+        _synchronize_event(self.copy_event, event_name="async model output copy")
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -245,11 +278,11 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
+        _synchronize_event(self.copy_event, event_name="async pooling output copy")
         if isinstance(self.pooler_output_cpu, torch.Tensor):
             pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
         else:
             pooler_output = self.pooler_output_cpu
-        self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
