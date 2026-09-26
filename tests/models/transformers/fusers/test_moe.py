@@ -29,6 +29,42 @@ class TopKRouter(nn.Module):
         return logits, value, index
 
 
+class SelectionScoredRouter(TopKRouter):
+    """Scores the selected logits only (GraniteMoE/Aria style), in fp32."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight).float()
+        value, index = torch.topk(logits, self.top_k, dim=-1)
+        value = (
+            torch.sigmoid(value) if self.sigmoid else F.softmax(value, dim=-1)
+        ).type_as(hidden_states)
+        return logits, value, index
+
+
+class EpsilonRenormRouter(TopKRouter):
+    """Renormalizes via an epsilon-offset denominator (DeepSeek-V3 style)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = torch.sigmoid(logits)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        denominator = value.sum(dim=-1, keepdim=True) + 1e-20
+        value /= denominator
+        return logits, value, index
+
+
+class UntraceableRouter(TopKRouter):
+    """Scores and selects, then loses the trace before the renormalization."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        if value.sum() > 0:  # data-dependent branch: tracing stops here
+            value = value / value.sum(dim=-1, keepdim=True)
+        return logits, value, index
+
+
 class ScaledRouter(TopKRouter):
     """Greedy router scaling its top-k weights (DeepSeek `routed_scaling_factor`)."""
 
@@ -268,11 +304,45 @@ def test_moe_fuser_detects_router(sigmoid):
     assert fuser.shared_name is None and fuser.shared_gate_name is None
 
 
+@pytest.mark.parametrize("sigmoid", [False, True])
+def test_moe_fuser_matches_router_scoring_the_selection(sigmoid):
+    """Scoring the selection rather than all logits still allows the fuser to match."""
+    with torch.device("meta"):
+        block = MoEBlock(lambda: SelectionScoredRouter(sigmoid=sigmoid))
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.gate_name == "gate"
+    assert fuser.scoring_func == ("sigmoid" if sigmoid else "softmax")
+    assert fuser.renormalize is (not sigmoid)
+    assert fuser.router_dtype == torch.float32
+
+
 def test_moe_fuser_matches_scaled_router():
     """Weight scaling after the top-k (DeepSeek style) does not break matching."""
     with torch.device("meta"):
         block = MoEBlock(ScaledRouter)
     assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
+
+
+@pytest.mark.parametrize(
+    "router_cls,expected",
+    [
+        (TopKRouter, True),  # divides by the sum of the selection
+        (EpsilonRenormRouter, True),  # ... with an epsilon in the denominator
+        (ScaledRouter, False),  # scales the weights instead of renormalizing
+        (UntraceableRouter, None),  # trace stops before it could say
+    ],
+)
+def test_moe_fuser_reads_renormalize_from_the_gate(router_cls, expected):
+    """The router's graph, not the config, decides whether vLLM renormalizes: it
+    is the code being replaced, and it already bakes in `norm_topk_prob` because
+    the flag is a Python bool that fx resolves at trace time. Absence of the
+    division only means "no" on a complete trace."""
+    with torch.device("meta"):
+        block = MoEBlock(router_cls)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.renormalize is expected
 
 
 def test_moe_fuser_matches_grouped_router():
