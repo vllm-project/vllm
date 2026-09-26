@@ -209,7 +209,6 @@ async def async_request_openai_completions(
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
@@ -386,7 +385,6 @@ async def async_request_openai_chat_completions(
                 first_chunk_received = False
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
@@ -515,7 +513,6 @@ async def async_request_openai_audio(
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
-                        chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
