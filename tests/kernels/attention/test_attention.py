@@ -309,46 +309,6 @@ def test_paged_attention(
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
-def ref_multi_query_kv_attention(
-    cu_seq_lens: list[int],
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-    alibi_bias: list[torch.Tensor] | None,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    num_seqs = len(cu_seq_lens) - 1
-    ref_outputs: list[torch.Tensor] = []
-    if alibi_bias:
-        assert len(alibi_bias) == num_seqs
-    for i in range(num_seqs):
-        start_idx = cu_seq_lens[i]
-        end_idx = cu_seq_lens[i + 1]
-        seq_len = end_idx - start_idx
-
-        # Create attention mask. ALiBi already includes a tril causal mask.
-        if alibi_bias:
-            attn_mask = alibi_bias[i]
-        else:
-            attn_mask = torch.triu(
-                torch.ones(seq_len, seq_len, dtype=dtype), diagonal=1
-            )
-            attn_mask = attn_mask * torch.finfo(dtype).min
-            attn_mask = attn_mask.to(dtype=dtype)
-
-        ref_output = ref_masked_attention(
-            query[start_idx:end_idx],
-            key[start_idx:end_idx],
-            value[start_idx:end_idx],
-            scale,
-            attn_mask=attn_mask,
-        )
-        ref_outputs.append(ref_output)
-
-    return torch.cat(ref_outputs, dim=0)
-
-
 @pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])
 def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
     head_size = 64

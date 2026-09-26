@@ -317,14 +317,6 @@ def example_system_message() -> str:
         return f.read()
 
 
-class DecoderPromptType(Enum):
-    """For encoder/decoder models only."""
-
-    CUSTOM = 1
-    NONE = 2
-    EMPTY_STR = 3
-
-
 @pytest.fixture
 def example_long_prompts() -> list[str]:
     return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]

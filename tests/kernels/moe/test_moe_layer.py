@@ -275,11 +275,6 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
-def rank_chunk(num: int, r: int, w: int) -> int:
-    rem = num % w
-    return (num // w) + (1 if r < rem else 0)
-
-
 def chunk_by_rank(
     t: torch.Tensor,
     r: int,
@@ -292,19 +287,6 @@ def chunk_by_rank(
     if device is not None:
         t = t.to(device)
     return t
-
-
-def maybe_chunk_by_rank(
-    t: torch.Tensor | None,
-    r: int,
-    w: int,
-    dim: int = 0,
-    device: torch.device | None = None,
-) -> torch.Tensor | None:
-    if t is not None:
-        return chunk_by_rank(t, r, w, dim, device)
-    else:
-        return t
 
 
 def tp_chunk_gate_up(
@@ -676,26 +658,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     return True, None
 
 
-def chunk_scales_by_rank(
-    t: torch.Tensor | None,
-    r: int,
-    w: int,
-    device: torch.device | None = None,
-) -> torch.Tensor | None:
-    if t is not None and t.numel() > 1:
-        # Calculate start index by summing chunk sizes for all previous ranks
-        # start = sum(rank_chunk(t.shape[0], i, w) for i in range(r))
-        # chunk = rank_chunk(t.shape[0], r, w)
-        # t = t[start:(start + chunk)]
-        chunk = rank_chunk(t.shape[0], r, w)
-        t = t[(r * chunk) : max(t.shape[0], (r + 1) * chunk)]
-
-    if t is not None and device is not None:
-        t = t.to(device)
-
-    return t
-
-
 def chunk_scales(
     t: torch.Tensor | None,
     start: int,
@@ -769,19 +731,6 @@ def _quantize_fp8_halves(
         w13_weight_scale=w13_weight_scale,
         w2_weight_scale=w2_weight_scale,
     )
-
-
-def quantization_to_quant_dtype(
-    quantization: str | None,
-) -> torch.dtype | str | None:
-    if quantization is None:
-        return None
-    elif quantization in ["fp8", "fp8_blocked", "modelopt_fp8"]:
-        return fp8_dtype
-    elif quantization in ["modelopt_fp4"]:
-        return "nvfp4"
-    else:
-        raise NotImplementedError(f"Unsupported quantization: {quantization}")
 
 
 def make_quant_config(
