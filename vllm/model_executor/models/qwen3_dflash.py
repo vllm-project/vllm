@@ -92,7 +92,9 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     if override is not None:
         return bool(override)
     layer_types = getattr(config, "layer_types", None)
-    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
+    if not layer_types:
+        return False
+    return layer_types[layer_idx] == _SLIDING_ATTENTION
 
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
@@ -105,6 +107,7 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
 
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
+    assert spec_config is not None
     config = spec_config.draft_model_config.hf_config
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
     num_features_to_use = len(aux_layers) if aux_layers else config.num_hidden_layers
@@ -418,7 +421,9 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
         _add_global_draft_layer_exclusions(
@@ -759,7 +764,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.draft_model_config = speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
@@ -801,7 +808,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -896,7 +903,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights["model.mask_embedding"] = mask_embedding
             self.model.has_separate_mask_embedding = True
 
-        orig_to_new_substr = {}
+        orig_to_new_substr: dict[str, None] = {}
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:
