@@ -155,7 +155,13 @@ def chunk_kda_prefill(
             aqk=ws["aqk"],
             decay=ws["decay"],
             # v is dead by this point, so it doubles as the output buffer.
-            out=out if out is not None else v,
+            out=out
+            if out is not None
+            else (
+                v
+                if v.is_contiguous()
+                else torch.empty_like(v, memory_format=torch.contiguous_format)
+            ),
             scale=scale,
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,

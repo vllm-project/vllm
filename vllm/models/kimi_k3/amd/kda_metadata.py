@@ -7,16 +7,26 @@ The request classification and cudagraph staging intentionally mirror
 differently on device rather than on the host.
 """
 
+from dataclasses import dataclass, fields
+
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -85,7 +95,75 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
+@dataclass
+class KimiK3ROCmKDAMetadata(GDNAttentionMetadata):
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
+
+
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    def __init__(
+        self,
+        kv_cache_spec: MambaSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
+
+    def build(  # type: ignore[override]
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+    ) -> GDNAttentionMetadata:
+        attn_metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            fast_build,
+        )
+        checkpoint_enabled = (
+            self.vllm_config.cache_config.mamba_cache_mode == "align"
+            and isinstance(self.kv_cache_spec, MambaSpec)
+            and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+        )
+        if not checkpoint_enabled:
+            return attn_metadata
+        return KimiK3ROCmKDAMetadata(
+            **{f.name: getattr(attn_metadata, f.name) for f in fields(attn_metadata)},
+            checkpoint=self._build_checkpoint_metadata(
+                common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
+            ),
+        )
+
+    def _build_checkpoint_metadata(
+        self,
+        m: CommonAttentionMetadata,
+        attn_metadata: GDNAttentionMetadata,
+        num_decode_draft_tokens_cpu: torch.Tensor | None,
+    ) -> MambaPrefillCheckpointMetadata | None:
+        if attn_metadata.num_prefills == 0:
+            return None
+        # request_rows must line up with prefill_query_start_loc, either the
+        # prefill tail of a decode-first batch, or every non-spec row
+        # including padding
+        num_decodes = attn_metadata.num_decodes
+        request_rows = list(
+            range(num_decodes, num_decodes + attn_metadata.num_prefills)
+        )
+        if attn_metadata.spec_sequence_masks is not None:
+            assert num_decode_draft_tokens_cpu is not None
+            request_rows = (
+                (num_decode_draft_tokens_cpu < 0).nonzero().flatten().tolist()
+            )
+        return self.checkpoint_builder.build(m, request_rows)
+
     def _build_chunk_metadata(
         self,
         prefill_query_start_loc: torch.Tensor,

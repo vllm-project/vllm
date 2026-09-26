@@ -184,6 +184,7 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         """Get the number of blocks needed to be allocated for the request.
 
@@ -203,6 +204,10 @@ class SingleTypeKVCacheManager(ABC):
             apply_admission_cap: If True, clamp by `num_required_blocks` by
                 `_max_admission_blocks_per_request`for recycling-aware specs
                 (SWA, chunked-local).
+            prefill_end: The token index the request's prefill ends at, the
+                same value the scheduler splits chunks against. Mamba needs it
+                to place the prefill checkpoint; 0 (dense retention) keeps the
+                chunk-keyed reservation.
 
         Returns:
             The number of blocks to allocate.
@@ -1215,6 +1220,7 @@ class CircularBufferManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 
@@ -1678,12 +1684,14 @@ class MambaManager(SingleTypeKVCacheManager):
         query_start: int,
         query_end: int,
         checkpoint_position: int,
+        prefill_end: int,
     ) -> bool:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         checkpoint_idx = cdiv(query_end, self.block_size) - 2
         blocks = self.req_to_blocks[request_id]
         return (
             self.has_prefill_checkpoint_blocks
+            and query_end >= prefill_end
             and is_mamba_prefill_checkpoint_valid(
                 query_start=query_start,
                 query_end=query_end,
@@ -1712,6 +1720,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
@@ -1738,6 +1747,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_local_computed_tokens,
                 num_tokens_main_model,
                 apply_admission_cap=apply_admission_cap,
+                prefill_end=prefill_end,
             )
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
@@ -1765,8 +1775,13 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
+            # Keyed on the whole prefill, not this chunk: the helper returns a
+            # boundary strictly below what it is given, so a chunk-relative
+            # position falls inside every chunk and reserves a block on each.
+            # Dense retention (prefill_end == 0) keeps the per-chunk reservation.
+            prefill_end_only = prefill_end > 0
             checkpoint_position = get_mamba_prefill_checkpoint_position(
-                num_tokens,
+                prefill_end if prefill_end_only else num_tokens,
                 self.block_pool.hash_block_size,
                 self.drop_eagle_checkpoint_block,
             )
@@ -1775,6 +1790,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 total_computed_tokens,
                 num_tokens,
                 checkpoint_position,
+                prefill_end if prefill_end_only else 0,
             ):
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
@@ -2028,6 +2044,28 @@ class MambaManager(SingleTypeKVCacheManager):
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
 
+    def _is_reachable_checkpoint(
+        self, request: Request, checkpoint_position: int
+    ) -> bool:
+        """Whether a reserved checkpoint sits where another request can resume at.
+
+        Decide if checkpoints are reachable (scheduler's `prefill_end` or shared
+        prefix boundaries) from checkpoint positions rather than `num_tokens`, as
+        `num_tokens` can be rounded down to scheduler block size by hybrid
+        coordinator, and the final chunk of a prompt whose length is not multiple
+        of the size can be classified as transient and unpublished.
+        """
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        prefill_end_checkpoint = get_mamba_prefill_checkpoint_position(
+            prefill_end,
+            self.block_pool.hash_block_size,
+            self.drop_eagle_checkpoint_block,
+        )
+        return checkpoint_position in (
+            prefill_end_checkpoint,
+            request.shared_prefix_boundary,
+        )
+
     def _cache_partial_tail_block(
         self,
         request: Request,
@@ -2042,10 +2080,8 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
-            if (
-                retention_interval == 0
-                and num_tokens < request.num_prompt_tokens
-                and checkpoint_position != request.shared_prefix_boundary
+            if retention_interval == 0 and not self._is_reachable_checkpoint(
+                request, checkpoint_position
             ):
                 # retention_interval == 0 keeps this transient checkpoint
                 # request-local. The slot may carry a hash from this step's
@@ -2260,6 +2296,7 @@ class HiSparseSourceManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         if (
             total_computed_tokens > num_local_computed_tokens
@@ -2418,6 +2455,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         assert not new_computed_blocks
         # A hot region is needed to read host-backed history: an external
@@ -2490,6 +2528,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         del num_tokens_main_model
         assert not new_computed_blocks
