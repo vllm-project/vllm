@@ -351,6 +351,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         is_fused_checkpoint_transposed: bool = False,
+        moe_block_type: type[nn.Module] = Qwen3MoeSparseMoeBlock,
     ) -> None:
         super().__init__()
 
@@ -386,7 +387,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         if (layer_idx not in mlp_only_layers) and (
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen3MoeSparseMoeBlock(
+            self.mlp = moe_block_type(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.mlp",
                 is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
