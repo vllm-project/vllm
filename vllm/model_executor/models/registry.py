@@ -616,6 +616,7 @@ _MULTIMODAL_MODELS = {
         "cohere_asr",
         "CohereAsrForConditionalGeneration",
     ),
+    "MarianMTModel": ("marian", "MarianMTModel"),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",
