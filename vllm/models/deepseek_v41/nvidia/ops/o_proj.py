@@ -16,7 +16,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dyna
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
 from vllm.platforms import current_platform
 
-_FUSED_WO_A_MAX_TOKENS = 32
+
+def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
+    # Additional token tiles only pay off for smaller grids.
+    ctas_per_tile = layer.n_local_heads * (layer.o_lora_rank // 128)
+    return 96 if ctas_per_tile <= 128 else 32
 
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
@@ -45,7 +49,7 @@ def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
         _FUSED_WO_A_KERNEL.register_warmup(
-            max_tokens=_FUSED_WO_A_MAX_TOKENS,
+            max_tokens=_fused_wo_a_max_tokens(layer),
             n_groups=layer.n_local_groups,
             heads_per_group=layer.n_local_heads // layer.n_local_groups,
             o_lora_rank=layer.o_lora_rank,
@@ -58,7 +62,7 @@ def dsv41_o_proj(
     """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches."""
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache
-    if 1 <= o.shape[0] <= _FUSED_WO_A_MAX_TOKENS and _can_fuse_wo_a(layer):
+    if 1 <= o.shape[0] <= _fused_wo_a_max_tokens(layer) and _can_fuse_wo_a(layer):
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
         q, scales = _FUSED_WO_A_KERNEL(
