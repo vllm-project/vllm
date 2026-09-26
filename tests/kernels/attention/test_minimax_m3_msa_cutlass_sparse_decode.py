@@ -31,6 +31,10 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     prepare_decode_metadata,
     should_prepare_decode_metadata,
 )
+from vllm.models.minimax_m3.nvidia.msa_flashinfer_sparse_decode import (
+    msa_flashinfer_sparse_decode,
+    supports_flashinfer_sparse_decode,
+)
 from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
     MiniMaxM3SparseMSABackend,
     MiniMaxM3SparseMSADecodeMetadata,
@@ -165,9 +169,41 @@ def test_msa_cutlass_decode_static_dispatch_requires_sm100(
 
 
 @pytest.mark.parametrize(
+    ("decode_backend", "num_q_heads", "num_kv_heads", "kv_cache_dtype", "expected"),
+    [
+        ("flashinfer", 16, 1, "fp8_e4m3", True),
+        ("flashinfer", 16, 1, "fp8", True),
+        ("triton", 16, 1, "fp8_e4m3", False),
+        ("flashinfer", 16, 1, "bfloat16", False),
+        ("flashinfer", 17, 1, "fp8_e4m3", False),
+        ("flashinfer", 16, 3, "fp8_e4m3", False),
+    ],
+)
+def test_msa_flashinfer_decode_static_dispatch(
+    decode_backend: str,
+    num_q_heads: int,
+    num_kv_heads: int,
+    kv_cache_dtype: str,
+    expected: bool,
+) -> None:
+    assert (
+        supports_flashinfer_sparse_decode(
+            decode_backend=decode_backend,  # type: ignore[arg-type]
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            kv_cache_dtype=kv_cache_dtype,
+            page_size=BLOCK_SIZE,
+            topk_blocks=TOPK,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     ("backend", "expected"),
     [
         (AttentionBackendEnum.CUTLASS_MSA, "cutlass"),
+        (AttentionBackendEnum.FLASHINFER_MSA, "flashinfer"),
         (AttentionBackendEnum.TRITON_MSA, "triton"),
     ],
 )
@@ -416,6 +452,185 @@ def _make_topk(
                 visible_pages, dtype=torch.int32, device="cuda"
             )
     return topk
+
+
+def _reference_sparse_attention(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    q2k_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int],
+    query_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(query)
+    lse = torch.empty(query.shape[:2], dtype=torch.float32, device=query.device)
+    group_size = query.shape[1] // key_cache.shape[1]
+    for request, seq_len in enumerate(seq_lens):
+        for local_query in range(query_len):
+            token = request * query_len + local_query
+            query_position = seq_len - query_len + local_query
+            for query_head in range(query.shape[1]):
+                kv_head = query_head // group_size
+                keys = []
+                values = []
+                for logical_page in q2k_indices[kv_head, token].tolist():
+                    if logical_page < 0:
+                        break
+                    physical_page = int(block_table[request, logical_page])
+                    page_start = logical_page * BLOCK_SIZE
+                    page_end = min(
+                        page_start + BLOCK_SIZE,
+                        seq_len,
+                        query_position + 1,
+                    )
+                    if page_end <= page_start:
+                        continue
+                    page_tokens = page_end - page_start
+                    keys.append(key_cache[physical_page, kv_head, :page_tokens])
+                    values.append(value_cache[physical_page, kv_head, :page_tokens])
+                selected_keys = torch.cat(keys).to(torch.float32)
+                selected_values = torch.cat(values).to(torch.float32)
+                scores = (
+                    selected_keys @ query[token, query_head].to(torch.float32)
+                ) * SM_SCALE
+                probabilities = torch.softmax(scores, dim=0)
+                output[token, query_head] = probabilities @ selected_values
+                lse[token, query_head] = torch.logsumexp(scores, dim=0)
+    return output, lse
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_msa_flashinfer_decode_matches_triton_and_lse_reference(
+    query_len: int,
+) -> None:
+    torch.manual_seed(1)
+    num_q_heads = 16
+    num_kv_heads = 4
+    seq_lens_list = [257, 513]
+    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device="cuda")
+    pages_per_request = [math.ceil(length / BLOCK_SIZE) for length in seq_lens_list]
+    num_pages = sum(pages_per_request)
+    max_pages = max(pages_per_request)
+    block_table = torch.zeros(
+        len(seq_lens_list), max_pages, dtype=torch.int32, device="cuda"
+    )
+    physical_pages = torch.randperm(num_pages, dtype=torch.int32, device="cuda")
+    offset = 0
+    for request, request_pages in enumerate(pages_per_request):
+        block_table[request, :request_pages] = physical_pages[
+            offset : offset + request_pages
+        ]
+        offset += request_pages
+
+    key_cache = (
+        torch.randn(
+            num_pages,
+            num_kv_heads,
+            BLOCK_SIZE,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        * 0.25
+    ).to(torch.float8_e4m3fn)
+    value_cache = (torch.randn_like(key_cache, dtype=torch.bfloat16) * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    assert key_cache.is_contiguous() and value_cache.is_contiguous()
+
+    total_q = len(seq_lens_list) * query_len
+    query = torch.randn(
+        total_q,
+        num_q_heads,
+        HEAD_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    query_scale_float = 0.75
+    query_scale = torch.tensor(query_scale_float, dtype=torch.float32, device="cuda")
+    query_fp8 = torch.empty_like(query, dtype=torch.float8_e4m3fn)
+    ops.scaled_fp8_quant(
+        query.view(total_q, -1),
+        scale=query_scale,
+        output=query_fp8.view(total_q, -1),
+    )
+    query_dequantized = query_fp8.to(torch.bfloat16) * query_scale
+    topk_token_major = _make_topk(seq_lens_list, num_kv_heads, query_len)
+    q2k_indices = topk_token_major.transpose(0, 1)
+    assert not q2k_indices.is_contiguous()
+
+    packed_cache = torch.cat((key_cache, value_cache), dim=-1)
+    triton_output = torch.empty_like(query)
+    minimax_m3_sparse_attn_decode(
+        query_dequantized,
+        packed_cache,
+        q2k_indices,
+        block_table,
+        seq_lens,
+        num_kv_heads,
+        SM_SCALE,
+        triton_output,
+        query_len,
+        k_scale=None,
+        v_scale=None,
+    )
+    reference_output, reference_lse = _reference_sparse_attention(
+        query_dequantized,
+        key_cache,
+        value_cache,
+        q2k_indices,
+        block_table,
+        seq_lens_list,
+        query_len,
+    )
+
+    provided_output = torch.empty_like(query)
+    provided_lse = torch.empty(
+        query.shape[0], query.shape[1], dtype=torch.float32, device=query.device
+    )
+    capture_stream = torch.cuda.Stream()
+    with torch.cuda.stream(capture_stream):
+        actual, actual_lse = msa_flashinfer_sparse_decode(
+            query_fp8,
+            packed_cache,
+            q2k_indices,
+            block_table,
+            seq_lens,
+            query_len,
+            scale=SM_SCALE,
+            q_scale_float=query_scale_float,
+            out=provided_output,
+            lse_out=provided_lse,
+        )
+    capture_stream.synchronize()
+
+    assert actual.data_ptr() == provided_output.data_ptr()
+    assert actual_lse.data_ptr() == provided_lse.data_ptr()
+    torch.testing.assert_close(actual, triton_output, atol=0.02, rtol=0.02)
+    torch.testing.assert_close(actual, reference_output, atol=0.02, rtol=0.02)
+    torch.testing.assert_close(actual_lse, reference_lse, atol=0.02, rtol=0.02)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=capture_stream):
+        captured_output, captured_lse = msa_flashinfer_sparse_decode(
+            query_fp8,
+            packed_cache,
+            q2k_indices,
+            block_table,
+            seq_lens,
+            query_len,
+            scale=SM_SCALE,
+            q_scale_float=query_scale_float,
+            out=provided_output,
+            lse_out=provided_lse,
+        )
+    assert captured_output.data_ptr() == actual.data_ptr()
+    assert captured_lse.data_ptr() == actual_lse.data_ptr()
+    graph.replay()
+    current_platform.synchronize()
+    torch.testing.assert_close(captured_output, reference_output, atol=0.02, rtol=0.02)
+    torch.testing.assert_close(captured_lse, reference_lse, atol=0.02, rtol=0.02)
 
 
 @pytest.mark.parametrize(
