@@ -1804,6 +1804,28 @@ class TestThinkingConfig:
                 thinking=thinking,
             )
 
+    def test_pd_prefill_leg_skips_budget_check(self):
+        """P/D sidecars resend the request to the prefill node with
+        max_tokens=1; the budget is enforced on the decode leg instead."""
+        thinking = {"type": "enabled", "budget_tokens": 1024}
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking=thinking,
+            kv_transfer_params={"do_remote_decode": True},
+        )
+
+        assert _convert(request).thinking_token_budget == 1024
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+                kv_transfer_params={"do_remote_decode": False},
+            )
+
     def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):
         """`adaptive` lets the model choose depth, so only the ceiling from
         output_config.effort should survive."""
