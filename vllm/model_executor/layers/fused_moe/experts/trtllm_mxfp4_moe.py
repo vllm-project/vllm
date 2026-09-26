@@ -170,6 +170,17 @@ class TrtLlmMxfp4ExpertsMonolithic(
         return True
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`apply` forwards `self.gemm1_clamp_limit` (built per-expert in
+        the base `__init__` from `quant_config.gemm1_clamp_limit`)
+        unconditionally to `flashinfer.trtllm_fp4_block_scale_moe` via the
+        `gemm1_clamp_limit` kwarg (see the call site in `apply`).
+        `_supports_activation` restricts this backend to SILU and
+        SWIGLUOAI; both reach the kernel with the clamp threaded.
+        """
+        return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
+
+    @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
@@ -300,6 +311,17 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         moe_config.limit_deferred_moe_finalize(
             self._max_supported_tokens(self.topk, moe_config.num_experts)
         )
+
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`apply` forwards `self.gemm1_clamp_limit` (built per-expert in
+        the base `__init__` from `quant_config.gemm1_clamp_limit`)
+        unconditionally to `flashinfer.trtllm_fp4_block_scale_routed_moe`
+        via the `gemm1_clamp_limit` kwarg. `_supports_activation`
+        restricts this backend to SILU and SWIGLUOAI; both reach the
+        kernel with the clamp threaded.
+        """
+        return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
 
     @staticmethod
     def _supports_parallel_config(
