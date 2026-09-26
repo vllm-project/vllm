@@ -9,7 +9,8 @@ import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
-from vllm.distributed.kv_events import BlockStored
+from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_events import AllBlocksCleared, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -513,6 +514,7 @@ def test_store_events_persist_across_polls():
     connector = object.__new__(mooncake_store_connector.MooncakeStoreConnector)
     connector.connector_scheduler = MagicMock()
     connector._kv_cache_events = None
+    connector._pending_reset_events = []
     complete = _make_block_stored(b"complete", group_idx=0)
     pending = _make_block_stored(b"pending", group_idx=0)
 
@@ -536,6 +538,78 @@ def test_store_events_persist_across_polls():
 # ============================================================
 
 
+def _make_scheduler_connector_for_reset(
+    enable_kv_events: bool = True,
+) -> tuple[mooncake_store_connector.MooncakeStoreConnector, MagicMock]:
+    vllm_config = _make_vllm_config()
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=enable_kv_events
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    scheduler_instance = mock_scheduler_cls.return_value
+    scheduler_instance.has_pending_push_work.return_value = False
+    return connector, scheduler_instance
+
+
+def test_reset_cache_emits_stored_events_before_clear_once():
+    connector, scheduler_instance = _make_scheduler_connector_for_reset()
+    ready = _make_block_stored(b"ready", group_idx=0)
+    incomplete = _make_block_stored(b"incomplete", group_idx=0)
+    old_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=2)
+    old_events.add_events([ready, ready, incomplete])
+    connector._kv_cache_events = old_events
+    scheduler_instance.reset_store.return_value = True
+
+    assert connector.reset_cache() is True
+    assert list(connector.take_events()) == [ready, AllBlocksCleared()]
+    assert list(connector.take_events()) == []
+
+    new_event = _make_block_stored(b"new", group_idx=0)
+    new_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
+    new_events.add_events([new_event])
+    connector.update_connector_output(KVConnectorOutput(kv_cache_events=new_events))
+    assert list(connector.take_events()) == [new_event]
+
+
+def test_reset_cache_failure_preserves_pending_store_events():
+    connector, scheduler_instance = _make_scheduler_connector_for_reset()
+    event = _make_block_stored()
+    old_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
+    old_events.add_events([event])
+    connector._kv_cache_events = old_events
+    scheduler_instance.reset_store.return_value = False
+
+    assert connector.reset_cache() is False
+    assert connector._kv_cache_events is old_events
+    assert list(connector.take_events()) == [event]
+
+
+def test_reset_cache_rejects_pending_store_writes():
+    connector, scheduler_instance = _make_scheduler_connector_for_reset()
+    scheduler_instance.has_pending_push_work.return_value = True
+
+    assert connector.reset_cache() is False
+    scheduler_instance.reset_store.assert_not_called()
+    assert list(connector.take_events()) == []
+
+
+def test_reset_cache_does_not_emit_clear_when_events_disabled():
+    connector, scheduler_instance = _make_scheduler_connector_for_reset(False)
+    scheduler_instance.reset_store.return_value = True
+
+    assert connector.reset_cache() is True
+    assert list(connector.take_events()) == []
+
+
 def test_reset_cache_scheduler_role_delegates_to_reset_store():
     """SCHEDULER role reset_cache() routes to scheduler.reset_store()."""
     vllm_config = _make_vllm_config()
@@ -553,6 +627,7 @@ def test_reset_cache_scheduler_role_delegates_to_reset_store():
         )
 
     mock_scheduler_cls.return_value.reset_store.return_value = True
+    mock_scheduler_cls.return_value.has_pending_push_work.return_value = False
     assert conn.reset_cache() is True
     mock_scheduler_cls.return_value.reset_store.assert_called_once_with()
 
@@ -574,6 +649,7 @@ def test_reset_cache_scheduler_role_propagates_failure():
         )
 
     mock_scheduler_cls.return_value.reset_store.return_value = False
+    mock_scheduler_cls.return_value.has_pending_push_work.return_value = False
     assert conn.reset_cache() is False
 
 
@@ -846,6 +922,7 @@ def test_scheduler_reset_connector_cache_invokes_connector_reset():
         )
 
     mock_scheduler_cls.return_value.reset_store.return_value = True
+    mock_scheduler_cls.return_value.has_pending_push_work.return_value = False
 
     class _StubScheduler:
         def __init__(self, c):
@@ -896,12 +973,13 @@ def test_reset_cache_scheduler_role_clears_local_state():
     conn._kv_cache_events = mooncake_store_connector.MooncakeStoreKVEvents(
         num_workers=1
     )
+    sched_inst.has_pending_push_work.return_value = False
     sched_inst.reset_store.return_value = True
 
     assert conn.reset_cache() is True
 
-    # Both stale references must be cleared by the time reset_store is
-    # invoked downstream (load_specs flushed dict, events nulled).
+    # Load specs are cleared before the RPC. Events are cleared after the
+    # master acknowledges the reset.
     assert sched_inst.load_specs == {}
     assert conn._kv_cache_events is None
 
