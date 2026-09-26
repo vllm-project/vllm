@@ -10,7 +10,8 @@ with single-kernel HPC implementations:
   head : same as pre but hc_mult projection rows and no H_post output
 
 The eager path issues 20 / 5 / 15 kernels for pre / post / head; each HPC op is
-a single kernel.
+a single kernel. ``HpcIHCPostPre`` additionally folds one sub-block's post,
+the following sub-block's pre, and RMSNorm into one launch.
 
 Constraints:
   - Requires VLLM_ENABLE_HPC_OPS=1
@@ -23,10 +24,6 @@ Constraints:
 The fused modules own no parameters: their forwards read the weights of the
 eager layer they replace directly via the captured owner reference.
 
-NOTE: The reference implementation also offers a cross-layer post+pre fusion
-(``HpcIHCPostPre``) that folds one segment's post into the next segment's pre.
-It requires reworking the decoder-layer forward scheduling and is not ported
-here. TODO: add it once the decoder dataflow is restructured for it.
 """
 
 import torch
@@ -234,4 +231,52 @@ class HpcIHCHead(HpcModule):
             owner.hc_head_base,
             self.norm_eps,
             self.hc_eps,
+        )
+
+
+class HpcIHCPostPre(HpcModule):
+    """Fuse one iHC post boundary with the following pre and RMSNorm."""
+
+    def __init__(
+        self,
+        hc_mult: int,
+        hidden_size: int,
+        magnitude: float,
+        hc_eps: float,
+        norm_eps: float,
+        pre_owner: torch.nn.Module,
+        norm_owner: torch.nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        self.hc_mult = hc_mult
+        self.hidden_size = hidden_size
+        self.magnitude = magnitude
+        self.hc_eps = hc_eps
+        self.norm_eps = norm_eps
+        object.__setattr__(self, "_pre_owner", pre_owner)
+        object.__setattr__(self, "_norm_owner", norm_owner)
+
+    @classmethod
+    def support(cls, hc_mult: int, hidden_size: int) -> bool:
+        return _ihc_supported(hc_mult, hidden_size)
+
+    def forward(
+        self, xa: torch.Tensor, residual: torch.Tensor, post_gates: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        import hpc
+
+        owner = self._pre_owner
+        norm_owner = self._norm_owner
+        return hpc.fuse_ihc_post_pre(
+            xa,
+            residual,
+            post_gates,
+            owner.hc_fn.weight,
+            owner.hc_scale,
+            owner.hc_base,
+            self.norm_eps,
+            self.hc_eps,
+            self.magnitude,
+            norm_owner.weight if norm_owner is not None else None,
+            norm_owner.variance_epsilon if norm_owner is not None else 0.0,
         )
