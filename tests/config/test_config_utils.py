@@ -8,7 +8,12 @@ import pytest
 
 from vllm.config.cache import CacheConfig
 from vllm.config.scheduler import SchedulerConfig
-from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
+from vllm.config.utils import (
+    get_attr_docs,
+    get_hash_factors,
+    hash_factors,
+    normalize_value,
+)
 
 # Helpers
 
@@ -114,7 +119,7 @@ def test_normalize_value_uuid_and_to_json():
     [
         (lambda x: x),
         (type("CallableInstance", (), {"__call__": lambda self: 0}))(),
-        (lambda: (lambda: 0))(),  # nested function instance
+        (lambda: lambda: 0)(),  # nested function instance
     ],
 )
 def test_error_cases(bad):
@@ -166,6 +171,31 @@ def test_classes_are_types():
         pass
 
     assert endswith_fqname(LocalDummy, ".LocalDummy")
+
+
+def test_get_attr_docs_includes_inherited_fields():
+    """get_attr_docs must collect attribute docstrings inherited from base
+    classes, not just those declared in the class's own body."""
+
+    @dataclass
+    class Base:
+        inherited: object = None
+        """doc for inherited (base)."""
+        overridden: object = None
+        """base version of overridden."""
+
+    @dataclass
+    class Derived(Base):
+        own: object = None
+        """doc for own (derived)."""
+        overridden: object = None
+        """derived override of overridden."""
+
+    docs = get_attr_docs(Derived)
+
+    assert docs["own"] == "doc for own (derived)."
+    assert docs["inherited"] == "doc for inherited (base)."
+    assert docs["overridden"] == "derived override of overridden."
 
 
 def test_envs_compile_factors_stable():
@@ -303,3 +333,10 @@ print(hash_factors(envs.compile_factors()))
         "HOME relocation changed the compile-cache env hash - a "
         "location-only derived var is leaking into the key"
     )
+
+
+def test_get_attr_docs_rejects_non_class():
+    """The annotation forbids it, but the runtime guard still protects
+    untyped callers, so keep asserting the documented TypeError."""
+    with pytest.raises(TypeError, match="Given object was not a class."):
+        get_attr_docs(object())  # type: ignore[arg-type]
