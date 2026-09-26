@@ -224,7 +224,7 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
     request = dict(
         model="claude-3-7-sonnet-latest",
         max_tokens=1,
-        temperature=0.0,
+        extra_body={"temperature": 0.0},
         messages=[
             {
                 "role": "user",
