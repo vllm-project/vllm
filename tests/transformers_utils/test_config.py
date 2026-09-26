@@ -76,6 +76,21 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
         assert set(config.rope_parameters) == set(per_layer)
 
 
+def test_deepseek_vl2_default_tile_tag_is_2d():
+    """The ``tile_tag`` default must be ``"2D"`` (the only value the model
+    supports), not the literal ``"tile_tag"``; otherwise a config that omits
+    ``tile_tag`` makes model init raise "Only 2D tile_tag is supported"."""
+    from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
+
+    config = DeepseekVLV2Config(
+        vision_config={},
+        projector_config={},
+        language_config={"vocab_size": 102400},
+    )
+
+    assert config.tile_tag == "2D"
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {
