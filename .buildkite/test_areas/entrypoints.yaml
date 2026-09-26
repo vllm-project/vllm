@@ -60,7 +60,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm/core
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/generate # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
@@ -82,9 +82,9 @@ steps:
   - pytest -v -s entrypoints/llm/accuracy
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (LLM Accuracy)"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (LLM Accuracy)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
@@ -101,9 +101,9 @@ steps:
   - pytest -v -s entrypoints/llm/structured_output --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (LLM Structured Output) %N"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (LLM Structured Output) %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd

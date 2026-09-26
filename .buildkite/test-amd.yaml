@@ -50,7 +50,7 @@
 #                                                  some of the dependencies. Please check the error message and add the package to  #
 #                                                  whitelist in `/vllm/tools/pre_commit/generate_nightly_torch_test.py`.            #
 #   * [Entrypoints Integration (LLM)]:                                                                                              #
-#     - {`pytest -v -s entrypoints/llm/test_generate.py`}: It needs a clean process                                                 #
+#     - {`pytest -v -s entrypoints/llm/generate`}: It needs a clean process                                                         #
 #     - {`pytest -v -s entrypoints/offline_mode`}: Needs to avoid interference with other tests                                     #
 #   * [Engine / Engine (1 GPU) / e2e Scheduling / e2e Core / V1 e2e / Spec Decode / V1 Sample + Logits / V1 Core + KV + Metrics]:   #
 #     - Previously a single "V1 Test e2e + engine" step, now split across multiple groups.                                          #
@@ -3332,8 +3332,8 @@ steps:
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/generate --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - pytest -v -s entrypoints/llm/generate # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) %N"
