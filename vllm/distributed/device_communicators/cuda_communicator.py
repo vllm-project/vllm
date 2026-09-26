@@ -72,6 +72,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
 
+        is_rdna4 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            is_rdna4 = on_rdna4()
+
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
@@ -92,6 +98,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
         )
+        from vllm.distributed.device_communicators.rdna4_all_reduce import (
+            RDNA4AllReduce,
+        )
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
@@ -110,6 +119,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
+        self.rdna4_ar_comm: RDNA4AllReduce | None = None
+
+        if use_custom_allreduce and self.world_size in (2, 4, 8) and is_rdna4:
+            try:
+                self.rdna4_ar_comm = RDNA4AllReduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
+                if self.rdna4_ar_comm.disabled:
+                    self.rdna4_ar_comm = None
+            except Exception:
+                logger.exception(
+                    "RDNA4 all-reduce initialization failed; using fallback"
+                )
+                self.rdna4_ar_comm = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -140,7 +164,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
+        if (
+            use_custom_allreduce
+            and not is_rdna4
+            and self.aiter_ar_comm is None
+            and self.world_size > 1
+        ):
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
@@ -166,7 +195,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 self.use_aiter_ag_rs = True
 
-        if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
+        if (
+            use_custom_allreduce
+            and self.world_size > 1
+            and not is_rdna4
+            and current_platform.is_rocm()
+        ):
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
             # (vLLM's or AITER's), so it is initialized for either backend.
@@ -267,6 +301,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "RDNA4",
             "FLASHINFER_PCIE_IPC",
             "FLASHINFER",
             "NCCL_SYMM_MEM",
@@ -277,6 +312,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if self.rdna4_ar_comm is not None:
+            enabled_ar_backends.append("RDNA4")
         if (
             self.fi_pcie_ipc_ar_comm is not None
             and not self.fi_pcie_ipc_ar_comm.disabled
@@ -333,6 +370,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        rdna4_ar_comm = self.rdna4_ar_comm
+        if rdna4_ar_comm is not None and rdna4_ar_comm.should_use(input_):
+            out = rdna4_ar_comm.all_reduce(input_)
+            assert out is not None
+            return out
+
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
             fi_ar_comm is not None
@@ -667,6 +710,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None
+        if self.rdna4_ar_comm is not None:
+            self.rdna4_ar_comm.close()
+            self.rdna4_ar_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None

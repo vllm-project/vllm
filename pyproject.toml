@@ -58,6 +58,8 @@ include = ["vllm*"]
 # `vllm` is the only installed package; everything else is standalone scripts
 "!vllm/**" = ["INP"]
 "vllm/third_party/**" = ["ALL"]
+# This directory is exposed by the same-named .py facade via __path__.
+"vllm/distributed/device_communicators/rdna4_all_reduce/*.py" = ["INP001"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
 # test args are mostly pytest fixtures, which don't benefit from descriptions
