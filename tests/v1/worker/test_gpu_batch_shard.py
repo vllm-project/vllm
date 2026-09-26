@@ -376,7 +376,8 @@ def test_gather_src_indices_round_trip(tp_size: int):
 def test_gather_sampler_output_kernels(tp_size: int):
     """The fused pack/unpack kernels round-trip per-rank sampler results
     into batch order: token ids zero-filled past the local width, counts
-    cast back to int32, identical on every rank."""
+    cast back to int32, identical on every rank. A rank with no reasoning loop
+    breaks to report contributes zeros, not uninitialized memory."""
     from dataclasses import replace as dc_replace
 
     from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -396,6 +397,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
     expected_ids = torch.zeros(num_reqs, width, dtype=torch.int64)
     expected_sampled = torch.zeros(num_reqs, dtype=torch.int32)
     expected_rejected = torch.zeros(num_reqs, dtype=torch.int32)
+    expected_loop_breaks = torch.zeros(num_reqs, dtype=torch.int32)
     for rank, (local, _, metadata) in enumerate(results):
         if metadata.num_local_reqs == 0:
             local_outputs.append(None)
@@ -405,6 +407,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
         ids = owned[:, None] * 1000 + torch.arange(src_width)[None, :]
         num_sampled = (owned % width + 1).to(torch.int32)
         num_rejected = (owned % 3).to(torch.int32)
+        loop_breaks = (owned * 7 + 1).to(torch.int32) if rank % 2 else None
         local_outputs.append(
             SamplerOutput(
                 sampled_token_ids=ids.to(device),
@@ -412,12 +415,17 @@ def test_gather_sampler_output_kernels(tp_size: int):
                 num_nans=None,
                 num_sampled=num_sampled.to(device),
                 num_rejected=num_rejected.to(device),
+                thinking_loop_breaks=(
+                    None if loop_breaks is None else loop_breaks.to(device)
+                ),
             )
         )
         copy_width = min(src_width, width)
         expected_ids[owned, :copy_width] = ids[:, :copy_width]
         expected_sampled[owned] = num_sampled
         expected_rejected[owned] = num_rejected
+        if loop_breaks is not None:
+            expected_loop_breaks[owned] = loop_breaks
 
     # Two passes over a mocked all-gather: capture each rank's packed send
     # block, then replay with the concatenated blocks as the gathered result.
@@ -447,6 +455,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
                 device,
                 global_batch=batch,
                 local_batch=results[rank][0],
+                gather_thinking_loop_breaks=True,
             )
 
     for rank in range(tp_size):
@@ -465,6 +474,8 @@ def test_gather_sampler_output_kernels(tp_size: int):
         assert torch.equal(out.sampled_token_ids.cpu(), expected_ids)
         assert torch.equal(out.num_sampled.cpu(), expected_sampled)
         assert torch.equal(out.num_rejected.cpu(), expected_rejected.to(torch.int32))
+        assert out.thinking_loop_breaks is not None
+        assert torch.equal(out.thinking_loop_breaks.cpu(), expected_loop_breaks)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

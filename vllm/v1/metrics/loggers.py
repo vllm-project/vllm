@@ -682,6 +682,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_num_preempted_reqs, per_engine_labelvalues
         )
 
+        counter_thinking_loop_breaks = self._counter_cls(
+            name="vllm:thinking_loop_breaks",
+            documentation=(
+                "Repeating reasoning loops detected and ended by reasoning loop "
+                "breaking (ReasoningConfig.loop_break_*)."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_thinking_loop_breaks = create_metric_per_engine(
+            counter_thinking_loop_breaks, per_engine_labelvalues
+        )
+
         counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
@@ -1122,6 +1134,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
+        )
+        self.counter_thinking_loop_breaks[engine_idx].inc(
+            iteration_stats.num_thinking_loop_breaks
         )
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
         # Labeled prompt token counters by source

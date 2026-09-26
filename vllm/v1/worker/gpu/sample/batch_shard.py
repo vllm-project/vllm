@@ -346,7 +346,12 @@ def _shard_grammar_output(
 
 
 @triton.jit(
-    do_not_specialize=["max_num_logits_per_req", "num_src_cols", "packed_stride"]
+    do_not_specialize=[
+        "max_num_logits_per_req",
+        "num_src_cols",
+        "packed_stride",
+        "thinking_loop_breaks_col",
+    ]
 )
 def _pack_sampler_output_kernel(
     packed_ptr,
@@ -357,10 +362,13 @@ def _pack_sampler_output_kernel(
     num_rejected_ptr,
     num_nans_ptr,
     local_cu_num_logits_ptr,
+    thinking_loop_breaks_ptr,
+    thinking_loop_breaks_col,
     max_num_logits_per_req,
     num_src_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Pack one local request's sampler outputs into a row for the all-gather."""
     req_idx = tl.program_id(0)
     cols = tl.arange(0, BLOCK_SIZE)
     row_ptr = packed_ptr + req_idx * packed_stride
@@ -385,9 +393,18 @@ def _pack_sampler_output_kernel(
         tl.store(
             row_ptr + max_num_logits_per_req + 2, tl.sum(nans.to(tl.int64), axis=0)
         )
+    if thinking_loop_breaks_ptr is not None:
+        loop_break = tl.load(thinking_loop_breaks_ptr + req_idx)
+        tl.store(row_ptr + thinking_loop_breaks_col, loop_break.to(tl.int64))
 
 
-@triton.jit(do_not_specialize=["max_num_logits_per_req", "gathered_stride"])
+@triton.jit(
+    do_not_specialize=[
+        "max_num_logits_per_req",
+        "gathered_stride",
+        "thinking_loop_breaks_col",
+    ]
+)
 def _unpack_gathered_output_kernel(
     gathered_ptr,
     gathered_stride,
@@ -396,9 +413,12 @@ def _unpack_gathered_output_kernel(
     num_sampled_ptr,
     num_rejected_ptr,
     num_nans_ptr,
+    thinking_loop_breaks_ptr,
+    thinking_loop_breaks_col,
     max_num_logits_per_req,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Copy one gathered row back to its request's place in the batch."""
     req_idx = tl.program_id(0)
     src = tl.load(gathered_src_indices_ptr + req_idx)
     row_ptr = gathered_ptr + src * gathered_stride
@@ -418,6 +438,9 @@ def _unpack_gathered_output_kernel(
     if num_nans_ptr is not None:
         num_nans = tl.load(row_ptr + max_num_logits_per_req + 2)
         tl.store(num_nans_ptr + req_idx, num_nans.to(tl.int32))
+    if thinking_loop_breaks_ptr is not None:
+        loop_break = tl.load(row_ptr + thinking_loop_breaks_col)
+        tl.store(thinking_loop_breaks_ptr + req_idx, loop_break.to(tl.int32))
 
 
 @triton.jit(
@@ -603,9 +626,12 @@ def gather_sampler_output(
     local_batch: InputBatch,
     gather_num_nans: bool = False,
     logprobs_dims: tuple[int, int] | None = None,
+    gather_thinking_loop_breaks: bool = False,
 ) -> SamplerOutput:
+    """All-gather each rank's sampler output back into batch order."""
     max_num_logits_per_req = metadata.max_num_logits_per_req
-    num_packed_cols = max_num_logits_per_req + 2 + (1 if gather_num_nans else 0)
+    thinking_loop_breaks_col = max_num_logits_per_req + 2 + int(gather_num_nans)
+    num_packed_cols = thinking_loop_breaks_col + int(gather_thinking_loop_breaks)
     block_size = triton.next_power_of_2(max_num_logits_per_req)
 
     # Pack the sampler output tensors (excluding logprobs) into a single
@@ -621,6 +647,14 @@ def gather_sampler_output(
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req
         )
+        local_loop_breaks = None
+        if gather_thinking_loop_breaks:
+            # A rank with no tracked request reports none for this step.
+            local_loop_breaks = local_output.thinking_loop_breaks
+            if local_loop_breaks is None:
+                local_loop_breaks = torch.zeros(
+                    metadata.num_local_reqs, dtype=torch.int32, device=device
+                )
         _pack_sampler_output_kernel[(metadata.num_local_reqs,)](
             packed,
             packed.stride(0),
@@ -630,6 +664,8 @@ def gather_sampler_output(
             local_output.num_rejected,
             local_output.num_nans if gather_num_nans else None,
             local_batch.cu_num_logits if gather_num_nans else None,
+            local_loop_breaks,
+            thinking_loop_breaks_col,
             max_num_logits_per_req,
             num_src_cols,
             BLOCK_SIZE=block_size,
@@ -656,6 +692,11 @@ def gather_sampler_output(
         if gather_num_nans
         else None
     )
+    thinking_loop_breaks = (
+        torch.empty(num_reqs, dtype=torch.int32, device=device)
+        if gather_thinking_loop_breaks
+        else None
+    )
     _unpack_gathered_output_kernel[(num_reqs,)](
         gathered,
         gathered.stride(0),
@@ -664,6 +705,8 @@ def gather_sampler_output(
         num_sampled,
         num_rejected,
         num_nans,
+        thinking_loop_breaks,
+        thinking_loop_breaks_col,
         max_num_logits_per_req,
         BLOCK_SIZE=block_size,
     )
@@ -673,4 +716,5 @@ def gather_sampler_output(
         num_nans=num_nans,
         num_sampled=num_sampled,
         num_rejected=num_rejected,
+        thinking_loop_breaks=thinking_loop_breaks,
     )

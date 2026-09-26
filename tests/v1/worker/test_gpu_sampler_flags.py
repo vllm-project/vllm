@@ -30,7 +30,17 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
+class MockLoopBreakReasoningConfig(MockReasoningConfig):
+    loop_break_max_pattern_size = 8
+    loop_break_min_pattern_size = 1
+    loop_break_min_count = 3
+
+
+def _make_sampler(
+    custom_logits_processors: Sequence[LogitsProcessor] = (),
+    reasoning_config: object | None = None,
+) -> Sampler:
+    """A V2 sampler over a small request state, optionally with reasoning on."""
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -40,7 +50,9 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         device=DEVICE,
     )
     return Sampler(
-        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
+        vllm_config=SimpleNamespace(
+            reasoning_config=reasoning_config or MockReasoningConfig()
+        ),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
@@ -74,6 +86,19 @@ def test_logits_processing_cache_matches_request_features(
 ):
     sampler = _make_sampler()
     sampler.add_request(3, sampling_params=sampling_params)
+
+    assert sampler.needs_logits_processing[3] == expected
+
+
+@pytest.mark.parametrize(
+    ("thinking_loop_break", "expected"), [(None, True), (False, False)]
+)
+def test_loop_break_alone_needs_logits_processing(
+    thinking_loop_break: bool | None, expected: bool
+):
+    """A loop-break request with no budget is flagged by loop breaking alone."""
+    sampler = _make_sampler(reasoning_config=MockLoopBreakReasoningConfig())
+    sampler.add_request(3, SamplingParams(thinking_loop_break=thinking_loop_break))
 
     assert sampler.needs_logits_processing[3] == expected
 

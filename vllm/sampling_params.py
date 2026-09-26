@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 from pydantic import BeforeValidator
@@ -355,6 +355,13 @@ class SamplingParams(
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
+    thinking_loop_break: bool | Literal["force", "ramp"] | None = None
+    """Per-request control for server-configured reasoning loop breaking
+    (``ReasoningConfig.loop_break_*``). ``None`` (default) or ``True`` follows
+    the server configuration, ``False`` opts this request out, and ``"force"``
+    or ``"ramp"`` picks the release in place of ``loop_break_release``. No value
+    enables the feature on a server that has not configured it."""
+
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
@@ -413,7 +420,12 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
+        # Appended rather than placed beside thinking_token_budget: from_optional
+        # takes positional arguments, so inserting mid-signature would silently
+        # rebind every later positional argument of existing callers.
+        thinking_loop_break: bool | Literal["force", "ramp"] | None = None,
     ) -> "SamplingParams":
+        """Build SamplingParams from request fields, using defaults for ``None``."""
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
             # to identify the exact offending entry for the error message.
@@ -458,6 +470,7 @@ class SamplingParams(
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
             thinking_token_budget=thinking_token_budget,
+            thinking_loop_break=thinking_loop_break,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -1293,6 +1306,7 @@ class SamplingParams(
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
             f"thinking_token_budget={self.thinking_token_budget}, "
+            f"thinking_loop_break={self.thinking_loop_break}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

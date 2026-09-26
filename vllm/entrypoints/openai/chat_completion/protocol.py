@@ -256,6 +256,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    thinking_loop_break: bool | Literal["force", "ramp"] | None = Field(
+        default=None,
+        description=(
+            "Per-request control for server-configured reasoning loop "
+            "breaking. null or true follows the server configuration, false "
+            "opts this request out, and 'force' or 'ramp' picks how a detected "
+            "loop ends the reasoning. No value enables the feature on a server "
+            "that has not configured it."
+        ),
+    )
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -663,6 +673,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: dict,
     ) -> SamplingParams:
+        """Build the engine's sampling parameters for this request."""
         # Priority: user -> server default -> OpenAI default
         sampling_params = {
             name: (
@@ -724,6 +735,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            thinking_loop_break=self.thinking_loop_break,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone

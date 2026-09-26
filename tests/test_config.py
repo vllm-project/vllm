@@ -823,6 +823,57 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+def _loop_break_reasoning_config():
+    from vllm.config.reasoning import ReasoningConfig
+
+    return ReasoningConfig(
+        reasoning_start_str="<think>",
+        reasoning_end_str="</think>",
+        loop_break_max_pattern_size=64,
+        loop_break_min_pattern_size=4,
+        loop_break_min_count=3,
+    )
+
+
+def test_reasoning_loop_breaking_keeps_the_v2_model_runner(monkeypatch):
+    """V2's ThinkingBudgetState detects reasoning loops on device, so enabling
+    the feature must not demote the request onto the deprecated V1 runner."""
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+
+    config = VllmConfig(reasoning_config=_loop_break_reasoning_config())
+
+    assert config._get_v2_model_runner_unsupported_features() == []
+    assert config.use_v2_model_runner
+
+
+@pytest.mark.parametrize("v1_trigger", ["env", "ngram"])
+def test_v1_model_runner_rejects_reasoning_loop_breaking(monkeypatch, v1_trigger):
+    """Loop breaking runs only on V2, so a config that selects V1 must fail
+    instead of accepting the setting and never breaking a loop."""
+    # With Triton present, ngram is what sends the config to V1.
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    if v1_trigger == "env":
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    else:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    def make(**kwargs) -> VllmConfig:
+        speculative_config = None
+        if v1_trigger == "ngram":
+            speculative_config = SpeculativeConfig(
+                method="ngram", num_speculative_tokens=1
+            )
+        return VllmConfig(speculative_config=speculative_config, **kwargs)
+
+    assert not make().use_v2_model_runner
+
+    with pytest.raises(
+        ValueError, match="Model Runner V1 does not support: reasoning loop breaking"
+    ):
+        make(reasoning_config=_loop_break_reasoning_config())
+
+
 @pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its

@@ -35,6 +35,7 @@ class SpanAttributes:
     GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
     GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
     GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
+    GEN_AI_THINKING_LOOP_BREAKS = "gen_ai.thinking_loop_breaks"
 
     # Latency breakdowns
     GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = "gen_ai.latency.time_in_model_forward"
