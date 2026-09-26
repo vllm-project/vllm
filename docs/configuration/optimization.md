@@ -24,6 +24,27 @@ Beyond the optimization levels, three mechanisms reduce time-to-first-token on r
 - **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile.
 - **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
 
+## Decode CUDA graph coverage
+
+A decode batch can exceed `--max-cudagraph-capture-size` even when CUDA graphs
+are enabled. Speculative decoding increases the number of target tokens per
+request. For example, a hypothetical batch of 200 requests with five
+speculative tokens per request requires 1,200 verification tokens.
+
+For supported full-attention and Mamba cache layouts, vLLM warns at startup
+when its estimated short-request decode coverage exceeds the resolved capture
+limit. The estimate uses the available cache blocks, each cache group's state
+requirements, and scheduler sequence and token limits. It assumes short,
+unshared requests; prompt lengths, prefix sharing, and dynamic speculation
+can change actual residency and decode width. Unsupported layouts are skipped,
+so absence of this warning does not guarantee complete graph coverage.
+
+If this warning appears, compare observed decode batch sizes with the capture
+limit and consider increasing `--max-cudagraph-capture-size`. Larger captures
+consume memory and can reduce the cache available for resident requests;
+measure throughput and memory usage after changing the setting. The warning
+does not change capture sizes or scheduling automatically.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
