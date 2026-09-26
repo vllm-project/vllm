@@ -12,14 +12,58 @@ TARGET="${1:-all}"
 case "${TARGET}" in
   cuda-13-0 | cuda-12-9 | cuda-13-0-ubuntu-24-04 | \
     cuda-12-9-ubuntu-24-04 | rocm | xpu | cpu | all) ;;
+  cuda-13-0-efa | cuda-12-9-efa | cuda-13-0-ubuntu-24-04-efa | \
+    cuda-12-9-ubuntu-24-04-efa) ;;
   *)
     echo "Usage: $0 {cuda-13-0|cuda-12-9|cuda-13-0-ubuntu-24-04|cuda-12-9-ubuntu-24-04|rocm|xpu|cpu|all}"
+    echo "       $0 {cuda-13-0|cuda-12-9|cuda-13-0-ubuntu-24-04|cuda-12-9-ubuntu-24-04}-efa"
     exit 2
     ;;
 esac
 
 target_enabled() {
   [ "${TARGET}" = "all" ] || [ "${TARGET}" = "$1" ]
+}
+
+# Promote one image family from ECR staging to DockerHub: per-arch tags plus the
+# latest and versioned multi-arch manifests. $1 is the tag suffix shared by both
+# registries: "" for the default CUDA family, else e.g. "-cu129", "-ubuntu2404",
+# "-efa", "-cu129-efa".
+#
+# Returns non-zero without publishing if either staging image is absent. For the
+# EFA families that is expected rather than exceptional: the vllm-openai-efa
+# build is opt-in, so a missing image must not fail the release publish.
+publish_image_family() {
+  local suffix="$1" arch
+  local staging="public.ecr.aws/q9t5s3a7/vllm-release-repo"
+  local latest="vllm/vllm-openai:latest${suffix}"
+  local versioned="vllm/vllm-openai:v${RELEASE_VERSION}${suffix}"
+
+  for arch in x86_64 aarch64; do
+    docker pull "${staging}:${COMMIT}-${arch}${suffix}" || {
+      echo "WARNING: ${staging}:${COMMIT}-${arch}${suffix} absent;" \
+           "skipping the ${suffix:-default} family"
+      return 1
+    }
+  done
+
+  for arch in x86_64 aarch64; do
+    docker tag "${staging}:${COMMIT}-${arch}${suffix}" "vllm/vllm-openai:latest-${arch}${suffix}"
+    docker tag "${staging}:${COMMIT}-${arch}${suffix}" "vllm/vllm-openai:v${RELEASE_VERSION}-${arch}${suffix}"
+    docker push "vllm/vllm-openai:latest-${arch}${suffix}"
+    docker push "vllm/vllm-openai:v${RELEASE_VERSION}-${arch}${suffix}"
+  done
+
+  docker manifest rm "${latest}" || true
+  docker manifest rm "${versioned}" || true
+  docker manifest create "${latest}" \
+    "vllm/vllm-openai:latest-x86_64${suffix}" \
+    "vllm/vllm-openai:latest-aarch64${suffix}"
+  docker manifest create "${versioned}" \
+    "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64${suffix}" \
+    "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64${suffix}"
+  docker manifest push "${latest}"
+  docker manifest push "${versioned}"
 }
 
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version --default "" | sed 's/^v//')
@@ -42,105 +86,42 @@ aws ecr-public get-login-password --region us-east-1 | \
 # ---- CUDA (default: 13.0) ----
 
 if target_enabled cuda-13-0; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" vllm/vllm-openai:latest-x86_64
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64"
-  docker push vllm/vllm-openai:latest-x86_64
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" vllm/vllm-openai:latest-aarch64
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
-  docker push vllm/vllm-openai:latest-aarch64
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
-
-  docker manifest rm vllm/vllm-openai:latest || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}" || true
-  docker manifest create vllm/vllm-openai:latest vllm/vllm-openai:latest-x86_64 vllm/vllm-openai:latest-aarch64
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
-  docker manifest push vllm/vllm-openai:latest
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}"
-
+  publish_image_family ""
   ZSTD_DIGEST=$(docker buildx imagetools inspect \
     "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" \
     --format '{{json .Manifest.Digest}}' | tr -d '"')
   .buildkite/scripts/publish-zstd-image.sh \
     "public.ecr.aws/q9t5s3a7/vllm-release-repo@${ZSTD_DIGEST}" \
     "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-zstd"
+
 fi
 
 # ---- CUDA 12.9 ----
 
 if target_enabled cuda-12-9; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129" vllm/vllm-openai:latest-x86_64-cu129
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129"
-  docker push vllm/vllm-openai:latest-x86_64-cu129
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129" vllm/vllm-openai:latest-aarch64-cu129
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129"
-  docker push vllm/vllm-openai:latest-aarch64-cu129
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129"
-
-  docker manifest rm vllm/vllm-openai:latest-cu129 || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-cu129" || true
-  docker manifest create vllm/vllm-openai:latest-cu129 vllm/vllm-openai:latest-x86_64-cu129 vllm/vllm-openai:latest-aarch64-cu129
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129"
-  docker manifest push vllm/vllm-openai:latest-cu129
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-cu129"
+  publish_image_family "-cu129"
 fi
 
 # ---- Ubuntu 24.04 (CUDA 13.0) ----
 
 if target_enabled cuda-13-0-ubuntu-24-04; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
-  docker push vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-  docker push vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-
-  docker manifest rm vllm/vllm-openai:latest-ubuntu2404 || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" || true
-  docker manifest create vllm/vllm-openai:latest-ubuntu2404 vllm/vllm-openai:latest-x86_64-ubuntu2404 vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-  docker manifest push vllm/vllm-openai:latest-ubuntu2404
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404"
+  publish_image_family "-ubuntu2404"
 fi
 
 # ---- Ubuntu 24.04 (CUDA 12.9) ----
 
 if target_enabled cuda-12-9-ubuntu-24-04; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404" vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404"
-  docker push vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404" vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404"
-  docker push vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404"
-
-  docker manifest rm vllm/vllm-openai:latest-cu129-ubuntu2404 || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404" || true
-  docker manifest create vllm/vllm-openai:latest-cu129-ubuntu2404 vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404 vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404"
-  docker manifest push vllm/vllm-openai:latest-cu129-ubuntu2404
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404"
+  publish_image_family "-cu129-ubuntu2404"
 fi
+
+# ---- AWS EFA variants (vllm-openai-efa target) ----
+# No cu134 entry: Rubin CUDA 13.4 is nightly-only and is not promoted to
+# DockerHub for the base variant either.
+
+target_enabled cuda-13-0-efa              && publish_image_family "-efa" || true
+target_enabled cuda-12-9-efa              && publish_image_family "-cu129-efa" || true
+target_enabled cuda-13-0-ubuntu-24-04-efa && publish_image_family "-ubuntu2404-efa" || true
+target_enabled cuda-12-9-ubuntu-24-04-efa && publish_image_family "-cu129-ubuntu2404-efa" || true
 
 # ---- ROCm ----
 
