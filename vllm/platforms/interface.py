@@ -662,6 +662,44 @@ class Platform:
             + ")."
         )
 
+    @staticmethod
+    def _sync_block_size_config_across_pp(
+        vllm_config: "VllmConfig", has_backend: bool
+    ) -> None:
+        """Share aligned cache sizes with attention-less pipeline stages."""
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            model_parallel_is_initialized,
+        )
+
+        if not model_parallel_is_initialized():
+            return
+        pp_group = get_pp_group()
+        if pp_group.world_size == 1:
+            return
+
+        cache_config = vllm_config.cache_config
+        fields = (
+            "block_size",
+            "mamba_block_size",
+            "mamba_page_size_padded",
+            "skip_page_size_padded",
+        )
+        local_config = (
+            {name: getattr(cache_config, name) for name in fields}
+            if has_backend
+            else None
+        )
+        configs: list[dict[str, Any] | None] = [None] * pp_group.world_size
+        torch.distributed.all_gather_object(
+            configs, local_config, group=pp_group.cpu_group
+        )
+        for config in configs:
+            if config is not None:
+                for name, value in config.items():
+                    setattr(cache_config, name, value)
+                return
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         """Ensure block_size is compatible with the attention backend.
@@ -678,6 +716,7 @@ class Platform:
 
         backend_classes = cls._find_non_ssm_backends(vllm_config)
         if not backend_classes:
+            cls._sync_block_size_config_across_pp(vllm_config, has_backend=False)
             return
 
         # Phase 1: Pick a block size every attention backend supports (skip if
@@ -706,6 +745,8 @@ class Platform:
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+
+        cls._sync_block_size_config_across_pp(vllm_config, has_backend=True)
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
