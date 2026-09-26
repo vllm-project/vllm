@@ -223,8 +223,26 @@ def _hc_down_silu(
         # TP-disabled, so the raw GEMM is what the Linear module would have
         # done. Only the low-rank columns take the activation; the injection
         # logits and the alignment pad pass through.
+        #
+        # The activation runs in place, straight into the slice, rather than
+        # through the `hc_silu` op. That op allocates its own output, so using
+        # it here needs an assignment back into the slice -- a copy kernel per
+        # boundary that the inline caller never paid, which at 95 boundaries a
+        # step measured as a 4-6% TPOT regression above the gate. The kernel is
+        # too small to matter in bytes and too frequent not to matter in
+        # launches. In-place is safe because each program owns one row and
+        # loads it in a single block before storing to the same addresses.
         out = rocm_unquantized_gemm_impl(x, weight, None)
-        out[:, :rank] = _hc_silu(out[:, :rank], hc_count)
+        low_rank = out[:, :rank]
+        _hc_silu_kernel[(M,)](
+            low_rank,
+            low_rank,
+            low_rank.stride(0),
+            low_rank.stride(0),
+            DIM=rank,
+            HC=hc_count,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
         return out
 
     global fused_call_count

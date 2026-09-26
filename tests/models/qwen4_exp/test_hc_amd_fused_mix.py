@@ -118,6 +118,35 @@ def test_fused_path_is_gated_to_decode_widths() -> None:
     assert not supports_fused_low_rank_mix(xn, w_down.t().contiguous().t(), w_up)
 
 
+@pytest.mark.parametrize("num_tokens", [HC_FUSED_MIX_MAX_TOKENS + 1, 64])
+def test_fallback_activates_in_place_without_touching_injection(
+    num_tokens: int,
+) -> None:
+    """The declined path applies the activation in place, into its own output.
+
+    Going through the `hc_silu` op instead would allocate and need an
+    assignment back into the slice, which is a copy kernel per boundary that
+    the inline caller never paid; at 95 boundaries a step it measured as a
+    4-6% TPOT regression above the gate. Writing in place into a slice is
+    either exactly right or silently wrong, so both halves are checked: the
+    low-rank columns must be activated and the injection columns, which share
+    the same rows, must come through the raw projection untouched.
+    """
+    xn, w_down, w_up = _operands(num_tokens)
+    assert not supports_fused_low_rank_mix(xn, w_down, w_up)
+
+    actual = hc_down_silu(xn, w_down, LORA_RANK, HC)
+
+    down = torch.nn.functional.linear(xn, w_down)
+    expected = down.clone()
+    expected[:, :LORA_RANK] = hc_silu(down[:, :LORA_RANK].contiguous(), HC)
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(
+        actual[:, LORA_RANK:], down[:, LORA_RANK:], atol=2e-2, rtol=2e-2
+    )
+
+
 def test_module_fused_and_unfused_agree(monkeypatch: pytest.MonkeyPatch) -> None:
     """Drive the real module both ways.
 
