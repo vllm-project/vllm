@@ -94,6 +94,11 @@ def get_mem_info_wrapper(
     # Call the underlying C++ implementation
     free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
 
+    if free == 0 and total > 0:
+        # getMemoryInfo reports 0 free memory on some client GPUs (observed on
+        # Arc B-series/Battlemage); fall back to torch's own query.
+        free, total = torch.xpu.mem_get_info(device)
+
     return free, total
 
 
