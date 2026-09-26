@@ -987,3 +987,115 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+def _mixed_block_size_kv_cache_config() -> KVCacheConfig:
+    """Two prefix-cacheable groups whose block sizes differ.
+
+    Speculative decoding's draft group is the usual source of a second block
+    size on an otherwise uniform model.
+    """
+    num_blocks = 16
+    specs = [
+        FullAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        )
+        for block_size in (16, 32)
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=spec.page_size_bytes * num_blocks,
+            layers=[f"layer{i}"],
+            layer_stride=spec.page_size_bytes * num_blocks,
+            block_stride=spec.page_size_bytes,
+        )
+        for i, spec in enumerate(specs)
+    ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer{i}"], spec) for i, spec in enumerate(specs)
+        ],
+    )
+
+
+def test_mixed_block_sizes_name_each_group_and_the_way_out():
+    """A bare assert here told an operator nothing they could act on.
+
+    The chunk size is given in tokens, so it can only be converted once; with
+    two block sizes the conversion is ambiguous and `blocks_per_chunk` is the
+    parameter that expresses it without one.
+    """
+    vllm_config = _make_vllm_config(extra_config={"block_size": 64})
+
+    with pytest.raises(ValueError) as excinfo:
+        build_offloading_config(vllm_config, _mixed_block_size_kv_cache_config())
+
+    message = str(excinfo.value)
+    assert "group 0: 16, group 1: 32 effective tokens per block" in message, message
+    assert "Set 'blocks_per_chunk'" in message, message
+
+
+def test_blocks_per_chunk_keeps_each_group_span():
+    """The alternative the message points at has to survive with its geometry.
+
+    Asserting only that the option is accepted would still pass if a group
+    were dropped or its span rewritten to match the other one.
+    """
+    vllm_config = _make_vllm_config(extra_config={"blocks_per_chunk": 2})
+
+    config = build_offloading_config(vllm_config, _mixed_block_size_kv_cache_config())
+
+    assert config.cache.blocks_per_chunk == 2
+    assert [group.tokens_per_block for group in config.groups] == [16, 32]
+    assert [group.group_id for group in config.groups] == [0, 1]
+
+
+def _aligned_mamba_kv_cache_config() -> KVCacheConfig:
+    """Two align-mode Mamba groups whose block sizes differ."""
+    num_blocks = 16
+    specs = [
+        MambaSpec(
+            shapes=((block_size,),),
+            dtypes=(torch.float32,),
+            block_size=block_size,
+            page_size_padded=None,
+            mamba_type="mamba2",
+            num_speculative_blocks=0,
+            mamba_cache_mode="align",
+        )
+        for block_size in (16, 32)
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=spec.page_size_bytes * num_blocks,
+            layers=[f"layer{i}"],
+            layer_stride=spec.page_size_bytes * num_blocks,
+            block_stride=spec.page_size_bytes,
+        )
+        for i, spec in enumerate(specs)
+    ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer{i}"], spec) for i, spec in enumerate(specs)
+        ],
+    )
+
+
+def test_align_mode_mamba_is_told_blocks_per_chunk_will_not_help():
+    """Pointing at a remedy that fails later is worse than the old assert.
+
+    resolve_mamba_align_size requires every align-mode group's chunk span to
+    be equal, and a shared multiplier keeps unequal block sizes unequal -- so
+    that case gets a different sentence.
+    """
+    vllm_config = _make_vllm_config(extra_config={"block_size": 64})
+
+    with pytest.raises(ValueError) as excinfo:
+        build_offloading_config(vllm_config, _aligned_mamba_kv_cache_config())
+
+    message = str(excinfo.value)
+    assert "will not help here" in message, message
