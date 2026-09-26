@@ -212,7 +212,15 @@ class XPUWorker(Worker):
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        spec_config = self.vllm_config.speculative_config
+        num_workspace_lanes = (
+            2
+            if self.use_v2_model_runner
+            and spec_config is not None
+            and spec_config.use_dspark()
+            else 1
+        )
+        init_workspace_manager(self.device, num_ubatches, num_workspace_lanes)
 
         # Construct the model runner
         model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
