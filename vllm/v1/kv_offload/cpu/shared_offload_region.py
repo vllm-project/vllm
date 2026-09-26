@@ -109,6 +109,7 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
+        self._mmap_identity: tuple[int, int] | None = None
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
@@ -132,6 +133,12 @@ class SharedOffloadRegion:
                 # land on a 0-byte stub and spin in _wait_for_file_size
                 # for the full 30 s timeout.
                 self._creator = True
+                # Record identity before the checks below, which can raise: the
+                # failure path unlinks, and unlink() needs the identity to know
+                # the pathname is still ours. The joiner path has nothing to
+                # unlink, so it is covered by the shared fstat after this block.
+                stat = os.fstat(self.fd)
+                self._mmap_identity = (stat.st_dev, stat.st_ino)
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(
@@ -145,6 +152,9 @@ class SharedOffloadRegion:
                     self.total_size_bytes / 1e9,
                 )
 
+            stat = os.fstat(self.fd)
+            self._mmap_identity = (stat.st_dev, stat.st_ino)
+
             self.mmap_obj: mmap.mmap | None = mmap.mmap(
                 self.fd,
                 self.total_size_bytes,
@@ -157,8 +167,7 @@ class SharedOffloadRegion:
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if self._creator:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.mmap_path)
+                self.unlink()
                 self._creator = False
             if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
                 self.mmap_obj.close()
@@ -188,8 +197,7 @@ class SharedOffloadRegion:
                 barrier()
             except Exception:
                 if self._creator:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self.mmap_path)
+                    self.unlink()
                     self._creator = False
                 self.mmap_obj.close()
                 os.close(self.fd)
@@ -197,9 +205,8 @@ class SharedOffloadRegion:
                 self.fd = None
                 raise
             if self._creator:
-                os.unlink(self.mmap_path)
+                self.unlink()
                 self._creator = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
@@ -235,6 +242,34 @@ class SharedOffloadRegion:
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
+
+    def unlink(self) -> bool:
+        """Unlink the pathname only if it still names our mapped file.
+
+        Best-effort, for two reasons: Linux cannot unlink by inode, so a
+        replacement could be created between the stat and the unlink; and tmpfs
+        reuses inode numbers aggressively, so a replacement can legitimately
+        match a stale generation's (st_dev, st_ino). This narrows the window
+        rather than closing it, which is enough for the realistic failure -- a
+        stale generation tearing down long after its file was replaced.
+        """
+        with contextlib.suppress(FileNotFoundError):
+            if self._creator and self._mmap_identity is None:
+                # We won O_EXCL but died before recording our identity, so the
+                # stub is ours by construction. Leaving it would wedge joiners
+                # in _wait_for_file_size for the full timeout.
+                os.unlink(self.mmap_path)
+                return True
+            stat = os.stat(self.mmap_path)
+            if (stat.st_dev, stat.st_ino) == self._mmap_identity:
+                os.unlink(self.mmap_path)
+                logger.info("Unlinked mmap file %s", self.mmap_path)
+                return True
+            logger.info(
+                "Kept mmap file %s: it no longer names our region",
+                self.mmap_path,
+            )
+        return False
 
     @property
     def base_tensor(self) -> torch.Tensor:
@@ -371,18 +406,17 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close mmap_obj", exc_info=True)
             self.mmap_obj = None
+        if self._creator and getattr(self, "mmap_path", None):
+            try:
+                self.unlink()
+            except Exception:
+                logger.warning(
+                    "Failed to unlink path %s", self.mmap_path, exc_info=True
+                )
+            self._creator = False
         if self.fd is not None:
             try:
                 os.close(self.fd)
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._creator and getattr(self, "mmap_path", None):
-            try:
-                os.unlink(self.mmap_path)
-                logger.info("Removed mmap file %s", self.mmap_path)
-            except Exception:
-                logger.warning(
-                    "Failed to unlink path %s", self.mmap_path, exc_info=True
-                )
-            self._creator = False

@@ -218,6 +218,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert isinstance(spec, TieringOffloadingSpec)
 
     region = MagicMock()
+    # The scheduler joins a region the workers created; get_manager asserts it.
+    region._creator = False
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []
 
@@ -242,6 +244,10 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
+
+    region.unlink.assert_not_called()
+    spec.get_manager()
+    region.unlink.assert_called_once_with()
 
 
 def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkeypatch):
@@ -369,6 +375,8 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     assert isinstance(spec, CPUOffloadingSpec)
 
     region = MagicMock()
+    # The scheduler joins a region the workers created; get_manager asserts it.
+    region._creator = False
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []
 

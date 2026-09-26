@@ -469,10 +469,18 @@ def test_creator_flag_set_on_first_open(iid):
 
 
 def test_joiner_flag_not_set(iid):
-    """A second worker opening the same file must have _creator == False."""
+    """A second worker opening the same file must have _creator == False.
+
+    A joiner (the scheduler-side mapping) may still drop the pathname once
+    every worker has mapped it; the mappings stay valid afterwards.
+    """
     with _multi_region(iid, num_workers=2) as (r0, r1):
         assert r0._creator is True
         assert r1._creator is False
+        assert r1.unlink()
+        assert not os.path.exists(r0.mmap_path)
+        r0.mmap_obj[0:1] = b"\xab"
+        assert memoryview(r1.mmap_obj)[0:1] == b"\xab"
 
 
 def test_file_exists_after_construction(iid):
@@ -982,7 +990,10 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
 
     engine_id = str(uuid.uuid4())
     mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-    mock_open = MagicMock(return_value=9999)
+    # A real fd and a real file keep os.fstat/os.stat unpatched: patching those
+    # process-wide breaks unrelated machinery that runs during the test.
+    fd = os.open(mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    mock_open = MagicMock(return_value=fd)
     mock_unlink = MagicMock()
     mock_close = MagicMock()
     monkeypatch.setattr(region.os, "open", mock_open)
@@ -1006,12 +1017,18 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
             cpu_page_size=PAGE_SIZE,
         )
 
-    mock_unlink.assert_called_once_with(mmap_path)
-    mock_close.assert_called_once_with(9999)
-    mock_check.assert_called_once_with(
-        4 * PAGE_SIZE,
-        allocation_name="CPU KV offload shared region in /dev/shm",
-    )
+    try:
+        mock_unlink.assert_called_once_with(mmap_path)
+        mock_close.assert_called_once_with(fd)
+        mock_check.assert_called_once_with(
+            4 * PAGE_SIZE,
+            allocation_name="CPU KV offload shared region in /dev/shm",
+        )
+    finally:
+        # os.* are still patched on the real module; restore before real cleanup.
+        monkeypatch.undo()
+        os.close(fd)
+        _cleanup_file(mmap_path)
 
 
 def test_ftruncate_failure_cleans_up_creator(monkeypatch):
@@ -1022,7 +1039,8 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
     mock_unlink = MagicMock()
     mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
+    fd = os.open(mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=fd))
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
     monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
@@ -1041,8 +1059,14 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
             cpu_page_size=PAGE_SIZE,
         )
 
-    mock_unlink.assert_called_once_with(mmap_path)
-    mock_close.assert_called_once_with(9999)
+    try:
+        mock_unlink.assert_called_once_with(mmap_path)
+        mock_close.assert_called_once_with(fd)
+    finally:
+        # os.* are still patched on the real module; restore before real cleanup.
+        monkeypatch.undo()
+        os.close(fd)
+        _cleanup_file(mmap_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1091,13 @@ def test_backing_file_unlinked_after_barrier(iid):
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
         del t
+        # A stale generation must not unlink the path of its replacement.
+        replacement = _make_region(iid)
+        try:
+            assert not region.unlink()
+            assert os.stat(path).st_ino == os.fstat(replacement.fd).st_ino
+        finally:
+            replacement.cleanup()
     finally:
         region.cleanup()
         _cleanup_file(path)
