@@ -144,12 +144,15 @@ def _pareto_frontier(
 ) -> "pd.DataFrame":
     sorted_df = df.sort_values([x_col, y_col], ascending=[False, False])
     frontier_indices = []
+    best_x = math.inf
     best_y = -math.inf
 
     for idx, row in sorted_df.iterrows():
+        x_val = row[x_col]
         y_val = row[y_col]
-        if y_val >= best_y - epsilon:
+        if y_val > best_y + epsilon or (x_val == best_x and y_val >= best_y - epsilon):
             frontier_indices.append(idx)
+            best_x = x_val
             best_y = max(best_y, y_val)
 
     return df.loc[frontier_indices]
