@@ -41,6 +41,7 @@ from vllm.parser.engine.adapters import (
     ParserEngineToolAdapter,
 )
 from vllm.parser.mistral import MistralParser
+from vllm.parser.olmo3 import Olmo3Parser
 
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
 
@@ -89,6 +90,11 @@ def _discover_pairings() -> list[_PairingInfo]:
             # Mistral uses brace-balanced JSON tool args with no TOOL_END
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
+            continue
+        if engine_cls is Olmo3Parser:
+            # Olmo 3's engine parser is reasoning-only (tool calls go through the
+            # separate olmo3 tool parser), so it has no TOOL_END to replay. It is
+            # covered by tests/reasoning/test_olmo3_reasoning_parser.py instead.
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
