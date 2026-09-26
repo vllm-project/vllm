@@ -84,7 +84,7 @@ def _apply_post_tokenization_to_token_type_ids(
         pad_length = tok_params.max_input_tokens
 
     if pad_length is not None and pad_length > len(token_type_ids):
-        pad_token_type_id = token_type_ids[-1] if token_type_ids else 0
+        pad_token_type_id = getattr(tokenizer, "pad_token_type_id", 0) or 0
         token_type_ids = token_type_ids + [pad_token_type_id] * (
             pad_length - len(token_type_ids)
         )

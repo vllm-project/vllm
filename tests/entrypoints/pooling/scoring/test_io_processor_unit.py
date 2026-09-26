@@ -26,6 +26,7 @@ class _DummyTokenizer:
     # Outside the range of the prompt ids below, so a test can tell a pad
     # token apart from a real one.
     pad_token_id: int = 99999
+    pad_token_type_id: int = 0
 
 
 @pytest.fixture
@@ -78,10 +79,11 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
 def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     """The cross-encoder segment boundary must survive truncate + pad.
 
-    `token_type_ids` are parallel to `prompt_token_ids` and are reduced to a
-    single boundary index by `compress_token_type_ids`. If the two arrays are
-    truncated and padded in different orders they no longer describe the same
-    positions, and the model is told the query segment is empty.
+    `token_type_ids` are parallel to `prompt_token_ids` and are reduced to the
+    document segment's start and end by `compress_token_type_ids`. If the two
+    arrays are truncated and padded in different orders they no longer
+    describe the same positions, and the model is told the query segment is
+    empty.
     """
     tokenizer = _DummyTokenizer()
     num_query, num_doc = 20, 30
@@ -105,7 +107,31 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
 
     # Keeping the last 40 tokens drops the first 10 query tokens, so 10 query
     # tokens survive and the document starts at index 10.
-    first_doc = compress_token_type_ids(token_type_ids)
-    assert first_doc == 10
-    assert prompt_token_ids[:first_doc] == list(range(10, num_query))
-    assert prompt_token_ids[first_doc:40] == list(range(num_query, 50))
+    doc_start, doc_end = compress_token_type_ids(token_type_ids)
+    assert (doc_start, doc_end) == (10, 40)
+    assert prompt_token_ids[:doc_start] == list(range(10, num_query))
+    assert prompt_token_ids[doc_start:doc_end] == list(range(num_query, 50))
+    assert token_type_ids[doc_end:] == [tokenizer.pad_token_type_id] * 60
+
+
+def test_token_type_padding_uses_the_tokenizer_pad_type():
+    tokenizer = _DummyTokenizer()
+    tok_params = TokenizeParams(
+        max_total_tokens=8,
+        pad_prompt_tokens=8,
+        truncate_prompt_tokens=None,
+        truncation_side="right",
+    )
+
+    token_type_ids = _apply_post_tokenization_to_token_type_ids(
+        tokenizer, tok_params, [0, 0, 0, 1, 1]
+    )
+
+    assert token_type_ids == [0, 0, 0, 1, 1, 0, 0, 0]
+    assert compress_token_type_ids(token_type_ids) == (3, 5)
+
+
+@pytest.mark.parametrize("token_type_ids", [[0, 1, 0, 1], [0, 2]])
+def test_compress_token_type_ids_rejects_invalid_sequences(token_type_ids):
+    with pytest.raises(ValueError, match="optional trailing zeros"):
+        compress_token_type_ids(token_type_ids)
