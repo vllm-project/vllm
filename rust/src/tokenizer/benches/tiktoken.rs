@@ -7,6 +7,7 @@ use tokio::runtime::Runtime;
 use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
 const MODEL_ID: &str = "moonshotai/Kimi-K2.5";
+const LOGPROB_ENTRIES_PER_POSITION: usize = 21;
 const SAMPLE_TEXT: &str = "\
 <think>
 I'm sure it's fine, but I can't say I'd trust that it's what we'd ship.
@@ -120,5 +121,44 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_decode);
+fn bench_decode_single_tokens(c: &mut Criterion) {
+    let fixture = BenchFixture::load();
+    let token_ids = &fixture.token_ids[..LOGPROB_ENTRIES_PER_POSITION];
+    let mut group = c.benchmark_group("tiktoken_decode_single_tokens");
+    group.throughput(Throughput::Elements(token_ids.len() as u64));
+
+    group.bench_function("riptoken", |b| {
+        b.iter(|| {
+            for token_id in token_ids {
+                black_box(
+                    fixture
+                        .riptoken
+                        .decode(black_box(std::slice::from_ref(token_id)), black_box(true))
+                        .expect("decode single token with riptoken"),
+                );
+            }
+        })
+    });
+    group.bench_function("tiktoken_rs", |b| {
+        b.iter(|| {
+            for token_id in token_ids {
+                black_box(
+                    fixture
+                        .tiktoken_rs
+                        .decode(black_box(std::slice::from_ref(token_id)), black_box(true))
+                        .expect("decode single token with tiktoken-rs"),
+                );
+            }
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_decode,
+    bench_decode_single_tokens
+);
 criterion_main!(benches);
