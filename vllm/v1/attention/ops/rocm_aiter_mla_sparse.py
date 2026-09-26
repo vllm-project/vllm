@@ -967,6 +967,7 @@ def rocm_fp8_mqa_logits(
     weights: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
+    flydsl_variant: str | None = None,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits for a single sequence without KV paging.
 
@@ -981,6 +982,8 @@ def rocm_fp8_mqa_logits(
             shape [M], dtype int32.
         cu_seqlen_ke: End indices (exclusive) for valid K per query position,
             shape [M], dtype int32.
+        flydsl_variant: Optional gfx942 FlyDSL kernel tag (e.g. ``mfma_r4_w4``).
+            ``None`` uses AITER auto selection.
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
@@ -994,7 +997,13 @@ def rocm_fp8_mqa_logits(
         from aiter.ops.flydsl import flydsl_fp8_mqa_logits
 
         return flydsl_fp8_mqa_logits(
-            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
+            q,
+            k_fp8,
+            scale,
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            variant=flydsl_variant,
         )
 
     aiter_mqa_logits_module = None
@@ -1316,6 +1325,15 @@ def rocm_aiter_sparse_attn_indexer(
                 weights[chunk.token_start : chunk.token_end],
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
+                flydsl_variant=(
+                    "mfma_r4_w4"
+                    if (
+                        _ON_GFX942
+                        and chunk.pcp_deinterleave_idx is None
+                        and chunk.local_total_seq_lens == chunk.total_seq_lens
+                    )
+                    else None
+                ),
             )
             if candidate_blocks is not None:
                 from vllm.model_executor.layers.sparse_attn_indexer import (
