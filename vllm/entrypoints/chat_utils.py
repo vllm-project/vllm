@@ -1642,12 +1642,292 @@ _ContentPart: TypeAlias = (
     MultiModalEmbedsPayload | dict[str, str] | InputAudio | PILImage
 )
 
+def _parse_file_part(
+
+    part: ChatCompletionContentPartParam,
+
+) -> _ContentPart:
+
+    """Parse an OpenAI-style 'file' content part into inline text.
+
+
+
+    Payload forms: {type:"file", file:{file_name, file_data: data-URI}},
+
+    or {type:"file", data, mediaType}. Text-like files are inlined verbatim;
+
+    PDF via pymupdf (pypdf fallback); docx via zip XML. Undecodable binary
+
+    degrades to a notice string instead of a 400.
+
+    """
+
+    import base64 as _base64
+
+    import io as _io
+
+    import re as _re
+
+    import zipfile as _zipfile
+
+    from urllib.parse import unquote as _unquote
+
+
+
+    part_dict = cast(dict[str, Any], part)
+
+    file_info = part_dict.get("file")
+
+    if not isinstance(file_info, dict):
+
+        file_info = {}
+
+    file_payload = part_dict.get("data") or file_info.get("file_data") or ""
+
+    file_name = (
+
+        file_info.get("file_name")
+
+        or file_info.get("filename")
+
+        or part_dict.get("filename")
+
+        or "attachment"
+
+    )
+
+    media_type = str(
+
+        part_dict.get("mediaType") or file_info.get("media_type") or ""
+
+    )
+
+
+
+    raw_bytes: bytes | None = None
+
+    if isinstance(file_payload, (bytes, bytearray)):
+
+        raw_bytes = bytes(file_payload)
+
+    elif isinstance(file_payload, str):
+
+        match = _re.match(r"^data:([^;,]*)(;base64)?,(.*)$", file_payload, _re.S)
+
+        if match:
+
+            if match.group(1):
+
+                media_type = media_type or match.group(1)
+
+            encoded = match.group(3)
+
+            if match.group(2):
+
+                encoded = encoded.strip()
+
+                raw_bytes = _base64.b64decode(encoded + "=" * (-len(encoded) % 4))
+
+            else:
+
+                raw_bytes = _unquote(encoded).encode("utf-8", errors="replace")
+
+        elif file_payload.startswith(("http://", "https://")):
+
+            return (
+
+                f"[file {file_name}: remote URL files are not supported; "
+
+                "pass images as image_url or inline the text content]"
+
+            )
+
+        else:
+
+            raw_bytes = file_payload.encode("utf-8", errors="replace")
+
+
+
+    file_name = str(file_name)
+
+    suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+
+    mime = (media_type or "").split(";")[0].strip().lower()
+
+    is_pdf = mime == "application/pdf" or suffix == "pdf"
+
+    is_docx = "wordprocessingml" in mime or suffix == "docx"
+
+    text_like = mime.startswith("text/") or mime in {
+
+        "application/json", "application/xml", "application/javascript",
+
+        "application/yaml", "application/x-yaml", "application/toml",
+
+        "application/csv",
+
+    } or suffix in {
+
+        "txt", "md", "markdown", "rst", "log", "csv", "tsv", "json",
+
+        "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml",
+
+        "html", "htm", "py", "js", "ts", "jsx", "tsx", "java", "c", "h",
+
+        "cpp", "hpp", "go", "rs", "sh", "bat", "ps1", "sql", "css",
+
+        "scss", "vue", "php", "rb", "swift", "kt", "tex", "srt",
+
+    }
+
+
+
+    decoded_text: str | None = None
+
+    if raw_bytes is None:
+
+        decoded_text = (
+
+            f"[file {file_name}: unsupported payload; only data URIs and "
+
+            "raw bytes are supported]"
+
+        )
+
+    elif is_pdf:
+
+        try:
+
+            try:
+
+                import fitz  # pymupdf
+
+
+
+                with fitz.open(stream=raw_bytes, filetype="pdf") as pdf_doc:
+
+                    page_count = pdf_doc.page_count
+
+                    page_texts = [page.get_text() or "" for page in pdf_doc]
+
+            except ImportError:
+
+                from pypdf import PdfReader
+
+
+
+                reader = PdfReader(_io.BytesIO(raw_bytes))
+
+                page_count = len(reader.pages)
+
+                page_texts = [page.extract_text() or "" for page in reader.pages]
+
+            joined = "\n\n".join(t.strip() for t in page_texts if t.strip())
+
+            decoded_text = (
+
+                joined
+
+                if joined
+
+                else (
+
+                    f"[file {file_name}: {page_count} pages, no extractable "
+
+                    "text (likely scanned images)]"
+
+                )
+
+            )
+
+        except Exception as exc:  # noqa: BLE001
+
+            decoded_text = f"[file {file_name}: PDF parse failed: {exc}]"
+
+    elif is_docx:
+
+        try:
+
+            with _zipfile.ZipFile(_io.BytesIO(raw_bytes)) as zf:
+
+                xml_blob = zf.read("word/document.xml").decode(
+
+                    "utf-8", errors="ignore"
+
+                )
+
+            lines = []
+
+            for para in _re.findall(r"<w:p[ >].*?</w:p>", xml_blob, _re.S):
+
+                plain = "".join(
+
+                    _re.findall(r"<w:t[^>]*>(.*?)</w:t>", para, _re.S)
+
+                )
+
+                if plain:
+
+                    lines.append(plain)
+
+            decoded_text = "\n".join(lines) if lines else (
+
+                f"[file {file_name}: docx contains no text runs]"
+
+            )
+
+        except Exception as exc:  # noqa: BLE001
+
+            decoded_text = f"[file {file_name}: DOCX parse failed: {exc}]"
+
+    else:
+
+        try:
+
+            sample = raw_bytes[:8192].decode("utf-8")
+
+        except UnicodeDecodeError:
+
+            sample = None
+
+        if sample is not None:
+
+            printable = sum(
+
+                1 for ch in sample if ch.isprintable() or ch in "\n\r\t"
+
+            )
+
+            ratio = printable / len(sample) if sample else 1.0
+
+            if text_like or ratio > 0.8:
+
+                decoded_text = raw_bytes.decode("utf-8", errors="replace")
+
+        if decoded_text is None:
+
+            decoded_text = (
+
+                f"[file {file_name} ({mime or 'unknown type'}): binary "
+
+                "content cannot be rendered inline]"
+
+            )
+
+
+
+    header = f"[file: {file_name}]" if file_name else "[file]"
+
+    return f"{header}\n{decoded_text}\n[/file]"
+
+
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: dict[
     str,
     Callable[[ChatCompletionContentPartParam], _ContentPart],
 ] = {
     "text": lambda part: _TextParser(part).get("text", None),
+    "file": lambda part: _parse_file_part(part),
     "thinking": lambda part: _ThinkParser(part).get("thinking", None),
     "input_text": lambda part: _TextParser(part).get("text", None),
     "output_text": lambda part: _TextParser(part).get("text", None),
@@ -1904,7 +2184,7 @@ def _parse_chat_message_content_part(
         )
         return None
 
-    if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
+    if part_type in ("text", "input_text", "output_text", "refusal", "thinking", "file"):
         str_content = cast(str, content)
         _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
