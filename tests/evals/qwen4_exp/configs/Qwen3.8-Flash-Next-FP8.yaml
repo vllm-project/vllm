@@ -8,6 +8,7 @@ datasets:
   aime25:
     metric_threshold: 0.90
     tolerance: 0.05
+    max_score_trials: 2
 eval_batch_size: 32
 startup_max_wait_seconds: 1800
 generation_config:
