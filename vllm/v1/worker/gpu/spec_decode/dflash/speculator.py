@@ -45,6 +45,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         super().__init__(vllm_config, device)
 
+        # Context features have already been projected into the draft's width.
+        self.hidden_size = self.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
@@ -109,12 +111,16 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
+        from vllm.model_executor.models.qwen3_dflash import get_dflash_cache_config
+
         # The draft's attention differs from the target's in causality.
         config = copy.copy(super().attn_vllm_config)
         config.attention_config = replace(
             self.vllm_config.attention_config,
             use_non_causal=self.requires_non_causal,
         )
+        if self.method == "dflash":
+            config.cache_config = get_dflash_cache_config(self.vllm_config)
         return config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
