@@ -284,3 +284,37 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+class _FakeTokenizer:
+    max_token_id = 1023
+
+    def __init__(self, vocab: dict[str, list[int]]):
+        self.vocab = vocab
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        return self.vocab[text]
+
+
+def test_bad_words_covering_allowed_token_ids_is_rejected():
+    """No token is left to sample when every allowed id is a banned one."""
+    tokenizer = _FakeTokenizer({"a": [264], " a": [264]})
+    params = SamplingParams(allowed_token_ids=[264], bad_words=["a"])
+    with pytest.raises(VLLMValidationError, match="allowed_token_ids"):
+        params.update_from_tokenizer(tokenizer)
+
+
+@pytest.mark.parametrize(
+    "allowed_token_ids, bad_words",
+    [
+        ([264, 265], ["a"]),
+        ([264], ["ab"]),
+    ],
+)
+def test_bad_words_leaving_an_allowed_token_is_accepted(allowed_token_ids, bad_words):
+    """Multi-token bad words only ban a sequence, not a whole token."""
+    tokenizer = _FakeTokenizer(
+        {"a": [264], " a": [264], "ab": [264, 265], " ab": [264, 265]}
+    )
+    params = SamplingParams(allowed_token_ids=allowed_token_ids, bad_words=bad_words)
+    params.update_from_tokenizer(tokenizer)

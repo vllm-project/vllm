@@ -784,6 +784,20 @@ class SamplingParams(
                 value=self.bad_words,
             )
 
+        if self.allowed_token_ids:
+            banned_token_ids = {
+                token_ids[0]
+                for token_ids in self._bad_words_token_ids
+                if len(token_ids) == 1
+            }
+            if banned_token_ids.issuperset(self.allowed_token_ids):
+                raise VLLMValidationError(
+                    "bad_words bans every token in allowed_token_ids, "
+                    "so no token can be sampled.",
+                    parameter="bad_words",
+                    value=self.bad_words,
+                )
+
     @cached_property
     def sampling_type(self) -> SamplingType:
         if self.temperature < _SAMPLING_EPS:
