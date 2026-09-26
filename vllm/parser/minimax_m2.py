@@ -127,8 +127,12 @@ def minimax_m2_config() -> ParserEngineConfig:
                 (EventType.REASONING_END,),
             ),
             (ParserState.CONTENT, "THINK_END"): Transition(
+                # In append-think mode (`minimax_m2_append_think`) the closing
+                # `</think>` is part of `content` rather than a reasoning
+                # delimiter, so it must be emitted as a text chunk instead of
+                # being silently dropped (fixes #58486).
                 ParserState.CONTENT,
-                (),
+                (EventType.TEXT_CHUNK,),
             ),
             (ParserState.REASONING, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
