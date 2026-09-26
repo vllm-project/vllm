@@ -7,9 +7,9 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -118,9 +118,9 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug
     gpu: 2+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -146,9 +146,9 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
