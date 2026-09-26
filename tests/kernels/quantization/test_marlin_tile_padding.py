@@ -6,11 +6,16 @@ Run `pytest tests/kernels/quantization/test_marlin_tile_padding.py`.
 """
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
@@ -185,6 +190,121 @@ def test_marlin_moe_pad_helpers_shapes():
     bias_shards = padded.view(E, 2, padded_N)
     assert torch.equal(bias_shards[..., :N], bias.view(E, 2, N))
     assert bias_shards[..., N:].abs().sum() == 0
+
+
+@pytest.mark.parametrize("intermediate", [32, 64, 96, 192, 256, 288, 576])
+@pytest.mark.parametrize("act_dtype", [None, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "backend,platform,capability,input_dtype,alignment",
+    [
+        (Mxfp4MoeBackend.MARLIN, "cuda", 90, None, 64),
+        (Mxfp4MoeBackend.MARLIN, "cuda", 89, None, 128),
+        (Mxfp4MoeBackend.MARLIN, "cuda", 120, torch.float8_e4m3fn, 128),
+        (Mxfp4MoeBackend.MARLIN, "cuda", 90, torch.float8_e4m3fn, 128),
+        (Mxfp4MoeBackend.MARLIN, "xpu", None, None, 128),
+        (Mxfp4MoeBackend.BATCHED_MARLIN, "cuda", 90, None, 128),
+    ],
+)
+def test_mxfp4_marlin_intermediate_allocation(
+    intermediate, act_dtype, backend, platform, capability, input_dtype, alignment
+):
+    """Avoid an extra W4A16 tile without changing unvalidated backends."""
+    module = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
+    with (
+        patch(f"{module}.current_platform.is_cuda", return_value=platform == "cuda"),
+        patch(f"{module}.current_platform.is_xpu", return_value=platform == "xpu"),
+        patch(
+            f"{module}.current_platform.is_device_capability",
+            side_effect=lambda cc: capability == cc,
+        ),
+        patch(f"{module}.get_marlin_input_dtype", return_value=input_dtype),
+    ):
+        hidden, padded = mxfp4_round_up_hidden_size_and_intermediate_size(
+            backend, 5119, intermediate, act_dtype=act_dtype
+        )
+    assert hidden == 5120
+    if act_dtype != torch.bfloat16:
+        alignment = 128
+    assert padded == (intermediate + alignment - 1) // alignment * alignment
+    assert _is_tile_aligned(2 * padded, hidden)
+    assert _is_tile_aligned(hidden, padded)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Reduced MXFP4 Marlin padding is enabled on SM90.",
+)
+@pytest.mark.parametrize(
+    "shape", [(32, 256), (64, 256), (96, 512), (192, 512), (288, 5120), (576, 5120)]
+)
+@pytest.mark.parametrize("m", [1, 33])
+def test_mxfp4_marlin_moe_padded_round_trip(shape, m, monkeypatch):
+    """Repack both smaller expert matrices and compare to unpadded weights."""
+    from tests.kernels.utils import torch_experts
+    from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        fused_marlin_moe,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+        prepare_moe_mxfp4_layer_for_marlin,
+    )
+
+    monkeypatch.delenv("VLLM_MARLIN_INPUT_DTYPE", raising=False)
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    n, k = shape
+    e, topk = 4, 2
+    _, padded_n = mxfp4_round_up_hidden_size_and_intermediate_size(
+        Mxfp4MoeBackend.MARLIN, k, n, act_dtype=dtype
+    )
+    weights, scales, references = [], [], []
+    for out_dim, in_dim in [(2 * n, k), (k, n)]:
+        w = torch.randint(
+            256, (e, out_dim, in_dim // 2), dtype=torch.uint8, device="cuda"
+        )
+        s = torch.randint(
+            119, 123, (e, out_dim, in_dim // 32), dtype=torch.uint8, device="cuda"
+        )
+        references.append(dq_mxfp4_torch(w, s, dtype))
+        weights.append(w)
+        scales.append(s)
+
+    def pad_gate_up(tensor):
+        tensor = tensor.reshape(e, 2, n, -1)
+        return torch.nn.functional.pad(tensor, (0, 0, 0, padded_n - n)).reshape(
+            e, 2 * padded_n, -1
+        )
+
+    pw13, pw2, ps13, ps2, _, _ = prepare_moe_mxfp4_layer_for_marlin(
+        SimpleNamespace(params_dtype=dtype),
+        pad_gate_up(weights[0]),
+        torch.nn.functional.pad(weights[1], (0, (padded_n - n) // 2)),
+        pad_gate_up(scales[0]),
+        torch.nn.functional.pad(scales[1], (0, (padded_n - n) // 32)),
+        None,
+        None,
+    )
+    assert pw2.numel() * pw2.element_size() == e * k * padded_n // 2
+    a = torch.randn(m, k, dtype=dtype, device="cuda") / 4
+    score = torch.randn(m, e, dtype=dtype, device="cuda")
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+    out = fused_marlin_moe(
+        a,
+        pw13,
+        pw2,
+        None,
+        None,
+        ps13,
+        ps2,
+        topk_weights,
+        topk_ids,
+        quant_type_id=scalar_types.float4_e2m1f.id,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        ref = torch_experts(a, *references, topk_weights, topk_ids)
+    torch.testing.assert_close(out, ref, atol=3e-2, rtol=3e-2)
 
 
 def _gpu_marlin_unsupported() -> bool:
