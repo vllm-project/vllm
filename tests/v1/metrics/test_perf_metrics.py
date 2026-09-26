@@ -517,6 +517,61 @@ def test_model_metrics_aggregation():
     assert total_flops == sum(breakdown.values())
 
 
+@pytest.mark.parametrize(
+    (
+        "is_new_request",
+        "num_scheduled_tokens",
+        "spec_decode_tokens",
+        "expected_num_logits_tokens",
+    ),
+    [
+        pytest.param(True, 2, [], 1, id="new-prefill"),
+        pytest.param(False, 1, [], 1, id="decode"),
+        pytest.param(False, 2, [], 1, id="chunked-prefill"),
+        pytest.param(False, 3, [11, 12], 3, id="speculative-decode"),
+        pytest.param(True, 3, [-1, -1], 3, id="padded-speculative-decode"),
+        pytest.param(True, 4, [11, 12], 1, id="resumed-prefill"),
+    ],
+)
+def test_step_perf_stats_classifies_requests(
+    is_new_request,
+    num_scheduled_tokens,
+    spec_decode_tokens,
+    expected_num_logits_tokens,
+):
+    """Test request phase classification with speculative tokens."""
+    model_metrics = ModelMetrics.__new__(ModelMetrics)
+    unembed_metrics = UnembedMetrics(
+        hidden_size=8,
+        vocab_size=16,
+        weight_byte_size=2,
+        activation_byte_size=2,
+        tp_size=1,
+    )
+    model_metrics.metrics = [unembed_metrics]
+    new_request = SimpleNamespace(req_id="r0", num_computed_tokens=16)
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[new_request] if is_new_request else [],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[] if is_new_request else ["r0"],
+            num_computed_tokens=[] if is_new_request else [16],
+        ),
+        num_scheduled_tokens={"r0": num_scheduled_tokens},
+        scheduled_spec_decode_tokens=(
+            {"r0": spec_decode_tokens} if spec_decode_tokens else {}
+        ),
+    )
+
+    perf_stats = model_metrics.get_step_perf_stats_per_gpu(scheduler_output)
+
+    assert perf_stats.num_flops_per_gpu == (
+        2
+        * expected_num_logits_tokens
+        * unembed_metrics.hidden_size
+        * unembed_metrics.vocab_size
+    )
+
+
 def test_moe_expert_activation_proportional_scaling():
     """Test that routed expert metrics scale proportionally with num_experts_per_tok."""
     base_moe_config = Qwen3MoeConfig(
