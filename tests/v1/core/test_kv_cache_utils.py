@@ -149,7 +149,7 @@ def test_hybrid_draft_full_attention_shapes(
         ("mamba", False),
     ],
 )
-def test_shared_block_table_spec(difference, shareable):
+def test_layers_share_block_table(difference, shareable):
     full = FullAttentionSpec(
         block_size=16, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
     )
@@ -173,8 +173,10 @@ def test_shared_block_table_spec(difference, shareable):
     elif difference == "mamba":
         full = MambaSpec(block_size=16, shapes=((1024,),), dtypes=(torch.bfloat16,))
         other = replace(full, shapes=((512, 2),))
-    spec = kv_cache_utils._get_shared_block_table_spec({"a": full, "b": other})
-    assert (spec is not None) == shareable
+    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
+        {"a": full, "b": other}, _grouping_config()
+    )
+    assert (len(groups) == 1) == shareable
 
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])

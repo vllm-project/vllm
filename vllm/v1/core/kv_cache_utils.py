@@ -1047,10 +1047,18 @@ def create_kv_cache_group_specs(
         layer_specs = [
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
-        merged_layer_spec = layer_specs[0].merge(layer_specs)
-        kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec)
-        )
+        group_spec: KVCacheSpec | None
+        try:
+            group_spec = layer_specs[0].merge(layer_specs)
+        except (AssertionError, ValueError):
+            # Layers of different shapes sharing a block table keep their own
+            # specs (see _get_kv_cache_groups_uniform_page_size).
+            group_spec = UniformTypeKVCacheSpecs.from_specs(
+                {name: kv_cache_spec[name] for name in layer_names_one_group}
+            )
+            if group_spec is None:
+                raise
+        kv_cache_groups.append(KVCacheGroupSpec(layer_names_one_group, group_spec))
     return kv_cache_groups
 
 
@@ -1523,16 +1531,21 @@ def _get_kv_cache_groups_uniform_page_size(
     spec_buckets: list[list[KVCacheSpec]] = []
     for layer_spec, layer_names in same_type_layers.items():
         for names, specs in zip(layer_buckets, spec_buckets):
-            candidate = {str(i): spec for i, spec in enumerate([*specs, layer_spec])}
-            if (
-                _get_shared_block_table_spec(
-                    candidate,
-                    # Page sizes depend on TP; KV transfer peers may differ.
-                    share_by_page_size=vllm_config.kv_transfer_config is None,
-                )
-                is None
-            ):
-                continue
+            try:
+                # A raise means that the specs are incompatible.
+                type(specs[0]).merge([*specs, layer_spec])
+            except (AssertionError, ValueError):
+                # Attention layers of different shapes can still share a
+                # block table if their page sizes match; each keeps its own
+                # spec. Page sizes depend on TP, so not with a KV connector.
+                candidate = {str(i): s for i, s in enumerate([*specs, layer_spec])}
+                if (
+                    vllm_config.kv_transfer_config is not None
+                    or not isinstance(layer_spec, AttentionSpec)
+                    or layer_spec.page_size_bytes != specs[0].page_size_bytes
+                    or not UniformTypeKVCacheSpecs.is_uniform_type(candidate)
+                ):
+                    continue
             names.extend(layer_names)
             specs.append(layer_spec)
             break
@@ -1598,40 +1611,7 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    groups = []
-    for layers in grouped_layers:
-        group_spec = _get_shared_block_table_spec(
-            {name: kv_cache_spec[name] for name in layers}
-        )
-        assert group_spec is not None
-        groups.append(KVCacheGroupSpec(layers, group_spec))
-    return groups
-
-
-def _get_shared_block_table_spec(
-    specs: dict[str, KVCacheSpec],
-    share_by_page_size: bool = True,
-) -> KVCacheSpec | None:
-    """The spec of a KV cache group holding these layers, or None if they
-    cannot share a block table.
-
-    Attention layers whose specs differ in shape (e.g. a drafter's head
-    layout) can still share one when their block size, token-slot semantics
-    and page size match; each keeps its own spec. The layout resolver picks a
-    block-compact layout whenever shapes differ.
-    """
-    values = list(specs.values())
-    try:
-        return type(values[0]).merge(values)
-    except (AssertionError, ValueError):
-        pass
-    if not share_by_page_size:
-        return None
-    if not all(isinstance(spec, AttentionSpec) for spec in values):
-        return None
-    if len({spec.page_size_bytes for spec in values}) > 1:
-        return None
-    return UniformTypeKVCacheSpecs.from_specs(specs)
+    return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
 def _get_per_layer_spec(
