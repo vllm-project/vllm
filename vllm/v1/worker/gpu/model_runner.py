@@ -998,6 +998,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     @torch.inference_mode()
+    def capture_one_sleep_graph(self) -> int:
+        """Capture one FULL descriptor while no requests own the input buffers."""
+        manager = self.cudagraph_manager
+        assert manager is not None
+        descriptors = manager._capture_descs
+        pending = [
+            desc
+            for desc in descriptors[CUDAGraphMode.FULL]
+            if desc not in manager.graphs
+        ]
+        if not pending:
+            return 0
+        # Preserve startup order: the first output buffer must fit the largest
+        # descriptor. Subsequent captures retain its address and the same pool.
+        manager._capture_descs = {CUDAGraphMode.FULL: pending[:1]}
+        try:
+            with torch.random.fork_rng(devices=[self.device]):
+                manager.capture(
+                    self.model,
+                    self.model_state,
+                    self.input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                )
+                torch.accelerator.synchronize()
+        finally:
+            manager._capture_descs = descriptors
+        logger.info(
+            "Sleep graph recapture: %s; remaining=%d", pending[0], len(pending) - 1
+        )
+        return len(pending) - 1
+
+    @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
         capture_encoder = (

@@ -125,6 +125,11 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        self._sleep_graph_pending = False
+        self._sleep_graph_traffic = False
+        self._sleep_graph_discarded = False
+        self._sleep_graph_error: str | None = None
+        self._sleep_graph_transition = False
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
@@ -662,6 +667,8 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
+        if model_executed and getattr(self, "_sleep_graph_pending", False):
+            self._sleep_graph_traffic = True
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
@@ -913,6 +920,15 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and (
+            self.model_executor.is_sleeping
+            or self._sleep_graph_error is not None
+            or self._sleep_graph_transition
+        ):
+            raise RuntimeError(
+                "Cannot resume during graph sleep, with sleeping memory "
+                "or a graph lifecycle error"
+            )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -932,16 +948,52 @@ class EngineCore:
                 documentation of pause_scheduler method.
 
         """
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and self._sleep_graph_transition:
+            raise RuntimeError("Graph-discard sleep is already in progress")
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and level:
+            if level != 1:
+                raise ValueError("Graph-discard sleep supports level 1 only")
+            if self._sleep_graph_error is not None:
+                raise RuntimeError(self._sleep_graph_error)
+            if self.model_executor.is_sleeping:
+                if self.model_executor.sleeping_tags == {"weights", "kv_cache"}:
+                    return None
+                raise RuntimeError(
+                    "Fully wake memory before another graph-discard sleep"
+                )
+            self._sleep_graph_pending = False
+            self._sleep_graph_traffic = False
+            self._sleep_graph_transition = True
+
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        try:
+            pause_future = self.pause_scheduler(
+                mode=mode, clear_cache=clear_prefix_cache
+            )
+        except Exception:
+            self._sleep_graph_transition = False
+            raise
         if level < 1:
             return pause_future
 
         # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
+
+        def sleep_memory():
+            try:
+                model_executor.sleep(level)
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+                    self._sleep_graph_discarded = True
+            except Exception as exc:
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+                    self._sleep_graph_error = f"Graph-discard sleep failed: {exc}"
+                raise
+            finally:
+                self._sleep_graph_transition = False
+
         if pause_future is None:
-            model_executor.sleep(level)
+            sleep_memory()
             return None
 
         future = Future[Any]()
@@ -949,8 +1001,11 @@ class EngineCore:
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                future.set_result(sleep_memory())
             except Exception as e:
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+                    self._sleep_graph_transition = False
+                    self._sleep_graph_error = f"Graph-discard pause failed: {e}"
                 future.set_exception(e)
 
         logger.info("Waiting for in-flight requests to complete before sleeping...")
@@ -967,17 +1022,31 @@ class EngineCore:
             Whether all executor memory is resident again (fully awake).
 
         """
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+            if self._sleep_graph_error is not None:
+                raise RuntimeError(self._sleep_graph_error)
+            if self._sleep_graph_transition:
+                raise RuntimeError("Graph-discard sleep is still in progress")
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
         if tags is None or tags:
-            self.model_executor.wake_up(tags)
+            try:
+                self.model_executor.wake_up(tags)
+            except Exception as exc:
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+                    self._sleep_graph_error = f"Graph-discard wake failed: {exc}"
+                raise
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
         fully_awake = not self.model_executor.is_sleeping
         if fully_awake:
+            if getattr(self, "_sleep_graph_discarded", False):
+                self._sleep_graph_pending = True
+                self._sleep_graph_traffic = False
+                self._sleep_graph_discarded = False
             self.resume_scheduler()
         return fully_awake
 
@@ -986,6 +1055,10 @@ class EngineCore:
         and all executor memory to be resident. Kept requests are recomputed
         after wake-up.
         """
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+            raise RuntimeError(
+                "Selective KV discard is not supported with graph-discard sleep"
+            )
         if not (
             self.is_scheduler_paused()
             and not self.scheduler.has_requests()
@@ -1004,6 +1077,29 @@ class EngineCore:
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
+
+    def _run_sleep_graph_capture(self) -> bool:
+        """Perform at most one idle capture, independently of inference has_work."""
+        if (
+            not self._sleep_graph_pending
+            or not self._sleep_graph_traffic
+            or self.is_sleeping()
+            or self._sleep_graph_error is not None
+            or self.scheduler.has_requests()
+            or self.batch_queue
+        ):
+            return False
+        try:
+            remaining = self.model_executor.collective_rpc("recapture_sleep_graph")
+            self._sleep_graph_pending = any(count > 0 for count in remaining)
+        except Exception as exc:
+            self._sleep_graph_pending = False
+            self._sleep_graph_error = f"Sleep graph recapture failed: {exc}"
+            self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+            # Propagate to EngineCore's fatal-error path so queued and future
+            # requests receive EngineDead instead of waiting on a paused engine.
+            raise
+        return True
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -1475,6 +1571,8 @@ class EngineCoreProc(EngineCore):
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            if self._sleep_graph_error is not None:
+                raise RuntimeError(self._sleep_graph_error)
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
             # 2) Step the engine core and return the outputs.
@@ -1502,7 +1600,13 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
+            if self._sleep_graph_error is not None:
+                raise RuntimeError(self._sleep_graph_error)
             if self.input_queue.empty():
+                if self._run_sleep_graph_capture():
+                    # Return to the outer loop after one descriptor. Incoming
+                    # requests and management operations run before the next.
+                    return
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
                     self.aborts_queue.queue.clear()

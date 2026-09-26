@@ -665,7 +665,105 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
+    core._sleep_graph_pending = False
+    core._sleep_graph_traffic = False
+    core._sleep_graph_discarded = False
+    core._sleep_graph_error = None
+    core._sleep_graph_transition = False
     return core
+
+
+@pytest.mark.parametrize("sleeping,error", [(True, None), (False, "device failure")])
+def test_graph_sleep_cannot_bypass_unsafe_resume(monkeypatch, sleeping, error):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = sleeping
+    core._sleep_graph_error = error
+    with pytest.raises(RuntimeError, match="Cannot resume"):
+        core.resume_scheduler()
+    core.scheduler.set_pause_state.assert_not_called()
+
+
+def test_graph_sleep_partial_wake_defers_capture_and_resume(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core._sleep_graph_discarded = True
+    core.model_executor.is_sleeping = True
+    assert core.wake_up(["weights"]) is False
+    assert not core._sleep_graph_pending
+    core.scheduler.set_pause_state.assert_not_called()
+    core.model_executor.is_sleeping = False
+    assert core.wake_up(["kv_cache"]) is True
+    assert core._sleep_graph_pending and not core._sleep_graph_traffic
+
+
+def test_graph_sleep_drain_cannot_be_resumed_early(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = False
+    pause: Future[None] = Future()
+    core.pause_scheduler = MagicMock(return_value=pause)
+    completed = core.sleep(level=1, mode="wait")
+    assert not completed.done()
+    for operation in (core.wake_up, core.resume_scheduler, core.sleep):
+        with pytest.raises(RuntimeError):
+            operation()
+    with pytest.raises(RuntimeError, match="already in progress"):
+        core.sleep(level=0, mode="invalid")
+    assert core._sleep_graph_transition
+    core.model_executor.sleep.assert_not_called()
+    pause.set_result(None)
+    assert completed.result() is None
+    core.model_executor.sleep.assert_called_once_with(1)
+    assert not core._sleep_graph_transition
+
+
+def test_graph_sleep_failed_idle_callback_does_not_block_requests():
+    core = _pausable_engine_core_proc()
+    core.has_work = MagicMock(return_value=False)
+    core.is_running = MagicMock(return_value=True)
+    core.input_queue = MagicMock()
+
+    def fail_sleep():
+        core._sleep_graph_error = "Graph-discard sleep failed: device failure"
+
+    core._notify_idle_state_callbacks = fail_sleep
+    with pytest.raises(RuntimeError, match="device failure"):
+        core._process_input_queue()
+    core.input_queue.get.assert_not_called()
+
+
+def test_idle_graph_capture_waits_for_traffic_and_runs_one_item():
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = True
+    core.model_executor.collective_rpc.return_value = [2]
+    assert core._run_sleep_graph_capture() is False
+    core.model_executor.collective_rpc.assert_not_called()
+    core._sleep_graph_traffic = True
+    assert core._run_sleep_graph_capture() is True
+    core.model_executor.collective_rpc.assert_called_once_with("recapture_sleep_graph")
+    assert core._sleep_graph_pending
+    core.scheduler.has_requests.return_value = True
+    assert core._run_sleep_graph_capture() is False
+
+
+def test_idle_graph_capture_failure_blocks_later_resume(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    core.model_executor.collective_rpc.side_effect = RuntimeError("device failure")
+    with pytest.raises(RuntimeError, match="device failure"):
+        core._run_sleep_graph_capture()
+    assert not core._sleep_graph_pending and core._sleep_graph_error
+    core.scheduler.set_pause_state.assert_called_once_with(PauseState.PAUSED_ALL)
+    with pytest.raises(RuntimeError):
+        core.wake_up()
+    with pytest.raises(RuntimeError):
+        core.resume_scheduler()
 
 
 @pytest.mark.parametrize(
