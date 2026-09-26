@@ -16,12 +16,15 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
@@ -330,6 +333,11 @@ fn collect_generate(
             token_ids: collected.token_ids,
         }],
         prompt_logprobs,
+        prompt_token_id_logprobs: collected
+            .prompt_token_id_logprobs
+            .as_ref()
+            .map(npy_base64)
+            .transpose()?,
         prompt_token_ids: return_token_ids.then_some(collected.prompt_token_ids),
         mm_placeholders: return_token_ids.then_some(mm_placeholders).flatten(),
         kv_transfer_params: collected.kv_transfer_params,
@@ -432,6 +440,29 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
         .collect()
 }
 
+/// Encode a float32 matrix as Python `numpy2base64` does.
+fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
+    let (TensorDtype::F32, Some(data), [rows, cols]) = (
+        array.dtype.scalar,
+        array.data.as_raw_view(),
+        array.shape.as_slice(),
+    ) else {
+        bail_server_error!("prompt_token_id_logprobs: expected a float32 matrix");
+    };
+    let mut header =
+        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
+    header.push_str(&" ".repeat(21 - rows.to_string().len()));
+    header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
+    header.push('\n');
+
+    let mut npy = Vec::with_capacity(10 + header.len() + data.len());
+    npy.extend_from_slice(b"\x93NUMPY\x01\x00");
+    npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    npy.extend_from_slice(header.as_bytes());
+    npy.extend_from_slice(data);
+    Ok(base64::engine::general_purpose::STANDARD.encode(npy))
+}
+
 fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
 }
@@ -509,6 +540,7 @@ mod tests {
                 prompt_info: Some(GeneratePromptInfo {
                     prompt_token_ids: Arc::from([11_u32, 22_u32]),
                     prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
                 }),
                 token_ids: vec![33],
                 logprobs: None,
@@ -592,6 +624,7 @@ mod tests {
             prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
                 prompt_token_ids: Arc::from(ids),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             token_ids,
             logprobs: None,
@@ -747,6 +780,7 @@ mod tests {
         let output = CollectedGenerateOutput {
             request_id: "raw-1".to_string(),
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
             token_ids: vec![30],
             logprobs: None,
             finish_reason: FinishReason::stop_eos(),
@@ -782,6 +816,17 @@ mod tests {
     }
 
     #[test]
+    fn prompt_token_id_logprobs_match_numpy2base64() {
+        let scores =
+            WireNdArray::from_f32(vec![2, 3], vec![-0.5, -1.5, -2.5, -3.5, -4.5, -5.5]).unwrap();
+        // numpy2base64(np.array([[-0.5, -1.5, -2.5], [-3.5, -4.5, -5.5]], np.float32))
+        assert_eq!(
+            npy_base64(&scores).unwrap(),
+            "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAC/AADAvwAAIMAAAGDAAACQwAAAsMA="
+        );
+    }
+
+    #[test]
     fn collect_generate_returns_spec_decode_metrics() {
         let metrics = RequestSpecDecodeMetrics {
             num_spec_tokens: 3,
@@ -792,6 +837,7 @@ mod tests {
         let output = CollectedGenerateOutput {
             request_id: "raw-metrics".to_string(),
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
             token_ids: vec![30],
             logprobs: None,
             finish_reason: FinishReason::stop_eos(),
@@ -879,6 +925,7 @@ mod tests {
         let output = CollectedGenerateOutput {
             request_id: "raw-1".to_string(),
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
             token_ids: vec![30],
             logprobs: None,
             finish_reason: FinishReason::stop_eos(),
@@ -914,6 +961,7 @@ mod tests {
         let output_without_payload = |prompt_token_ids: Vec<u32>| CollectedGenerateOutput {
             request_id: "raw-1".to_string(),
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
             token_ids: vec![3],
             logprobs: None,
             finish_reason: FinishReason::stop_eos(),

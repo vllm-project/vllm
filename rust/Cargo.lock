@@ -5968,6 +5968,7 @@ dependencies = [
  "asynk-strim-attr",
  "auto_enums",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "educe",

@@ -131,6 +131,19 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            if params.prompt_logprob_token_ids is not None:
+                if not self.vllm_config.use_v2_model_runner:
+                    raise VLLMValidationError(
+                        "prompt_logprob_token_ids requires the V2 model runner "
+                        "(VLLM_USE_V2_MODEL_RUNNER=1).",
+                        parameter="prompt_logprob_token_ids",
+                    )
+                if self.vllm_config.cache_config.kv_sharing_fast_prefill:
+                    raise VLLMValidationError(
+                        "prompt_logprob_token_ids is incorrect with "
+                        "--kv-sharing-fast-prefill; disable it for scoring.",
+                        parameter="prompt_logprob_token_ids",
+                    )
 
             self.validate_logits_processors_params(params)
 

@@ -103,6 +103,8 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -123,6 +125,7 @@ pub fn lower_sampling_params(
         logprobs,
         prompt_logprobs,
         logprob_token_ids.as_deref(),
+        prompt_logprob_token_ids.as_deref(),
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
@@ -176,6 +179,8 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -646,6 +651,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -701,6 +708,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -870,6 +879,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -935,6 +946,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1008,6 +1021,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.1,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1119,6 +1134,38 @@ mod tests {
                 token_ids,
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_prompt_logprob_token_ids() {
+        let lower = |ids: Vec<u32>| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    prompt_logprob_token_ids: Some(ids),
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+        };
+
+        assert_eq!(
+            lower(vec![1, 2]).unwrap().prompt_logprob_token_ids,
+            Some(vec![1, 2])
+        );
+        assert!(matches!(
+            lower((0..21).collect()),
+            Err(Error::Logprobs(LogprobsError::TooManyCount {
+                parameter: "prompt_logprob_token_ids",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            lower(vec![1000]),
+            Err(Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt_logprob_token_ids",
+                ..
+            }))
         ));
     }
 
@@ -1259,6 +1306,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.1,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,

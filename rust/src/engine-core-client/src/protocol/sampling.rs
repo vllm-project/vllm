@@ -101,6 +101,11 @@ pub struct EngineCoreSamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
+    /// Candidate token IDs scored at every scored causal prompt row, where row
+    /// `i` scores them as predictions of prompt token `i + 1`.
+    pub prompt_logprob_token_ids: Option<Vec<u32>>,
+    /// First causal prompt row to score; `None` scores from the first row.
+    pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
@@ -171,6 +176,8 @@ impl EngineCoreSamplingParams {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
