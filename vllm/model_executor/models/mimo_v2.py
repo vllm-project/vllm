@@ -841,15 +841,17 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             if "attention_sink_bias" in name:
                 total_heads = loaded_weight.shape[0]
                 heads_per_rank = total_heads // tp_size
-                head_start = tp_rank * heads_per_rank
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-
-                param.data.copy_(narrow_weight)
-                loaded_params.add(name)
-            else:
+                local_weight = loaded_weight.narrow(
+                    0, tp_rank * heads_per_rank, heads_per_rank
+                )
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+                weight_loader(param, local_weight)
                 loaded_params.add(name)
+                continue
+
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
 
         return loaded_params
 
