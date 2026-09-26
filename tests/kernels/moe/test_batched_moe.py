@@ -387,7 +387,7 @@ def _td_supported() -> bool:
     )
 
 
-def _run_td(A, B, num_expert_tokens, use_td: bool):
+def _run_td(A, B, num_expert_tokens, use_td: bool, swap: bool | None = None):
     out = torch.zeros(
         A.shape[0],
         A.shape[1],
@@ -399,6 +399,7 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
 
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         batched_triton_kernel,
+        batched_triton_kernel_swapped,
     )
 
     if use_td:
@@ -411,8 +412,12 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
     K = A.shape[2]
     N = B.shape[1]
     BM = BN = BK = 64
-    grid = (E, triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN))
-    batched_triton_kernel[grid](
+    if swap is None:
+        swap = current_platform.is_xpu()
+    num_tiles = triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN)
+    grid = (num_tiles, E) if swap else (E, num_tiles)
+    kernel = batched_triton_kernel_swapped if swap else batched_triton_kernel
+    kernel[grid](
         A,
         B,
         out,
@@ -450,6 +455,54 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
         USE_TD=use_td,
     )
     return out
+
+
+@pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
+def test_batched_mm_swapped_grid(num_experts, max_tokens_per_expert, K, N):
+    """The swapped kernel maps every program's tile to the right expert, m and n."""
+    set_random_seed(42)
+    A = (
+        torch.randn(
+            num_experts, max_tokens_per_expert, K, device=DEVICE, dtype=torch.bfloat16
+        )
+        / 10
+    )
+    B = torch.randn(num_experts, N, K, device=DEVICE, dtype=torch.bfloat16)
+    num_expert_tokens = torch.randint(
+        low=0,
+        high=max_tokens_per_expert,
+        size=(num_experts,),
+        device=DEVICE,
+        dtype=torch.int32,
+    )
+
+    out = _run_td(A, B, num_expert_tokens, False, swap=True)
+    ref = native_batched_masked_quant_matmul(
+        A, B, torch.zeros_like(out), num_expert_tokens
+    )
+
+    torch.testing.assert_close(out, ref, atol=6e-2, rtol=6e-2)
+
+
+def test_swapped_kernel_matches_original_source():
+    """The two kernels must stay in sync apart from their program_id axes."""
+    import inspect
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        batched_triton_kernel,
+        batched_triton_kernel_swapped,
+    )
+
+    def body(kernel):
+        return [
+            line
+            for line in inspect.getsource(kernel.fn).splitlines()
+            if not line.startswith("def ")
+            and "tl.program_id(" not in line
+            and not line.strip().startswith("# axis ")
+        ]
+
+    assert body(batched_triton_kernel_swapped) == body(batched_triton_kernel)
 
 
 @pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
@@ -682,3 +735,39 @@ def test_batched_triton_backend_mapping():
         == UnquantizedMoeBackend.BATCHED_TRITON
     )
     assert map_unquantized_backend("triton") == UnquantizedMoeBackend.TRITON
+
+
+def test_batched_resize_keeps_blockwise_quant_k_tile():
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        resize_batched_config_tiles,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+
+    block_shape = [128, 128]
+    cfg = get_default_config(512, 64, 1408, 2048, 6, "fp8_w8a8", block_shape)
+    # moe_mmk derives scale-group offsets from BLOCK_SIZE_K.
+    assert resize_batched_config_tiles(cfg, block_shape)["BLOCK_SIZE_K"] == 128
+
+
+def test_batched_config_override_is_not_resized():
+    """An override or tuned config reaches the batched kernel with its own tiles."""
+    from vllm.model_executor.layers.fused_moe import override_config
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        has_configured_moe_config,
+        try_get_optimal_moe_config,
+    )
+
+    w1_shape, w2_shape = (64, 2816, 2048), (64, 2048, 1408)
+    tuned = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+    with override_config(tuned):
+        # BatchedTritonExperts.apply resizes tiles only when this is False.
+        assert has_configured_moe_config(w2_shape, None, 256)
+        assert try_get_optimal_moe_config(w1_shape, w2_shape, 6, None, 256) == tuned
