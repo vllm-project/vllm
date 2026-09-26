@@ -159,7 +159,8 @@ async def build_and_serve(
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
-    decorate_logs("APIServer", skip_if_decorated=True)
+    if args.log_prefix:
+        decorate_logs("APIServer", skip_if_decorated=True)
 
     # Interrupt initialization if SIGTERM arrives before uvicorn installs its
     # own signal handlers. Once uvicorn is running it replaces this.

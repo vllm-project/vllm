@@ -730,6 +730,7 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    log_prefix: bool = ObservabilityConfig.log_prefix
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
@@ -1645,6 +1646,10 @@ class EngineArgs:
             **observability_kwargs["enable_logging_iteration_details"],
         )
         observability_group.add_argument(
+            "--log-prefix",
+            **observability_kwargs["log_prefix"],
+        )
+        observability_group.add_argument(
             "--jit-monitor-mode",
             **observability_kwargs["jit_monitor_mode"],
         )
@@ -2126,6 +2131,7 @@ class EngineArgs:
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
+            log_prefix=self.log_prefix,
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
         )

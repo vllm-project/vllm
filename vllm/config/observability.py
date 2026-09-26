@@ -88,6 +88,14 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    log_prefix: bool = True
+    """Prefix each stdout/stderr line with a coloured process name and PID,
+    e.g. `(EngineCore_DP0 pid=1234)`. This covers output vLLM itself doesn't
+    log through the logging module, such as from CUDA/torch/FlashInfer in
+    worker processes. Use `--no-log-prefix` if you manage log formatting
+    yourself, e.g. via `%(processName)s` in a custom logging config, or need
+    unprefixed machine-parseable output."""
+
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""
 
