@@ -1258,6 +1258,7 @@ def _fastsafetensors_memory_budget(
         several causes -- asked for, unmodellable, unreadable, or too little
         memory to reserve headroom from -- and they are not interchangeable
         when someone is working out why a load behaved as it did.
+
     """
     # Zero means "no bound". Every rank contributes a value and takes part in
     # the reduce below, whatever its local state: a rank that returned early
@@ -1323,6 +1324,7 @@ def _safetensors_largest_tensor(
         hf_weights_files: Safetensors files to scan.
         keep_tensor: The predicate the loader filters with, or None. Must be the
             same predicate: a tensor that is never read cannot constrain a chunk.
+
     """
     largest = 0
     for path in hf_weights_files:
@@ -1357,6 +1359,9 @@ def fastsafetensors_weights_iterator(
         accumulate_resident: Whether device memory grows as tensors are
             yielded. False when parameters are allocated before loading and
             only copied into, which is the common case.
+        local_expert_ids: Experts this rank owns under expert parallelism, or
+            None to load every expert. Expert weights outside the set are
+            skipped, matching the default loader.
 
     Note:
         Collective. Every rank must call this the same number of times in the
@@ -1368,6 +1373,7 @@ def fastsafetensors_weights_iterator(
         alone, before any pipeline branching. Each source is planned
         separately and reads free memory at its own point, so a load with
         several sources has a budget per source rather than one overall.
+
     """
     from fastsafetensors import BudgetInfeasibleError
     from fastsafetensors.parallel_loader import ParallelLoader
@@ -1401,6 +1407,7 @@ def fastsafetensors_weights_iterator(
     # roughly an order of magnitude more than --load-format auto.
     keep_tensor: Callable[[str], bool] | None = None
     if local_expert_ids is not None:
+
         def keep_tensor(name: str) -> bool:  # noqa: F811
             return not should_skip_weight(name, local_expert_ids)
 
