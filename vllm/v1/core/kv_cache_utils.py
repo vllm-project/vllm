@@ -1441,6 +1441,8 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config: VllmConfig,
+    warn_padding: bool = True,
 ) -> list[KVCacheGroupSpec]:
     """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
@@ -1500,6 +1502,9 @@ def _get_kv_cache_groups_uniform_page_size(
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
+        vllm_config: The global VllmConfig
+        warn_padding: Log a warning for each padded bucket.
+
     Returns:
         The generated KVCacheGroupSpecs
 
@@ -1537,29 +1542,31 @@ def _get_kv_cache_groups_uniform_page_size(
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
-    # FIXME(Chen): At the moment of writing this code (2025-06-02), all
-    # open-source hybrid model follows a n:1 pattern between different attention
-    # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
-    # full), so we can use the "1" in the n:1 pattern as the group size, which
-    # is the minimum number of layers among all attention types. Need a better
-    # strategy if we want to support more complex patterns (e.g., 20 full + 30
-    # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
-    group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
-    if max_num_layers < min_num_layers * 1.5:
-        # If the number of layers is not much larger than the minimum number of
-        # layers, use the maximum number of layers as the group size to avoid
-        # too many padding layers. A typical example is gpt-oss-20b + eagle,
-        # with 12 sw + 13 full. We pad it to (13 sw, 13 full) instead of
-        # (12 sw, 24 full). 1.5 is a heuristic to avoid too many padding
-        # layers while accommodating speculative decoding drafters that add
-        # extra layers to one attention type.
-        group_size = max_num_layers
+    # Pick the group size that wastes the fewest worst-case (max_model_len)
+    # bytes per request on padding layers, from the smallest bucket (bounding
+    # the number of groups; at least min_kv_cache_group_layers so e.g. a
+    # single-layer drafter bucket cannot force per-layer groups) up to the
+    # largest. Ties prefer fewer groups.
+    bucket_sizes = [len(layers) for layers in layer_buckets]
+    min_group_layers = vllm_config.cache_config.min_kv_cache_group_layers
+    padding_layer_bytes = [
+        max(spec.max_memory_usage_bytes(vllm_config) for spec in specs)
+        for specs in spec_buckets
+    ]
+    group_size = min(
+        range(
+            min(max(min(bucket_sizes), min_group_layers), max(bucket_sizes)),
+            max(bucket_sizes) + 1,
+        ),
+        key=lambda size: (
+            sum(b * (-n % size) for n, b in zip(bucket_sizes, padding_layer_bytes)),
+            sum(cdiv(n, size) for n in bucket_sizes),
+        ),
+    )
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
-        if num_padding_layers != group_size:
+        if warn_padding and num_padding_layers != group_size:
             logger.warning(
                 "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
                 num_padding_layers,
@@ -2000,8 +2007,19 @@ def _get_packed_kv_cache_groups(
     share one page size.
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not layout.is_block_outermost:
+        return None
+    return _plan_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+
+
+def _plan_packed_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """The groups ``_get_packed_kv_cache_groups`` would build for a
+    block-outermost layout, or None if all layers share one page size."""
     page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
-    if not layout.is_block_outermost or len(page_sizes) <= 1:
+    if len(page_sizes) <= 1:
         return None
 
     buckets: list[dict[str, KVCacheSpec]] = []
@@ -2119,6 +2137,35 @@ def _get_packed_kv_cache_groups(
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
+
+
+def packed_kv_cache_layout_is_better(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> bool:
+    """Whether a block-outermost (packed) layout beats the layer-outermost
+    grouping: it avoids full attention padding, whose memory grows with the
+    context, or needs fewer KV cache groups."""
+    specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if not isinstance(spec, HiddenStateCacheSpec)
+    }
+    packed = _plan_packed_kv_cache_groups(vllm_config, specs)
+    if packed is None:
+        return False
+    try:
+        uniform = _get_kv_cache_groups_uniform_page_size(
+            unify_kv_cache_spec_page_size(specs), vllm_config, warn_padding=False
+        )
+    except NotImplementedError:
+        return True
+    group_size = max(len(group.layer_names) for group in uniform)
+    pads_full_attention = any(
+        isinstance(group.kv_cache_spec, FullAttentionSpec)
+        and len(group.layer_names) < group_size
+        for group in uniform
+    )
+    return pads_full_attention or len(packed) < len(uniform)
 
 
 def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
@@ -2349,7 +2396,7 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec, vllm_config)
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
