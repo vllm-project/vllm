@@ -211,7 +211,6 @@ class InputProcessor:
         """Apply trace replay's generation semantics to request-local params."""
         trace_token_ids = sampling_params.trace_decode_token_ids
         assert trace_token_ids
-        assert sampling_params.max_tokens is not None
 
         max_trace_len = max(self.model_config.max_model_len - prompt_len, 1)
         trace_token_ids = trace_token_ids[:max_trace_len]
@@ -219,9 +218,7 @@ class InputProcessor:
 
         # Apply this after the generation config so its EOS token cannot stop
         # replay before the trace is exhausted.
-        sampling_params.max_tokens = min(
-            len(trace_token_ids), sampling_params.max_tokens
-        )
+        sampling_params.max_tokens = len(trace_token_ids)
         sampling_params.min_tokens = 0
         sampling_params.ignore_eos = True
         sampling_params._eos_token_id = None
