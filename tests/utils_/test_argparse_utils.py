@@ -30,6 +30,7 @@ def parser():
     parser.add_argument("--hf-overrides", type=json.loads)
     parser.add_argument("-cc", "--compilation-config", type=json.loads)
     parser.add_argument("--optimization-level", type=int)
+    parser.add_argument("--presence-penalty", type=float)
     return parser
 
 
@@ -73,6 +74,19 @@ def test_with_int_value(parser):
     assert args.batch_size == 32
     args = parser.parse_args(["--batch-size", "32"])
     assert args.batch_size == 32
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--presence-penalty", "-0.5"],
+        ["--presence-penalty", "-0.5", "--model-name", "test-model"],
+    ],
+)
+def test_negative_float_values_are_not_dotted_args(parser, args):
+    parsed_args = parser.parse_args(args)
+
+    assert parsed_args.presence_penalty == -0.5
 
 
 def test_with_bool_flag(parser):
