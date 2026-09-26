@@ -103,13 +103,20 @@ def _build_config(
     kv_connector: str | None,
     enable_sleep_mode: bool = False,
     enable_cumem_allocator: bool = False,
+    kv_connector_supports_expandable_segments: bool = False,
 ) -> VllmConfig:
     """Build a VllmConfig that exercises _verify_kv_transfer_compat without
     requiring a real model (avoids HF downloads in CI)."""
     from types import SimpleNamespace
 
     kv_transfer_config = (
-        KVTransferConfig(kv_connector=kv_connector, kv_role="kv_both")
+        KVTransferConfig(
+            kv_connector=kv_connector,
+            kv_role="kv_both",
+            kv_connector_supports_expandable_segments=(
+                kv_connector_supports_expandable_segments
+            ),
+        )
         if kv_connector is not None
         else None
     )
@@ -150,6 +157,32 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
     """Manual CuMem allocation must also bypass expandable_segments."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
+
+
+@pytest.mark.parametrize("kv_connector", ["LMCacheMPConnector", "LMCacheConnectorV1"])
+def test_kv_connector_allows_expandable_segments_with_operator_opt_in(
+    monkeypatch, kv_connector
+):
+    """Copy-based connectors (CUDA kernels / cudaMemcpy at transfer time, no
+    pinned/registered KV memory) dereference virtual addresses on every
+    transfer, so VMM physical remaps are transparent to them. The operator
+    can assert that via kv_connector_supports_expandable_segments to skip
+    the conservative rejection."""
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    _build_config(
+        kv_connector=kv_connector,
+        kv_connector_supports_expandable_segments=True,
+    )
+
+
+def test_kv_connector_opt_in_defaults_off(monkeypatch):
+    """Without the explicit operator opt-in the rejection must still fire."""
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    with pytest.raises(ValueError, match="expandable_segments"):
+        _build_config(
+            kv_connector="LMCacheMPConnector",
+            kv_connector_supports_expandable_segments=False,
+        )
 
 
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
