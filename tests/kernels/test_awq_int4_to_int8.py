@@ -203,7 +203,7 @@ class TestInt4ScaledMmCpu:
         print(f"  [PASS] INT4 GEMM with bias: M={M}")
 
     def test_gemm_3d_input(self):
-        """apply() reshapes 3D input [B, S, K] -> [B*S, K] -> back to 3D."""
+        """int4_scaled_mm_cpu flattens 3D [B, S, K] to 2D and reshapes back."""
         K, N, group_size = 256, 128, 128
         (packed_qweight, packed_qzeros, scales, float_ref, _, _) = (
             make_awq_checkpoint_data(K, N, group_size)
@@ -220,12 +220,13 @@ class TestInt4ScaledMmCpu:
         x_3d = torch.randn(B, S, K, dtype=torch.bfloat16)
         x_2d = x_3d.reshape(-1, K)
 
+        out_3d = int4_scaled_mm_cpu(x_3d, blocked_w, blocked_zp, blocked_s, None)
         out_2d = int4_scaled_mm_cpu(x_2d, blocked_w, blocked_zp, blocked_s, None)
-        out_3d = out_2d.reshape(B, S, N)
-
-        ref_out = torch.mm(x_2d.float(), float_ref).reshape(B, S, N)
 
         assert out_3d.shape == (B, S, N)
+        torch.testing.assert_close(out_3d.reshape(-1, N), out_2d)
+
+        ref_out = torch.mm(x_2d.float(), float_ref).reshape(B, S, N)
         abs_diff = (out_3d.float() - ref_out).abs()
         mean_abs = abs_diff.mean().item()
         ref_mag = ref_out.abs().mean().item() + 1e-6
