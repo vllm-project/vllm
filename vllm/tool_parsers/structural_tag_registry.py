@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
@@ -73,7 +74,9 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v4_1",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
+    {"glm_4_7_nonstrict", "hermes", "hy_v4", "kimi_k3"}
+)
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -808,3 +811,121 @@ def get_hy_v4_structural_tag(
     # the ``<think>...</think:SUF>`` prefix.
     prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end=think_end)
     return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
+
+
+# ---------------------------------------------------------------------------
+# GLM-4.7 tool calls (<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>)
+# ---------------------------------------------------------------------------
+# Assistant output after the reasoning gate (``</think>``):
+#   [<text>]
+#   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...</tool_call>
+# Values are raw JSON scalars: strings verbatim (unquoted), other types as
+# bare JSON, matching how the chat template serializes tool-call history.
+
+_GLM_4_7_VALUE_EXCLUDES = [
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "</tool_call>",
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+]
+
+
+def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
+    if "enum" in prop:
+        values = [
+            ConstStringFormat(value=v if isinstance(v, str) else json.dumps(v))
+            for v in prop["enum"]
+        ]
+        return values[0] if len(values) == 1 else OrFormat(elements=values)
+    prop_type = prop.get("type")
+    if isinstance(prop_type, list):
+        formats = [
+            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
+        ]
+        if "string" in prop_type:
+            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
+        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
+    if prop_type in (None, "string"):
+        return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
+    return JSONSchemaFormat(json_schema={"type": prop_type})
+
+
+def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
+    properties = (tool.function.parameters or {}).get("properties", {})
+    pairs: list[Any] = [
+        SequenceFormat(
+            elements=[
+                ConstStringFormat(value=f"<arg_key>{key}</arg_key><arg_value>"),
+                _glm_4_7_value_format(prop),
+                ConstStringFormat(value="</arg_value>"),
+            ]
+        )
+        for key, prop in properties.items()
+    ]
+    content: Any = (
+        StarFormat(content=pairs[0] if len(pairs) == 1 else OrFormat(elements=pairs))
+        if pairs
+        else ConstStringFormat(value="")
+    )
+    return TagFormat(
+        begin=f"<tool_call>{tool.function.name}",
+        content=content,
+        end="</tool_call>",
+    )
+
+
+@register_vllm_structural_tag("glm_4_7_nonstrict")
+def get_glm_4_7_non_strict_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build the non-strict GLM-4.7 structural tag.
+
+    Registered separately from ``glm_4_7`` so the schema-exact strict path
+    keeps dispatching to the xgrammar builtin unchanged. Applies shallow
+    constraints: argument keys may be omitted, repeated, and emitted in any
+    order, and values are typed shallowly from the schema.
+
+    Args:
+        tools: Normalized function tools the model may call.
+        builtin_tools: Unused; GLM-4.7 has no builtin tools.
+        tool_choice: Simplified tool choice.
+        reasoning: Whether the grammar also covers the reasoning phase.
+        token_suffix: Unused; GLM-4.7 structural tokens are fixed.
+
+    """
+    del builtin_tools, token_suffix
+
+    tags = [_glm_4_7_tool_tag(tool) for tool in tools]
+    if tool_choice == "auto":
+        suffix_tag: Any = TriggeredTagsFormat(
+            triggers=["<tool_call>"],
+            tags=tags,
+            excludes=[
+                "<think>",
+                "</think>",
+                "</tool_call>",
+                "<arg_key>",
+                "</arg_key>",
+                "<arg_value>",
+                "</arg_value>",
+            ],
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=tool_choice == "forced",
+        )
+    if reasoning:
+        prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end="</think>")
+        return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
+    return StructuralTag(format=suffix_tag)

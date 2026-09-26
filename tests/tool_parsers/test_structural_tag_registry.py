@@ -6,16 +6,21 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import FunctionTool, NamespaceTool
 from xgrammar import Grammar, StructuralTag
+from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural_tag
 from xgrammar.testing import _is_grammar_accept_string
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
@@ -1030,3 +1035,417 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("strict")
     with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("off")
+
+
+# ---------------------------------------------------------------------------
+# GLM-4.7 structural tag (non-strict shallow constraints)
+# ---------------------------------------------------------------------------
+
+
+def _glm47_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "days": {"type": "integer"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["city"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                },
+            },
+        ),
+    ]
+
+
+def _glm47_arg(key: str, value: str) -> str:
+    return f"<arg_key>{key}</arg_key><arg_value>{value}</arg_value>"
+
+
+def _glm47_call(name: str, *args: str) -> str:
+    return f"<tool_call>{name}{''.join(args)}</tool_call>"
+
+
+def _glm47_grammar(tool_choice, tools=None, reasoning: bool = False):
+    # FUNCTION lifts the auto/no-strict gate for the dedicated nonstrict key.
+    tag = get_model_structural_tag(
+        model="glm_4_7_nonstrict",
+        tools=tools if tools is not None else _glm47_tools(),
+        tool_choice=tool_choice,
+        reasoning=reasoning,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+    assert isinstance(tag, StructuralTag)
+    return Grammar.from_structural_tag(tag)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # plain text, no tool call
+        "Hello there",
+        # text followed by a call
+        "Sure." + _glm47_call("get_weather", _glm47_arg("city", "Paris")),
+        # call only, required arg present
+        _glm47_call("get_weather", _glm47_arg("city", "Paris")),
+        # all arguments omitted
+        _glm47_call("get_weather"),
+        # repeated argument
+        _glm47_call(
+            "get_weather", _glm47_arg("city", "Paris"), _glm47_arg("city", "Rome")
+        ),
+        # arguments in reverse declaration order
+        _glm47_call(
+            "get_weather", _glm47_arg("days", "3"), _glm47_arg("city", "Paris")
+        ),
+        # enum-constrained value
+        _glm47_call("get_weather", _glm47_arg("unit", "celsius")),
+        # string values with spaces and a bare '<'
+        _glm47_call("run_command", _glm47_arg("command", "grep 'a<b' x.py")),
+        # second tool, two calls
+        _glm47_call("run_command", _glm47_arg("command", "ls -la"))
+        + _glm47_call("get_weather", _glm47_arg("city", "Paris")),
+    ],
+)
+def test_glm47_non_strict_auto_accepts_valid_tool_calls(body: str):
+    assert _is_grammar_accept_string(_glm47_grammar("auto"), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # unknown tool name
+        _glm47_call("unknown_tool", _glm47_arg("city", "Paris")),
+        # undeclared argument key
+        _glm47_call("get_weather", _glm47_arg("zzz", "x")),
+        # structural marker inside a string value
+        _glm47_call("get_weather", _glm47_arg("city", "a<arg_key>b")),
+        # integer-typed value given non-numeric text
+        _glm47_call("get_weather", _glm47_arg("days", "abc")),
+        # enum-typed value outside the enum
+        _glm47_call("get_weather", _glm47_arg("unit", "kelvin")),
+        # unterminated tool call
+        "<tool_call>get_weather" + _glm47_arg("city", "Paris"),
+    ],
+)
+def test_glm47_non_strict_auto_rejects_invalid(body: str):
+    assert not _is_grammar_accept_string(_glm47_grammar("auto"), body)
+
+
+def test_glm47_non_strict_required_requires_at_least_one_call():
+    grammar = _glm47_grammar("required")
+
+    assert not _is_grammar_accept_string(grammar, "Just answering.")
+    assert _is_grammar_accept_string(
+        grammar, _glm47_call("get_weather", _glm47_arg("city", "Paris"))
+    )
+    assert _is_grammar_accept_string(
+        grammar,
+        _glm47_call("run_command", _glm47_arg("command", "ls"))
+        + _glm47_call("get_weather", _glm47_arg("city", "Paris")),
+    )
+
+
+def test_glm47_non_strict_forced_emits_single_named_call():
+    grammar = _glm47_grammar(
+        ChatCompletionNamedToolChoiceParam(
+            type="function",
+            function=ChatCompletionNamedFunction(name="get_weather"),
+        )
+    )
+
+    assert _is_grammar_accept_string(
+        grammar, _glm47_call("get_weather", _glm47_arg("city", "Paris"))
+    )
+    assert not _is_grammar_accept_string(grammar, "No call here")
+    assert not _is_grammar_accept_string(grammar, _glm47_call("run_command"))
+    assert not _is_grammar_accept_string(
+        grammar,
+        _glm47_call("get_weather", _glm47_arg("city", "Paris"))
+        + _glm47_call("run_command"),
+    )
+
+
+def test_glm47_non_strict_reasoning_gates_on_think_close():
+    grammar = _glm47_grammar("required", reasoning=True)
+    call = _glm47_call("get_weather", _glm47_arg("city", "Paris"))
+
+    assert _is_grammar_accept_string(grammar, "thinking...</think>" + call)
+    assert not _is_grammar_accept_string(grammar, call)
+
+
+def test_glm47_non_strict_builds_tag_for_auto_without_strict_tools(sample_tools):
+    # glm_4_7_nonstrict + FUNCTION lifts the "auto without strict tools => no
+    # tag" gate; glm_4_7 still dispatches to the xgrammar builtin.
+    tag = get_model_structural_tag(
+        model="glm_4_7_nonstrict",
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_glm47_strict_mode_matches_xgrammar_builtin(
+    tool_choice: str,
+    sample_tools_strict: list[ChatCompletionToolsParam],
+):
+    ours = get_model_structural_tag(
+        model="glm_4_7",
+        tools=sample_tools_strict,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+    expected = get_xgrammar_builtin_structural_tag(
+        model="glm_4_7",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "strict": True,
+                    "parameters": sample_tools_strict[0].function.parameters,
+                },
+            }
+        ],
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+
+    assert isinstance(ours, StructuralTag)
+    assert ours.model_dump() == expected.model_dump()
+
+
+def _glm47_parser(tools, monkeypatch: pytest.MonkeyPatch) -> Glm47MoeModelToolParser:
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
+    return Glm47MoeModelToolParser(MagicMock(), tools=tools)
+
+
+def test_glm47_get_structural_tag_non_strict_bypasses_strict_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    parser = _glm47_parser(sample_tools, monkeypatch)
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+
+    assert parser.get_structural_tag(request) is None
+    assert (
+        get_model_structural_tag(
+            model="glm_4_7_nonstrict",
+            tools=sample_tools,
+            tool_choice="required",
+            reasoning=False,
+            strict_level=ToolStrictLevel.FUNCTION,
+        )
+        is not None
+    )
+
+
+def test_glm47_adjust_request_attaches_non_strict_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    parser = _glm47_parser(sample_tools, monkeypatch)
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+        response_format={"type": "text"},
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.json is None
+    dumped = json.loads(out.structured_outputs.structural_tag)
+    assert dumped["format"]["tags"][0]["begin"] == "<tool_call>get_weather"
+    assert dumped["format"]["tags"][0]["end"] == "</tool_call>"
+    # detokenization must keep the structural markers
+    assert out.skip_special_tokens is False
+    assert out.response_format is None
+
+
+def test_glm47_adjust_request_responses_request_attaches_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parser = _glm47_parser(None, monkeypatch)
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None
+    assert out.text is None
+    assert out.skip_special_tokens is False
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required"],
+)
+def test_glm47_adjust_request_skips_non_strict_tag_for_strict_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools_strict: list[ChatCompletionToolsParam],
+    tool_choice: str,
+):
+    # Strict tools go through the regular strict structural-tag/json path.
+    parser = _glm47_parser(sample_tools_strict, monkeypatch)
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools_strict,
+        tool_choice=tool_choice,
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None or (
+        out.structured_outputs.structural_tag is None
+    )
+
+
+def test_glm47_adjust_request_no_op_without_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parser = _glm47_parser(None, monkeypatch)
+    request = ChatCompletionRequest(messages=[], model="m")
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None
+
+
+def test_glm47_adjust_request_skips_non_strict_tag_when_tool_choice_none(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    parser = _glm47_parser(sample_tools, monkeypatch)
+    request = ChatCompletionRequest(
+        messages=[], model="m", tools=sample_tools, tool_choice="none"
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None
+
+
+def test_glm47_adjust_request_leaves_guided_requests_to_their_own_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    # A request that already carries structured-output params (guided json)
+    # must not have them replaced by the non-strict structural tag.
+    parser = _glm47_parser(sample_tools, monkeypatch)
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+        structured_outputs=StructuredOutputsParams(json={"type": "object"}),
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is None
+
+
+def test_glm47_adjust_request_skips_non_strict_tag_for_json_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    parser = _glm47_parser(sample_tools, monkeypatch)
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+        response_format={"type": "json_object"},
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None or (
+        out.structured_outputs.structural_tag is None
+    )
+
+
+def test_glm47_adjust_request_skips_non_strict_tag_when_strict_calling_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+    parser = Glm47MoeModelToolParser(MagicMock(), tools=sample_tools)
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+
+    out = parser.adjust_request(request)
+
+    # Falls back to the JSON-schema constraint path instead.
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is None
+
+
+def test_glm47_has_strict_tools_detection():
+    chat_strict = ChatCompletionToolsParam(
+        type="function",
+        function={"name": "get_weather", "strict": True},
+    )
+    chat_relaxed = ChatCompletionToolsParam(
+        type="function",
+        function={"name": "get_weather"},
+    )
+    responses_strict = FunctionTool(type="function", name="get_weather", strict=True)
+    namespace_strict = NamespaceTool.model_construct(
+        type="namespace",
+        name="mcp__computer_use",
+        description="Computer use tools.",
+        tools=[SimpleNamespace(strict=True)],
+    )
+
+    assert Glm47MoeModelToolParser._has_strict_tools([chat_strict])
+    assert Glm47MoeModelToolParser._has_strict_tools([responses_strict])
+    assert Glm47MoeModelToolParser._has_strict_tools([namespace_strict])
+    assert not Glm47MoeModelToolParser._has_strict_tools([chat_relaxed])
