@@ -9,7 +9,7 @@ use xgrammar_structural_tag::{
 };
 
 use super::DeepSeekV41ToolParser;
-use crate::tool::test_utils::collect_stream;
+use crate::tool::test_utils::{collect_stream, split_by_chars};
 use crate::tool::{Tool, ToolParser};
 
 fn tools() -> Vec<Tool> {
@@ -90,6 +90,136 @@ fn spaced_dsml_keeps_parameter_without_string_attr() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
         json!({ "query": "value", "limit": 2 })
+    );
+}
+
+#[test]
+fn spaced_dsml_recovers_complete_invoke_without_calls_start() {
+    let invoke = concat!(
+        "<｜DSML｜ invoke name=\"lookup\">",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">weather</｜DSML｜ parameter>",
+        "</｜DSML｜ invoke>",
+    );
+    for end in ["", "</｜DSML｜ calls>"] {
+        let wire = format!("Before.\n{invoke}{end}");
+        for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
+            let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+            let output = collect_stream(parser.as_mut(), &[&wire[..split], &wire[split..]]);
+            assert_eq!(output.normal_text(), "Before.\n", "split {split}");
+            assert_eq!(output.calls().len(), 1, "split {split}");
+            assert_eq!(
+                output.calls()[0].name.as_deref(),
+                Some("lookup"),
+                "split {split}"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"query": "weather"}),
+                "split {split}"
+            );
+        }
+
+        let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+        let output = collect_stream(parser.as_mut(), &split_by_chars(&wire, 1));
+        assert_eq!(output.normal_text(), "Before.\n");
+        assert_eq!(output.calls().len(), 1);
+    }
+}
+
+#[test]
+fn spaced_dsml_recovers_parallel_invokes_without_calls_start() {
+    let invoke = |query| {
+        format!(
+            "<｜DSML｜ invoke name=\"lookup\"><｜DSML｜ parameter name=\"query\" string=\"true\">{query}</｜DSML｜ parameter></｜DSML｜ invoke>"
+        )
+    };
+    let wire = format!(
+        "{}{}\n</｜DSML｜ calls>ignored",
+        invoke("first"),
+        invoke("second")
+    );
+    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let output = collect_stream(parser.as_mut(), &split_by_chars(&wire, 1));
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 2);
+    assert_eq!(output.calls()[0].tool_index, 0);
+    assert_eq!(output.calls()[1].tool_index, 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+        json!({"query": "first"})
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[1].arguments).unwrap(),
+        json!({"query": "second"})
+    );
+}
+
+#[test]
+fn spaced_dsml_parses_wrapped_block_after_recovered_invoke() {
+    let invoke = "<｜DSML｜ invoke name=\"lookup\"><｜DSML｜ parameter name=\"query\" string=\"true\">first</｜DSML｜ parameter></｜DSML｜ invoke>";
+    let wrapped = "<｜DSML｜ calls><｜DSML｜ invoke name=\"lookup\"><｜DSML｜ parameter name=\"query\" string=\"true\">second</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>";
+    let wire = format!("{invoke}{wrapped}");
+    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let output = collect_stream(parser.as_mut(), &split_by_chars(&wire, 1));
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 2);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+        json!({"query": "first"})
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[1].arguments).unwrap(),
+        json!({"query": "second"})
+    );
+}
+
+#[test]
+fn spaced_dsml_preserves_unrecoverable_invokes_as_text() {
+    let complete = concat!(
+        "<｜DSML｜ invoke name=\"lookup\">",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">weather</｜DSML｜ parameter>",
+        "</｜DSML｜ invoke>",
+    );
+    let undeclared = complete.replace("lookup", "unknown");
+    let incomplete = complete.trim_end_matches("</｜DSML｜ invoke>");
+    let mut required_tools = tools();
+    required_tools[0].parameters["required"] = json!(["query"]);
+    let missing_required = "<｜DSML｜ invoke name=\"lookup\"></｜DSML｜ invoke>";
+
+    for (available, wire) in [
+        (tools(), undeclared.as_str()),
+        (tools(), incomplete),
+        (required_tools, missing_required),
+        (Vec::new(), complete),
+    ] {
+        let mut parser = DeepSeekV41ToolParser::create(&available).unwrap();
+        let output = collect_stream(parser.as_mut(), &split_by_chars(wire, 1));
+        assert_eq!(output.normal_text(), wire);
+        assert!(output.calls().is_empty());
+    }
+}
+
+#[test]
+fn spaced_dsml_recovers_wrapped_call_after_invalid_invoke_text() {
+    let invalid = "<｜DSML｜ invoke name=\"lookup\"><bad/></｜DSML｜ invoke>";
+    let wrapped = concat!(
+        "<｜DSML｜ calls>",
+        "<｜DSML｜ invoke name=\"lookup\">",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">next</｜DSML｜ parameter>",
+        "</｜DSML｜ invoke></｜DSML｜ calls>",
+    );
+    let wire = format!("{invalid}{wrapped}");
+    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let output = collect_stream(parser.as_mut(), &split_by_chars(&wire, 1));
+
+    assert_eq!(output.normal_text(), invalid);
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("lookup"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+        json!({"query": "next"})
     );
 }
 
