@@ -1035,6 +1035,9 @@ class ROCMAiterMLASparseImpl(
             q_scale=layer._q_scale,
             kv_scale=layer._k_scale,
             attn_sink=self.sinks,
+            # triton_convert_req_index_to_global_index writes 0, never -1,
+            # for an invalid top-k entry, so no slot in the stream is negative.
+            has_invalid=False,
         )
         return output
 

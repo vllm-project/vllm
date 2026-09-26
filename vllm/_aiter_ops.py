@@ -3161,14 +3161,18 @@ class rocm_aiter_ops:
         extra_kv_buffer: torch.Tensor | None = None,
         extra_kv_indptr: torch.Tensor | None = None,
         extra_kv_indices: torch.Tensor | None = None,
+        has_invalid: bool = True,
     ) -> None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
-        kv_indices are ragged global slot ids and may hold -1. The cache format
-        (bf16, per-tensor fp8, or DeepSeek V4's paged fp8_ds_mla) is inferred
-        from kv_buffer and kv_scale. An fp8 q must come with its q_scale and
-        runs both dots in fp8. The extra segment is DeepSeek V4's second cache:
-        SWA window in kv_buffer, top-k compressed tokens here.
+        kv_indices are ragged global slot ids. With has_invalid they may hold
+        -1, which the kernel masks; a caller whose stream never holds a
+        negative slot passes False, which lets the fp8 kernel stage K straight
+        into LDS. The cache format (bf16, per-tensor fp8, or DeepSeek V4's
+        paged fp8_ds_mla) is inferred from kv_buffer and kv_scale. An fp8 q
+        must come with its q_scale and runs both dots in fp8. The extra segment
+        is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
+        compressed tokens here.
         """
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
@@ -3182,7 +3186,7 @@ class rocm_aiter_ops:
             kv_scale=kv_scale,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
-            has_invalid=True,
+            has_invalid=has_invalid,
             dot_precision="fp8" if fp8_q else "bf16",
             q_scale=q_scale if fp8_q else None,
             out=o,
