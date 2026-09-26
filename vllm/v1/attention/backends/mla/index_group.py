@@ -12,6 +12,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -496,17 +497,8 @@ class SparseMLAIndexGroupBuilder:
 
 
 def get_sparse_mla_index_group_max_rows(vllm_config: VllmConfig) -> int:
-    max_query_len = 1
-    speculative_config = vllm_config.speculative_config
-    if (
-        speculative_config is not None
-        and speculative_config.num_speculative_tokens is not None
-    ):
-        max_query_len += speculative_config.num_speculative_tokens * (
-            2 if speculative_config.parallel_drafting else 1
-        )
     scheduler_config = vllm_config.scheduler_config
     return min(
         scheduler_config.max_num_batched_tokens,
-        scheduler_config.max_num_seqs * max_query_len,
+        scheduler_config.max_num_seqs * max_decode_query_len(vllm_config),
     )
