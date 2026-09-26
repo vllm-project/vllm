@@ -217,7 +217,12 @@ async def test_load(
 
 
 @pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+    "output_kind",
+    [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
 )
 @pytest.mark.parametrize(
     "engine_args,prompt",
@@ -292,7 +297,12 @@ async def test_abort(
 
 
 @pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+    "output_kind",
+    [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
 )
 @pytest.mark.asyncio
 async def test_multi_abort(output_kind: RequestOutputKind):
