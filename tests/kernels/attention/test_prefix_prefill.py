@@ -608,6 +608,133 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
+def test_noncausal_sliding_window_ignores_evicted_nan_blocks(device: str) -> None:
+    """Evicted context blocks must not poison sliding-window attention."""
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    dtype = torch.bfloat16
+    batch_size = 2
+    num_heads = 4
+    num_kv_heads = 2
+    head_size = 32
+    block_size = 32
+    query_len = 8
+    context_len = 96
+    sliding_window = 32
+
+    query = torch.randn(batch_size * query_len, num_heads, head_size, dtype=dtype)
+    key = torch.randn(batch_size * query_len, num_kv_heads, head_size, dtype=dtype)
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+
+    # The first two logical context blocks have been evicted. Their stale
+    # physical IDs may now belong to another cache group with a different
+    # dtype, while the final context block remains resident.
+    block_table = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.int32)
+
+    num_physical_blocks = 9
+    x = 8
+    k_cache = torch.zeros(
+        num_physical_blocks,
+        num_kv_heads,
+        head_size // x,
+        block_size,
+        x,
+        dtype=dtype,
+    )
+    v_cache = torch.zeros(
+        num_physical_blocks,
+        num_kv_heads,
+        head_size,
+        block_size,
+        dtype=dtype,
+    )
+    evicted_blocks = torch.tensor([1, 2, 5, 6])
+    k_cache[evicted_blocks].fill_(float("nan"))
+    v_cache[evicted_blocks].fill_(float("nan"))
+
+    contexts_k = []
+    contexts_v = []
+    for req in range(batch_size):
+        context_k = torch.randn(context_len, num_kv_heads, head_size, dtype=dtype)
+        context_v = torch.randn_like(context_k)
+        contexts_k.append(context_k)
+        contexts_v.append(context_v)
+
+        resident_k = context_k[-block_size:]
+        resident_v = context_v[-block_size:]
+        physical_block = int(block_table[req, 2].item())
+        k_cache[physical_block].copy_(
+            resident_k.view(block_size, num_kv_heads, head_size // x, x).permute(
+                1, 2, 0, 3
+            )
+        )
+        v_cache[physical_block].copy_(resident_v.permute(1, 2, 0))
+
+    query_start_loc = torch.arange(
+        0,
+        (batch_size + 1) * query_len,
+        query_len,
+        dtype=torch.int32,
+    )
+    seq_lens = torch.full((batch_size,), context_len + query_len, dtype=torch.int32)
+    scale = torch.tensor(1.0, dtype=torch.float32)
+
+    context_attention_fwd(
+        query,
+        key,
+        value,
+        output,
+        "auto",
+        k_cache,
+        v_cache,
+        block_table,
+        query_start_loc,
+        seq_lens,
+        context_len + query_len,
+        query_len,
+        scale,
+        scale,
+        sliding_window=sliding_window,
+        causal=False,
+    )
+
+    output_ref = torch.empty_like(output)
+    for req in range(batch_size):
+        start = req * query_len
+        end = start + query_len
+        q = query[start:end].transpose(0, 1).unsqueeze(0)
+        k = torch.cat((contexts_k[req], key[start:end]), dim=0)
+        v = torch.cat((contexts_v[req], value[start:end]), dim=0)
+        k = k.repeat_interleave(num_heads // num_kv_heads, dim=1)
+        v = v.repeat_interleave(num_heads // num_kv_heads, dim=1)
+        k = k.transpose(0, 1).unsqueeze(0)
+        v = v.transpose(0, 1).unsqueeze(0)
+
+        query_positions = torch.arange(query_len) + context_len
+        key_positions = torch.arange(context_len + query_len)
+        valid = query_positions[:, None] - key_positions[None, :] < sliding_window
+        attn_mask = torch.where(valid, 0.0, float("-inf")).to(dtype)
+        output_ref[start:end] = (
+            F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+            )
+            .squeeze(0)
+            .transpose(0, 1)
+        )
+
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
 def test_contexted_kv_attention_cached_kv_alibi_unsupported(device: str) -> None:
     # The cached-K/V (k=None) path is not supported together with ALiBi; the
     # entry point must reject it up-front with a clear NotImplementedError
