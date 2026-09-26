@@ -242,6 +242,18 @@ fn factory_new_registers_phi4_mini_json_by_name() {
 }
 
 #[test]
+fn factory_registers_minicpm5_by_name_and_model() {
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::MINICPM5));
+    factory.create(names::MINICPM5, &[]).unwrap();
+    assert_eq!(
+        factory.resolve_name_for_model("openbmb/MiniCPM5-2B"),
+        Some(names::MINICPM5)
+    );
+}
+
+#[test]
 fn factory_parses_mimo_parameter_tags() {
     let factory = ToolParserFactory::new();
     for model in ["XiaomiMiMo/MiMo-V2.5", "XiaomiMiMo/MiMo-V2.5-Pro"] {
