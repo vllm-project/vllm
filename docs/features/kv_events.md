@@ -47,7 +47,8 @@ The older replay-only subscriber example does not implement this extension.
 | Snapshot response | `sequence`, `publisher_id`, zero or more `KVEventBatch` chunks |
 
 The live/replay sequence starts at zero and is an unsigned 8-byte big-endian
-integer. The following 16 bytes identify this publisher lifetime. An idle
+integer. The following 16 bytes identify the publisher; they change when it
+restarts or when snapshots become available again after a `-2` reply. An idle
 publisher emits an empty batch every second; this establishes subscription
 delivery and exposes a lost final batch. Numeric replay requests still contain
 only the 8-byte starting sequence. The replay end marker remains unchanged.
@@ -86,17 +87,15 @@ Its `bootstrap()` returns snapshot chunks followed by the validated buffered
 suffix. Its `ready` flag describes transport continuity, not completion of the
 caller's index construction.
 
-The recorder counts residency by `(medium, group, locality, ownership, hash)`.
-It preserves duplicate references and retains whole source store events, so
-partial removals do not change sparse-token or canonical-block alignment.
-`AllBlocksCleared` from the GPU block pool clears GPU residency; offloaded
-residency and its reconstruction metadata remain. Consumers must apply the same
-tier semantics to the subsequent live stream.
-
-A store whose parent metadata has expired is retained only when every reported
-block already has reconstruction metadata. The snapshot represents that event
-as a tokenless tier update after its retained source event. Other missing-parent
-stores invalidate the recorder because their prefix hashes cannot be rebuilt.
+The recorder keeps one record per block hash: its parent, tokens and hash
+inputs. A record is retained while the block is resident in any tier, while a
+retained record names it as parent, and for 16 event-carrying batches after
+its last residency ends, because an offload store can complete after its GPU
+copy was evicted. A snapshot teaches every retained block, parents first,
+removes them again, and then stores each live residency by hash with its exact
+count. `AllBlocksCleared` from the GPU block pool clears GPU residency;
+offloaded residency and its reconstruction metadata remain. Consumers must
+apply the same tier semantics to the subsequent live stream.
 
 ## Limits and failure behavior
 
@@ -106,20 +105,28 @@ ROUTER socket. Snapshot requests process a finite FIFO cut and coalesce up to
 32 waiting requests. A slow snapshot requester does not block the publisher on
 its socket; the requester can time out and retry.
 
-Pending recorder input is limited to 4,096 batches and 64 MiB. Accounted metadata
-and encoded snapshot replies are each limited to 256 MiB; live references are
-limited to one million. Metadata accounting estimates decoded-object storage;
-it is not a process RSS limit. The example limits buffered bootstrap data to
-64 MiB. Snapshot work shares the engine process and Python GIL, so it can still
-affect CPU use and inference latency.
+Pending recorder input is limited to 4,096 batches and 64 MiB. When it is full,
+the publisher waits up to one second for room. Records and live references are
+each limited to one million, recently dead records to 65,536 (the oldest leave
+early beyond that), and encoded snapshot replies to 256 MiB. The example limits
+buffered bootstrap data to 64 MiB. Snapshot work shares the engine process and
+Python GIL, so it can still affect CPU use and inference latency.
 
-Input loss, missing reconstruction metadata, unsupported events, or exceeded
-state/reply limits invalidate the recorder. Subsequent requests receive `-2`,
-while live publishing continues. **Restart the publisher to recover an invalid
-recorder.** Resubscribing cannot reconstruct discarded history, and retrying a
-snapshot does not silently re-enable recording. A stopped service instead causes
-request timeouts. A consumer that falls behind an otherwise healthy recorder can
-recover by requesting another snapshot without restarting vLLM.
+A block the recorder cannot rebuild, such as a store whose parent or own record
+has already left, or a hash restated with other inputs, taints its record.
+While any tainted record is retained, requests receive `-2`; snapshots become
+available again once none is, without a restart. If a `-2` was sent during
+that period, the publisher identity changes when it ends, so consumers that
+fell back to live events alone bootstrap again. A removal of a hash without a
+record is counted and logged; a consumer bootstrapped after the record left
+fails on it once and bootstraps again.
+
+Input the recorder could not queue within the wait, undecodable batches,
+unsupported events and exceeded record, reference or reply limits invalidate
+the recorder: requests receive `-2` until the publisher restarts, while live
+publishing continues. Every invalidation is logged. A stopped service instead
+causes request timeouts. A consumer that falls behind an otherwise healthy
+recorder can recover by requesting another snapshot without restarting vLLM.
 
 Use incremental KV event reporting. Optional per-request `full` reporting can
 re-announce existing blocks with the same `BlockStored` schema as new copies;

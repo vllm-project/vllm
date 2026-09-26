@@ -15,13 +15,16 @@ most recently dead blocks, because an offload store can arrive after its GPU
 copy was evicted. Retention therefore follows the live cache, not the event
 history.
 
-The recorder must observe the stream from its beginning. Missing metadata or
-resource exhaustion disables snapshots rather than returning partial state.
+The recorder must observe the stream from its beginning. A block it cannot
+rebuild is tainted: snapshots are unavailable while any retained record is
+tainted, and become available again once none is. Lost input, unsupported
+events and exhausted budgets disable snapshots until the publisher restarts.
+Snapshots are never partial.
 """
 
-import queue
 import threading
 import time
+import uuid
 from array import array
 from collections import deque
 from collections.abc import Iterator
@@ -65,28 +68,27 @@ class _Record:
         "live",
         "children",
         "death",
+        "tainted",
     )
 
-    def __init__(
-        self,
-        parent: ExternalBlockHash | None,
-        tokens: array,
-        event: BlockStored,
-        extra_key: Any,
-    ) -> None:
-        self.parent = parent
-        self.tokens = tokens
-        self.block_size = event.block_size
-        self.extra_key = extra_key
-        self.lora_id = event.lora_id
-        self.lora_name = event.lora_name
-        self.group = event.group_idx
+    def __init__(self, group: int | None) -> None:
+        # Without tokens the record is a placeholder for a hash whose inputs
+        # were never seen.
+        self.parent: ExternalBlockHash | None = None
+        self.tokens = array("I")
+        self.block_size = 0
+        self.extra_key: Any = None
+        self.lora_id: int | None = None
+        self.lora_name: str | None = None
+        self.group = group
         # Live residency references across all scopes.
         self.live = 0
         # Retained records that name this block as their parent.
         self.children = 0
         # Ring generation while recently dead, else 0.
         self.death = 0
+        # The block cannot be rebuilt: a placeholder or conflicting inputs.
+        self.tainted = False
 
 
 class KVCacheSnapshot:
@@ -97,8 +99,8 @@ class KVCacheSnapshot:
     # A block's offload store can complete after its GPU eviction: reusing a
     # block flushes its pending store in the same scheduler step, and the
     # completion is published with that step's or the next step's batch. Dead
-    # records are kept for this many batches that carry events; more than
-    # MAX_RING_BLOCKS of them within that window disables snapshots.
+    # records are kept for this many batches that carry events, at most
+    # MAX_RING_BLOCKS of them; beyond that the oldest leave early.
     RING_BATCHES = 16
     MAX_RING_BLOCKS = 65_536
 
@@ -112,6 +114,14 @@ class KVCacheSnapshot:
         self._generation = 0
         self._batch = 0
         self._references = 0
+        # Retained records that cannot be rebuilt, and the first reason.
+        self.tainted = 0
+        self.taint_reason = ""
+        # Removals of hashes without a record; consumers bootstrapped after
+        # the record left fail on them once.
+        self.forgotten_removals = 0
+        # Dead records dropped before RING_BATCHES to keep the ring in budget.
+        self.expired_early = 0
 
     def __len__(self) -> int:
         return len(self._live)
@@ -164,60 +174,100 @@ class KVCacheSnapshot:
         hashes = [self._hash(h) for h in event.block_hashes]
         if self._references + len(hashes) > self.MAX_REFERENCES:
             raise ValueError("Snapshot reference budget exceeded")
-        if event.token_ids:
-            size = event.block_size
-            if size <= 0 or len(event.token_ids) != size * len(hashes):
-                raise ValueError("Snapshot requires dense block stores")
-            parent = (
-                None
-                if event.parent_block_hash is None
-                else self._hash(event.parent_block_hash)
-            )
-            extra = event.extra_keys
-            for i, h in enumerate(hashes):
-                tokens = array("I", event.token_ids[i * size : (i + 1) * size])
-                record = self._records.get(h)
-                if record is None:
-                    if parent is not None and parent not in self._records:
-                        raise ValueError(
-                            f"Missing reconstruction metadata for parent {parent!r}"
-                        )
-                    if len(self._records) >= self.MAX_RECORDS:
-                        raise ValueError("Snapshot record budget exceeded")
-                    record = _Record(parent, tokens, event, extra[i] if extra else None)
-                    self._records[h] = record
-                    if parent is not None:
-                        self._records[parent].children += 1
-                elif (
-                    record.parent,
-                    record.tokens,
-                    record.block_size,
-                    record.extra_key,
-                    record.lora_id,
-                    record.lora_name,
-                    record.group,
-                ) != (
-                    parent,
-                    tokens,
-                    size,
-                    extra[i] if extra else None,
-                    event.lora_id,
-                    event.lora_name,
-                    event.group_idx,
-                ):
-                    # One record per hash: a block hashed differently per
-                    # group, or restated with other inputs, cannot be rebuilt.
-                    raise ValueError(f"Conflicting reconstruction metadata for {h!r}")
-                self._add_live((event.medium, event.group_idx, h))
-                parent = h
-        else:
+        size = event.block_size
+        if (
+            not event.token_ids
+            or size <= 0
+            or len(event.token_ids) != size * len(hashes)
+        ):
+            # Rebuilding a block needs its own token span.
+            sparse = bool(event.token_ids)
             for h in hashes:
                 record = self._records.get(h)
                 if record is None:
-                    raise ValueError(f"Missing reconstruction metadata for block {h!r}")
-                if record.group != event.group_idx:
-                    raise ValueError(f"Conflicting reconstruction metadata for {h!r}")
+                    record = self._new_record(h, event.group_idx)
+                    self._taint(record, f"no reconstruction metadata for {h!r}")
+                elif sparse or record.group != event.group_idx:
+                    self._taint(
+                        record, f"conflicting reconstruction metadata for {h!r}"
+                    )
                 self._add_live((event.medium, event.group_idx, h))
+            return
+        parent = (
+            None
+            if event.parent_block_hash is None
+            else self._hash(event.parent_block_hash)
+        )
+        extra = event.extra_keys
+        for i, h in enumerate(hashes):
+            tokens = array("I", event.token_ids[i * size : (i + 1) * size])
+            extra_key = extra[i] if extra else None
+            record = self._records.get(h)
+            if record is None:
+                record = self._new_record(h, event.group_idx)
+                self._fill(record, parent, tokens, event, extra_key)
+            elif not record.tokens and record.group == event.group_idx:
+                self._fill(record, parent, tokens, event, extra_key)
+                record.tainted = False
+                self.tainted -= 1
+            elif (
+                record.parent,
+                record.tokens,
+                record.block_size,
+                record.extra_key,
+                record.lora_id,
+                record.lora_name,
+                record.group,
+            ) != (
+                parent,
+                tokens,
+                size,
+                extra_key,
+                event.lora_id,
+                event.lora_name,
+                event.group_idx,
+            ):
+                # One record per hash: a block hashed differently per group,
+                # or restated with other inputs, cannot be rebuilt.
+                self._taint(record, f"conflicting reconstruction metadata for {h!r}")
+            self._add_live((event.medium, event.group_idx, h))
+            parent = h
+
+    def _new_record(self, h: ExternalBlockHash, group: int | None) -> _Record:
+        if len(self._records) >= self.MAX_RECORDS:
+            raise ValueError("Snapshot record budget exceeded")
+        record = self._records[h] = _Record(group)
+        return record
+
+    def _fill(
+        self,
+        record: _Record,
+        parent: ExternalBlockHash | None,
+        tokens: array,
+        event: BlockStored,
+        extra_key: Any,
+    ) -> None:
+        record.parent = parent
+        record.tokens = tokens
+        record.block_size = event.block_size
+        record.extra_key = extra_key
+        record.lora_id = event.lora_id
+        record.lora_name = event.lora_name
+        record.group = event.group_idx
+        if parent is not None:
+            parent_record = self._records.get(parent)
+            if parent_record is None:
+                parent_record = self._new_record(parent, event.group_idx)
+                self._taint(parent_record, f"no reconstruction metadata for {parent!r}")
+            parent_record.children += 1
+
+    def _taint(self, record: _Record, reason: str) -> None:
+        if record.tainted:
+            return
+        if not self.tainted:
+            self.taint_reason = reason
+        record.tainted = True
+        self.tainted += 1
 
     def _add_live(self, key: _BlockKey) -> None:
         self._live[key] = self._live.get(key, 0) + 1
@@ -231,11 +281,8 @@ class KVCacheSnapshot:
     def _remove(self, key: _BlockKey) -> None:
         count = self._live.get(key)
         if count is None:
-            # A consumer bootstrapped from this recorder must resolve it too.
             if key[2] not in self._records:
-                raise ValueError(
-                    f"Missing reconstruction metadata for block {key[2]!r}"
-                )
+                self.forgotten_removals += 1
             return
         if count > 1:
             self._live[key] = count - 1
@@ -255,16 +302,18 @@ class KVCacheSnapshot:
 
     def _collect(self) -> None:
         oldest = self._batch - self.RING_BATCHES
-        while self._ring and self._ring[0][2] <= oldest:
-            h, generation, _ = self._ring.popleft()
+        while self._ring and (
+            self._ring[0][2] <= oldest or self._ring_size > self.MAX_RING_BLOCKS
+        ):
+            h, generation, batch = self._ring.popleft()
             record = self._records.get(h)
             if record is None or record.death != generation:
                 continue
+            if batch > oldest:
+                self.expired_early += 1
             record.death = 0
             self._ring_size -= 1
             self._drop(h, record)
-        if self._ring_size > self.MAX_RING_BLOCKS:
-            raise ValueError("Snapshot ring budget exceeded")
         # Revived and dropped records leave stale entries behind.
         if len(self._ring) > 2 * self._ring_size + 1024:
             self._ring = deque(
@@ -276,6 +325,8 @@ class KVCacheSnapshot:
     def _drop(self, h: ExternalBlockHash, record: _Record) -> None:
         while not (record.live or record.children or record.death):
             del self._records[h]
+            if record.tainted:
+                self.tainted -= 1
             if record.parent is None:
                 return
             h = record.parent
@@ -292,7 +343,9 @@ class KVCacheSnapshot:
         what it learned about each hash. Token-less stores then bring every
         live scope to its exact count. Clearing before setting keeps a dead
         block from removing a live block the consumer keys identically.
+        Only an untainted snapshot can be exported.
         """
+        assert not self.tainted
         children: dict[ExternalBlockHash, list[ExternalBlockHash]] = {}
         roots: list[ExternalBlockHash] = []
         for h, record in self._records.items():
@@ -387,27 +440,37 @@ class KVCacheSnapshot:
 class KVEventSnapshotRecorder:
     """Owns snapshot state and its ROUTER socket on one thread.
 
-    Input is the immutable payload sent on PUB. Resource exhaustion invalidates
-    the recorder for this publisher lifetime; live publishing continues.
+    Input is the immutable payload sent on PUB. While the snapshot is tainted,
+    requests receive the unavailable sequence. If one did, `stream_id` changes
+    when the taint clears, so consumers that fell back to live events alone
+    bootstrap again. Lost input or exhausted budgets invalidate the recorder
+    for this publisher lifetime; live publishing continues.
     """
 
     EVENTS_PER_CHUNK = 256
     BLOCKS_PER_EVENT = 1024
     POLL_INTERVAL_MS = 20
+    MAX_PENDING_BATCHES = 4096
     MAX_PENDING_BYTES = 64 * 1024 * 1024
+    # The publisher waits this long for room before the recorder gives up.
+    MAX_RECORD_WAIT_S = 1.0
     MAX_REPLY_BYTES = 256 * 1024 * 1024
     MAX_REQUESTS = 32
+    REPORT_INTERVAL_S = 60.0
 
-    def __init__(
-        self, endpoint: str, data_parallel_rank: int, stream_id: bytes
-    ) -> None:
+    def __init__(self, endpoint: str, data_parallel_rank: int) -> None:
         self._dp_rank = data_parallel_rank
-        self._stream_id = stream_id
-        self._inbox: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=4096)
+        # The publisher identity sent with every live frame and reply.
+        self.stream_id = uuid.uuid4().bytes
+        self._inbox: deque[tuple[int, bytes]] = deque()
         self._pending_bytes = 0
-        self._lock = threading.Lock()
+        self._room = threading.Condition()
         self._snapshot = KVCacheSnapshot()
         self._seq = -1
+        self._tainted = False
+        self._served_unavailable = False
+        self._reported = (0, 0)
+        self._next_report = 0.0
         self._failed = threading.Event()
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -422,21 +485,37 @@ class KVEventSnapshotRecorder:
             raise RuntimeError(f"Unable to bind KV snapshot endpoint {endpoint}")
 
     def record(self, seq: int, payload: bytes) -> None:
-        with self._lock:
+        """Queue a published batch, waiting a bounded time for room."""
+        size = len(payload)
+        with self._room:
+            if not self._room.wait_for(
+                lambda: (
+                    self._failed.is_set() or self._stop.is_set() or self._fits(size)
+                ),
+                timeout=self.MAX_RECORD_WAIT_S,
+            ):
+                logger.error(
+                    "KV snapshot recorder is %d batches behind at sequence %d; "
+                    "snapshots are unavailable until the engine restarts",
+                    len(self._inbox),
+                    seq,
+                )
+                self._failed.set()
             if self._failed.is_set() or self._stop.is_set():
                 return
-            if self._pending_bytes + len(payload) > self.MAX_PENDING_BYTES:
-                self._failed.set()
-                return
-            try:
-                self._inbox.put_nowait((seq, payload))
-            except queue.Full:
-                self._failed.set()
-                return
-            self._pending_bytes += len(payload)
+            self._inbox.append((seq, payload))
+            self._pending_bytes += size
+
+    def _fits(self, size: int) -> bool:
+        return not self._inbox or (
+            len(self._inbox) < self.MAX_PENDING_BATCHES
+            and self._pending_bytes + size <= self.MAX_PENDING_BYTES
+        )
 
     def shutdown(self, timeout: float) -> None:
         self._stop.set()
+        with self._room:
+            self._room.notify_all()
         self._thread.join(timeout=timeout)
 
     def _run(self, endpoint: str) -> None:
@@ -462,23 +541,59 @@ class KVEventSnapshotRecorder:
 
     def _drain(self, decoder: msgspec.msgpack.Decoder) -> None:
         # A finite FIFO cut: future arrivals cannot postpone this snapshot.
-        for _ in range(self._inbox.qsize()):
-            with self._lock:
-                try:
-                    seq, payload = self._inbox.get_nowait()
-                except queue.Empty:
-                    break
+        with self._room:
+            cut = len(self._inbox)
+        for _ in range(cut):
+            with self._room:
+                seq, payload = self._inbox.popleft()
                 self._pending_bytes -= len(payload)
+                self._room.notify()
             if self._failed.is_set():
                 continue
             try:
                 self._snapshot.apply(decoder.decode(payload).events)
-                self._seq = seq
             except Exception:
-                logger.exception("KV snapshot fold failed at sequence %d", seq)
+                logger.exception(
+                    "KV snapshot fold failed at sequence %d; snapshots are "
+                    "unavailable until the engine restarts",
+                    seq,
+                )
                 self._failed.set()
+                continue
+            self._seq = seq
+            self._report(seq)
         if self._failed.is_set():
             self._snapshot = KVCacheSnapshot()
+
+    def _report(self, seq: int) -> None:
+        snapshot = self._snapshot
+        if bool(snapshot.tainted) != self._tainted:
+            self._tainted = not self._tainted
+            if self._tainted:
+                logger.warning(
+                    "KV snapshots unavailable from sequence %d: %s",
+                    seq,
+                    snapshot.taint_reason,
+                )
+            elif self._served_unavailable:
+                self._served_unavailable = False
+                self.stream_id = uuid.uuid4().bytes
+                logger.info(
+                    "KV snapshots available again from sequence %d under a new "
+                    "publisher identity",
+                    seq,
+                )
+            else:
+                logger.info("KV snapshots available again from sequence %d", seq)
+        counters = (snapshot.forgotten_removals, snapshot.expired_early)
+        if counters != self._reported and time.monotonic() >= self._next_report:
+            self._reported = counters
+            self._next_report = time.monotonic() + self.REPORT_INTERVAL_S
+            logger.warning(
+                "KV snapshot recorder totals: %d removals of blocks without a "
+                "record, %d dead blocks dropped early to keep the ring in budget",
+                *counters,
+            )
 
     def _serve(self, router, encoder, decoder) -> None:
         envelopes: list[list[bytes]] = []
@@ -491,8 +606,10 @@ class KVEventSnapshotRecorder:
             except ValueError:
                 envelopes.append(frames[:1])
         self._drain(decoder)
-        reply = [self._seq.to_bytes(8, "big", signed=True), self._stream_id]
-        if not self._failed.is_set():
+        reply = [self._seq.to_bytes(8, "big", signed=True), self.stream_id]
+        if self._snapshot.tainted:
+            self._served_unavailable = True
+        elif not self._failed.is_set():
             try:
                 size = 0
                 for chunk in self._encode_chunks(encoder):
@@ -501,12 +618,15 @@ class KVEventSnapshotRecorder:
                         raise ValueError("Snapshot response budget exceeded")
                     reply.append(chunk)
             except Exception:
-                logger.exception("KV snapshot export failed")
+                logger.exception(
+                    "KV snapshot export failed; snapshots are unavailable until "
+                    "the engine restarts"
+                )
                 self._failed.set()
-        if self._failed.is_set():
+        if self._failed.is_set() or self._snapshot.tainted:
             reply = [
                 SNAPSHOT_UNAVAILABLE_SEQ.to_bytes(8, "big", signed=True),
-                self._stream_id,
+                self.stream_id,
             ]
         for envelope in envelopes:
             # A slow requester retries; it cannot hold the recorder thread.

@@ -4,7 +4,6 @@
 import queue
 import threading
 import time
-import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
@@ -381,13 +380,12 @@ class ZmqEventPublisher(EventPublisher):
         )
 
         self._snapshot_recorder: KVEventSnapshotRecorder | None = None
-        self._snapshot_stream_id = uuid.uuid4().bytes if snapshot_endpoint else b""
         if snapshot_endpoint is not None:
             from vllm.distributed import kv_events_snapshot
 
             try:
                 self._snapshot_recorder = kv_events_snapshot.KVEventSnapshotRecorder(
-                    snapshot_endpoint, self._dp_rank, self._snapshot_stream_id
+                    snapshot_endpoint, self._dp_rank
                 )
             except Exception:
                 assert self._pub is not None
@@ -412,6 +410,12 @@ class ZmqEventPublisher(EventPublisher):
 
     def get_publisher_config(self) -> KVEventsConfig:
         return self._publisher_config
+
+    @property
+    def _snapshot_stream_id(self) -> bytes:
+        # The recorder renews it when snapshots become available again.
+        recorder = self._snapshot_recorder
+        return b"" if recorder is None else recorder.stream_id
 
     def publish(self, events: EventBatch) -> None:
         if not self._running:

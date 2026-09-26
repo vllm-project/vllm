@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import queue
 import random
 import threading
 import time
+import uuid
 from collections import Counter
 
 import msgspec
@@ -120,13 +120,13 @@ def test_heartbeats_do_not_age_dead_records():
     assert counts(wire(snap.export())) == Counter({("CPU", None, 1): 1})
 
 
-def test_ring_budget_fails_closed(monkeypatch):
+def test_ring_budget_drops_oldest_dead_records_early(monkeypatch):
     snap = KVCacheSnapshot()
     monkeypatch.setattr(snap, "MAX_RING_BLOCKS", 10)
-    for h in range(1, 11):
+    for h in range(1, 13):
         snap.apply([stored([h]), BlockRemoved(block_hashes=[h], medium="GPU")])
-    with pytest.raises(ValueError, match="ring budget"):
-        snap.apply([stored([11]), BlockRemoved(block_hashes=[11], medium="GPU")])
+    assert set(snap._records) == set(range(3, 13))
+    assert snap.expired_early == 2 and not snap.tainted
 
 
 def test_ancestors_of_live_blocks_are_retained(monkeypatch):
@@ -154,41 +154,72 @@ def test_delayed_transfer_preserves_metadata():
     assert counts(exported) == Counter({("CPU", None, 2): 1})
 
 
-def test_unknown_parent_without_known_block_fails_closed():
-    with pytest.raises(ValueError, match="Missing reconstruction"):
-        KVCacheSnapshot().apply([stored([2], parent=1)])
+def test_unknown_parent_taints_until_its_children_leave():
+    snap = KVCacheSnapshot()
+    snap.apply([stored([2], parent=1)])
+    assert snap.tainted == 1 and "reconstruction metadata" in snap.taint_reason
+    snap.apply([BlockRemoved(block_hashes=[2], medium="GPU")])
+    for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
+        snap.apply([stored([h])])
+    assert not snap.tainted and 1 not in snap._records
 
 
-def test_store_after_ring_window_fails_closed(monkeypatch):
+def test_store_after_ring_window_taints_until_evicted(monkeypatch):
+    """An offload store later than the ring window, as after a GPU-only
+    prefix cache reset with stores in flight."""
     snap = KVCacheSnapshot()
     monkeypatch.setattr(snap, "RING_BATCHES", 1)
     snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
     snap.apply([stored([9]), BlockRemoved(block_hashes=[9], medium="GPU")])
     assert set(snap._records) == {9}
-    with pytest.raises(ValueError, match="Missing reconstruction"):
-        snap.apply([stored([1], medium="CPU")])
+    snap.apply([stored([1], medium="CPU")])
+    assert snap.tainted == 1
+    snap.apply([BlockRemoved(block_hashes=[1], medium="CPU")])
+    snap.apply([stored([2])])
+    assert not snap.tainted
+    assert counts(wire(snap.export())) == Counter({("GPU", None, 2): 1})
 
 
-def test_remove_after_ring_window_fails_closed(monkeypatch):
+def test_store_after_ring_window_heals_when_restated(monkeypatch):
     snap = KVCacheSnapshot()
     monkeypatch.setattr(snap, "RING_BATCHES", 1)
     snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
     snap.apply([stored([9])])
-    with pytest.raises(ValueError, match="Missing reconstruction"):
-        snap.apply([BlockRemoved(block_hashes=[1], medium="CPU")])
+    snap.apply([stored([1], medium="CPU")])
+    assert snap.tainted == 1
+    snap.apply([stored([1])])
+    assert not snap.tainted
+    consumer = RouterModel()
+    consumer.apply(wire(snap.export()))
+    assert consumer.refs == Counter(
+        {(("cpu", None), 1): 1, (("gpu", None), 1): 1, (("gpu", None), 9): 1}
+    )
 
 
-def test_conflicting_metadata_fails_closed():
+def test_remove_after_ring_window_is_counted(monkeypatch):
+    snap = KVCacheSnapshot()
+    monkeypatch.setattr(snap, "RING_BATCHES", 1)
+    snap.apply([stored([1]), BlockRemoved(block_hashes=[1], medium="GPU")])
+    snap.apply([stored([9])])
+    snap.apply([BlockRemoved(block_hashes=[1], medium="CPU")])
+    assert snap.forgotten_removals == 1 and not snap.tainted
+
+
+def test_conflicting_metadata_taints_until_the_block_leaves():
     snap = KVCacheSnapshot()
     snap.apply([stored([1])])
     restated = stored([1])
     restated.token_ids[0] += 1
-    with pytest.raises(ValueError, match="Conflicting"):
-        snap.apply([restated])
+    snap.apply([restated])
+    assert snap.tainted == 1 and "conflicting" in snap.taint_reason
+    snap.apply([BlockRemoved(block_hashes=[1, 1], medium="GPU")])
+    for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
+        snap.apply([stored([h])])
+    assert not snap.tainted
     snap = KVCacheSnapshot()
     snap.apply([stored([1], group=0)])
-    with pytest.raises(ValueError, match="Conflicting"):
-        snap.apply([stored([1], medium="CPU", group=1)])
+    snap.apply([stored([1], medium="CPU", group=1)])
+    assert snap.tainted == 1
 
 
 def test_offloaded_history_exports_live_state():
@@ -427,14 +458,25 @@ def test_strict_consumer_follows_any_cut(seed):
                 assert consumer.state() == states[later]
 
 
-def test_short_ring_fails_recorder_before_consumer(monkeypatch):
-    """With a ring that cannot cover the offload lag, the recorder fails
-    closed on the same event a strict consumer would reject."""
+@pytest.mark.parametrize("seed", range(3))
+def test_short_ring_is_unavailable_then_heals(monkeypatch, seed):
+    """With a ring that cannot cover the offload lag, snapshots are
+    unavailable while a block cannot be rebuilt, and every snapshot exported
+    while available reproduces the full-history state."""
     monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 1)
+    reference = RouterModel()
     snap = KVCacheSnapshot()
-    with pytest.raises(ValueError, match="Missing reconstruction"):
-        for events in cache_history(0, lag=5):
-            snap.apply(events)
+    available = []
+    for events in cache_history(seed, lag=5):
+        reference.apply(events)
+        snap.apply(events)
+        available.append(not snap.tainted)
+        if not snap.tainted:
+            consumer = RouterModel()
+            consumer.apply(wire(snap.export()))
+            assert consumer.state() == reference.state()
+    first_taint = available.index(False)
+    assert any(available[first_taint:])
 
 
 @pytest.fixture
@@ -526,12 +568,46 @@ def test_record_happens_before_send(publisher, monkeypatch):
         c.close()
 
 
-def test_overflow_disables_snapshot_without_losing_live_batch(publisher, monkeypatch):
+@pytest.fixture
+def idle_recorder():
+    """A recorder whose thread is stopped, so the test drives it."""
+    recorder = KVEventSnapshotRecorder(f"inproc://snapshot-{uuid.uuid4().hex}", 0)
+    recorder._stop.set()
+    recorder._thread.join(5)
+    recorder._stop.clear()
+    yield recorder
+    recorder.shutdown(timeout=1)
+
+
+def encoded(events):
+    return msgspec.msgpack.encode(KVEventBatch(ts=0, events=events))
+
+
+def test_record_waits_for_room(idle_recorder, monkeypatch):
+    monkeypatch.setattr(idle_recorder, "MAX_PENDING_BATCHES", 1)
+    idle_recorder.record(0, encoded([stored([1])]))
+    waiting = threading.Thread(
+        target=idle_recorder.record, args=(1, encoded([stored([2])]))
+    )
+    waiting.start()
+    waiting.join(0.2)
+    assert waiting.is_alive()
+    idle_recorder._drain(msgspec.msgpack.Decoder(type=KVEventBatch))
+    waiting.join(5)
+    assert not waiting.is_alive() and not idle_recorder._failed.is_set()
+    assert [seq for seq, _ in idle_recorder._inbox] == [1]
+
+
+def test_recorder_that_stays_behind_fails_without_losing_live_batch(
+    publisher, monkeypatch
+):
     pub, port, _ = publisher
     c = client(port)
     try:
         c.bootstrap()
-        monkeypatch.setattr(pub._snapshot_recorder, "MAX_PENDING_BYTES", 1)
+        recorder = pub._snapshot_recorder
+        monkeypatch.setattr(recorder, "MAX_RECORD_WAIT_S", 0.01)
+        monkeypatch.setattr(recorder, "_fits", lambda size: False)
         publish(pub, [stored([1])])
         assert c.poll() is not None
         assert int.from_bytes(request(port)[0], "big", signed=True) == -2
@@ -539,46 +615,40 @@ def test_overflow_disables_snapshot_without_losing_live_batch(publisher, monkeyp
         c.close()
 
 
-def test_dequeue_releases_pending_bytes_before_capacity_check():
-    first = msgspec.msgpack.encode(KVEventBatch(ts=0, events=[stored([1])]))
-    second = msgspec.msgpack.encode(KVEventBatch(ts=0, events=[stored([2])]))
-    recorder = KVEventSnapshotRecorder.__new__(KVEventSnapshotRecorder)
-    recorder._inbox = queue.Queue()
-    recorder._inbox.put_nowait((0, first))
-    recorder._pending_bytes = len(first)
-    recorder._lock = threading.Lock()
-    recorder._snapshot = KVCacheSnapshot()
-    recorder._seq = -1
-    recorder._failed = threading.Event()
-    recorder._stop = threading.Event()
-    recorder.MAX_PENDING_BYTES = max(len(first), len(second))
+def test_healing_renews_identity_after_unavailable_reply(publisher):
+    pub, port, _ = publisher
+    publish(pub, [stored([1], medium="CPU")])
+    reply = request(port)
+    assert int.from_bytes(reply[0], "big", signed=True) == -2
+    assert reply[1] == pub._snapshot_stream_id
+    old = reply[1]
+    publish(pub, [BlockRemoved(block_hashes=[1], medium="CPU")])
+    for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
+        publish(pub, [stored([h])])
+    reply = request(port)
+    assert int.from_bytes(reply[0], "big", signed=True) >= 0
+    assert reply[1] == pub._snapshot_stream_id != old
+    c = client(port)
+    try:
+        _, payloads = c.bootstrap()
+        assert c.stream_id == reply[1]
+        decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+        restored = counts(e for p in payloads for e in decoder.decode(p).events)
+        assert len(restored) == KVCacheSnapshot.RING_BATCHES
+    finally:
+        c.close()
 
-    dequeued = threading.Event()
-    release = threading.Event()
-    get_nowait = recorder._inbox.get_nowait
 
-    def blocked_get_nowait():
-        item = get_nowait()
-        dequeued.set()
-        assert release.wait(5)
-        return item
-
-    recorder._inbox.get_nowait = blocked_get_nowait
-    drain = threading.Thread(
-        target=recorder._drain,
-        args=(msgspec.msgpack.Decoder(type=KVEventBatch),),
-    )
-    drain.start()
-    assert dequeued.wait(5)
-    record = threading.Thread(target=recorder.record, args=(1, second))
-    record.start()
-    release.set()
-    drain.join(5)
-    record.join(5)
-
-    assert not recorder._failed.is_set()
-    assert recorder._pending_bytes == len(second)
-    assert recorder._inbox.qsize() == 1
+def test_healing_keeps_identity_without_unavailable_reply(publisher):
+    pub, port, _ = publisher
+    old = pub._snapshot_stream_id
+    publish(pub, [stored([1], medium="CPU")])
+    publish(pub, [BlockRemoved(block_hashes=[1], medium="CPU")])
+    for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
+        publish(pub, [stored([h])])
+    reply = request(port)
+    assert int.from_bytes(reply[0], "big", signed=True) >= 0
+    assert reply[1] == old == pub._snapshot_stream_id
 
 
 @pytest.mark.parametrize("budget", ["records", "reply"])
@@ -649,26 +719,19 @@ def test_replay_preserves_snapshot_stream_identity(random_port):
         pub.shutdown()
 
 
-def test_drain_takes_finite_cut():
-    recorder = KVEventSnapshotRecorder.__new__(KVEventSnapshotRecorder)
-    import queue
+def test_drain_takes_finite_cut(idle_recorder, monkeypatch):
+    payload = encoded([])
+    idle_recorder.record(0, payload)
+    apply = idle_recorder._snapshot.apply
 
-    recorder._inbox = queue.Queue()
-    recorder._lock = threading.Lock()
-    recorder._failed = threading.Event()
-    payload = msgspec.msgpack.encode(KVEventBatch(ts=0, events=[]))
-    recorder._inbox.put((0, payload))
-    recorder._pending_bytes = len(payload)
+    def replenishing(events):
+        idle_recorder.record(1, payload)
+        apply(events)
 
-    class Replenishing:
-        def apply(self, events):
-            recorder._inbox.put((1, payload))
-            recorder._pending_bytes += len(payload)
-
-    recorder._snapshot = Replenishing()
-    recorder._drain(msgspec.msgpack.Decoder(type=KVEventBatch))
-    assert recorder._seq == 0
-    assert recorder._inbox.qsize() == 1
+    monkeypatch.setattr(idle_recorder._snapshot, "apply", replenishing)
+    idle_recorder._drain(msgspec.msgpack.Decoder(type=KVEventBatch))
+    assert idle_recorder._seq == 0
+    assert [seq for seq, _ in idle_recorder._inbox] == [1]
 
 
 def test_midstream_bootstrap_converges(publisher):
