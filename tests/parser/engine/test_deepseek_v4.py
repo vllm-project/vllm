@@ -26,6 +26,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
+    DSML_PARAM_CLOSE,
     DSML_THINK_END,
     DSML_THINK_START,
     DSML_TOOL_END,
@@ -1461,3 +1462,65 @@ class TestMalformedDsmlNoise:
         assert output.tool_calls[0]["name"] == "get_weather"
         assert json.loads(output.tool_calls[0]["arguments"]) == {"city": "Seoul"}
         assert "DSML" not in (output.content or "")
+
+
+# ── Orphan DSML structural closers in plain content ──────────────────
+
+
+class TestOrphanStructuralCloserAbsorption:
+    """Long-context degeneration can emit an orphan structural closer while
+    no tool call is open (e.g. a trailing ``</｜DSML｜parameter>``). The tag must be
+    absorbed, not echoed into the client-visible content.
+    """
+
+    _STRAYS = [DSML_PARAM_CLOSE, DSML_INVOKE_END, DSML_TOOL_END]
+
+    @pytest.mark.parametrize("stray", _STRAYS)
+    def test_not_leaked_into_content_non_streaming(
+        self, mock_tokenizer, mock_request, stray
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls("All done.\n" + stray, mock_request)
+
+        assert not result.tools_called
+        assert result.content == "All done.\n"
+        assert "DSML" not in (result.content or "")
+
+    @pytest.mark.parametrize("stray", _STRAYS)
+    def test_not_leaked_into_content_streaming(
+        self, mock_tokenizer, mock_request, stray
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(
+            parser, mock_request, list("All done.\n" + stray)
+        )
+
+        assert collect_content(results) == "All done.\n"
+        assert collect_function_name(results) is None
+
+    def test_normal_tool_call_unaffected(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            "Running.\n"
+            + DSML_TOOL_START
+            + DSML_INVOKE_PREFIX
+            + "get_weather"
+            + DSML_INVOKE_NAME_END
+            + "\n"
+            + _param("city", "true", "NYC")
+            + "\n"
+            + DSML_INVOKE_END
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"city": "NYC"}
+        assert result.content == "Running.\n"
