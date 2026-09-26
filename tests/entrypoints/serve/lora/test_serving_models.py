@@ -107,11 +107,48 @@ async def test_unload_lora_adapter_success():
     )
     response = await serving_models.load_lora_adapter(request)
     assert len(serving_models.lora_requests) == 1
+    lora_id = serving_models.lora_requests["adapter1"].lora_int_id
 
     request = UnloadLoRAAdapterRequest(lora_name="adapter1")
     response = await serving_models.unload_lora_adapter(request)
     assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 0
+    # The engine must be told as well, otherwise the adapter keeps its
+    # worker-side slot until LRU eviction reclaims it.
+    serving_models.engine_client.remove_lora.assert_awaited_once_with(lora_id)
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_adapter_success_when_engine_already_evicted():
+    """An adapter the engine already evicted still unloads cleanly."""
+    serving_models = await _async_serving_models_init()
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(lora_name="adapter1", lora_path="/path/to/adapter1")
+    )
+    serving_models.engine_client.remove_lora.return_value = False
+
+    response = await serving_models.unload_lora_adapter(
+        UnloadLoRAAdapterRequest(lora_name="adapter1")
+    )
+    assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    assert len(serving_models.lora_requests) == 0
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_adapter_engine_error():
+    """A failing engine removal surfaces as an error and keeps the adapter."""
+    serving_models = await _async_serving_models_init()
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(lora_name="adapter1", lora_path="/path/to/adapter1")
+    )
+    serving_models.engine_client.remove_lora.side_effect = RuntimeError("boom")
+
+    response = await serving_models.unload_lora_adapter(
+        UnloadLoRAAdapterRequest(lora_name="adapter1")
+    )
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert "adapter1" in serving_models.lora_requests
 
 
 @pytest.mark.asyncio
