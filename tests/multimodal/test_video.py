@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import math
 import subprocess
 import sys
 import threading
@@ -1555,6 +1556,56 @@ class TestGLMGASamplingCaps:
         )
         assert 0 < len(indices) <= GLMGAVideoBackend._MAX_FRAMES
         assert all(0 <= idx < 1000 for idx in indices)
+
+
+class TestDynamicVideoBackendFpsCap:
+    """`fps` is request-settable via `media_io_kwargs`, and the candidate walk
+    in the `duration <= max_duration` branch is `floor(duration * fps)` long.
+
+    The returned indices are *fps-invariant* once fps is large -- the highest
+    index reachable is `duration * original_fps` either way -- so only the
+    amount of work changes. These tests therefore assert the walk, not the
+    output.
+    """
+
+    @staticmethod
+    def _source() -> VideoSourceMetadata:
+        return VideoSourceMetadata(3_000, 30.0, 100.0)
+
+    def _count_walk(self, monkeypatch, fps: int) -> int:
+        calls = 0
+        real_ceil = math.ceil
+
+        def counting_ceil(value):
+            nonlocal calls
+            calls += 1
+            return real_ceil(value)
+
+        monkeypatch.setattr(math, "ceil", counting_ceil)
+        DynamicVideoBackend.compute_frames_index_to_sample(
+            self._source(),
+            VideoTargetMetadata(num_frames=-1, fps=fps, max_duration=1_000),
+        )
+        return calls
+
+    def test_huge_fps_does_not_scale_the_candidate_walk(self, monkeypatch):
+        # Without the cap this walks floor(100 * 100_000) = 10_000_000 times.
+        assert self._count_walk(monkeypatch, 100_000) <= 3_000
+
+    def test_capped_fps_matches_an_explicitly_capped_request(self, monkeypatch):
+        # 30 spelled out rather than `cls._MAX_FPS` so this also runs, and
+        # fails for the right reason, against an uncapped tree.
+        assert self._count_walk(monkeypatch, 100_000) == self._count_walk(
+            monkeypatch, 30
+        )
+
+    def test_normal_fps_is_unchanged(self):
+        source = self._source()
+        target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=1_000)
+        indices = DynamicVideoBackend.compute_frames_index_to_sample(source, target)
+        assert indices == sorted(set(indices))
+        assert all(0 <= idx < 3_000 for idx in indices)
+        assert len(indices) == 200
 
 
 def test_glm5next_backend_selected_for_processor():

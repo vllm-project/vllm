@@ -501,6 +501,7 @@ class DynamicVideoBackend(VideoBackend):
     """
 
     _sampling_suffix: ClassVar[str] = "_dynamic"
+    _MAX_FPS: ClassVar[int] = 30
 
     @classmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
@@ -528,7 +529,11 @@ class DynamicVideoBackend(VideoBackend):
         duration = source.duration
         original_fps = source.original_fps
         max_duration = target.max_duration
-        fps = target.fps
+        # `fps` is request-settable through `media_io_kwargs`, and the
+        # candidate walk below is `floor(duration * fps)` long while the
+        # result is bounded by the clip. Cap it the same way the Qwen and
+        # GLM-GA backends do so the work stays proportional to the video.
+        fps = min(target.fps, cls._MAX_FPS)
         max_frame_idx = source.total_frames_num - 1
 
         # Refer to:
