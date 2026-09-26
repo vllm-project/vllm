@@ -394,3 +394,24 @@ class TestNonFunctionToolsSkipped:
         any_of = schema["items"]["anyOf"]
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+
+
+def test_required_streaming_single_closed_tool_no_indexerror():
+    """Regression: a length-1 tool-call array whose sole object closes before
+    a 'parameters' key must not crash with IndexError on obj[-2]."""
+    previous_text = '[{"name": "f"'
+    delta_text = "}]"
+    current_text = previous_text + delta_text  # '[{"name": "f"}]'
+
+    delta_message, function_name_returned = extract_required_tool_call_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text=delta_text,
+        function_name_returned=False,
+        tool_call_idx=None,
+        tool_call_id_type="random",
+    )
+
+    assert function_name_returned is True
+    assert delta_message is not None
+    assert delta_message.tool_calls[0].function.name == "f"

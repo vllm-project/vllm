@@ -178,7 +178,11 @@ def extract_required_tool_call_streaming(
                 # if this iteration finishes a previous tool call but a
                 # new incomplete tool is already generated, take the
                 # previous from the list
-                if finishes_previous_tool and "parameters" not in current_tool_call:
+                if (
+                    finishes_previous_tool
+                    and "parameters" not in current_tool_call
+                    and len(obj) >= 2
+                ):
                     current_tool_call = obj[-2]
 
                 function_name_returned = True
