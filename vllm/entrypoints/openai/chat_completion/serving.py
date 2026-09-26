@@ -362,7 +362,13 @@ class OpenAIServingChat(GenerateBaseServing):
                     # non-reasoning outputs.
                     reasoning_ended = True
                 elif parser is not None and parser.reasoning_parser is not None:
-                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
+                    # Seed from the bare reasoning parser, not the composite:
+                    # the engine's grammar boundary (any non-reasoning channel,
+                    # e.g. MuseGlimmer's `to=user`) differs from the composite's
+                    # stream-ownership rule.
+                    reasoning_ended = parser.reasoning_parser.is_reasoning_end(
+                        prompt_token_ids or []
+                    )
                 else:
                     reasoning_ended = None
 
