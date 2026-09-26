@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.functiongemma_tool_parser import FunctionGemmaToolParser
 
@@ -148,6 +149,84 @@ class TestBufferDeltaText:
         parser.buffered_delta_text = "<start_function_"
         result = parser._buffer_delta_text("call>")
         assert "<start_function_call>" in result
+
+
+class TestRegexTimeout:
+    def test_regex_timeout_treated_as_no_tool_call(self, parser, mock_request):
+        model_output = (
+            "<start_function_call>call:search{" + "a" * 100 + ":<escape>v<escape>"
+        )
+        mock_regex = MagicMock()
+        mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+
+        with patch.object(parser, "tool_call_regex", mock_regex):
+            result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == model_output
+        mock_regex.findall.assert_called_once()
+        assert (
+            mock_regex.findall.call_args.kwargs["timeout"]
+            == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        )
+
+    def test_arg_regex_timeout_treated_as_no_tool_call(self, parser, mock_request):
+        model_output = (
+            "<start_function_call>call:search{k:<escape>v<escape>}<end_function_call>"
+        )
+        mock_regex = MagicMock()
+        mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+
+        with patch.object(parser, "arg_regex", mock_regex):
+            result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == model_output
+        mock_regex.findall.assert_called_once()
+        assert (
+            mock_regex.findall.call_args.kwargs["timeout"]
+            == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        )
+
+    def test_streaming_regex_timeout_skips_later_deltas(self, parser, mock_request):
+        parser.current_tool_id = 0
+        parser.current_tool_name_sent = True
+        parser.streamed_args_for_tool = [""]
+        parser.prev_tool_call_arr = [{}]
+        mock_regex = MagicMock()
+        mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+        previous = "<start_function_call>call:search{"
+        current = previous + "k:<escape>v"
+
+        with patch.object(parser, "arg_regex", mock_regex):
+            first = parser.extract_tool_calls_streaming(
+                previous,
+                current,
+                "k:<escape>v",
+                [],
+                [],
+                [],
+                mock_request,
+            )
+            second = parser.extract_tool_calls_streaming(
+                current,
+                current + "x",
+                "x",
+                [],
+                [],
+                [],
+                mock_request,
+            )
+
+        assert first is None
+        assert second is None
+        mock_regex.findall.assert_called_once()
+        assert (
+            mock_regex.findall.call_args.kwargs["timeout"]
+            == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        )
 
 
 if __name__ == "__main__":
