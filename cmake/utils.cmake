@@ -464,8 +464,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
-        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
+        # Only consume the plain SRC entry when TGT did not also ask for the
+        # plain arch. If TGT lists both x.y and x.ya (as TORCH_CUDA_ARCH_LIST
+        # commonly does for "10.0 10.0a"), the plain x.y must stay available
+        # for the loose-intersection pass below, otherwise it is silently
+        # dropped and the build ships x.ya-only cubins that do not load on
+        # other GPUs of the same major (e.g. sm_100a on a CC 10.3 B300).
+        if(NOT "${_base}" IN_LIST _TGT_CUDA_ARCHS)
+          list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
+        endif()
       endif()
     endif()
   endforeach()
