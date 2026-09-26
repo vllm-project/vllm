@@ -1649,6 +1649,7 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.stop_reason = None
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
@@ -2150,10 +2151,13 @@ class Scheduler(SchedulerInterface):
                     )
 
             finish_reason = None
+            stop_reason = None
             if stopped:
-                # Capture finish_reason BEFORE _handle_stopped_request, which may
-                # reset the status to WAITING for streaming requests that continue.
+                # Capture finish_reason and stop_reason BEFORE
+                # _handle_stopped_request, which may reset the request for a
+                # streaming continuation.
                 finish_reason = request.get_finished_reason()
+                stop_reason = request.stop_reason
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
@@ -2205,7 +2209,7 @@ class Scheduler(SchedulerInterface):
                         new_sampling_mask=new_sampling_mask,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
-                        stop_reason=request.stop_reason,
+                        stop_reason=stop_reason,
                         events=request.take_events(),
                         prefill_stats=prefill_stats,
                         spec_decode_metrics=(
