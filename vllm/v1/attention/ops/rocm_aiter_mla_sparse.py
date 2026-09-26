@@ -31,6 +31,14 @@ logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+# KV tokens per chunk in the torch paged-MQA-logits fallbacks. The fallbacks
+# have to cover the whole paged range without a device-to-host read of the
+# context lengths, so the work is done in fixed-size chunks: that bounds the
+# gathered cache and the [B, N, H] / [B, T, H, N] intermediates regardless of
+# max_model_len. A long max_model_len with short contexts would otherwise
+# allocate several GB before masking anything out.
+_TORCH_MQA_CHUNK_TOKENS = 8192
+
 
 @functools.cache
 def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
@@ -527,92 +535,106 @@ def fp8_paged_mqa_logits_torch(
 
     batch_size, next_n, _, dim = q.size()
     if next_n == 1:
+        # Vectorized decode path: no per-sequence python loop and no .item()
+        # host syncs (each sync stalls the pipeline once per layer). The
+        # paged range is walked in fixed chunks so the gathered cache and the
+        # [B, N, H] intermediates stay bounded when a long max_model_len is
+        # paired with short contexts.
         block_size = kv_cache.shape[1]
+        num_blocks = kv_cache.shape[0]
+        if context_lens.dim() > 1:
+            context_lens = context_lens.squeeze(-1)
+        kv_cache_flat = kv_cache.view(-1, block_size * (dim + 4))
+        scale_offset = block_size * dim
+        q_f = q[:, 0].to(torch.float32)  # [B, H, D]
+        w_f = weights.to(torch.float32)[:, None, :]
+        ctx = context_lens.to(q.device)
+        np_ = min(cdiv(max_model_len, block_size), block_tables.shape[1])
         logits = torch.full(
             [batch_size, max_model_len],
             float("-inf"),
             device=q.device,
             dtype=torch.float32,
         )
-        if context_lens.dim() > 1:
-            context_lens = context_lens.squeeze(-1)
-        kv_cache_flat = kv_cache.view(-1, block_size * (dim + 4))
-        for i in range(batch_size):
-            q_i = q[i, 0].to(torch.float32)
-            q_scale = weights[i]
-            seq_len = int(context_lens[i].item())
-            assert seq_len <= max_model_len
-            num_pages = cdiv(seq_len, block_size)
-            padded_seq_len = num_pages * block_size
-            pages = block_tables[i, :num_pages]
-            cache = kv_cache_flat[pages]
-            scale_offset = block_size * dim
-            cache_value = (
-                cache[..., :scale_offset].view(dtype=FP8_DTYPE).to(torch.float32)
+        pages_per_chunk = max(1, _TORCH_MQA_CHUNK_TOKENS // block_size)
+        for start in range(0, np_, pages_per_chunk):
+            end = min(start + pages_per_chunk, np_)
+            n_tok = (end - start) * block_size
+            pages = block_tables[:, start:end].long().clamp_(0, num_blocks - 1)
+            cache = kv_cache_flat[pages]  # [B, P, bs*(dim+4)]
+            val = (
+                cache[..., :scale_offset]
+                .view(dtype=FP8_DTYPE)
+                .to(torch.float32)
+                .view(batch_size, n_tok, dim)
             )
-            cache_scale = (
-                cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
+            scl = (
+                cache[..., scale_offset:]
+                .view(dtype=torch.float32)
+                .reshape(batch_size, n_tok)
             )
-            cache_value = cache_value.view(padded_seq_len, dim)
-            cache_scale = cache_scale.view(padded_seq_len)
-            score = F.linear(cache_value, q_i)
-            score = F.relu(score)
-            score *= q_scale[None, :]
-            score = score.sum(dim=1)
-            score *= cache_scale
-            logits[i, :seq_len] = score[:seq_len]
+            score = torch.einsum("bnd,bhd->bnh", val, q_f)
+            score = F.relu(score) * w_f
+            score = score.sum(dim=-1) * scl  # [B, n_tok]
+            pos = torch.arange(start * block_size, end * block_size, device=q.device)
+            score = torch.where(pos[None, :] < ctx[:, None], score, float("-inf"))
+            keep = min(end * block_size, max_model_len) - start * block_size
+            logits[:, start * block_size : start * block_size + keep] = score[:, :keep]
         return logits
 
-    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
-    scale = scale.contiguous().view(torch.float)
-    q = q.float()
-    kv_cache = kv_cache.view(FP8_DTYPE).float() * scale
-    num_block, block_size, _, dim = kv_cache.size()
+    # Vectorized next_n > 1 (speculative verify) path: no per-sequence
+    # python loops, no .item() host syncs, no full-cache dequantization, and
+    # the same chunked walk as the next_n == 1 path. Uses the same packed
+    # per-page cache layout.
+    num_blocks = kv_cache.shape[0]
+    block_size = kv_cache.shape[1]
+    kv_cache_flat = kv_cache.view(-1, block_size * (dim + 4))
+    scale_offset = block_size * dim
+    q_f = q.to(torch.float32)  # [B, T, H, D]
+    if context_lens.dim() == 1:
+        ctx = context_lens.to(device=q.device)[:, None]  # [B, 1]
+        context_limit = ctx.expand(batch_size, next_n)
+        q_offsets = ctx - next_n + torch.arange(next_n, device=q.device)[None, :]
+    else:
+        context_limit = context_lens.to(device=q.device)
+        q_offsets = context_limit - 1
+    w = weights.to(torch.float32).view(batch_size, next_n, -1)  # [B, T, H]
+    np_ = min(cdiv(max_model_len, block_size), block_tables.shape[1])
     logits = torch.full(
         [batch_size * next_n, max_model_len],
         float("-inf"),
         device=q.device,
         dtype=torch.float32,
     )
-    for i in range(batch_size):
-        context_len = context_lens[i]
-        if context_len.ndim == 0:
-            context_len_i = int(context_len.item())
-            q_offsets = torch.arange(
-                context_len_i - next_n, context_len_i, device=q.device
-            )
-            context_limit = torch.full(
-                (next_n,), context_len_i, dtype=torch.int32, device=q.device
-            )
-        else:
-            context_limit = context_len.to(device=q.device, dtype=torch.int32)
-            q_offsets = context_limit - 1
-        weight_slice = (
-            weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
+    pages_per_chunk = max(1, _TORCH_MQA_CHUNK_TOKENS // block_size)
+    for start in range(0, np_, pages_per_chunk):
+        end = min(start + pages_per_chunk, np_)
+        n_tok = (end - start) * block_size
+        pages = block_tables[:, start:end].long().clamp_(0, num_blocks - 1)
+        cache = kv_cache_flat[pages]  # [B, P, bs*(dim+4)]
+        val = (
+            cache[..., :scale_offset]
+            .view(dtype=FP8_DTYPE)
+            .to(torch.float32)
+            .view(batch_size, n_tok, dim)
         )
-        max_context_len = int(context_limit.max().item())
-        for block_rk in range(cdiv(max_context_len, block_size)):
-            block_idx = block_tables[i][block_rk]
-            qx, kx = q[i], kv_cache[block_idx]
-            k_offsets = torch.arange(
-                block_rk * block_size, (block_rk + 1) * block_size, device=q.device
-            )
-            mask = (k_offsets[None, :] < context_limit[:, None]) & (
-                k_offsets[None, :] <= q_offsets[:, None]
-            )
-            s = torch.where(
-                mask[None, :, :],
-                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
-                    logits.dtype
-                ),
-                float("-inf"),
-            )
-            s = torch.relu(s) * weight_slice[..., None]
-            s = s.sum(dim=0)
-            logits[
-                i * next_n : (i + 1) * next_n,
-                block_rk * block_size : (block_rk + 1) * block_size,
-            ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float("-inf"))
+        scl = (
+            cache[..., scale_offset:]
+            .view(dtype=torch.float32)
+            .reshape(batch_size, n_tok)
+        )
+        score = torch.einsum("bnd,bthd->bthn", val, q_f)  # [B, T, H, N]
+        score = F.relu(score) * w[..., None]
+        score = score.sum(dim=2) * scl[:, None, :]  # [B, T, N]
+        pos = torch.arange(start * block_size, end * block_size, device=q.device)
+        mask = (pos[None, None, :] < context_limit[..., None]) & (
+            pos[None, None, :] <= q_offsets[..., None]
+        )
+        score = torch.where(mask, score, float("-inf"))
+        keep = min(end * block_size, max_model_len) - start * block_size
+        logits[:, start * block_size : start * block_size + keep] = score.reshape(
+            batch_size * next_n, n_tok
+        )[:, :keep]
     return logits
 
 
@@ -785,6 +807,143 @@ def paged_mqa_logits_module():
     return None
 
 
+_PORTABLE_MQA_TRITON_OK = [True]
+
+
+@triton.jit
+def _portable_fp8_paged_mqa_logits_kernel(
+    q_ptr,
+    kv_ptr,
+    ks_ptr,
+    w_ptr,
+    bt_ptr,
+    qoff_ptr,
+    lim_ptr,
+    out_ptr,
+    kv_row_stride,
+    ks_row_stride,
+    bt_row_stride,
+    out_row_stride,
+    num_blocks,
+    max_len,
+    T: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    BS: tl.constexpr,
+):
+    """Paged-MQA logits with in-kernel fp8 -> bf16 dequantization.
+
+    Portable across Triton targets: the fp8 cache values are converted to
+    bf16 before tl.dot, so no fp8 MMA support is required (unlike the AITER
+    pa_mqa_logits kernels, whose fp8 tl.dot fails to compile on e.g.
+    gfx1151/RDNA3.5).
+
+    One program per (query token, KV page):
+        logits[bt, pos] = k_scale[pos]
+                          * sum_h(relu(k[pos] . q[bt, h]) * w[bt, h])
+    masked to pos < lim[bt] and pos <= qoff[bt]; `out` is pre-filled -inf.
+    """
+    pid_bt = tl.program_id(0)
+    pid_p = tl.program_id(1)
+    qoff = tl.load(qoff_ptr + pid_bt)
+    if pid_p * BS > qoff:
+        return
+    b = pid_bt // T
+    page = tl.load(bt_ptr + b * bt_row_stride + pid_p)
+    page = tl.minimum(tl.maximum(page, 0), num_blocks - 1)
+    offs = tl.arange(0, BS)
+    dd = tl.arange(0, D)
+    hh = tl.arange(0, H)
+    pos = pid_p * BS + offs
+    lim = tl.load(lim_ptr + pid_bt)
+    valid = (pos < lim) & (pos <= qoff)
+    qb = tl.load(q_ptr + pid_bt * H * D + hh[:, None] * D + dd[None, :])
+    kf = tl.load(kv_ptr + page * kv_row_stride + offs[:, None] * D + dd[None, :])
+    scores = tl.dot(kf.to(tl.bfloat16), tl.trans(qb))
+    scores = tl.maximum(scores, 0.0)
+    wv = tl.load(w_ptr + pid_bt * H + hh)
+    srow = tl.sum(scores * wv[None, :], axis=1)
+    ks = tl.load(ks_ptr + page * ks_row_stride + offs)
+    srow = srow * ks
+    srow = tl.where(valid, srow, float("-inf"))
+    tl.store(out_ptr + pid_bt * out_row_stride + pos, srow, mask=pos < max_len)
+
+
+def portable_fp8_paged_mqa_logits(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Triton-backed equivalent of fp8_paged_mqa_logits_torch.
+
+    Same packed per-page cache layout and same outputs (see the unit test);
+    used when the AITER Triton kernels are unavailable for the platform.
+
+    Requires the block-flat page layout: all values then all scales, both
+    token-major within the page (see `_indexer_k_is_c4a_block_flat`). Pages
+    written 16x16-tiled (`indexer_k_quant_and_cache_triton` with
+    `block_size > 1`) must not be passed here; the caller gates on that.
+    """
+    from vllm.utils.math_utils import cdiv
+
+    batch_size, next_n, num_heads, dim = q.shape
+    num_blocks, block_size = kv_cache.shape[0], kv_cache.shape[1]
+    assert num_heads & (num_heads - 1) == 0 and dim & (dim - 1) == 0
+    assert block_size & (block_size - 1) == 0
+    flat = kv_cache.view(num_blocks, block_size * (dim + 4))
+    fp8_dtype = current_platform.fp8_dtype()
+    kv_vals = flat[:, : block_size * dim].view(dtype=fp8_dtype)
+    kv_scales = flat[:, block_size * dim :].view(dtype=torch.float32)
+    q_bf = (
+        q.to(torch.bfloat16).reshape(batch_size * next_n, num_heads, dim).contiguous()
+    )
+    w = weights.to(torch.float32).reshape(batch_size * next_n, num_heads).contiguous()
+    if context_lens.dim() == 1:
+        ctx = context_lens.to(device=q.device, dtype=torch.int32)
+        lim = ctx[:, None].expand(batch_size, next_n)
+        qoff = (
+            ctx[:, None]
+            - next_n
+            + torch.arange(next_n, device=q.device, dtype=torch.int32)[None, :]
+        )
+    else:
+        lim = context_lens.to(device=q.device, dtype=torch.int32)
+        qoff = lim - 1
+    lim = lim.reshape(-1).contiguous()
+    qoff = qoff.reshape(-1).contiguous()
+    np_ = min(cdiv(max_model_len, block_size), block_tables.shape[1])
+    out = torch.full(
+        [batch_size * next_n, max_model_len],
+        float("-inf"),
+        device=q.device,
+        dtype=torch.float32,
+    )
+    _portable_fp8_paged_mqa_logits_kernel[(batch_size * next_n, np_)](
+        q_bf,
+        kv_vals,
+        kv_scales,
+        w,
+        block_tables,
+        qoff,
+        lim,
+        out,
+        kv_vals.stride(0),
+        kv_scales.stride(0),
+        block_tables.stride(0),
+        out.stride(0),
+        num_blocks,
+        max_model_len,
+        T=next_n,
+        H=num_heads,
+        D=dim,
+        BS=block_size,
+    )
+    return out
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -886,6 +1045,28 @@ def rocm_fp8_paged_mqa_logits(
         )
         return out_qk.sum(dim=0)
     else:
+        # No AITER Triton kernel for this platform: prefer the portable
+        # Triton kernel (bf16 dequant, no fp8 MMA requirement) and fall
+        # back to the torch reference if it ever fails to compile/run.
+        #
+        # The portable kernel reads pages in the block-flat layout (all
+        # values, then all scales, token-major within the page): that is
+        # what `block_size == 1` produces and what the C4A compressor
+        # writes. Ratio 1 and 2 caches are stored 16x16-tiled, so they keep
+        # the existing path instead of being read as if they were flat.
+        block_flat = block_size == 1 or _indexer_k_is_c4a_block_flat(compress_ratio)
+        if block_flat and _PORTABLE_MQA_TRITON_OK[0]:
+            try:
+                return portable_fp8_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                )
+            except Exception:
+                _PORTABLE_MQA_TRITON_OK[0] = False
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
