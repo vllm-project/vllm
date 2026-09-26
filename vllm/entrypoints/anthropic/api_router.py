@@ -80,6 +80,10 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
     elif isinstance(generator, AnthropicMessagesResponse):
         resp = generator.model_dump(exclude_none=True)
+        # Required-nullable in the Anthropic Message schema; exclude_none drops
+        # an explicit None (unlike the stream's exclude_unset, see #55324).
+        for key in ("stop_reason", "stop_sequence"):
+            resp.setdefault(key, None)
         logger.debug("Anthropic Messages Response: %s", resp)
         return JSONResponse(content=resp)
 
