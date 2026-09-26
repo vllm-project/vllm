@@ -358,6 +358,8 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+                        del cpu_backup_tensor
+                        torch.accelerator.empty_host_cache()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
