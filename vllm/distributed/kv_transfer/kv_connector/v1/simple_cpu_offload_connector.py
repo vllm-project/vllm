@@ -188,6 +188,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Worker-side methods ---
 
+    @classmethod
+    def supports_layer_sharded_kv_cache(cls) -> bool:
+        return True
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)

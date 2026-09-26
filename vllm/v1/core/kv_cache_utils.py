@@ -54,6 +54,7 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.kv_cache_placement import KVCachePlacement
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -2375,6 +2376,7 @@ def generate_scheduler_kv_cache_config(
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
+    cfg.storage_plan = None
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
@@ -2629,6 +2631,7 @@ def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
+    placements: list["KVCachePlacement"] | None = None,
 ) -> list[KVCacheConfig]:
     """Generates the KV cache configurations for a model.
     Since we use a shared centralized controller for all workers, we need the
@@ -2654,6 +2657,7 @@ def get_kv_cache_configs(
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
+        placements: Optional worker-local physical cache placement descriptors.
 
     Returns:
         The generated KVCacheConfigs for each worker.
@@ -2698,6 +2702,15 @@ def get_kv_cache_configs(
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in kv_cache_specs
     ]
+
+    if vllm_config.cache_config.kv_cache_placement == "layer_sharded":
+        from vllm.v1.kv_cache_placement import plan_layer_sharded_configs
+
+        if placements is None:
+            raise ValueError("Layer-sharded KV needs worker placement metadata.")
+        return plan_layer_sharded_configs(
+            vllm_config, projected_groups_per_worker, placements, available_memory
+        )
 
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`:

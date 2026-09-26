@@ -535,6 +535,69 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
         assert region.stride(0) == specs[name].page_size_bytes
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+def test_layer_sharded_offload_roundtrip_excludes_scratch(rank):
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_placement import (
+        KVCacheBundle,
+        KVCachePlacement,
+        build_kv_cache_storage,
+    )
+
+    specs = _dsa_specs(5, 64)
+    names = list(specs)
+    group = KVCacheGroupSpec(
+        names, UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
+    )
+    placement = KVCachePlacement(
+        rank,
+        2,
+        tuple(KVCacheBundle(tuple(names[2 * i : 2 * i + 2]), i % 2) for i in range(5)),
+        alignment=2 * 1024 * 1024,
+    )
+    config = build_kv_cache_storage(
+        KVCacheConfig(4, [], [group]), placement, KVCacheLayout.LBNHC
+    )
+    # Rank 0 owns 3 bundles, rank 1 owns 2; both use the same block IDs.
+    block_bytes = 3 * sum(specs[n].page_size_bytes for n in names[:2])
+    config.offload_block_size_bytes = block_bytes
+    caches = allocate_kv_cache(config, torch.device("cuda"), KVCacheLayout.LBNHC)
+    worker = SimpleCPUOffloadWorker(None, config, cpu_capacity_bytes=7 * block_bytes)
+    worker.register_kv_caches(caches)
+    try:
+        assert worker.num_cpu_blocks == 7
+        assert set(worker.gpu_kv_caches) == set(config.storage_plan.persistent_layers)
+        for i, (name, region) in enumerate(worker.gpu_kv_caches.items()):
+            assert region.data_ptr() == caches[name].data_ptr()
+            region.fill_(i + 11)
+        ready = torch.cuda.Event()
+        ready.record()
+        events = []
+        worker._backend.launch_copy([1], [3], True, 0, events, ready)
+        deadline = time.monotonic() + 10
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert events, "offload store did not launch"
+        events[0][1].synchronize()
+        for region in worker.gpu_kv_caches.values():
+            region.zero_()
+        ready.record()
+        events = []
+        worker._backend.launch_copy([3], [2], False, 1, events, ready)
+        deadline = time.monotonic() + 10
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert events, "offload load did not launch"
+        events[0][1].synchronize()
+        for i, region in enumerate(worker.gpu_kv_caches.values()):
+            assert torch.all(region[2] == i + 11)
+            assert torch.all(region[1] == 0)
+    finally:
+        worker._backend.shutdown()
+        for tensor in worker.cpu_kv_caches.values():
+            torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
+
+
 @pytest.mark.parametrize("rank_blocks", [1, 5])
 def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     """Registration holds at block counts that are not powers of two.

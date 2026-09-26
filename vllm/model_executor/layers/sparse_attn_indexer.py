@@ -11,7 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import acquire_kv_cache, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
@@ -351,6 +351,7 @@ def sparse_attn_indexer(
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    acquire_kv_cache(k_cache_prefix)
 
     if candidate_blocks is not None:
         # Candidate blocks are request-local; the DCP-sharded logits layout

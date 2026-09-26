@@ -22,6 +22,14 @@ class AttentionLayerBase(ABC):
     impl: "AttentionImpl"
     supports_dcp: bool = True
 
+    def get_kv_cache_bundle(self) -> tuple["AttentionLayerBase", ...] | None:
+        """Components whose KV updates are replicated across TP ranks.
+
+        Returning None leaves this layer ineligible for layer-sharded storage.
+        Implementations list actual cache modules, including auxiliary caches.
+        """
+        return None
+
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Bind the allocated KV cache tensor to this layer.
 

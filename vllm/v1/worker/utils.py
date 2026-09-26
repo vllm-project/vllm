@@ -424,7 +424,14 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+    if (storage_plan := kv_cache_config.storage_plan) is not None:
+        alignment = storage_plan.placement.alignment
+        raw = torch.zeros(
+            storage_plan.allocation_bytes, dtype=torch.int8, device=device
+        )
+        buf = raw.narrow(0, (-raw.data_ptr()) % alignment, storage_plan.backing_size)
+    else:
+        buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:

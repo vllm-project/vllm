@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -18,6 +18,9 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.kv_cache_runtime import KVCacheRuntime
 
 track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
 last_logging_time: float = 0
@@ -195,6 +198,7 @@ class ForwardContext:
     moe_layer_index: int = 0
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
+    kv_cache_runtime: "KVCacheRuntime | None" = field(default=None, kw_only=True)
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
@@ -212,6 +216,20 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context."
     )
     return _forward_context
+
+
+def acquire_kv_cache(layer_name: str) -> None:
+    """Make a temporary cache view ready before its first read or write."""
+    runtime = get_forward_context().kv_cache_runtime
+    if runtime is not None:
+        runtime.acquire(layer_name)
+
+
+def release_kv_cache(layer_name: str) -> None:
+    """Record the last device access before a cache view can be reused."""
+    runtime = get_forward_context().kv_cache_runtime
+    if runtime is not None:
+        runtime.release(layer_name)
 
 
 def is_forward_context_available() -> bool:

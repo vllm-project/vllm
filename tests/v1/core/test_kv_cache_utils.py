@@ -92,6 +92,165 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
+def _layer_sharded_cache_case():
+    from vllm.v1.kv_cache_placement import KVCacheBundle, KVCachePlacement
+
+    specs = {
+        name: MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        )
+        for name in ("a", "b", "c", "d", "e", "f", "draft")
+    }
+    group = KVCacheGroupSpec(
+        list(specs), UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs)
+    )
+    config = KVCacheConfig(3, [], [group])
+    placement = KVCachePlacement(
+        rank=0,
+        world_size=2,
+        bundles=tuple(
+            KVCacheBundle((name,), 0 if i < 2 else 1)
+            for i, name in enumerate(list(specs)[:-1])
+        )
+        + (KVCacheBundle(("draft",), None),),
+    )
+    return config, placement
+
+
+def test_layer_sharded_storage_preserves_logical_groups_and_reuses_scratch():
+    """Nonowner layers alias by execution ordinal; owner/draft data survive."""
+    from vllm.v1.kv_cache_placement import build_kv_cache_storage
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config, placement = _layer_sharded_cache_case()
+    result = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
+    assert result.kv_cache_groups is config.kv_cache_groups
+    assert result.num_blocks == config.num_blocks
+    caches = allocate_kv_cache(result, torch.device("cpu"), KVCacheLayout.LBNHC)
+    caches["a"].fill_(11)
+    caches["draft"].fill_(12)
+    caches["c"].fill_(13)
+    caches["d"].fill_(14)
+    assert torch.all(caches["e"] == 13)
+    assert torch.all(caches["f"] == 14)
+    assert torch.all(caches["a"] == 11)
+    assert torch.all(caches["draft"] == 12)
+    assert result.storage_plan.persistent_layers == ("a", "b", "draft")
+    assert len({x.untyped_storage().data_ptr() for x in caches.values()}) == 1
+
+
+def test_layer_sharded_worker_capacities_and_offload_budget_agree():
+    from vllm.v1.kv_cache_placement import (
+        build_kv_cache_storage,
+        plan_layer_sharded_configs,
+    )
+    from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
+
+    config, placement = _layer_sharded_cache_case()
+    other = replace(placement, rank=1)
+    placements = [placement, other]
+    budgets = [
+        build_kv_cache_storage(
+            replace(config, num_blocks=n), p, KVCacheLayout.LBNHC
+        ).storage_plan.allocation_bytes
+        for n, p in zip([9, 7], placements)
+    ]
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(
+        max_model_len=32, original_max_model_len=32
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    result = plan_layer_sharded_configs(
+        vllm_config, [config.kv_cache_groups] * 2, placements, budgets
+    )
+    assert [c.num_blocks for c in result] == [7, 7]
+    for c, budget in zip(result, budgets):
+        assert c.storage_plan.allocation_bytes <= budget
+    page = config.kv_cache_groups[0].kv_cache_spec.first_spec.page_size_bytes
+    assert [c.offload_block_size_bytes for c in result] == [5 * page] * 2
+    scheduler = generate_scheduler_kv_cache_config(result)
+    assert scheduler.storage_plan is None
+    assert scheduler.offload_block_size_bytes == 5 * page
+    assert (
+        SimpleCPUOffloadScheduler._derive_cpu_config(scheduler, 20 * page).num_blocks
+        == 4
+    )
+    vllm_config.cache_config.num_gpu_blocks_override = 8
+    with pytest.raises(ValueError, match="exceeds physical capacity"):
+        plan_layer_sharded_configs(
+            vllm_config, [config.kv_cache_groups] * 2, placements, budgets
+        )
+
+
+def test_layer_sharded_rejects_inconsistent_replica_domains():
+    from vllm.v1.kv_cache_placement import layer_specs, validate_kv_cache_placements
+
+    config, placement = _layer_sharded_cache_case()
+    specs = layer_specs(config.kv_cache_groups)
+    peer = replace(placement, rank=1)
+    validate_kv_cache_placements([specs] * 2, [placement, peer])
+    with pytest.raises(ValueError, match="incomplete"):
+        validate_kv_cache_placements([specs] * 2, [placement] * 2)
+    with pytest.raises(ValueError, match="ownership/layout"):
+        validate_kv_cache_placements(
+            [specs] * 2, [placement, replace(peer, alignment=4096)]
+        )
+    other_specs = dict(specs)
+    other_specs["a"] = replace(specs["a"], head_size=256)
+    with pytest.raises(ValueError, match="different logical"):
+        validate_kv_cache_placements([specs, other_specs], [placement, peer])
+
+
+@pytest.mark.parametrize("alignment", [256, 2 * 1024 * 1024])
+def test_layer_sharded_capacity_includes_exact_alignment_cost(alignment):
+    """The capacity boundary must be identical to actual allocation geometry."""
+    from vllm.v1.kv_cache_placement import (
+        build_kv_cache_storage,
+        fit_kv_cache_storage,
+    )
+
+    config, placement = _layer_sharded_cache_case()
+    placement = replace(placement, alignment=alignment)
+    result = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
+    budget = result.storage_plan.allocation_bytes
+    count = fit_kv_cache_storage(config, placement, KVCacheLayout.LBNHC, budget)
+    fitted = build_kv_cache_storage(
+        replace(config, num_blocks=count), placement, KVCacheLayout.LBNHC
+    )
+    overflow = build_kv_cache_storage(
+        replace(config, num_blocks=count + 1), placement, KVCacheLayout.LBNHC
+    )
+    assert count >= config.num_blocks
+    assert fitted.storage_plan.allocation_bytes <= budget
+    assert overflow.storage_plan.allocation_bytes > budget
+    assert fit_kv_cache_storage(config, placement, KVCacheLayout.LBNHC, 0) == 0
+
+
+def test_layer_sharded_bundle_keeps_indexer_and_scales_with_owner():
+    """All components transfer contiguously even when their page sizes differ."""
+    from vllm.v1.kv_cache_placement import (
+        KVCacheBundle,
+        build_kv_cache_storage,
+    )
+
+    config, placement = _layer_sharded_cache_case()
+    spec = config.kv_cache_groups[0].kv_cache_spec
+    spec.kv_cache_specs["b"] = replace(spec.kv_cache_specs["b"], head_size=32)
+    placement = replace(
+        placement,
+        bundles=(KVCacheBundle(("a", "b"), 1), *placement.bundles[2:]),
+    )
+    result = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
+    region = result.storage_plan.regions[0]
+    assert region.bundle.layers == ("a", "b")
+    for tensor in result.kv_cache_tensors[:2]:
+        assert region.offset <= tensor.offset
+        assert (
+            tensor.offset + spec.kv_cache_specs[tensor.layers[0]].page_size_bytes * 3
+            <= region.offset + region.size
+        )
+
+
 @pytest.mark.parametrize("gpu_block_size", [32, 64])
 @pytest.mark.parametrize("shared_host_pool", [False, True])
 def test_hisparse_hma_uses_resolved_gpu_block_size(

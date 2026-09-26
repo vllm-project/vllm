@@ -289,7 +289,14 @@ class SimpleCPUOffloadScheduler:
         # so its size is the total GPU KV cache size.
         gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
-        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        if gpu_config.offload_block_size_bytes is not None:
+            num_cpu_blocks = cpu_capacity_bytes // gpu_config.offload_block_size_bytes
+            if num_cpu_blocks < 2:
+                raise ValueError("Offload budget cannot hold a usable KVPP block.")
+        else:
+            num_cpu_blocks = max(
+                1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes
+            )
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
@@ -306,6 +313,7 @@ class SimpleCPUOffloadScheduler:
             gpu_config,
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
+            storage_plan=None,
         )
 
     @staticmethod
