@@ -300,7 +300,7 @@ def test_beam_search_passes_multimodal_data(
 
 
 # NOTE: encoder/decoder tests are currently located under
-# tests/models/multimodal/generation/test_whisper.py
+# tests/models/multimodal/generation/audio/test_whisper.py
 
 
 @pytest.mark.parametrize("model", MODELS)

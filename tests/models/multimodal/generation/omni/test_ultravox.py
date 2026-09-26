@@ -9,9 +9,9 @@ import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
 
-from ....conftest import AUDIO_ASSETS, AudioTestAssets, VllmRunner
-from ....utils import RemoteOpenAIServer
-from ...registry import HF_EXAMPLE_MODELS
+from .....conftest import AUDIO_ASSETS, AudioTestAssets, VllmRunner
+from .....utils import RemoteOpenAIServer
+from ....registry import HF_EXAMPLE_MODELS
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 

@@ -12,7 +12,7 @@ steps:
   - tests/models/multimodal
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
-    - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+    - pytest -v -s models/multimodal/generation/omni/test_ultravox.py -m core_model
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Standard) 1: qwen2"
@@ -63,25 +63,59 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: ViT CUDAGraph Shard %N"
   device: h200_35gb
-  key: multi-modal-models-standard-4-other-whisper
-  timeout_in_minutes: 75
-  source_file_dependencies:
+  key: multi-modal-models-standard-4-vit-cudagraph
+  timeout_in_minutes: 45
+  source_file_dependencies: &mm-standard-4-deps
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
+  parallelism: 3
   commands:
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
-    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
-    - pytest models/multimodal/generation/test_memory_leak.py -m core_model
-    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    # Only test_vit_cudagraph.py has core cases here. Its encoder-only test must
+    # stay last in the file: ViT cases run after it in the same process segfault.
+    - pytest -v -s models/multimodal/generation/vision -m core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 4: other + whisper"
+      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 4: ViT CUDAGraph Shard %N"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 70
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: Audio"
+  device: h200_35gb
+  key: multi-modal-models-standard-4-audio
+  timeout_in_minutes: 45
+  source_file_dependencies: *mm-standard-4-deps
+  commands:
+    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/audio -m core_model  # Otherwise, mp_method="spawn" doesn't work
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 4: Audio"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: Pooling + Other"
+  device: h200_35gb
+  key: multi-modal-models-standard-4-pooling-other
+  timeout_in_minutes: 45
+  source_file_dependencies: *mm-standard-4-deps
+  commands:
+    # Catch-all: every core test not owned by another job, including new ones.
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/omni/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/audio --ignore models/multimodal/generation/vision --ignore models/multimodal/standard/memory_leak --ignore models/multimodal/processing
+    - pytest models/multimodal/standard/memory_leak -m core_model
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 4: Pooling + Other"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
 
@@ -159,21 +193,59 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1): Audio"
   device: h200_35gb
-  key: multi-modal-models-extended-generation-1
+  key: multi-modal-models-extended-generation-1-audio
   optional: true
-  source_file_dependencies:
+  source_file_dependencies: &mm-extended-generation-1-deps
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - pytest -v -s models/multimodal/generation/audio -m 'not core_model'
+  mirror:
+    amd:
+      label: ":amd: (MI300) Multimodal Models (Extended Generation 1): Audio"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1): Vision"
+  device: h200_35gb
+  key: multi-modal-models-extended-generation-1-vision
+  optional: true
+  source_file_dependencies: *mm-extended-generation-1-deps
+  commands:
+    # Catch-all for files at the generation/ root. Today that is only
+    # test_moondream3_moe, a cpu_test that initializes a gloo process group in
+    # the pytest parent, so it keeps its own process.
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/audio --ignore models/multimodal/generation/vision --ignore models/multimodal/generation/omni
+    # test_moondream3 keeps a module-scoped in-process LLM, and an EngineCore
+    # forked after it hangs on startup; spawn from the repo root avoids that.
+    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/vision -m 'not core_model'
+  mirror:
+    amd:
+      label: ":amd: (MI300) Multimodal Models (Extended Generation 1): Vision"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1): Omni + Mapping"
+  device: h200_35gb
+  key: multi-modal-models-extended-generation-1-omni
+  optional: true
+  source_file_dependencies: *mm-extended-generation-1-deps
+  commands:
+    - pytest -v -s models/multimodal/generation/omni -m 'not core_model'
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Extended Generation 1)"
+      label: ":amd: (MI300) Multimodal Models (Extended Generation 1): Omni + Mapping"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
