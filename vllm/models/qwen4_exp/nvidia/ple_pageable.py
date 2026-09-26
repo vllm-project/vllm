@@ -14,6 +14,14 @@ GPU faults on non-resident file pages are serviced one page at a time, so the
 rows a step needs are faulted in ahead of the lookup by CPU threads
 (:class:`PagePrefetcher`). The prefetch is only a hint: the lookup is correct
 whether or not it has finished.
+
+A decode step's rows are known only once the previous step has sampled, so the
+prefetch has no lead over the lookup: while the table is cold (after a start,
+loading the weights evicts it from the page cache), the GPU reaches the missing
+pages at the same time as the prefetch. The prefetch therefore issues readahead
+for all of a step's pages at once (:meth:`MappedTable._fill`); the GPU's faults
+then wait on reads that are already in flight in parallel instead of issuing
+them one at a time.
 """
 
 import ctypes
@@ -38,6 +46,11 @@ logger = init_logger(__name__)
 
 _PAGE = 4096
 _MADV_RANDOM = 1
+_MADV_WILLNEED = 3
+_MADV_POPULATE_READ = 22  # Linux 5.14+
+# Row sets up to this size (decode steps) are filled page by page; larger ones
+# (prefill) are touched from the thread pool.
+_FILL_MAX_ROWS = 4096
 _CU_PAGEABLE_MEMORY_ACCESS = 88
 _CU_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES = 100
 _SAFETENSORS_DTYPES = {
@@ -244,6 +257,9 @@ class MappedTable:
         self.num_rows = layout.num_rows
         self._maps: dict[str, tuple[mmap.mmap, np.ndarray]] = {}
         libc = ctypes.CDLL(None, use_errno=True)
+        libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        self._libc = libc
+        self._can_populate = True
         for path in sorted({s.path for s in layout.shards}):
             fd = os.open(path, os.O_RDONLY)
             try:
@@ -290,6 +306,8 @@ class MappedTable:
         )
         array = np.frombuffer(mapping, dtype=np.uint8)
         self._maps = {"<zeros>": (mapping, array)}
+        self._libc = None
+        self._can_populate = False
         self.views = [array[: num_rows * row_bytes].reshape(num_rows, row_bytes)]
         self.layout = None
         self.shard_base = torch.tensor(
@@ -343,7 +361,12 @@ class MappedTable:
             view, index = task
             return int(view[index, 0].sum()) + int(view[index, last].sum())
 
-        if pool is None or rows.size <= 4096:
+        if rows.size <= _FILL_MAX_ROWS:
+            if not self._fill(groups(np.arange(rows.size))):
+                for task in groups(np.arange(rows.size)):
+                    fault(task)
+            return
+        if pool is None:
             for task in groups(np.arange(rows.size)):
                 fault(task)
             return
@@ -352,6 +375,38 @@ class MappedTable:
             if chunk.size:
                 tasks.extend(groups(chunk))
         list(pool.map(fault, tasks))
+
+    def _fill(self, tasks: list[tuple[np.ndarray, np.ndarray]]) -> bool:
+        """Read the pages of a few rows in parallel; False if unsupported.
+
+        One thread touching the pages serially waits for each read in turn
+        (~4.7 ms for a decode step's ~57 cold pages on GB10, idle box).
+        ``MADV_WILLNEED`` queues readahead for every page and returns at once,
+        so the SSD serves them concurrently, and the GPU's own faults on these
+        pages wait on reads already in flight; ``MADV_POPULATE_READ`` then maps
+        each page (~0.36 ms in total). ctypes releases the GIL in both calls.
+        """
+        if not self._can_populate:
+            return False
+        starts = []
+        for view, index in tasks:
+            first = view.__array_interface__["data"][0] + index.astype(np.int64) * (
+                self.row_bytes
+            )
+            starts.append(first & ~(_PAGE - 1))
+            starts.append((first + self.row_bytes - 1) & ~(_PAGE - 1))
+        if not starts:
+            return True
+        pages = np.unique(np.concatenate(starts)).tolist()
+        madvise = self._libc.madvise
+        for page in pages:
+            madvise(page, _PAGE, _MADV_WILLNEED)
+        for page in pages:
+            if madvise(page, _PAGE, _MADV_POPULATE_READ) != 0:
+                # EINVAL before Linux 5.14: touch the rows instead from now on.
+                self._can_populate = False
+                return False
+        return True
 
 
 class PagePrefetcher:
