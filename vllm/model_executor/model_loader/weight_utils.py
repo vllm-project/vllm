@@ -3,10 +3,12 @@
 """Utilities for downloading and initializing model weights."""
 
 import asyncio
+import collections
 import concurrent.futures
 import fnmatch
 import glob
 import hashlib
+import itertools
 import json
 import os
 import tempfile
@@ -22,7 +24,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open
+from safetensors.torch import load, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -1172,30 +1174,56 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    local_expert_ids: list[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Multi-Thread iterate over the weights in the model safetensor files."""
+    """Multi-threaded safetensor loader with bounded memory via a sliding window.
+
+    At most (max_workers + 1) shard files are in-flight at any time:
+    max_workers loading concurrently + 1 prefetched and ready to yield.
+    Peak CPU RAM <= (max_workers + 2) * shard_file_size.
+    Uses safe_open to skip non-local expert tensors before loading into RAM.
+    """
 
     def _load_file(st_file: str):
-        result = load_file(st_file, device="cpu")
+        result = {}
+        with safe_open(st_file, framework="pt", device="cpu") as f:
+            for k in f.keys():  # noqa: SIM118 (safe_open is not iterable)
+                if should_skip_weight(k, local_expert_ids):
+                    continue
+                result[k] = f.get_tensor(k)
         return result
 
+    buffer_size = max_workers + 1
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Note to use generator here so we do not store all the loaded files in memory
-        # at the same time, which can cause OOM for large models.
-        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
+        file_iter = iter(hf_weights_files)
+        pending: collections.deque = collections.deque()
+
+        # Seed the buffer.
+        for st_file in itertools.islice(file_iter, buffer_size):
+            pending.append((st_file, executor.submit(_load_file, st_file)))
+
         futures_iter = tqdm(
-            concurrent.futures.as_completed(futures),
             total=len(hf_weights_files),
             desc="Multi-thread loading shards",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
         )
 
-        for future in futures_iter:
+        while pending:
+            st_file, future = pending.popleft()
             state_dict = future.result()
             del future
+
+            next_file = next(file_iter, None)
+            if next_file is not None:
+                pending.append((next_file, executor.submit(_load_file, next_file)))
+
             for key in list(state_dict):
                 yield key, state_dict.pop(key)
+            del state_dict
+
+            futures_iter.update(1)
 
 
 def runai_safetensors_weights_iterator(
