@@ -23,7 +23,25 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics."""
+    """Container for transfer performance metrics.
+
+    IMPORTANT: All metrics are aggregated across all tensor-parallel (TP) ranks
+    before summary statistics are computed. Each rank independently records
+    per-transfer telemetry, but the reported metrics reflect the combined pool
+    of observations from all ranks.
+
+    Metric semantics:
+    - "Num successful transfers": total count across all ranks.
+    - "Avg MB per transfer": average over individual rank-level transfers.
+    - "Throughput (MB/s)": total_MB / total_time across all ranks, effectively
+      per-rank average throughput, not aggregate system throughput, since
+      transfers across ranks occur concurrently.
+    - Percentiles (e.g., P90): computed over the combined distribution of all
+      ranks' transfer times.
+
+    This is a deliberate design choice to provide a global view of transfer
+    performance across the engine.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -129,6 +147,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         total_mb = mb.sum()
         avg_mb = total_mb / n
 
+        # Throughput = total_MB / total_time_seconds.
+        # NOTE: This is an average per-rank throughput, not aggregate system
+        # throughput, because transfers across TP ranks occur concurrently.
         total_time_seconds = xfer_time.sum()
         throughput_mb_s = total_mb / total_time_seconds
 
@@ -150,6 +171,15 @@ class NixlKVConnectorStats(KVConnectorStats):
 
 
 class NixlPromMetrics(KVConnectorPromMetrics):
+    """Prometheus metrics for NIXL KV connector transfers.
+
+    Pipeline: observe() -> aggregate() -> reduce() -> log()
+
+    Stats arrive pre-aggregated across all workers (TP ranks). This means
+    histograms and counters reflect the combined observation pool, not
+    per-rank data.
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -262,7 +292,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
-    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
                 self.nixl_histogram_xfer_time,
@@ -286,10 +316,6 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_kv_expired_reqs,
             ],
             [
-                # Transfer, handshake and notification failures are grouped:
-                # all are sporadic lower-transport-layer events. KV expiry is
-                # reported separately as it signals autoscaler behavior, not
-                # transport health.
                 (
                     "num_failed_transfers",
                     "num_failed_handshakes",
