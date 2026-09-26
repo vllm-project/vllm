@@ -120,6 +120,12 @@ def split_string_into_token_deltas(tokenizer: TokenizerLike, text: str) -> list[
     for i in range(1, len(token_ids) + 1):
         current_tokens = token_ids[:i]
         current_text = tokenizer.decode(current_tokens)
+        if current_text.endswith("�") and i < len(token_ids):
+            # The token boundary fell inside a multi-byte character and the
+            # partial bytes decoded to a replacement char. A real
+            # incremental detokenizer withholds the bytes until the
+            # character completes; merge this token into the next delta.
+            continue
         new_text = current_text[len(previously_decoded_text) :]
         previously_decoded_text = current_text
         deltas.append(new_text)

@@ -267,3 +267,83 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+INNER_SIMPLE_OUTPUT = "get_weather(city='LA', metric='C')"
+INNER_SIMPLE_CALL = FunctionCall(
+    name="get_weather",
+    arguments='{"city": "LA", "metric": "C"}',
+)
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_bad_sibling_call_does_not_drop_good_calls(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    """One unconvertible call (bytes argument) used to abort the whole
+    conversion, dropping every parseable sibling call in the block."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+    model_output = f"<|python_start|>[bad(x=b'z'), {INNER_SIMPLE_OUTPUT}]<|python_end|>"
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser,
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == INNER_SIMPLE_CALL
+
+
+def test_non_finite_argument_rejected(default_tokenizer: TokenizerLike):
+    """A 1e999 literal overflows to inf and used to serialize as Infinity —
+    arguments no JSON parser accepts; the call is rejected and every
+    emitted arguments string stays valid JSON."""
+    import json
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+    model_output = (
+        f"<|python_start|>[calc(x=1e999), {INNER_SIMPLE_OUTPUT}]<|python_end|>"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == INNER_SIMPLE_CALL
+    for call in tool_calls:
+        json.loads(call.function.arguments)
+
+
+def test_streaming_mismatched_brackets_reported_once(
+    default_tokenizer: TokenizerLike,
+):
+    """Brackets the model got structurally wrong raise at the same offset on
+    every chunk of the block, so the failure was logged with a full traceback
+    once per chunk and none of them named the offending text. It is reported
+    once per request instead."""
+    from vllm.tool_parsers import llama4_pythonic_tool_parser as parser_module
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+    model_output = "<|python_start|>[foo(x=1])]<|python_end|>"
+
+    with (
+        patch.object(parser_module.logger, "exception") as logged_exception,
+        patch.object(parser_module.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert tool_calls == []
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1
