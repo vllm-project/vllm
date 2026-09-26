@@ -84,8 +84,7 @@ class InputBatch:
     num_computed_prefill_tokens_np: np.ndarray
     # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
-    # Execution classification; may be False for padded prompt tails even when
-    # is_prefilling_np is True.
+    # == np.any(is_prefilling_np)
     has_prefill: bool
 
     # [num_tokens_after_padding]
