@@ -248,6 +248,65 @@ def test_batched_mm(
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
+@pytest.mark.parametrize("scale_shape", ["[E]", "[E,1,1]"])
+def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
+    """Per-tensor weight scales must broadcast along N when activations are
+    quantized per token, instead of indexing into other experts' scales."""
+    if torch.float8_e4m3fn not in DTYPES or (
+        current_platform.is_cuda_alike()
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("float8_e4m3fn is not supported on this device")
+    set_random_seed(7)
+
+    E, M, K, N = 8, 64, 256, 256
+    num_expert_tokens = torch.randint(
+        1, M + 1, size=(E,), device=DEVICE, dtype=torch.int32
+    )
+    _, A_q, A_scale = make_quantized_test_activations(
+        E,
+        M,
+        K,
+        in_dtype=torch.bfloat16,
+        quant_dtype=torch.float8_e4m3fn,
+        per_act_token_quant=True,
+    )
+    (_, B_q, B_scale, _), _ = make_test_weights(
+        E, N // 2, K, in_dtype=torch.bfloat16, quant_dtype=torch.float8_e4m3fn
+    )
+    assert B_scale is not None and B_scale.numel() == E
+    B_scale = B_scale.view(-1) if scale_shape == "[E]" else B_scale.view(-1, 1, 1)
+
+    test_output = torch.zeros((E, M, N), dtype=torch.bfloat16, device=DEVICE)
+    invoke_moe_batched_triton_kernel(
+        A_q,
+        B_q,
+        test_output,
+        num_expert_tokens,
+        tl.bfloat16,
+        A_scale,
+        B_scale,
+        None,
+        True,
+        False,
+        False,
+        config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32},
+        per_act_token_quant=True,
+    )
+
+    ref_output = native_batched_masked_quant_matmul(
+        A_q,
+        B_q,
+        torch.zeros_like(test_output),
+        num_expert_tokens,
+        A_scale,
+        B_scale.view(-1, 1, 1),
+        None,
+        True,
+    )
+    torch.testing.assert_close(test_output, ref_output, atol=6e-2, rtol=6e-2)
+
+
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
