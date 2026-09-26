@@ -286,19 +286,48 @@ class RemoteVLLMServer:
                 f"{pre_gb:.2f} GB"
             )
 
-        self._start_server(model, vllm_serve_args, env_dict)
-        self._register_active_server()
         max_wait_seconds = max_wait_seconds or 480
-        try:
-            self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
-        except Exception:
-            # If the server never became healthy, we must still clean up
-            # the subprocess tree. Without this, a timeout in __init__
-            # leaks the server + EngineCore processes (and their GPU
-            # memory), because __exit__ is never called when __init__
-            # raises inside a ``with`` statement.
-            self._shutdown()
-            raise
+        # Startup can die for transient reasons on busy CI hosts — most often
+        # EADDRINUSE when get_open_port()'s probe socket races another process
+        # (or a leaked process) for the port. Retry with a fresh port a bounded
+        # number of times; a deterministic startup bug still fails once the
+        # attempts are exhausted. Only "server process died" is retried — a
+        # server that stays up but never gets healthy (timeout) is not.
+        max_attempts = 3 if self.port is not None else 1
+        for attempt in range(1, max_attempts + 1):
+            self._start_server(model, vllm_serve_args, env_dict)
+            self._register_active_server()
+            try:
+                self._wait_for_server(
+                    url=self.url_for("health"), timeout=max_wait_seconds
+                )
+                break
+            except RuntimeError as exc:
+                # If the server never became healthy, we must still clean up
+                # the subprocess tree. Without this, a timeout in __init__
+                # leaks the server + EngineCore processes (and their GPU
+                # memory), because __exit__ is never called when __init__
+                # raises inside a ``with`` statement.
+                self._shutdown()
+                if (
+                    "Server exited unexpectedly" not in str(exc)
+                    or attempt == max_attempts
+                ):
+                    raise
+                print(
+                    f"[{type(self).__name__}] Server died during startup "
+                    f"(attempt {attempt}/{max_attempts}); retrying on a "
+                    "fresh port."
+                )
+                # Pick a fresh port: the old one may be held by a leaked
+                # process or have been claimed between probe and bind.
+                port_idx = vllm_serve_args.index("--port") + 1
+                vllm_serve_args[port_idx] = str(get_open_port())
+                self.port = int(vllm_serve_args[port_idx])
+                self._shutdown_complete = False
+            except Exception:
+                self._shutdown()
+                raise
 
     def __enter__(self):
         return self
