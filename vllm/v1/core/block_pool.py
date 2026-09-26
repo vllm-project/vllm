@@ -617,6 +617,9 @@ class BlockPool:
         if not self.enable_kv_cache_events:
             return
         for block_hash in block_hashes:
+            # Blocks are not de-duplicated: keep the hash while a copy remains.
+            if self.cached_block_hash_to_block.get_one_block(block_hash) is not None:
+                continue
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],

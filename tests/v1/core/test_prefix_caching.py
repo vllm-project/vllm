@@ -3179,7 +3179,12 @@ def test_prefix_cache_stats_disabled():
 
 
 def test_maybe_evict_cached_block():
-    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=True,
+    )
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
     block_hash1 = make_block_hash_with_group_id(BlockHash(b"20"), 2000)
     block_hash2 = make_block_hash_with_group_id(BlockHash(b"30"), 3000)
@@ -3211,19 +3216,25 @@ def test_maybe_evict_cached_block():
         block_hash0: {block0.block_id: block0, block3.block_id: block3},
         block_hash2: block2,
     }
-    # Evict block0: block_hash0 entry should NOT be removed, as block3
-    # also use the same hash
+    assert len(pool.take_events()) == 1
+    # Evict block0: block_hash0 entry should NOT be removed, and no
+    # BlockRemoved event emitted, as block3 also use the same hash
     pool._maybe_evict_cached_block(block0)
     assert pool.cached_block_hash_to_block._cache == {
         block_hash0: {block3.block_id: block3},
         block_hash2: block2,
     }
+    assert pool.take_events() == []
     # Evict block2
     pool._maybe_evict_cached_block(block2)
     assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert pool.cached_block_hash_to_block._cache == {}
+    assert [event.block_hashes for event in pool.take_events()] == [
+        [kv_cache_utils.maybe_convert_block_hash(BlockHash(b"30"))],
+        [kv_cache_utils.maybe_convert_block_hash(BlockHash(b"10"))],
+    ]
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
