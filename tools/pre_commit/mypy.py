@@ -113,7 +113,6 @@ SEPARATE_GROUPS = [
 
 EXCLUDE = [
     r"vllm/model_executor/models/[kK]",
-    r"vllm/model_executor/models/[qQ]",
     r"vllm/model_executor/models/[uU]",
     r"vllm/model_executor/models/[vV]",
     r"vllm/model_executor/models/[wW]",

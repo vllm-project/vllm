@@ -253,25 +253,6 @@ def dequant(
         return t.to(out_dtype)
 
 
-def batched_dequant(
-    t: torch.Tensor,
-    scale: torch.Tensor | None,
-    block_shape: list[int] | None,
-    per_act_token_quant: bool,
-    out_dtype: torch.dtype | None = torch.float32,
-) -> torch.Tensor:
-    if scale is not None:
-        assert t.shape[0] == scale.shape[0]
-        out = torch.empty_like(t, dtype=out_dtype)
-        for e in range(t.shape[0]):
-            out[e] = dequant(
-                t[e], scale[e], block_shape, per_act_token_quant, out_dtype
-            )
-        return out
-
-    return t.to(out_dtype)
-
-
 def native_batched_masked_quant_matmul(
     A: torch.Tensor,
     B: torch.Tensor,
