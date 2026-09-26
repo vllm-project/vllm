@@ -154,15 +154,15 @@ class PassConfig:
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the Q/K RoPE and KV-cache update ops."""
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
-    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
+    """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
-    for layers that support it. Auto-enabled at O1+ on ROCm for models
-    with QK-norm (e.g. Qwen3-MoE)."""
+    for layers that support it. Auto-enabled at O2+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """Maximum token count for RoPE+KV-cache fusion, targeting small decode
     batches. Larger batches use the unfused kernels. Also applies to the fused
-    QK-Norm+RoPE+KV-cache pass.
+    QK-Norm+RoPE/MRoPE+KV-cache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None

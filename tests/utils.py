@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import atexit
 import contextlib
 import copy
@@ -23,7 +22,6 @@ from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
-from unittest.mock import patch
 
 import anthropic
 import cloudpickle
@@ -33,12 +31,9 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
-from huggingface_hub.constants import HF_HUB_OFFLINE
-from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
 import vllm.envs as envs
-from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -52,7 +47,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
-from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
@@ -69,43 +63,7 @@ logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
-def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
-    """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
-    trust_remote_code modules would otherwise fetch from third-party CDNs
-    (often unreachable from US-based CI)."""
-    if HF_HUB_OFFLINE:
-        return
-    for repo_id, filename in assets:
-        try:
-            hf_api().hf_hub_download(repo_id=repo_id, filename=filename)
-        except Exception as e:
-            logger.warning(
-                "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",
-                repo_id,
-                filename,
-                e,
-            )
-
-
-if current_platform.is_rocm():
-    from amdsmi import (
-        amdsmi_get_gpu_vram_usage,
-        amdsmi_get_processor_handles,
-        amdsmi_init,
-        amdsmi_shut_down,
-    )
-
-    _amdsmi_lock = threading.Lock()
-
-    @contextmanager
-    def _nvml():
-        with _amdsmi_lock:
-            try:
-                amdsmi_init()
-                yield
-            finally:
-                amdsmi_shut_down()
-elif current_platform.is_cuda():
+if current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
         nvmlDeviceGetHandleByUUID,
@@ -595,27 +553,20 @@ class RemoteVLLMServer:
         return members
 
     def _get_gpu_memory_used(self) -> float | None:
-        """Get total GPU memory used across all visible devices in bytes."""
+        """Get device-wide usage across visible devices in bytes.
+
+        On ROCm this initializes HIP in the caller; subsequent multiprocessing
+        GPU workers must use spawn, as the ROCm server helpers already do.
+        """
         try:
             if current_platform.is_rocm():
-                with _nvml():
-                    handles = amdsmi_get_processor_handles()
-                    devices = get_physical_device_indices(
-                        list(range(current_platform.device_count()))
-                    )
-                    total_used_mib = 0
-                    for device in devices:
-                        handle = handles[device]
-                        vram_info = amdsmi_get_gpu_vram_usage(handle)
-                        total_used_mib += vram_info["vram_used"]
-                    # amdsmi reports VRAM in MiB; convert to bytes so this
-                    # matches the CUDA/nvml branch (already bytes) and the
-                    # byte-based target in _wait_for_gpu_memory_release. Without
-                    # this, that wait compares MiB against a ~2e9-byte target,
-                    # is always satisfied instantly, and returns "released to
-                    # 0.00 GB" while the previous server's VRAM is still
-                    # resident -- OOMing the next server's startup on ROCm.
-                    return total_used_mib * 1024 * 1024
+                # Use HIP logical devices. On MI355 DPX/NPS2, the primary
+                # AMD SMI device can expose whole-card memory counters.
+                total_used = 0
+                for i in range(current_platform.device_count()):
+                    free, total = torch.accelerator.get_memory_info(i)
+                    total_used += total - free
+                return float(total_used)
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
@@ -653,9 +604,12 @@ class RemoteVLLMServer:
             # Can't query GPU memory - nothing to do
             return
 
-        # Allow up to 2 GiB overhead above baseline for driver/context state
-        # that may persist between server instances.
-        headroom_bytes = 2 * 1024 * 1024 * 1024
+        # Allow aggregate driver/context growth above the baseline.
+        headroom_bytes = (
+            4 * 1024 * 1024 * 1024
+            if current_platform.is_rocm()
+            else 2 * 1024 * 1024 * 1024
+        )
         target = baseline + headroom_bytes
 
         start = time.time()
@@ -1427,8 +1381,10 @@ def init_test_distributed_environment(
         get_current_vllm_config_or_none,
         set_current_vllm_config,
     )
+    from vllm.platforms import current_platform
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    backend = current_platform.dist_backend
 
     if data_parallel_size > 1:
         # For DP we need to set a common DP master port
@@ -1449,6 +1405,7 @@ def init_test_distributed_environment(
                 rank=rank % tp_pp_world,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank if local_rank >= 0 else rank,
+                backend=backend,
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
         return
@@ -1460,6 +1417,7 @@ def init_test_distributed_environment(
             rank=rank,
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
+            backend=backend,
         )
         ensure_model_parallel_initialized(tp_size, pp_size)
     else:
@@ -1470,6 +1428,7 @@ def init_test_distributed_environment(
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
+                backend=backend,
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
 
@@ -1573,17 +1532,6 @@ def assert_rocm_custom_allreduce_backend_state_on_worker(
     )
 
 
-@contextmanager
-def error_on_warning(category: type[Warning] = Warning):
-    """Within the scope of this context manager, tests will fail if any warning
-    of the given category is emitted.
-    """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("error", category=category)
-
-        yield
-
-
 def get_physical_device_indices(devices: list[int]):
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible_devices is None:
@@ -1611,13 +1559,17 @@ def record_gpu_memory_usage_stats(
     *,
     devices: list[int],
 ) -> dict[int, tuple[float, float]]:
+    """Return device-wide used/total GiB; ROCm IDs are HIP logical devices.
+
+    ROCm queries initialize HIP in the caller and include other processes'
+    allocations on the same memory partition.
+    """
     output: dict[int, tuple[float, float]] = {}
     for device in devices:
         if current_platform.is_rocm():
-            dev_handle = amdsmi_get_processor_handles()[device]
-            mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
-            gb_used = mem_info["vram_used"] / 2**10
-            gb_total = mem_info["vram_total"] / 2**10
+            free, total = torch.accelerator.get_memory_info(device)
+            gb_used = (total - free) / 2**30
+            gb_total = total / 2**30
         elif current_platform.is_xpu():
             # nvml/amdsmi are unavailable on XPU. Query device memory through
             # torch.accelerator.get_memory_info, which the XPU platform patches
@@ -1645,7 +1597,9 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    devices = get_physical_device_indices(devices)
+    # HIP already applies device visibility; keep logical IDs and threshold keys.
+    if not current_platform.is_rocm():
+        devices = get_physical_device_indices(devices)
     if isinstance(threshold_bytes, int):
         threshold_bytes = {device: threshold_bytes for device in devices}
     elif isinstance(threshold_bytes, dict):
@@ -1667,8 +1621,6 @@ def wait_for_gpu_memory_to_clear(
                 threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
             )
 
-    # Use nvml instead of pytorch to reduce measurement error from torch cuda
-    # context.
     start_time = time.time()
     stable_since: float | None = None
     stable_used_bytes: dict[int, int] | None = None
@@ -1941,7 +1893,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
     The child inherits the parent's stdout/stderr so its output (engine
     cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
-    traceback is serialized to ``tb_file`` for structured re-raising. A
+    traceback or skip reason is serialized to ``tb_file`` for propagation. A
     native crash leaves ``tb_file`` empty — the diagnostic is then only in
     the inherited subprocess output.
     """
@@ -1966,7 +1918,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             )
 
             child_script = (
-                "import sys, importlib, cloudpickle, traceback\n"
+                "import sys, importlib, cloudpickle, traceback, json\n"
                 "try:\n"
                 "    from _pytest.outcomes import Skipped\n"
                 "except ImportError:\n"
@@ -1978,7 +1930,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 "    target = getattr(target, name)\n"
                 "try:\n"
                 "    target(*data['args'], **data['kwargs'])\n"
-                "except Skipped:\n"
+                "except Skipped as exc:\n"
+                "    with open(data['tb_file'], 'w') as fp:\n"
+                "        json.dump(str(exc), fp)\n"
                 "    sys.exit(0)\n"
                 "except BaseException:\n"
                 "    with open(data['tb_file'], 'w') as fp:\n"
@@ -1997,18 +1951,20 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 env=env,
             )
 
+            try:
+                with open(tb_file) as fp:
+                    tb = fp.read()
+            except OSError:
+                tb = ""
             if result.returncode != 0:
-                try:
-                    with open(tb_file) as fp:
-                        tb = fp.read()
-                except OSError:
-                    tb = ""
                 if not tb:
                     tb = "<no Python traceback; see subprocess output above>"
                 raise RuntimeError(
                     f"Test subprocess '{f.__name__}' failed "
                     f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
                 )
+            if tb:
+                pytest.skip(json.loads(tb))
         finally:
             with contextlib.suppress(OSError):
                 os.remove(tb_file)
@@ -2166,88 +2122,6 @@ def multi_gpu_only(*, num_gpus: int = 2):
     return wrapper
 
 
-async def completions_with_server_args(
-    prompts: list[str],
-    model_name: str,
-    server_cli_args: list[str],
-    num_logprobs: int | None,
-    max_wait_seconds: int = 240,
-    max_tokens: int | list = 5,
-) -> list[Completion]:
-    """Construct a remote OpenAI server, obtain an async client to the
-    server & invoke the completions API to obtain completions.
-
-    Args:
-      prompts: test prompts
-      model_name: model to spin up on the vLLM server
-      server_cli_args: CLI args for starting the server
-      num_logprobs: Number of logprobs to report (or `None`)
-      max_wait_seconds: timeout interval for bringing up server.
-                        Default: 240sec
-      max_tokens: max_tokens value for each of the given input prompts.
-        if only one max_token value is given, the same value is used
-        for all the prompts.
-
-    Returns:
-      OpenAI Completion instance
-
-    """
-    if isinstance(max_tokens, int):
-        max_tokens = [max_tokens] * len(prompts)
-
-    assert len(max_tokens) == len(prompts)
-
-    outputs = None
-    with RemoteOpenAIServer(
-        model_name, server_cli_args, max_wait_seconds=max_wait_seconds
-    ) as server:
-        client = server.get_async_client()
-        outputs = [
-            client.completions.create(
-                model=model_name,
-                prompt=[p],
-                temperature=0,
-                stream=False,
-                max_tokens=max_tok,
-                logprobs=num_logprobs,
-            )
-            for p, max_tok in zip(prompts, max_tokens)
-        ]
-        outputs = await asyncio.gather(*outputs)
-
-    assert outputs is not None, "Completion API call failed."
-
-    return outputs
-
-
-def get_client_text_generations(completions: list[Completion]) -> list[str]:
-    """Extract generated tokens from the output of a
-    request made to an Open-AI-protocol completions endpoint.
-    """
-    assert all([len(x.choices) == 1 for x in completions])
-    return [x.choices[0].text for x in completions]
-
-
-def get_client_text_logprob_generations(
-    completions: list[Completion],
-) -> list[TextTextLogprobs]:
-    """Operates on the output of a request made to an Open-AI-protocol
-    completions endpoint; obtains top-rank logprobs for each token in
-    each {class}`SequenceGroup`
-    """
-    text_generations = get_client_text_generations(completions)
-    text = "".join(text_generations)
-    return [
-        (
-            text_generations,
-            text,
-            (None if x.logprobs is None else x.logprobs.top_logprobs),
-        )
-        for completion in completions
-        for x in completion.choices
-    ]
-
-
 def has_module_attribute(module_name, attribute_name):
     """Helper function to check if a module has a specific attribute."""
     try:
@@ -2274,50 +2148,6 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         return ["FLASH_ATTN", "TRITON_ATTN"]
     else:
         raise ValueError("Unsupported platform")
-
-
-@contextmanager
-def override_cutlass_fp8_supported(value: bool):
-    with patch(
-        "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
-        return_value=value,
-    ):
-        yield
-
-
-def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
-    """Patch dispatch_rocm_rmsnorm_func so the plain (non-fused) rms_norm path
-    always uses the native float32 kernel for the duration of a test.
-
-    The fused path (rms_norm2d_with_add, selected when with_fused_add=True) is
-    left on AITER -- only the plain path is redirected to native.
-
-    AITER's plain rms_norm accumulates variance in bfloat16 (~1 ULP/call),
-    which drifts the KV cache over many decode steps. This drift is irrelevant
-    for a trained model (rank-1/rank-2 gap ~1-3 nats >> 1 ULP), but breaks
-    logprob comparison tests with randomly-initialised models like
-    TitanML/tiny-mixtral whose rank-1/rank-2 gap is only O(1/sqrt(V)) ~0.006
-    nats -- smaller than the accumulated per-step error.
-    """
-    import torch
-
-    import vllm.model_executor.layers.layernorm as _ln_mod
-    from vllm.model_executor.layers.layernorm import rms_norm as _native
-
-    _orig = _ln_mod.dispatch_rocm_rmsnorm_func
-
-    def _native_plain(
-        with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
-    ):
-        if (
-            use_aiter
-            and not with_fused_add
-            and dtype in (torch.float16, torch.bfloat16)
-        ):
-            return _native
-        return _orig(with_fused_add, dtype, use_aiter)
-
-    monkeypatch.setattr(_ln_mod, "dispatch_rocm_rmsnorm_func", _native_plain)
 
 
 def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):

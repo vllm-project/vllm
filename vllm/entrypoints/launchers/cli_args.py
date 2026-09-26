@@ -14,12 +14,16 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+)
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (
@@ -89,6 +93,11 @@ class BaseFrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    trust_request_mm_kwargs: bool = False
+    """Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
+    and `media_io_kwargs`). If False, the server rejects non-empty values
+    because they can change multimodal preprocessing resource usage. Only
+    enable this when API clients are trusted."""
     default_chat_template_kwargs: dict[str, Any] | None = None
     """Default keyword arguments to pass to the chat template renderer.
     These will be merged with request-level chat_template_kwargs,
@@ -116,6 +125,13 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    tool_strict_level: ToolStrictLevelName = "auto"
+    """Server-side floor for structural-tag based tool calling, applied on top
+    of the per-tool `strict` field. `auto` follows the request's tool choice
+    and per-tool strictness; `function` constrains the
+    tool-call envelope (markup and function name) for every request with
+    tools; `parameter` additionally pins argument schemas, as if every tool
+    were `strict: true`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
@@ -123,8 +139,6 @@ class BaseFrontendArgs:
     The `demo` Python tool executes model-generated code in Docker without
     network isolation by default. See the security guide for more
     information."""
-    log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
-    """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""
@@ -173,6 +187,13 @@ class BaseFrontendArgs:
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
     explicit request-level ``chat_template_kwargs.cohere_format`` takes
     priority."""
+    anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
+    """Anthropic ``/v1/messages`` only. The ``reasoning_effort`` used for
+    requests with ``thinking: {"type": "disabled"}``. ``none`` turns thinking
+    off for models that support it; ``low`` suits models that always think
+    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
+    ``low`` when the renderer rejects ``none`` or renders it the same as a
+    thinking effort, and ``none`` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False

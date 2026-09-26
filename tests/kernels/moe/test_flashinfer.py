@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.moe.utils import (
+    check_deferred_moe_finalize,
+    make_dummy_moe_config,
+    make_test_weights,
+)
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -23,16 +29,28 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    view_as_block_major_k,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsModular,
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    convert_to_fp8_moe_kernel_format,
+    make_fp8_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -534,10 +552,11 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe = moe_config
     method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
     method.moe_kernel = None
+    mock_kernel = MagicMock()
     monkeypatch.setattr(
         method,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", object()),
+        lambda _: setattr(method, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
@@ -570,6 +589,10 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
     padded = w2_shape[-1]
     w13_ptr = layer.w13_weight.data_ptr()
     w2_ptr = layer.w2_weight.data_ptr()
+    load_numel = (
+        layer.w13_weight.weight_loader_numel,
+        layer.w2_weight.weight_loader_numel,
+    )
 
     for _ in range(2):
         reloaded_w13 = torch.randn_like(layer.w13_weight)
@@ -602,30 +625,41 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
         assert layer.w2_weight.shape == w2_shape
         assert layer.w13_weight.data_ptr() == w13_ptr
         assert layer.w2_weight.data_ptr() == w2_ptr
-        kernel_w13, kernel_w2 = method._kernel_weights(layer)
+        assert (
+            layer.w13_weight.weight_loader_numel,
+            layer.w2_weight.weight_loader_numel,
+        ) == load_numel
+        kernel_w13 = view_as_block_major_k(layer.w13_weight)
+        kernel_w2 = view_as_block_major_k(layer.w2_weight)
         assert torch.equal(kernel_w13, expected_w13)
         assert torch.equal(kernel_w2, expected_w2)
 
 
-def _check_flashinfer_ipc_weights(entries, expected, is_gated, mode, device_index):
+def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheState,
+    )
     from vllm.model_executor.utils import weights_already_processed
 
     torch.accelerator.set_device_index(device_index)
     with pytest.MonkeyPatch.context() as monkeypatch:
         method, layer = _make_unquantized_flashinfer_test_layer(
-            monkeypatch, 192, is_gated, device="meta"
+            monkeypatch, 192, is_gated=True, device="meta"
         )
         loader = object.__new__(IpcModelLoader)
         loader.mode = mode
-        loader._apply_entries(layer, entries, {}, device_index)
+        loader._apply_entries(layer, WeightCacheState(entries, {}, {}), device_index)
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
 
         # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
         with weights_already_processed():
             method.process_weights_after_loading(layer)
         assert method.moe_kernel is not None
-        actual = method._kernel_weights(layer)
+        actual = (
+            view_as_block_major_k(layer.w13_weight),
+            view_as_block_major_k(layer.w2_weight),
+        )
         for weight, reference, pointer in zip(actual, expected, pointers):
             assert weight.data_ptr() == pointer
             assert torch.equal(weight.cpu(), reference)
@@ -636,11 +670,10 @@ def _check_flashinfer_ipc_weights(entries, expected, is_gated, mode, device_inde
         torch.accelerator.synchronize()
 
 
-@pytest.mark.parametrize("is_gated", [True, False])
 @pytest.mark.parametrize("cache_ndim", [3, 4])
 @pytest.mark.parametrize("mode", ["copy", "zero_copy"])
 def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
-    monkeypatch, is_gated, cache_ndim, mode
+    monkeypatch, cache_ndim, mode
 ):
     """A spawned IPC consumer restores views without transient method state."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -649,13 +682,12 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
 
     method, layer = _make_unquantized_flashinfer_test_layer(
-        monkeypatch, 192, is_gated, device="meta"
+        monkeypatch, 192, is_gated=True, device="meta"
     )
     packed = convert_moe_weights_to_flashinfer_trtllm_block_layout(
         {},
         torch.randn_like(layer.w13_weight, device="cuda"),
         torch.randn_like(layer.w2_weight, device="cuda"),
-        is_gated_act_gemm=is_gated,
     )
     expected = [weight.cpu() for weight in packed]
     entries = {}
@@ -667,7 +699,6 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         args=(
             entries,
             expected,
-            is_gated,
             mode,
             torch.accelerator.current_device_index(),
         ),
@@ -750,3 +781,109 @@ def test_trtllm_fp8_swiglu_clamp_support(
     assert supported == expected, reason
     if not expected:
         assert "SwiGLU" in reason
+
+
+def _make_mxfp8_moe_weights(
+    e: int, n: int, k: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def quantize(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q, s = zip(
+            *(mxfp8_e4m3_quantize(w[i], is_sf_swizzled_layout=False) for i in range(e))
+        )
+        return torch.stack(q), torch.stack(s)
+
+    w1, w1_scale = quantize(
+        torch.randn(e, 2 * n, k, device="cuda", dtype=torch.bfloat16) / 10
+    )
+    w2, w2_scale = quantize(
+        torch.randn(e, k, n, device="cuda", dtype=torch.bfloat16) / 10
+    )
+    return w1, w2, w1_scale, w2_scale
+
+
+@pytest.mark.parametrize("block_shape", [[128, 128], [1, 32]], ids=["block", "mxfp8"])
+@pytest.mark.parametrize("m", [1, 16])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_fp8_block_moe_deferred_finalize(
+    m: int, block_shape: list[int], workspace_init
+):
+    """TRTLLM-Gen block-FP8 and MXFP8 modular experts can leave the top-k
+    finalize to the caller."""
+    e, topk, n, k = 32, 4, 1024, 1024
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        if block_shape == [1, 32]:
+            w1, w2, w1_scale, w2_scale = _make_mxfp8_moe_weights(e, n, k)
+        else:
+            (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+                e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+            )
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            w1_scale,
+            w2_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        # One rank of a TP group, which deferral needs.
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=2 * n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+            ),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config, quant_config=quant_config, allow_new_interface=True
+            ),
+            TrtLlmFp8ExpertsModular(moe_config=moe_config, quant_config=quant_config),
+        )
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+        check_deferred_moe_finalize(
+            moe_config,
+            lambda: kernel.apply(
+                hidden_states=a,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ),
+            router_weights=topk_weights,
+        )
