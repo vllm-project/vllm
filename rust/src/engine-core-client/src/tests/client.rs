@@ -295,6 +295,7 @@ fn handshake_test_config(
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
+            handshake_listener: None,
         },
         coordinator_mode,
         model_name: model_name.to_string(),

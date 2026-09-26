@@ -22,7 +22,7 @@ use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
-use crate::transport::{self, ConnectedEngine};
+use crate::transport::{self, ConnectedEngine, HandshakeListener};
 
 pub(crate) mod imp;
 mod state;
@@ -51,6 +51,10 @@ pub enum TransportMode {
         local_input_address: Option<String>,
         /// Optional explicit bind address for the output PULL socket.
         local_output_address: Option<String>,
+        /// Handshake ROUTER already bound by the caller. Used so engines can be
+        /// spawned against the same kernel-assigned port the frontend will use.
+        #[serde(skip)]
+        handshake_listener: Option<Arc<HandshakeListener>>,
     },
 
     /// The Python supervisor has already chosen the frontend transport
@@ -169,6 +173,7 @@ impl EngineCoreClientConfig {
                 ready_timeout: Duration::from_secs(30),
                 local_input_address: None,
                 local_output_address: None,
+                handshake_listener: None,
             },
             coordinator_mode: None,
             model_name: String::new(),
@@ -299,6 +304,7 @@ impl EngineCoreClient {
                 ready_timeout,
                 local_input_address,
                 local_output_address,
+                handshake_listener,
             } => {
                 let enable_inproc_coordinator = match config.coordinator_mode {
                     None => false,
@@ -316,6 +322,7 @@ impl EngineCoreClient {
                     local_output_address.as_deref(),
                     enable_inproc_coordinator,
                     *ready_timeout,
+                    handshake_listener.clone(),
                 )
                 .await?
             }
