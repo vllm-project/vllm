@@ -573,6 +573,12 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif (
+            moe_config.num_fused_shared_experts > 0
+            and cls.is_monolithic()
+            and not cls.supports_native_fused_shared_experts()
+        ):
+            return False, _make_reason("native fused shared experts")
         return True, None
 
     @staticmethod
@@ -735,6 +741,11 @@ class FusedMoEExperts(ABC):
         LoRA-aware experts should mix in LoRAExpertsMixin, which flips this
         to True and provides the per-forward LoRA state plumbing.
         """
+        return False
+
+    @staticmethod
+    def supports_native_fused_shared_experts() -> bool:
+        """Whether a monolithic backend handles appended shared-expert slots."""
         return False
 
     def supports_packed_ue8m0_act_scales(self) -> bool:

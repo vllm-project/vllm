@@ -187,12 +187,22 @@ class RoutedExperts(PluggableLayer):
             ),
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
-            "global_num_experts": moe_config.num_experts,
+            # Quant methods that allocate globally indexed metadata (for
+            # example ModelOpt NVFP4 input scales) must include appended
+            # shared-expert slots as well as routed experts.
+            "global_num_experts": self.kernel_global_num_experts,
         }
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.lora_base_layer_prefix = ""
+
+    @property
+    def kernel_global_num_experts(self) -> int:
+        """Expert count used for globally indexed quantization metadata."""
+        if self.moe_config.aiter_fmoe_shared_expert_enabled:
+            return self.global_num_experts
+        return self.global_num_experts + self.moe_config.num_fused_shared_experts
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):

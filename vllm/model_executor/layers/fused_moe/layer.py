@@ -287,6 +287,16 @@ def FusedMoEFactory(
         rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
     )
 
+    shared_expert_weight = (
+        1.0 / routed_scaling_factor
+        if (
+            apply_routed_scale_to_output
+            and num_fused_shared_experts > 0
+            and routed_scaling_factor
+        )
+        else 1.0
+    )
+
     # TODO(bnell): we should not have to create a router if the kernel is
     # monolithic.
     if router is None:
@@ -315,15 +325,7 @@ def FusedMoEFactory(
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
             # contribution to be 1.0 (matching the un-scaled separate-MLP add).
-            shared_expert_weight=(
-                (1.0 / routed_scaling_factor)
-                if (
-                    apply_routed_scale_to_output
-                    and num_fused_shared_experts > 0
-                    and routed_scaling_factor
-                )
-                else 1.0
-            ),
+            shared_expert_weight=shared_expert_weight,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
@@ -371,6 +373,8 @@ def FusedMoEFactory(
         activation_situ_linear_beta=activation_situ_linear_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
+        num_fused_shared_experts=num_fused_shared_experts,
+        fused_shared_expert_weight=shared_expert_weight,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)
