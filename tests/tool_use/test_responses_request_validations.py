@@ -208,6 +208,28 @@ def test_input_image_detail_defaults_or_preserves(detail: str | None) -> None:
     )
 
 
+@pytest.mark.parametrize("part_type", ["input_image", "image_url"])
+def test_input_image_accepts_chat_completions_format(part_type: str) -> None:
+    # #46631: chat-completions image parts must validate on /v1/responses.
+    item = {
+        "role": "user",
+        "content": [
+            {
+                "type": part_type,
+                "image_url": {"url": "https://example.com/image.png"},
+            }
+        ],
+    }
+
+    request = ResponsesRequest.model_validate({"input": [item]})
+
+    assert request.input[0]["content"][0] == {
+        "type": "input_image",
+        "image_url": "https://example.com/image.png",
+        "detail": "auto",
+    }
+
+
 # Regression tests for parallel_tool_calls=null crash in Responses API
 # (from_request() passed None to ResponsesResponse.parallel_tool_calls,
 #  a non-optional bool field, causing a Pydantic ValidationError during

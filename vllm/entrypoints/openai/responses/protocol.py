@@ -136,8 +136,12 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
-def _default_input_image_details(value: Any) -> Any:
-    """Set the API default for input images before SDK type validation."""
+def _normalize_input_images(value: Any) -> Any:
+    """Normalize input images before SDK type validation.
+
+    Sets the API default ``detail`` and accepts the chat-completions shapes
+    (``image_url`` part type, nested ``image_url: {"url": ...}``).
+    """
     if not isinstance(value, dict):
         return value
 
@@ -149,13 +153,13 @@ def _default_input_image_details(value: Any) -> Any:
     changed = False
     for part in content:
         new_part = part
-        if (
-            isinstance(part, dict)
-            and part.get("type") == "input_image"
-            and "detail" not in part
-        ):
-            new_part = {**part, "detail": "auto"}
-            changed = True
+        if isinstance(part, dict) and part.get("type") in ("input_image", "image_url"):
+            new_part = {**part, "type": "input_image"}
+            image_url = new_part.get("image_url")
+            if isinstance(image_url, dict) and "url" in image_url:
+                new_part["image_url"] = image_url["url"]
+            new_part.setdefault("detail", "auto")
+            changed = changed or new_part != part
         new_content.append(new_part)
 
     return {**value, "content": new_content} if changed else value
@@ -183,7 +187,7 @@ class ResponsesRequest(OpenAIBaseModel):
         | list[
             Annotated[
                 ResponseInputOutputItem,
-                BeforeValidator(_default_input_image_details),
+                BeforeValidator(_normalize_input_images),
             ]
         ]
     )
