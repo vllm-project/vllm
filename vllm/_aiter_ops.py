@@ -1887,11 +1887,19 @@ def _sync_aiter_situv2_moe_env() -> None:
 
     import vllm.envs as envs
 
-    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
+    if not current_platform.is_rocm() or not envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
+        os.environ.pop("AITER_SITUV2_A4W4", None)
+        os.environ.pop("AITER_FORCE_A8W4", None)
+        return
+
+    from vllm.platforms.rocm import on_gfx1250
+
+    if on_gfx1250():
+        os.environ["AITER_FORCE_A8W4"] = "1"
+        os.environ.pop("AITER_SITUV2_A4W4", None)
+    else:
         os.environ["AITER_SITUV2_A4W4"] = "1"
         os.environ.pop("AITER_SITUV2_A8W4", None)
-    else:
-        os.environ.pop("AITER_SITUV2_A4W4", None)
 
 
 class rocm_aiter_ops:
