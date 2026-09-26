@@ -239,17 +239,46 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             return
 
         elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
+            from vllm.utils.torch_utils import (
+                get_accelerator_view_from_cpu_tensor,
+            )
+
             w13 = layer.w13_weight
             w2 = layer.w2_weight
+            w13_offloaded = getattr(w13, "_vllm_is_uva_offloaded", False)
+            w2_offloaded = getattr(w2, "_vllm_is_uva_offloaded", False)
 
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
+            def _xpu_transpose(w, offloaded):
+                # CPU-offloaded expert weights (UVAOffloader) present as
+                # accelerator tensors backed by host memory. A plain
+                # .transpose().contiguous() materializes a real on-device
+                # copy, silently de-offloading every expert and OOMing the
+                # card. Transpose on the host and rebuild the UVA view to keep
+                # the offload; resident weights take the device path.
+                if offloaded:
+                    cpu_t = w.data.to("cpu").transpose(-1, -2).contiguous()
+                    w.data = get_accelerator_view_from_cpu_tensor(cpu_t)
+                    w._vllm_is_uva_offloaded = True
+                else:
+                    w.data = w.transpose(-1, -2).contiguous()
+
+            _xpu_transpose(w13, w13_offloaded)
+            _xpu_transpose(w2, w2_offloaded)
 
             self._setup_kernel(
                 layer=layer,
                 w13=w13,
                 w2=w2,
             )
+
+            # _setup_kernel -> replace_parameter registers a fresh Parameter
+            # and drops attributes of the old one; re-assert the offload marker
+            # so a later reload (e.g. RL weight update) still detects the
+            # offload and takes the host-transpose path above.
+            if w13_offloaded:
+                layer.w13_weight._vllm_is_uva_offloaded = True
+            if w2_offloaded:
+                layer.w2_weight._vllm_is_uva_offloaded = True
         else:
             self._setup_kernel(
                 layer=layer,
