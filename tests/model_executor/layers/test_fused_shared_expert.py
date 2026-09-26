@@ -416,6 +416,41 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     assert reason is None
 
 
+@pytest.mark.parametrize(
+    "layout", ["owned", "view", "strided_output", "strided_result", "cast"]
+)
+def test_aiter_experts_output_binding_preserves_storage_contract(layout: str) -> None:
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+
+    result = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    output = torch.empty_like(result)
+    backing = None
+    if layout == "view":
+        backing = torch.full((4, 4), -1.0)
+        output = backing[:3]
+    elif layout == "strided_output":
+        output = torch.empty_strided((3, 4), (1, 3))
+    elif layout == "strided_result":
+        result = torch.arange(12, dtype=torch.float32).reshape(4, 3).t()
+    elif layout == "cast":
+        output = torch.empty_like(result, dtype=torch.bfloat16)
+    original_ptr = output.data_ptr()
+
+    AiterExperts._bind_output(output, result)
+
+    torch.testing.assert_close(output, result.to(output.dtype))
+    if layout == "owned":
+        assert output.data_ptr() == result.data_ptr()
+    else:
+        assert output.data_ptr() == original_ptr
+        assert output.data_ptr() != result.data_ptr()
+    if backing is not None:
+        torch.testing.assert_close(backing[:3], result)
+        assert torch.all(backing[3] == -1)
+
+
 def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
     from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
 
@@ -449,6 +484,266 @@ def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> No
     assert torch.equal(prepared[2].view(torch.uint8), expected_w13_scale)
     assert torch.equal(prepared[3].view(torch.uint8)[:, :12], expected_w2_scale)
     assert torch.all(prepared[3].view(torch.uint8)[:, 12:] == 0x7F)
+
+
+@pytest.mark.parametrize(
+    ("tp_rank", "tp_size", "dp_size", "expected"),
+    [
+        (3, 8, 1, (0, 1)),
+        (3, 8, 8, (3, 8)),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_shared_expert_sharding(
+    tp_rank: int,
+    tp_size: int,
+    dp_size: int,
+    expected: tuple[int, int],
+) -> None:
+    from vllm.models.deepseek_v4.amd.model import (
+        _shared_expert_shard_rank_and_size,
+    )
+
+    assert _shared_expert_shard_rank_and_size(tp_rank, tp_size, dp_size) == expected
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_shards_dp_shared_expert() -> None:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+    from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
+
+    hidden_size = 128
+    intermediate_size = 384
+    shard_size = 8
+    full_intermediate_size = intermediate_size * shard_size
+    w13 = (
+        torch.arange(2 * full_intermediate_size * hidden_size, dtype=torch.uint8)
+        .view(torch.float8_e4m3fn)
+        .reshape(2 * full_intermediate_size, hidden_size)
+    )
+    w2 = (
+        torch.arange(hidden_size * full_intermediate_size, dtype=torch.uint8)
+        .view(torch.float8_e4m3fn)
+        .reshape(hidden_size, full_intermediate_size)
+    )
+    w13_scale_bytes = (
+        torch.arange(2 * full_intermediate_size // 128, dtype=torch.uint8) + 0x60
+    ).reshape(-1, 1)
+    w2_scale_bytes = (
+        torch.arange(full_intermediate_size // 128, dtype=torch.uint8) + 0x70
+    ).reshape(1, -1)
+    w13_scale = w13_scale_bytes.view(torch.float8_e8m0fnu)
+    w2_scale = w2_scale_bytes.view(torch.float8_e8m0fnu)
+
+    shards = []
+    for dp_rank in range(shard_size):
+        flattened_size, flattened_rank = (
+            FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+                tp_size=1,
+                dp_size=shard_size,
+                dp_rank=dp_rank,
+                pcp_size=1,
+                pcp_rank=0,
+            )
+        )
+        assert flattened_size == shard_size
+        assert flattened_rank == dp_rank
+        shards.append(
+            _prepare_native_fp8_shared_expert(
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                intermediate_size,
+                flattened_rank,
+                flattened_size,
+            )
+        )
+
+    assert all(shard[0].shape == (1, 768, hidden_size) for shard in shards)
+    assert all(
+        shard[1].shape == (1, hidden_size, intermediate_size) for shard in shards
+    )
+    reconstructed_w1 = torch.cat(
+        [shard[0][0, :intermediate_size] for shard in shards], dim=0
+    )
+    reconstructed_w3 = torch.cat(
+        [shard[0][0, intermediate_size:] for shard in shards], dim=0
+    )
+    reconstructed_w2 = torch.cat([shard[1][0] for shard in shards], dim=1)
+    assert torch.equal(
+        reconstructed_w1.view(torch.uint8),
+        w13[:full_intermediate_size].view(torch.uint8),
+    )
+    assert torch.equal(
+        reconstructed_w3.view(torch.uint8),
+        w13[full_intermediate_size:].view(torch.uint8),
+    )
+    assert torch.equal(
+        reconstructed_w2.view(torch.uint8),
+        w2.view(torch.uint8),
+    )
+
+    scale_rows_per_shard = intermediate_size // 128
+    full_scale_rows = full_intermediate_size // 128
+    for rank, shard in enumerate(shards):
+        start = rank * scale_rows_per_shard
+        end = start + scale_rows_per_shard
+        expected_w13_scale = torch.cat(
+            (
+                w13_scale_bytes[start:end],
+                w13_scale_bytes[full_scale_rows + start : full_scale_rows + end],
+            ),
+            dim=0,
+        )
+        expected_w13_scale = expected_w13_scale.repeat_interleave(
+            128, dim=0
+        ).repeat_interleave(4, dim=1)
+        expected_w2_scale = (
+            w2_scale_bytes[:, start:end]
+            .repeat_interleave(128, dim=0)
+            .repeat_interleave(4, dim=1)
+        )
+        assert torch.equal(shard[2].view(torch.uint8), expected_w13_scale)
+        assert torch.equal(
+            shard[3].view(torch.uint8)[:, : expected_w2_scale.shape[1]],
+            expected_w2_scale,
+        )
+        assert torch.all(
+            shard[3].view(torch.uint8)[:, expected_w2_scale.shape[1] :] == 0x7F
+        )
+
+
+@pytest.mark.parametrize("use_fused", [False, True])
+@pytest.mark.parametrize("local_tokens", [0, 2, 5])
+def test_deepseek_v4_heterogeneous_fhmoe_uses_modular_kernel(
+    monkeypatch: pytest.MonkeyPatch, use_fused: bool, local_tokens: int
+) -> None:
+    from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
+
+    class FakeSharedExpert(nn.Module):
+        def forward(self, x):
+            return x * 10
+
+    class FakeQuantMethod:
+        def __init__(self) -> None:
+            self.route_columns: list[int] = []
+
+        def apply(self, *, x, topk_ids, **kwargs):
+            self.route_columns.append(topk_ids.shape[1])
+            return 2 * x
+
+    shared_expert = FakeSharedExpert()
+    quant_method = FakeQuantMethod()
+    chunk_sizes = [0, 2, 5, 1, 3, 4, 2, 1]
+    checked_tokens: list[int] = []
+
+    def supports_fhmoe(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return num_tokens <= (sum(chunk_sizes) if use_fused else 8)
+
+    monkeypatch.setattr(
+        deepseek_v4_model,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            dp_metadata=SimpleNamespace(
+                get_chunk_sizes_across_dp_rank=lambda: chunk_sizes
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports_fhmoe,
+    )
+
+    layer = deepseek_v4_model.DeepseekV4HeterogeneousSharedRoutedExperts.__new__(
+        deepseek_v4_model.DeepseekV4HeterogeneousSharedRoutedExperts
+    )
+    nn.Module.__init__(layer)
+    layer.moe_config = SimpleNamespace(dp_size=8, experts_per_token=1)
+    layer.shared_w1 = torch.ones(1)
+    layer.shared_w2 = torch.ones(1)
+    layer.shared_w1_scale = torch.ones(1)
+    layer.shared_w2_scale = torch.ones(1)
+    layer.shared_expert_id = 1
+    layer.quant_method = quant_method
+    layer._routed_quant_config = object()
+    layer._shared_expert_ref = lambda: shared_expert
+
+    x = torch.arange(local_tokens * 4, dtype=torch.float32).reshape(local_tokens, 4)
+    topk_weights = torch.ones((local_tokens, 2), dtype=torch.float32)
+    topk_ids = torch.zeros((local_tokens, 2), dtype=torch.int32)
+    output = layer.forward_modular(x, topk_weights, topk_ids)
+
+    expected = 2 * x if use_fused else 12 * x
+    torch.testing.assert_close(output, expected)
+    assert quant_method.route_columns == [2 if use_fused else 1]
+    assert checked_tokens == [sum(chunk_sizes)]
+
+
+@pytest.mark.parametrize("use_shared_route", [False, True])
+def test_deepseek_v4_heterogeneous_aiter_experts_selects_weights(
+    monkeypatch: pytest.MonkeyPatch, use_shared_route: bool
+) -> None:
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    full_quant_config = object()
+    routed_quant_config = object()
+    experts = rocm_aiter_moe.DeepseekV4HeterogeneousAiterExperts.__new__(
+        rocm_aiter_moe.DeepseekV4HeterogeneousAiterExperts
+    )
+    experts.moe_config = SimpleNamespace(experts_per_token=1)
+    experts.quant_config = full_quant_config
+    experts.configure_shared_expert(
+        shared_w1=torch.ones(1),
+        shared_w2=torch.ones(1),
+        shared_w1_scale=torch.ones(1),
+        shared_w2_scale=torch.ones(1),
+        shared_expert_id=2,
+        routed_quant_config=routed_quant_config,
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_fused_experts(**kwargs):
+        calls.append(kwargs)
+        return 2 * kwargs["hidden_states"]
+
+    monkeypatch.setattr(rocm_aiter_moe, "rocm_aiter_fused_experts", fake_fused_experts)
+    monkeypatch.setattr(
+        rocm_aiter_moe.rocm_aiter_ops, "get_moe_dispatch_policy", lambda: None
+    )
+
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    output = torch.empty_like(hidden_states)
+    route_columns = 2 if use_shared_route else 1
+    experts.apply(
+        output=output,
+        hidden_states=hidden_states,
+        w1=torch.ones((3, 2, 2)),
+        w2=torch.ones((3, 2, 2)),
+        topk_weights=torch.ones((2, route_columns)),
+        topk_ids=torch.zeros((2, route_columns), dtype=torch.int32),
+        activation=None,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    torch.testing.assert_close(output, 2 * hidden_states)
+    call = calls[0]
+    assert call["quant_config"] is (
+        full_quant_config if use_shared_route else routed_quant_config
+    )
+    assert call["w1"].shape[0] == (3 if use_shared_route else 2)
+    assert (call["shared_w1"] is not None) is use_shared_route
+    if not use_shared_route:
+        assert call["w1"].is_shuffled
+        assert call["w2"].is_shuffled
 
 
 @pytest.mark.parametrize(
@@ -617,6 +912,8 @@ def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_signature_erro
     [
         ("data_parallel_size", 1, True),
         ("data_parallel_size", 2, False),
+        ("tensor_parallel_size", 1, False),
+        ("dp8", True, True),
         ("prefill_context_parallel_size", 2, False),
         ("topk_method", "greedy", False),
         ("fhmoe_supported", False, False),
@@ -649,6 +946,9 @@ def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
     )
     if setting == "topk_method":
         hf_config.topk_method = value
+    elif setting == "dp8":
+        parallel_config.tensor_parallel_size = 1
+        parallel_config.data_parallel_size = 8
     elif setting != "fhmoe_supported":
         setattr(parallel_config, setting, value)
 
