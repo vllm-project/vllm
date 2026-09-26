@@ -5759,6 +5759,7 @@ dependencies = [
  "expect-test",
  "futures",
  "half",
+ "image",
  "itertools 0.14.0",
  "llm-multimodal",
  "minijinja",

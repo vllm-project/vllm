@@ -39,6 +39,7 @@ use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
 mod expand;
+mod gemma4;
 mod image;
 mod input;
 mod item;
@@ -133,7 +134,15 @@ impl MultimodalModelContext {
     /// Resolve a static model processor spec for one loaded model.
     fn resolve_model_spec(&self) -> Option<&'static dyn ModelProcessorSpec> {
         static REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
-        REGISTRY.lookup(&self.metadata())
+        if let Some(spec) = REGISTRY.lookup(&self.metadata()) {
+            return Some(spec);
+        }
+        // Fallback: check in-tree specs not yet in the upstream registry.
+        static GEMMA4: gemma4::Gemma4Spec = gemma4::Gemma4Spec;
+        if GEMMA4.matches(&self.metadata()) {
+            return Some(&GEMMA4);
+        }
+        None
     }
 
     /// Build a vision preprocessor for one loaded model and modality.
