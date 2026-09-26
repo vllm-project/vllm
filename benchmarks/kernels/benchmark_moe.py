@@ -620,6 +620,30 @@ class BenchmarkWorker:
                 topk,
             )
 
+        if use_int4_w4a16 and block_quant_shape is not None:
+            # The CUDA moe_wna16 kernel is selected for small batches and
+            # asserts tile constraints the generic search space violates
+            # (BLOCK_SIZE_M <= 64, BLOCK_SIZE_K a {1,2,4,8} multiple of
+            # group_size, K divisible by BLOCK_SIZE_K). Restrict the space to
+            # configs that kernel accepts whenever it will be the one used.
+            from vllm.model_executor.layers.fused_moe.fused_moe import (
+                should_moe_wna16_use_cuda,
+            )
+
+            group_size = block_quant_shape[1]
+            if should_moe_wna16_use_cuda(
+                num_tokens * topk, group_size, num_experts, 4
+            ):
+                k_dims = (hidden_size, shard_intermediate_size // 2)
+                search_space = [
+                    config
+                    for config in search_space
+                    if config["BLOCK_SIZE_M"] <= 64
+                    and config["BLOCK_SIZE_K"] % group_size == 0
+                    and (config["BLOCK_SIZE_K"] // group_size) in (1, 2, 4, 8)
+                    and all(k % config["BLOCK_SIZE_K"] == 0 for k in k_dims)
+                ]
+
         need_device_guard = False
         if current_platform.is_rocm():
             visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
