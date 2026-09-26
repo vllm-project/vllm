@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from math import prod
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
@@ -34,6 +35,36 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
+class PrefillMainKVGatherCache:
+    """Bounded, forward-local BF16 gather buffer for one decoder group."""
+
+    def __init__(self, capacity_mb: int, device: torch.device) -> None:
+        self.storage = torch.empty(
+            capacity_mb * 1024**2 // torch.bfloat16.itemsize,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        self._key: tuple[object, ...] | None = None
+        self._view: torch.Tensor | None = None
+
+    def acquire(
+        self, key: tuple[object, ...], shape: tuple[int, int, int]
+    ) -> tuple[torch.Tensor, bool] | None:
+        elements = prod(shape)
+        if elements > self.storage.numel():
+            self.reset()
+            return None
+        if self._key == key:
+            assert self._view is not None
+            return self._view, True
+        self._key = key
+        self._view = self.storage[:elements].view(shape)
+        return self._view, False
+
+
 class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
     """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
 
@@ -56,6 +87,22 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         super().__init__(*args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe(
             self._o_proj_block_size
+        )
+        self.prefill_main_kv_cache: PrefillMainKVGatherCache | None = None
+        last_kv_source = max(self.kv_source_layers, default=-1)
+        group_id = self.index_source_layer_id
+        self.prefill_main_kv_group_id = (
+            group_id
+            if (
+                self.compress_ratio == 1
+                and not self.is_kv_source
+                and group_id is not None
+                and group_id > last_kv_source
+                and self.candidate_source_layer >= 0
+                and group_id > self.candidate_source_layer
+                and self.layer_id < group_id + 4
+            )
+            else None
         )
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -304,13 +351,51 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            workspace = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
-            kv, combined_indices_out, combined_lens_out = workspace
-            if not swa_only:
+            cached: tuple[torch.Tensor, bool] | None = None
+            if (
+                self.prefill_main_kv_cache is not None
+                and self.prefill_main_kv_group_id is not None
+                and num_decodes == 0
+                and len(chunk_plan) == 1
+                and chunk_size == 1
+                and attn_metadata is not None
+                and compressed_k_cache is not None
+            ):
+                key = (
+                    self.prefill_main_kv_group_id,
+                    self.compressed_cache_prefix,
+                    id(attn_metadata),
+                    compressed_k_cache.data_ptr(),
+                    attn_metadata.block_table.data_ptr(),
+                    seq_lens.data_ptr(),
+                    query_start_loc_cpu.data_ptr(),
+                    chunk_start,
+                    chunk_end,
+                    chunk_N,
+                    chunk_M,
+                    q.shape[-1],
+                    num_prefill_tokens,
+                )
+                cached = self.prefill_main_kv_cache.acquire(
+                    key, (chunk_size, chunk_M, q.shape[-1])
+                )
+            if cached is None:
+                kv, combined_indices_out, combined_lens_out = (
+                    workspace_manager.get_simultaneous(
+                        ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
+                        ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                        ((self.max_num_batched_tokens,), torch.int32),
+                    )
+                )
+            else:
+                kv, _ = cached
+                combined_indices_out, combined_lens_out = (
+                    workspace_manager.get_simultaneous(
+                        ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                        ((self.max_num_batched_tokens,), torch.int32),
+                    )
+                )
+            if not swa_only and (cached is None or not cached[1]):
                 # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]

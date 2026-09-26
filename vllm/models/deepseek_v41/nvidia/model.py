@@ -82,7 +82,10 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
 )
-from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v41.nvidia.flashmla import (
+    DeepseekV4FlashMLAAttention,
+    PrefillMainKVGatherCache,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -671,6 +674,43 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
+        self.prefill_main_kv_cache: PrefillMainKVGatherCache | None = None
+        reuse_mb = vllm_config.kernel_config.dsv41_prefill_main_kv_reuse_mb
+        parallel = vllm_config.parallel_config
+        if reuse_mb:
+            supported = (
+                not self.use_sequence_parallel
+                and not parallel.use_ubatching
+                and parallel.prefill_context_parallel_size == 1
+                and parallel.decode_context_parallel_size == 1
+            )
+            groups: dict[int, list[DeepseekV4FlashMLAAttention]] = {}
+            if supported:
+                for layer in islice(self.layers, self.start_layer, self.end_layer):
+                    if not isinstance(layer, DeepseekV4DecoderLayer) or not isinstance(
+                        layer.attn, DeepseekV4FlashMLAAttention
+                    ):
+                        continue
+                    group_id = layer.attn.prefill_main_kv_group_id
+                    if group_id is not None:
+                        groups.setdefault(group_id, []).append(layer.attn)
+            eligible = [
+                attn for group in groups.values() if len(group) == 4 for attn in group
+            ]
+            if eligible:
+                self.prefill_main_kv_cache = PrefillMainKVGatherCache(
+                    reuse_mb,
+                    torch.device("cuda", torch.accelerator.current_device_index()),
+                )
+                for attn in eligible:
+                    attn.prefill_main_kv_cache = self.prefill_main_kv_cache
+            else:
+                logger.warning_once(
+                    "DeepSeek-V4.1 prefill main-KV gather reuse disabled: "
+                    "requires a complete four-layer FlashMLA decoder group "
+                    "without DBO, PCP, DCP, or sequence parallelism"
+                )
+
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local
         # layer's sliding-window KV cache. Only PP ranks owning an engram
@@ -751,6 +791,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if self.prefill_main_kv_cache is not None:
+            self.prefill_main_kv_cache.reset()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
