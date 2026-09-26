@@ -1980,6 +1980,8 @@ def rocm_mxfp8_wo_a_bmm(
 
 _DSV4_SPARSE_NOPE_DIM = 448
 _DSV4_SPARSE_ROPE_DIM = 64
+# V4.1 NVFP4 compressed record: 256 packed e2m1 bytes then 32 e4m3 scales.
+_V41_NVFP4_BYTES_PER_TOKEN = 288
 
 
 def _validate_sparse_dims(
@@ -2300,6 +2302,51 @@ def _load_fp8_ds_mla_gfx950_tail128(
     )
     value = tl.where(nope_mask[None, :], nope, rope)
     zero = tl.zeros((BLOCK_K, 128), dtype=tl.bfloat16)
+    return tl.where(valid[:, None], value, zero)
+
+
+@triton.jit
+def _load_v41_nvfp4_gfx950_chunk(
+    token_data_ptr,
+    token_scale_ptr,
+    valid,
+    CHUNK_START: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """One chunk of a V4.1 NVFP4 row: e2m1 pairs plus an e4m3 scale per 16 dims.
+    V4.1 RoPEs before quantizing, so there is no bf16 tail to splice in.
+    """
+    byte_offsets = CHUNK_START // 2 + tl.arange(0, CHUNK_SIZE // 2)
+    packed = tl.load(
+        token_data_ptr[:, None] + byte_offsets[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    # A 16-dim tile starts on an even dim, so byte j never splits a scale.
+    scale_offsets = CHUNK_START // 16 + tl.arange(0, CHUNK_SIZE // 16)
+    encoded_scales = tl.load(
+        token_scale_ptr[:, None] + scale_offsets[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    scales = encoded_scales.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+    scales = tl.broadcast_to(scales[:, :, None], (BLOCK_K, CHUNK_SIZE // 16, 8))
+    scales = tl.reshape(scales, (BLOCK_K, CHUNK_SIZE // 2))
+    # The instruction's scale operand is E8M0, so this record's e4m3 scale is
+    # applied separately; its destination is a register pair, hence int64.
+    converted = tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_f32_fp4 $0, $1, $2",
+        "=v,v,v",
+        [packed.to(tl.int32), tl.full(packed.shape, 1.0, tl.float32)],
+        dtype=tl.int64,
+        is_pure=True,
+        pack=1,
+    )
+    even = (converted & 0xFFFFFFFF).to(tl.int32).to(tl.float32, bitcast=True)
+    odd = (converted >> 32).to(tl.int32).to(tl.float32, bitcast=True)
+    value = tl.interleave(even * scales, odd * scales).to(tl.bfloat16)
+    zero = tl.zeros((BLOCK_K, CHUNK_SIZE), dtype=tl.bfloat16)
     return tl.where(valid[:, None], value, zero)
 
 
@@ -2797,48 +2844,65 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
     BLOCK_K: tl.constexpr,
     IS_FNUZ: tl.constexpr,
     TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
+    FP4: tl.constexpr,
 ):
     safe_slot = tl.where(valid, slot, 0)
     block_idx = safe_slot // BLOCK_SIZE
     pos_in_block = safe_slot % BLOCK_SIZE
     cache_block_ptr = cache_ptr + block_idx.to(tl.int64) * cache_stride0
-    token_data_ptr = cache_block_ptr + pos_in_block * 576
-    token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 576 + pos_in_block * 8
-    k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        0,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_nope_0b = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        128,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_nope_1 = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        256,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_tail = _load_fp8_ds_mla_gfx950_tail128(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        NOPE_DIM,
-        BLOCK_K,
-        IS_FNUZ,
-    )
+    if FP4:
+        token_data_ptr = cache_block_ptr + pos_in_block * 256
+        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 256 + pos_in_block * 32
+        k_nope_0a = _load_v41_nvfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 0, 128, BLOCK_K
+        )
+        k_nope_0b = _load_v41_nvfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 128, 128, BLOCK_K
+        )
+        k_nope_1 = _load_v41_nvfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 256, 128, BLOCK_K
+        )
+        k_tail = _load_v41_nvfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 384, 128, BLOCK_K
+        )
+    else:
+        token_data_ptr = cache_block_ptr + pos_in_block * 576
+        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 576 + pos_in_block * 8
+        k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            0,
+            128,
+            BLOCK_K,
+            IS_FNUZ,
+        )
+        k_nope_0b = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            128,
+            128,
+            BLOCK_K,
+            IS_FNUZ,
+        )
+        k_nope_1 = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            256,
+            128,
+            BLOCK_K,
+            IS_FNUZ,
+        )
+        k_tail = _load_fp8_ds_mla_gfx950_tail128(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            NOPE_DIM,
+            BLOCK_K,
+            IS_FNUZ,
+        )
     if not TRUST_EXTRA_CACHE_NAN_FREE:
         zero = tl.zeros((BLOCK_K, 128), dtype=tl.bfloat16)
         k_nope_0a = tl.where(k_nope_0a == k_nope_0a, k_nope_0a, zero)
@@ -2904,6 +2968,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     ROPE_DIM: tl.constexpr,
     IS_FNUZ_MAIN: tl.constexpr,
     IS_FNUZ_EXTRA: tl.constexpr,
+    EXTRA_FP4: tl.constexpr,
     TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
     ADAPTIVE_SPLITS: tl.constexpr,
     ONE_WAVE_SPLITS: tl.constexpr,
@@ -3028,6 +3093,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
             BLOCK_K,
             IS_FNUZ_MAIN,
             False,
+            False,
         )
 
     if HAS_EXTRA:
@@ -3082,6 +3148,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 BLOCK_K,
                 IS_FNUZ_EXTRA,
                 TRUST_EXTRA_CACHE_NAN_FREE,
+                EXTRA_FP4,
             )
             (
                 m_i,
@@ -3109,6 +3176,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 BLOCK_K,
                 IS_FNUZ_EXTRA,
                 TRUST_EXTRA_CACHE_NAN_FREE,
+                EXTRA_FP4,
             )
         for tail_idx in tl.static_range(2):
             tail_start = extra_hi_full + tail_idx * BLOCK_K
@@ -3147,6 +3215,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                     BLOCK_K,
                     IS_FNUZ_EXTRA,
                     TRUST_EXTRA_CACHE_NAN_FREE,
+                    EXTRA_FP4,
                 )
 
     pm_base = (query_idx * NUM_SPLITS + split_id) * num_heads + head_offsets
@@ -3787,6 +3856,11 @@ def _rocm_sparse_attn_decode_ragged_triton(
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
+    # The record width is what the KV-cache spec publishes for this layer.
+    extra_fp4 = has_extra and extra_cache.shape[-1] == _V41_NVFP4_BYTES_PER_TOKEN
+    assert not extra_fp4 or _ON_GFX950, (
+        "NVFP4 compressed KV cache needs the gfx950 sparse decode path"
+    )
 
     if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
@@ -3896,6 +3970,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             ROPE_DIM=rope_head_dim,
             IS_FNUZ_MAIN=is_fnuz,
             IS_FNUZ_EXTRA=False,
+            EXTRA_FP4=extra_fp4,
             TRUST_EXTRA_CACHE_NAN_FREE=extra_cache_nan_free,
             ADAPTIVE_SPLITS=adaptive_splits,
             ONE_WAVE_SPLITS=one_wave_splits,

@@ -191,6 +191,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
     # a single attention class dispatches across arch-specific layouts.
     use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # Whether this layer's kernel decodes an NVFP4 compressed cache. Only that
+    # record changes width; the sliding-window one stays fp8.
+    reads_nvfp4_compressed_cache: ClassVar[bool] = False
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -511,10 +514,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # sum, and 512 satisfies both TMA strides in play (512 for the V4.1
         # fp8 record, 256 for NVFP4).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
-        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
+        if self.kv_cache_dtype == "nvfp4_ds_mla" and not (
+            self.kv_mxfp8 or self.reads_nvfp4_compressed_cache
+        ):
             raise ValueError(
-                "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
-                "decodes only on SM100."
+                "nvfp4_ds_mla needs a kernel that decodes an NVFP4 compressed "
+                "cache: FlashMLA's SM100 sparse decode, or the ROCm sparse "
+                "decode on gfx950."
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay
