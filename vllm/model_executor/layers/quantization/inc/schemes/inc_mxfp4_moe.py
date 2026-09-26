@@ -60,7 +60,13 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         # passthrough, and Marlin weight-only. XPU dispatch is deferred to the
         # shared oracle; b12x dispatch is explicit; every remaining non-CUTLASS
         # device falls back to Marlin.
-        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        cutlass_device_supported = CutlassExpertsMxfp4._supports_current_device()
+        cutlass_parallel_supported = (
+            CutlassExpertsMxfp4._supports_parallel_config(moe.moe_parallel_config)
+            if cutlass_device_supported
+            else False
+        )
+        self.use_cutlass_mxfp4 = cutlass_device_supported and cutlass_parallel_supported
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
         if moe.moe_backend == "b12x":
@@ -72,6 +78,12 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         elif current_platform.is_xpu():
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
         else:
+            if cutlass_device_supported and not cutlass_parallel_supported:
+                logger.warning_once(
+                    "CutlassExpertsMxfp4 does not support ep_size=%d; "
+                    "falling back to MarlinExperts",
+                    moe.moe_parallel_config.ep_size,
+                )
             self.experts_cls = MarlinExperts
             logger.info_once(
                 "Using MarlinExperts (weight-only FP4) for AutoRound MXFP4 MoE"

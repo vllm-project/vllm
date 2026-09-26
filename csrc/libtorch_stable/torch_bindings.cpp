@@ -151,7 +151,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
       "                        int n, int k, Tensor? blockscale_offsets, "
-      "                        bool is_gated) -> ()");
+      "                        bool is_gated, Tensor? expert_map=None) -> ()");
 
   // compute per-expert problem sizes from expert_first_token_offset
   // produced by vLLM's moe_permute kernel

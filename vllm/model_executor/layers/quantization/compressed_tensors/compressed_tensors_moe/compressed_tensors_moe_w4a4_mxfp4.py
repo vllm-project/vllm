@@ -52,7 +52,13 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # Backend selection must match the weight preparation below: CUTLASS
         # swizzles scales, b12x and XPU consume checkpoint packing, and Marlin
         # repacks weights and scales.
-        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        cutlass_device_supported = CutlassExpertsMxfp4._supports_current_device()
+        cutlass_parallel_supported = (
+            CutlassExpertsMxfp4._supports_parallel_config(moe.moe_parallel_config)
+            if cutlass_device_supported
+            else False
+        )
+        self.use_cutlass_mxfp4 = cutlass_device_supported and cutlass_parallel_supported
         self.experts_cls: type[mk.FusedMoEExperts]
         if moe.moe_backend == "b12x":
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
@@ -67,6 +73,12 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             self.experts_cls = XPUExpertsMxFp4
             logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
         else:
+            if cutlass_device_supported and not cutlass_parallel_supported:
+                logger.warning_once(
+                    "CutlassExpertsMxfp4 does not support ep_size=%d; "
+                    "falling back to MarlinExperts",
+                    moe.moe_parallel_config.ep_size,
+                )
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
 
