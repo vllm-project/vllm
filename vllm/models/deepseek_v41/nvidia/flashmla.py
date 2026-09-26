@@ -16,6 +16,10 @@ from vllm.models.deepseek_v41.common.ops import (
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
+from vllm.models.deepseek_v41.nvidia.fewhead_prefill import (
+    run_fewhead_sparse_prefill,
+    should_use_fewhead_prefill,
+)
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
@@ -360,12 +364,31 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 chunk_N,
                 out=(combined_indices_out, combined_lens_out),
             )
-            flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-                out=output[query_start:query_end],
-            )
+            q_chunk = q[query_start:query_end]
+            out_chunk = output[query_start:query_end]
+            kv_view = kv.view(-1, 1, q.shape[-1])
+            if should_use_fewhead_prefill(
+                n_local_heads=self.n_local_heads,
+                padded_heads=self.padded_heads,
+                s_q=int(q_chunk.shape[0]),
+            ):
+                run_fewhead_sparse_prefill(
+                    q_chunk,
+                    kv_view,
+                    combined_indices,
+                    self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=out_chunk,
+                    n_local_heads=self.n_local_heads,
+                )
+            else:
+                flash_mla_sparse_fwd(
+                    q=q_chunk,
+                    kv=kv_view,
+                    indices=combined_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=out_chunk,
+                )

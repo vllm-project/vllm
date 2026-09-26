@@ -326,6 +326,8 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_DSV41_FEWHEAD_PREFILL: bool = True
+    VLLM_DSV41_FEWHEAD_MIN_SQ: int = 2048
 
 
 def get_default_cache_root():
@@ -365,6 +367,14 @@ def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
 
 def disable_compile_cache() -> bool:
     return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+
+
+def dsv41_fewhead_min_sq() -> int:
+    raw = os.getenv("VLLM_DSV41_FEWHEAD_MIN_SQ", "2048")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 2048
 
 
 def use_aot_compile() -> bool:
@@ -2207,6 +2217,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
     "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    # DSV4.1 SM90 TP8 pads 8 local Q heads to 64 for FlashMLA. Prefill can
+    # run native-head Triton instead; decode stays on padded FP8 FlashMLA.
+    # Default on. Short prefills stay on FlashMLA until MIN_SQ (2048).
+    "VLLM_DSV41_FEWHEAD_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_DSV41_FEWHEAD_PREFILL", "1"))
+    ),
+    "VLLM_DSV41_FEWHEAD_MIN_SQ": dsv41_fewhead_min_sq,
     # Whether to skip version suffix when building package
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
