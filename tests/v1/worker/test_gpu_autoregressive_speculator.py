@@ -369,19 +369,22 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     (
         "method_name",
         "cg_mode",
+        "num_speculative_steps",
         "expected_eager_calls",
         "expected_graph_replays",
     ),
     [
-        ("_multi_step_decode", CUDAGraphMode.NONE, 3, 0),
-        ("_multi_step_decode", CUDAGraphMode.FULL, 0, 3),
-        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 3, 0),
-        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 0, 1),
+        ("_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
+        ("_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 3),
+        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
+        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 1),
+        ("_multi_step_decode", CUDAGraphMode.FULL, 3, 0, 2),
     ],
 )
 def test_multi_step_decode_replays_captured_graph_as_expected(
     method_name,
     cg_mode,
+    num_speculative_steps,
     expected_eager_calls,
     expected_graph_replays,
 ):
@@ -411,6 +414,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,
+        num_speculative_steps=num_speculative_steps,
     )
 
     assert generate_draft.call_count == expected_eager_calls
