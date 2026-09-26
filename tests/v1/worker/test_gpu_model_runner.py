@@ -519,6 +519,22 @@ class _RecordingEvent:
         self.log.append(f"record:{self.name}")
 
 
+def _input_prep_runner(
+    prepare_inputs_event,
+    num_accepted_tokens_event,
+    *,
+    use_async_scheduling: bool = True,
+    mamba_cache_mode: str = "align",
+) -> GPUModelRunner:
+    """A runner holding only the state synchronize_input_prep reads."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.prepare_inputs_event = prepare_inputs_event
+    runner.num_accepted_tokens_event = num_accepted_tokens_event
+    runner.use_async_scheduling = use_async_scheduling
+    runner.cache_config = CacheConfig(mamba_cache_mode=mamba_cache_mode)
+    return runner
+
+
 def test_synchronize_input_prep_waits_for_spec_decode_postprocess():
     """The persistent batch must not be mutated while the postprocess still runs.
 
@@ -529,9 +545,9 @@ def test_synchronize_input_prep_waits_for_spec_decode_postprocess():
     context, so its event has to be waited on before the body.
     """
     log: list[str] = []
-    runner = SimpleNamespace(
-        prepare_inputs_event=_RecordingEvent("prepare_inputs", log),
-        num_accepted_tokens_event=_RecordingEvent("accepted_counts", log),
+    runner = _input_prep_runner(
+        _RecordingEvent("prepare_inputs", log),
+        _RecordingEvent("accepted_counts", log),
     )
 
     with GPUModelRunner.synchronize_input_prep(runner):
@@ -546,9 +562,28 @@ def test_synchronize_input_prep_waits_for_spec_decode_postprocess():
 def test_synchronize_input_prep_without_spec_decode_is_unchanged():
     """Without spec decode only prepare_inputs_event is waited on and recorded."""
     log: list[str] = []
-    runner = SimpleNamespace(
-        prepare_inputs_event=_RecordingEvent("prepare_inputs", log),
-        num_accepted_tokens_event=None,
+    runner = _input_prep_runner(_RecordingEvent("prepare_inputs", log), None)
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    assert log == ["wait:prepare_inputs", "update_states", "record:prepare_inputs"]
+
+
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "all"])
+def test_synchronize_input_prep_skips_postprocess_wait_when_counts_unread(
+    mamba_cache_mode: str,
+):
+    """Async scheduling outside align mode never reads the copied counts.
+
+    _prepare_inputs fills them with 1 there instead, so waiting on the
+    postprocess would block the host on a copy nobody reads.
+    """
+    log: list[str] = []
+    runner = _input_prep_runner(
+        _RecordingEvent("prepare_inputs", log),
+        _RecordingEvent("accepted_counts", log),
+        mamba_cache_mode=mamba_cache_mode,
     )
 
     with GPUModelRunner.synchronize_input_prep(runner):
@@ -558,17 +593,18 @@ def test_synchronize_input_prep_without_spec_decode_is_unchanged():
 
 
 def test_synchronize_input_prep_waits_for_postprocess_without_async_scheduling():
-    """Pipeline parallelism overlaps steps without async scheduling.
+    """Without async scheduling input prep reads the counts in every mode.
 
-    max_concurrent_batches is the PP size even with async scheduling off, so
-    the batch queue runs the next step's _update_states while the previous
-    step's postprocess is still in flight, yet prepare_inputs_event exists only
-    under async scheduling. The accepted-count wait must not depend on it.
+    That covers the pipeline-parallel batch queue, where max_concurrent_batches
+    is the PP size with async scheduling off. prepare_inputs_event exists only
+    under async scheduling, so the accepted-count wait must not depend on it.
     """
     log: list[str] = []
-    runner = SimpleNamespace(
-        prepare_inputs_event=None,
-        num_accepted_tokens_event=_RecordingEvent("accepted_counts", log),
+    runner = _input_prep_runner(
+        None,
+        _RecordingEvent("accepted_counts", log),
+        use_async_scheduling=False,
+        mamba_cache_mode="none",
     )
 
     with GPUModelRunner.synchronize_input_prep(runner):
@@ -579,7 +615,7 @@ def test_synchronize_input_prep_waits_for_postprocess_without_async_scheduling()
 
 def test_synchronize_input_prep_is_a_noop_without_spec_decode_or_overlap():
     """With neither event there is nothing to wait on or record."""
-    runner = SimpleNamespace(prepare_inputs_event=None, num_accepted_tokens_event=None)
+    runner = _input_prep_runner(None, None, use_async_scheduling=False)
 
     with GPUModelRunner.synchronize_input_prep(runner):
         pass
@@ -607,10 +643,7 @@ def test_synchronize_input_prep_lands_prior_d2h_before_batch_mutation():
     pinned.copy_(counts_gpu, non_blocking=True)  # the postprocess D2H
     accepted_event.record()
 
-    runner = SimpleNamespace(
-        prepare_inputs_event=prepare_inputs_event,
-        num_accepted_tokens_event=accepted_event,
-    )
+    runner = _input_prep_runner(prepare_inputs_event, accepted_event)
 
     with GPUModelRunner.synchronize_input_prep(runner):
         # What condense()/_update_states do: compact a finished row away, then

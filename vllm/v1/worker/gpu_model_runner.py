@@ -2095,10 +2095,7 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         # Skipped under async scheduling (non-align): the CPU copy races with
         # the in-flight D2H copy and with input-batch row moves.
-        needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and not (
-            self.use_async_scheduling and self.cache_config.mamba_cache_mode != "align"
-        )
-        if needs_cpu_accepted_counts:
+        if self._needs_cpu_accepted_counts():
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
@@ -3801,6 +3798,12 @@ class GPUModelRunner(
             invalid_req_indices,
         )
 
+    def _needs_cpu_accepted_counts(self) -> bool:
+        """Whether input prep reads the accepted counts copied back to the host."""
+        return self.num_accepted_tokens_event is not None and not (
+            self.use_async_scheduling and self.cache_config.mamba_cache_mode != "align"
+        )
+
     @contextmanager
     def synchronize_input_prep(self):
         """Wait until the previous step is done with the buffers input prep reuses."""
@@ -3810,10 +3813,12 @@ class GPUModelRunner(
         # buffers and writes the accepted counts, all of which _update_states
         # mutates as soon as this context is entered. Wait for it here; the
         # later wait in _prepare_inputs is already past those mutations.
-        # Steps overlap under async scheduling and under the pipeline-parallel
-        # batch queue alike, and only the former creates prepare_inputs_event,
-        # so this wait cannot hang off that event's existence.
-        if self.num_accepted_tokens_event is not None:
+        # Both waits run only where input prep reads the counts: not under async
+        # scheduling outside align mode, where the postprocess only copies the
+        # counts and nothing reads them. prepare_inputs_event exists only under
+        # async scheduling, so this wait sits ahead of its early return.
+        if self._needs_cpu_accepted_counts():
+            assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.synchronize()
 
         if self.prepare_inputs_event is None:
