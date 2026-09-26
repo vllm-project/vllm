@@ -97,7 +97,9 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.attn_groups = [
         [
             SimpleNamespace(
-                get_metadata_builder=lambda _: SimpleNamespace(build=build),
+                get_metadata_builder=lambda _: SimpleNamespace(
+                    build=build, supports_update_block_table=False
+                ),
                 layer_names=["draft"],
             )
         ]

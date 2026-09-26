@@ -122,6 +122,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # it. Subclasses keep building.
         self.supports_update_block_table = (
             vllm_config.use_v2_model_runner
+            and device.type == "cuda"
             and type(self) is GDNAttentionMetadataBuilder
         )
 
