@@ -15,6 +15,8 @@ imports) should use subprocess or be run in a GPU environment.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -237,3 +239,89 @@ def test_auto_awq_config_get_name():
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
     assert AutoAWQConfig.get_name() == "auto_awq"
+
+
+class _FakeQuantConfig:
+    def __init__(self, pack_factor: int = 8):
+        self.pack_factor = pack_factor
+
+
+def _make_fake_awq_layer_and_method(
+    k: int, n: int, group_size: int, device: torch.device
+):
+    """Build a minimal (layer, method) pair that exercises
+    AutoAWQLinearMethod.apply's dispatch logic without a full model load."""
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
+    layer = SimpleNamespace()
+    layer.qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (k, n // 8), dtype=torch.int32, device=device
+    )
+    layer.scales = torch.rand((k // group_size, n), dtype=torch.float16, device=device)
+    layer.qzeros = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (k // group_size, n // 8),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    method = auto_awq_module.AutoAWQLinearMethod.__new__(
+        auto_awq_module.AutoAWQLinearMethod
+    )
+    method.quant_config = _FakeQuantConfig()
+    return layer, method
+
+
+def _count_fused_calls(monkeypatch) -> list[int]:
+    """Patch awq_gemm_fused_fp32 with a call counter; returns a 1-item list
+    holding the running count (mutable cell, since the closure needs to be
+    read after the patched calls happen)."""
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
+    counter = [0]
+    original_fused_gemm = auto_awq_module.awq_gemm_fused_fp32
+
+    def _counting_fused_gemm(*args, **kwargs):
+        counter[0] += 1
+        return original_fused_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(auto_awq_module, "awq_gemm_fused_fp32", _counting_fused_gemm)
+    return counter
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
+)
+def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch):
+    """Fused and legacy paths aren't numerically identical, so dispatch must
+    not depend on incidental input contiguity (regression test for the bug
+    fixed in this PR)."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    fused_calls = _count_fused_calls(monkeypatch)
+
+    device = torch.device(current_platform.device_type)
+    k, n, group_size, m = 3584, 512, 128, 16
+    layer, method = _make_fake_awq_layer_and_method(k, n, group_size, device)
+
+    x_contig = torch.rand((m, k), dtype=torch.float16, device=device)
+    padded = torch.zeros((m, 2 * k), dtype=torch.float16, device=device)
+    padded[:, :k] = x_contig
+    x_noncontig = padded[:, :k]
+    assert not x_noncontig.is_contiguous()
+    assert torch.equal(x_contig, x_noncontig)
+
+    out_contig = method.apply(layer, x_contig)
+    out_noncontig = method.apply(layer, x_noncontig)
+
+    assert fused_calls[0] == 2, (
+        "Expected both the contiguous and non-contiguous inputs to dispatch "
+        f"to the fused kernel; got {fused_calls[0]} fused call(s)."
+    )
+    # assert_close(atol=0, rtol=0) still treats +0.0 and -0.0 as equal;
+    # compare raw bytes to catch that and any other bit-level divergence.
+    assert torch.equal(
+        out_contig.contiguous().view(torch.uint8),
+        out_noncontig.contiguous().view(torch.uint8),
+    )
