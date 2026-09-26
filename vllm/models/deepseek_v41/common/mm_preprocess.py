@@ -278,9 +278,8 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekV41Config)
 
     def get_hf_processor(self, **kwargs: object) -> DeepseekV4VLProcessor:
-        unsupported = set(kwargs) - {"do_rescale", "do_normalize"}
-        if unsupported:
-            raise ValueError(f"Unexpected processor kwargs: {sorted(unsupported)}")
+        if kwargs:
+            raise ValueError(f"Unexpected processor kwargs: {sorted(kwargs)}")
 
         mm_config = self.ctx.get_mm_config()
         return DeepseekV4VLProcessor(
