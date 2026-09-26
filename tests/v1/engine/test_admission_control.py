@@ -104,6 +104,7 @@ def _make_request_test_llm(
         resources=SimpleNamespace(engine_dead=False),
         add_request_async=AsyncMock(side_effect=add_request_async),
         abort_requests_async=AsyncMock(),
+        group_requests_by_engine=lambda ids: {0: ids},
         shutdown=MagicMock(),
     )
     llm.vllm_config = SimpleNamespace(
@@ -111,6 +112,8 @@ def _make_request_test_llm(
     )
     llm.output_handler = None
     llm.log_requests = False
+    llm.log_stats = False
+    llm.logger_manager = None
     llm._run_output_handler = MagicMock()
     llm.input_processor = MagicMock()
     llm.input_processor.assign_request_id.side_effect = lambda request: setattr(

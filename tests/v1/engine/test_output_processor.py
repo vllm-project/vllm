@@ -3,6 +3,7 @@
 
 import math
 import time
+from copy import copy
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -34,6 +35,7 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
+from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 
 
@@ -1549,3 +1551,56 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize(
+    ("pooling", "abort_stage"),
+    [(False, "queued"), (False, "prefill"), (False, "decode"), (True, "prefill")],
+)
+def test_abort_requests_updates_finished_stats(pooling: bool, abort_stage: str):
+    decoding = abort_stage == "decode"
+    processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None if pooling else SamplingParams(n=2, detokenize=False),
+        pooling_params=PoolingParams(task="embed") if pooling else None,
+    )
+    parent = None if pooling else ParentRequest(request)
+    num_requests = 2 if parent else 1
+    for index in range(num_requests):
+        child = copy(request)
+        if parent:
+            child.request_id, child.sampling_params = parent.get_child_info(index)
+        processor.add_request(child, None, parent, index)
+        request_stats = processor.request_states[child.request_id].stats
+        assert request_stats is not None
+        request_stats.queued_ts = 1.0
+        request_stats.scheduled_ts = 0.0 if abort_stage == "queued" else 2.0
+        if decoding:
+            request_stats.first_token_ts, request_stats.last_token_ts = 3.0, 5.0
+            request_stats.num_generation_tokens = 3
+
+    stats = IterationStats()
+    processor.abort_requests([request.request_id], internal=True, iteration_stats=stats)
+    assert not processor.has_unfinished_requests()
+    assert not processor.parent_requests
+    assert len(stats.finished_requests) == num_requests
+    assert stats.n_params_iter == [num_requests]
+    assert stats.max_num_generation_tokens_iter == [3 if decoding else 0]
+    for finished in stats.finished_requests:
+        assert finished.finish_reason == FinishReason.ABORT
+        assert finished.request_id == request.external_req_id
+        assert finished.num_prompt_tokens == 3
+        assert finished.num_generation_tokens == (3 if decoding else 0)
+        assert finished.queued_time == (None if abort_stage == "queued" else 1.0)
+        assert finished.prefill_time == (1.0 if decoding else None)
+        assert finished.decode_time == (2.0 if decoding else None)
+        assert finished.inference_time == (3.0 if decoding else None)
+        assert finished.mean_time_per_output_token == (1.0 if decoding else None)

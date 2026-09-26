@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock, Mock, call
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
     IterationStats,
     PrefillStats,
     PromptTokenStats,
@@ -12,6 +17,43 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
+
+
+def test_abort_metrics_do_not_count_as_engine_iterations():
+    stat_logger = MagicMock(
+        histogram_iteration_tokens={idx: Mock() for idx in (0, 1)},
+        counter_request_success={FinishReason.ABORT: {idx: Mock() for idx in (0, 1)}},
+        kv_cache_metrics_enabled=False,
+        gauge_lora_info=None,
+    )
+    abort_stats = IterationStats()
+    abort_stats.finished_requests.append(FinishedRequestStats(FinishReason.ABORT))
+    PrometheusStatLogger.record(stat_logger, None, abort_stats, engine_idx=1)
+
+    for sched_stats, token_count in [(None, 3), (SchedulerStats(), 0)]:
+        step_stats = IterationStats()
+        step_stats.num_generation_tokens = token_count
+        PrometheusStatLogger.record(stat_logger, sched_stats, step_stats, engine_idx=1)
+
+    counters = stat_logger.counter_request_success[FinishReason.ABORT]
+    counters[1].inc.assert_called_once_with()
+    counters[0].inc.assert_not_called()
+    histograms = stat_logger.histogram_iteration_tokens
+    histograms[0].observe.assert_not_called()
+    assert histograms[1].observe.call_args_list == [call(3), call(0)]
+
+
+def test_abort_request_engine_ownership():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.reqs_in_flight = {"active": (2).to_bytes(2, "little")}
+    client._finished_request_engines = {"pending": (1).to_bytes(2, "little")}
+    assert client.group_requests_by_engine(["active", "pending", "unknown"]) == {
+        2: ["active"],
+        1: ["pending"],
+        None: ["unknown"],
+    }
+    client.acknowledge_finished_requests(["pending"])
+    assert client.group_requests_by_engine(["pending"]) == {None: ["pending"]}
 
 
 def test_iteration_stats_repr():
