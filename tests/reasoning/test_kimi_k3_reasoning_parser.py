@@ -390,3 +390,86 @@ def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
             assert parser.is_reasoning_end_streaming(
                 full, delta
             ) == _reference_is_reasoning_end(full), (head, delta)
+
+
+RESP_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
+
+
+def test_is_reasoning_end_response_only_turn_ends():
+    """#57714: the model skipped the think channel and opened the response
+    channel directly; reasoning never started, so it ends at the opener."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    # generation prefix consumed the think-open, then the response opens
+    ids = [*OPEN_IDS, *RESP_OPEN_IDS, 7, 8]
+    assert parser.is_reasoning_end(ids)
+
+
+def test_is_reasoning_end_response_open_before_think_open_does_not_end():
+    """A prior turn's response opener must not end the current turn's
+    reasoning: the current think opener is the newest marker."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    prior_turn = [*OPEN_IDS, 5, *CLOSE_IDS, *RESP_OPEN_IDS, 6]
+    current_turn_prefix = [*prior_turn, *OPEN_IDS]  # this turn's gen prefix
+    assert not parser.is_reasoning_end(current_turn_prefix)
+    # ...and it ends only when this turn closes (or opens its response)
+    assert parser.is_reasoning_end([*current_turn_prefix, 9, *CLOSE_IDS])
+    assert parser.is_reasoning_end([*current_turn_prefix, 9, *RESP_OPEN_IDS])
+
+
+def test_is_reasoning_end_streaming_response_open_ends():
+    """Per-step check: the response opener completing in this step ends
+    reasoning even with no think markers anywhere (#57714; this is what the
+    structured-output gate consults)."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    history = [*OPEN_IDS, 5, 5]  # gen prefix + two reasoning tokens
+    assert parser.is_reasoning_end_streaming(history, RESP_OPEN_IDS)
+    # but a plain reasoning step still does not end
+    assert not parser.is_reasoning_end_streaming(history, [7, 8])
+
+
+def test_is_reasoning_end_streaming_response_open_straddling_steps():
+    """The 3-token response opener may straddle a step boundary."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    # input_ids carries the delta already; the marker's first two tokens sit
+    # in the prior steps' tail, the last arrives now
+    full = [*OPEN_IDS, 5, *RESP_OPEN_IDS]
+    assert parser.is_reasoning_end_streaming(full, RESP_OPEN_IDS[2:])
+
+
+RESPONSE_CLOSE = f"◁/response{SEP}"
+MESSAGE_CLOSE = f"◁/message{SEP}"
+
+
+def test_end_detection_agrees_with_extraction_on_same_bytes():
+    """vllm/reasoning/AGENTS.md asks for this agreement: whatever the gate
+    calls reasoning-end must be what extraction calls the content boundary,
+    on identical inputs."""
+    OPEN = THINK_OPEN
+    CLOSE = THINK_CLOSE
+    RC = RESPONSE_CLOSE
+    MC = MESSAGE_CLOSE
+    cases = {
+        "normal thinking": (
+            f"{OPEN}think step{CLOSE}{RESPONSE_OPEN}answer{RC}{MC}",
+            True,
+            True,
+        ),
+        "response-only (no think markers)": (
+            f"{RESPONSE_OPEN}answer{RC}{MC}",
+            True,
+            True,
+        ),
+        "truncated reasoning": ("still thinking", False, False),
+    }
+    for name, (text, want_end, want_content) in cases.items():
+        parser = KimiK3ReasoningParser(DummyTokenizer())
+        ids = DummyTokenizer().encode(text)
+        reasoning, content = parser.extract_reasoning(
+            text, ChatCompletionRequest(model="test-model", messages=[])
+        )
+        got_end = parser.is_reasoning_end(ids)
+        got_content = content is not None and content.strip() != ""
+        assert got_end == want_end, (name, got_end)
+        assert got_content == want_content, (name, content)
+        # agreement: the gate says ended exactly when extraction produced content
+        assert got_end == got_content, name

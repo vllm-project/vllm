@@ -58,22 +58,31 @@ def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     return -1
 
 
-def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) -> int:
-    """Report which of *a* / *b* occurs last in *haystack*.
+def _newest_marker_kind(
+    haystack: Sequence[int], markers: Sequence[Sequence[int]]
+) -> int:
+    """Report which of *markers* occurs last in *haystack*, as its index into
+    *markers*, or -1 when none occur.
 
-    Returns 0 if *a* is the newest marker, 1 if *b* is, -1 if neither occurs.
-    Equivalent to comparing two ``_subseq_index`` results, but a single backward
-    pass that stops at the first hit instead of walking to index 0 twice.
+    Single backward pass that stops at the first hit instead of one scan per
+    marker. Several markers may share a first token, so candidates under one
+    first token are all tried before moving on.
     """
-    if not a or not b:
+    first_tokens: dict[int, list[int]] = {}
+    for kind, marker in enumerate(markers):
+        if marker:
+            first_tokens.setdefault(marker[0], []).append(kind)
+    if not first_tokens:
         return -1
-    a0, b0 = a[0], b[0]
-    for i in range(len(haystack) - min(len(a), len(b)), -1, -1):
-        head = haystack[i]
-        if head == a0 and i + len(a) <= len(haystack) and _match_at(haystack, i, a):
-            return 0
-        if head == b0 and i + len(b) <= len(haystack) and _match_at(haystack, i, b):
-            return 1
+    min_len = min(len(m) for m in markers if m)
+    for i in range(len(haystack) - min_len, -1, -1):
+        kinds = first_tokens.get(haystack[i])
+        if kinds is None:
+            continue
+        for kind in kinds:
+            marker = markers[kind]
+            if i + len(marker) <= len(haystack) and _match_at(haystack, i, marker):
+                return kind
     return -1
 
 
@@ -169,8 +178,18 @@ class KimiK3ReasoningParser(ReasoningParser):
         # marker). A missing open marker (e.g. it was consumed as the generation
         # prefix) means a close marker alone ends reasoning, which is what
         # "close is the newest marker" already encodes.
+        # A response opener newer than every think marker means the model
+        # skipped the think channel entirely (#57714): reasoning never
+        # started, so it ends here — otherwise the structured-output gate
+        # never engages and the response body is generated unconstrained.
+        # Single backward pass: reasoning ends iff the newest marker is the
+        # think close or the response opener (kind 0 is the think open).
         return (
-            _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
+            _newest_marker_kind(
+                input_ids,
+                (self._think_open_ids, self._think_close_ids, self._response_open_ids),
+            )
+            > 0
         )
 
     def is_reasoning_end_streaming(
@@ -192,10 +211,25 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        carry = (
+            max(
+                len(self._think_close_ids),
+                len(self._think_open_ids),
+                len(self._response_open_ids),
+            )
+            - 1
+        )
         head = len(input_ids) - len(delta)
         window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        # Same end rule as is_reasoning_end, on the step window: a response
+        # opener with no newer think marker ends reasoning (#57714).
+        return (
+            _newest_marker_kind(
+                window,
+                (self._think_open_ids, self._think_close_ids, self._response_open_ids),
+            )
+            > 0
+        )
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
