@@ -1990,6 +1990,7 @@ class rocm_aiter_ops:
     _MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    _GDN_NORM_OUT_PROJ_ENABLED = envs.VLLM_ROCM_USE_AITER_GDN_NORM_OUT_PROJ
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -2019,6 +2020,7 @@ class rocm_aiter_ops:
         cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._GDN_NORM_OUT_PROJ_ENABLED = envs.VLLM_ROCM_USE_AITER_GDN_NORM_OUT_PROJ
         cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 
     @staticmethod
@@ -2419,6 +2421,34 @@ class rocm_aiter_ops:
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:
         """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
+
+    @staticmethod
+    @functools.cache
+    def _gdn_norm_out_proj_kernel_importable() -> bool:
+        try:
+            from aiter.ops.flydsl import (  # noqa: F401
+                flydsl_gdn_gated_rmsnorm_out_proj,
+                flydsl_gdn_gated_rmsnorm_out_proj_supported,
+            )
+
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_gdn_norm_out_proj_enabled(cls) -> bool:
+        """Check if the aiter FlyDSL kernel that fuses the GDN RMSNormGated into
+        the out_proj GEMM at decode can be used.
+
+        The kernel is absent from aiter builds without FlyDSL and from older
+        builds. The kernel itself decides per call which shapes it supports.
+        """
+        return (
+            cls._AITER_ENABLED
+            and cls._GDN_NORM_OUT_PROJ_ENABLED
+            and cls._gdn_norm_out_proj_kernel_importable()
+        )
 
     @classmethod
     @if_aiter_supported
