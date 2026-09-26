@@ -33,7 +33,10 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -131,6 +134,16 @@ class DSparkDeepseekV4Model(nn.Module):
             ]
         )
 
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "context_wkv_proj"),
+            disable_tp=True,
+        )
+
         # Heads: final norm, and the Markov + confidence heads.
         # Loaded from the "final" MTP layer weights (mtp.*) in the target
         # checkpoint. v4.1 has no learned hc_head: the hc copies are
@@ -173,8 +186,8 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
-        from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        from the SAME projected target hidden ``main_x``, via its ``wkv`` shard of
+        ``context_wkv_proj`` + ``kv_norm`` + RoPE + quant, then writes it at the
         layer's context slots.
 
         ``context_slot_mappings`` is a per-layer list (each entry is the context
@@ -182,19 +195,16 @@ class DSparkDeepseekV4Model(nn.Module):
         place draft layers in different groups). ``None`` (or a ``None`` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
-        for i, layer in enumerate(self.layers):
-            slot_mapping = (
-                None if context_slot_mappings is None else context_slot_mappings[i]
-            )
-            attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            kv = qr_kv[..., attn.q_lora_rank :]
-            kv = attn.kv_norm(kv)
-            if slot_mapping is None:
-                continue
-            _insert_context_kv(attn, kv, context_positions, slot_mapping)
+        all_kv = self.context_wkv_proj(main_x).view(
+            -1, self.num_dspark_layers, self.config.head_dim
+        )
+        slot_mappings = context_slot_mappings or [None] * self.num_dspark_layers
+        for layer, kv, slot_mapping in zip(
+            self.layers, all_kv.unbind(1), slot_mappings
+        ):
+            kv = layer.attn.kv_norm(kv)
+            if slot_mapping is not None:
+                _insert_context_kv(layer.attn, kv, context_positions, slot_mapping)
 
     def forward(
         self,
@@ -402,6 +412,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             ("attn.fused_wqa_wkv", "attn.wq_a", 0),
             ("attn.fused_wqa_wkv", "attn.wkv", 1),
         ]
+        # Each draft layer's wkv is also a shard of the stacked context_wkv_proj.
+        context_wkv_shards = {
+            f"model.layers.{i}.attn.wkv": i for i in range(len(self.model.layers))
+        }
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -460,6 +474,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                         loaded_params.add(name_mapped)
                         break
                 continue
+
+            module, _, param_suffix = name.rpartition(".")
+            if (context_shard := context_wkv_shards.get(module)) is not None:
+                context_name = f"model.context_wkv_proj.{param_suffix}"
+                param = params_dict[context_name]
+                param.weight_loader(param, loaded_weight, context_shard)
+                loaded_params.add(context_name)
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params
             # (main_proj/norm/markov_head/confidence_head) load directly —
