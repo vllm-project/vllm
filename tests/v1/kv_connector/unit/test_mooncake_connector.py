@@ -1666,6 +1666,28 @@ def test_coalesce_promotes_padding_only_for_a_full_row():
     assert partial_local[0].kv_block_len == 2 * page
 
 
+def test_coalesce_spans_padding_between_pages():
+    """Unpadded payloads with a padded-page gap still merge inside the row."""
+    row = 2560
+
+    def region(base: int) -> TransferRegion:
+        return TransferRegion(
+            layer_name="layer",
+            layer_index=0,
+            base_addr=base,
+            block_len=row,
+            kv_block_len=1000,
+        )
+
+    merged, _ = _coalesce_contiguous_transfer_regions(
+        [region(0), region(1024)],
+        [region(5000), region(6024)],
+        promote_full_row=True,
+    )
+    assert len(merged) == 1
+    assert merged[0].kv_block_len == row
+
+
 def _layer_name(idx: int) -> str:
     return f"model.layers.{idx}.mla_attn"
 

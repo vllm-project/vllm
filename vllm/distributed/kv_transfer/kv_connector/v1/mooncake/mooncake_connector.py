@@ -417,6 +417,21 @@ def _align_transfer_regions(
                     f"{remote_region.group_index}."
                 ),
             )
+        if (
+            local_region.shared_group_ids
+            and remote_region.shared_group_ids
+            and local_region.shared_group_ids != remote_region.shared_group_ids
+        ):
+            return (
+                [],
+                [],
+                (
+                    "Mooncake shared-group set mismatch for "
+                    f"{local_region.layer_name}: producer="
+                    f"{local_region.shared_group_ids}, consumer="
+                    f"{remote_region.shared_group_ids}."
+                ),
+            )
         aligned_local.append(local_region)
         aligned_remote.append(remote_region)
 
@@ -439,10 +454,14 @@ def _coalesce_contiguous_transfer_regions(
         return local_regions, remote_regions
 
     def adjacent(prev: TransferRegion, nxt: TransferRegion) -> bool:
+        # Page padding sits between unpadded payloads. Allow that gap, but
+        # stay inside this row so the span cannot run into the next block.
         return (
             prev.group_index == nxt.group_index
+            and prev.shared_group_ids == nxt.shared_group_ids
             and prev.block_len == nxt.block_len
-            and nxt.base_addr == prev.base_addr + prev.kv_block_len
+            and prev.base_addr + prev.kv_block_len <= nxt.base_addr
+            and nxt.base_addr + nxt.kv_block_len <= prev.base_addr + prev.block_len
         )
 
     def span(region: TransferRegion, kv_block_len: int) -> TransferRegion:
@@ -466,12 +485,9 @@ def _coalesce_contiguous_transfer_regions(
             merged_local.append(run_local[0])
             merged_remote.append(run_remote[0])
             return
-        merged_local.append(
-            span(run_local[0], sum(region.kv_block_len for region in run_local))
-        )
-        merged_remote.append(
-            span(run_remote[0], sum(region.kv_block_len for region in run_remote))
-        )
+        for merged, run in ((merged_local, run_local), (merged_remote, run_remote)):
+            span_len = run[-1].base_addr + run[-1].kv_block_len - run[0].base_addr
+            merged.append(span(run[0], span_len))
 
     for local_region, remote_region in zip(local_regions[1:], remote_regions[1:]):
         if adjacent(run_local[-1], local_region) and adjacent(
@@ -520,6 +536,9 @@ class MooncakeXferMetadata(
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
+    # Parallel to registered regions. Each entry is the groups that share
+    # that region. Empty means the peer did not send the field.
+    registered_shared_group_ids: list[list[int]] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
 
 
@@ -1116,6 +1135,7 @@ class MooncakeConnectorWorker:
         self.registered_group_indices: list[int] = []
         # Parallel to registered regions. -1 flattens only these groups.
         self.region_shared_groups: list[tuple[int, ...]] = []
+        self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
@@ -1369,8 +1389,37 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        if (
+            meta.remote_pp_size > 1
+            and meta.remote_pp_size != self.pp_size
+            and self.opaque_packed_storages
+        ):
+            msg = (
+                "Mooncake non-page-contiguous packed regions keep only the "
+                "first layer name, so they cannot be aligned to PP size "
+                f"{meta.remote_pp_size}."
+            )
+            logger.error(msg)
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=msg,
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
         shared_groups = self.region_shared_groups
         if len(shared_groups) != len(self.registered_layer_names):
+            if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
+                msg = (
+                    "Mooncake shared-group metadata does not match registered "
+                    "layers, so a shared packed region cannot be transferred."
+                )
+                logger.error(msg)
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=msg,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
             shared_groups = None
         local_regions = self._get_transfer_regions(
             self.kv_caches_base_addr,
@@ -1381,6 +1430,9 @@ class MooncakeConnectorWorker:
             self.registered_group_indices,
             shared_groups,
         )
+        remote_shared = [tuple(groups) for groups in meta.registered_shared_group_ids]
+        if len(remote_shared) != len(meta.registered_layer_names):
+            remote_shared = None
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
             meta.block_lens,
@@ -1388,6 +1440,7 @@ class MooncakeConnectorWorker:
             meta.registered_layer_names,
             meta.registered_layer_indices,
             meta.registered_group_indices,
+            remote_shared,
         )
         pre_align_local = local_regions
         pre_align_remote = remote_regions
@@ -1424,10 +1477,16 @@ class MooncakeConnectorWorker:
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
+            n_aligned = len(local_regions)
             local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
                 local_regions,
                 remote_regions,
                 promote_full_row=covered_both_sides,
+            )
+            logger.info(
+                "Mooncake packed coalesce: %s aligned regions -> %s transfer regions.",
+                n_aligned,
+                len(local_regions),
             )
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
@@ -1874,6 +1933,7 @@ class MooncakeConnectorWorker:
         self.registered_layer_indices = []
         self.registered_group_indices = []
         self.region_shared_groups: list[tuple[int, ...]] = []
+        self.opaque_packed_storages = set()
 
         packed_storage_to_region: dict[int, int] = {}
         packed_view_to_region: dict[tuple[int, int, int], int] = {}
@@ -1959,6 +2019,13 @@ class MooncakeConnectorWorker:
                     # NIXL branch B: length is the row, base is the allocation.
                     view_addr = storage_addr
                     kv_block_len = block_stride
+                    self.opaque_packed_storages.add(storage_addr)
+                if not page_contiguous and self.pp_size > 1:
+                    raise RuntimeError(
+                        "Mooncake cannot align a non-page-contiguous packed "
+                        "allocation across pipeline-parallel stages "
+                        f"(layer {layer_name})."
+                    )
                 dedupe_key = (view_addr, block_stride, kv_block_len)
                 region_idx = packed_view_to_region.get(dedupe_key)
                 if region_idx is not None:
@@ -1973,16 +2040,8 @@ class MooncakeConnectorWorker:
                             _SHARED_REGION_GROUP_ID
                         )
                     continue
-                if (
-                    not page_contiguous
-                    and self.pp_size > 1
-                    and storage_addr in packed_storage_to_region
-                ):
-                    raise RuntimeError(
-                        "Mooncake cannot align a non-page-contiguous packed "
-                        "allocation across pipeline-parallel stages "
-                        f"(layer {layer_name})."
-                    )
+                if not page_contiguous:
+                    self.opaque_packed_storages.add(storage_addr)
                 if storage_addr not in packed_storage_to_region:
                     packed_storage_to_region[storage_addr] = len(region_base_addresses)
                 packed_view_to_region[dedupe_key] = len(region_base_addresses)
@@ -2193,6 +2252,9 @@ class MooncakeConnectorWorker:
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
             registered_group_indices=self.registered_group_indices,
+            registered_shared_group_ids=[
+                list(groups) for groups in self.region_shared_groups
+            ],
         )
 
         encoded_data = self._encoder.encode(metadata)
