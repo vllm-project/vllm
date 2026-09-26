@@ -1203,7 +1203,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
     def gather_batch_req_state(
-        self, scheduler_output: SchedulerOutput, dummy_run: bool
+        self,
+        scheduler_output: SchedulerOutput,
+        dummy_run: bool,
+        max_query_len: int | None = None,
     ) -> tuple["BatchReqState | None", int | None]:
         """Gather CPU request state for the scheduled batch, in batch order.
         Returns (batch_state, uniform_decode_token_count)
@@ -1211,7 +1214,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
         num_toks = scheduler_output.total_num_scheduled_tokens
-        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        if max_query_len is None:
+            max_query_len = max(num_tokens_per_req.values())
 
         if dummy_run:
             # Dummy batches are uniform by construction.
@@ -1647,7 +1651,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len: int | None = max(scheduler_output.num_scheduled_tokens.values())
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
-            scheduler_output, dummy_run
+            scheduler_output, dummy_run, max_query_len=max_query_len
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
