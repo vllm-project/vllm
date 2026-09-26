@@ -546,8 +546,6 @@ def _prepare_dflash_inputs_kernel(
     block_size,
     num_query_per_req,
     num_speculative_steps,
-    max_num_reqs,
-    max_num_tokens,
     max_model_len,
     cp_rank,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
@@ -558,7 +556,6 @@ def _prepare_dflash_inputs_kernel(
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
-    num_reqs = tl.num_programs(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
 
     ctx_start = tl.load(target_query_start_loc_ptr + req_idx)
@@ -679,37 +676,61 @@ def _prepare_dflash_inputs_kernel(
             tl.load(temperature_ptr + req_state_idx),
         )
         tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
-        if req_idx == num_reqs - 1:
-            # Pad per-request buffers to max_num_reqs for CUDA graph safety.
-            last_query_end = num_reqs * num_query_per_req
-            for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_reqs + 1
-                tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
-            for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_reqs
-                tl.store(out_seq_lens_ptr + block, 0, mask=mask)
-            # Padded sample slots point at query index 0 (a valid row in
-            # last_hidden_states) so CG replay never reads OOB. Padded
-            # sample idx mappings point to -1, which is ignored during
-            # sampling to prevent writing stale values to draft logits.
-            pad_start = num_reqs * num_speculative_steps
-            pad_end = max_num_reqs * num_speculative_steps
-            for i in range(pad_start, pad_end, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < pad_end
-                tl.store(out_sample_indices_ptr + block, 0, mask=mask)
-                tl.store(out_sample_pos_ptr + block, 0, mask=mask)
-                tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
-            # Pad query slot mappings past num_query_tokens with PAD so the
-            # captured CG sees PAD slots (no K/V write) for replay sizes
-            # larger than the current request count.
-            q_pad_start = num_reqs * num_query_per_req
-            for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_tokens
-                tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
+
+
+@triton.jit
+def _pad_dflash_buffers_kernel(
+    out_query_start_loc_ptr,
+    out_seq_lens_ptr,
+    out_sample_indices_ptr,
+    out_sample_pos_ptr,
+    out_sample_idx_mapping_ptr,
+    out_query_slot_mapping_ptr,
+    num_reqs,
+    num_query_per_req,
+    num_speculative_steps,
+    max_num_reqs,
+    max_num_tokens,
+    PAD_SLOT_ID: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Fill the unused tail of the draft input buffers.
+
+    This ran inside ``_prepare_dflash_inputs_kernel`` under
+    ``req_idx == num_reqs - 1`` as four serial loops. Their trip counts are
+    bounded by the buffer capacities, not by the batch, so one program walked
+    ``(max_num_tokens - num_reqs * num_query_per_req) / BLOCK_SIZE`` iterations
+    on every step -- and because ``num_reqs * num_query_per_req`` stays small,
+    that cost barely moves with concurrency. On MI355X with
+    ``max_num_batched_tokens=16384`` it measured 38 us/step on every rank.
+
+    The writes are independent of one another and disjoint from everything the
+    main kernel stores (it only writes the ``[0, num_reqs)`` prefixes), so they
+    parallelise across the grid and can run as their own launch.
+    """
+    offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    last_query_end = num_reqs * num_query_per_req
+
+    # Pad per-request buffers to max_num_reqs for CUDA graph safety.
+    i = num_reqs + offs
+    tl.store(out_query_start_loc_ptr + i, last_query_end, mask=i < max_num_reqs + 1)
+    tl.store(out_seq_lens_ptr + i, 0, mask=i < max_num_reqs)
+
+    # Padded sample slots point at query index 0 (a valid row in
+    # last_hidden_states) so CG replay never reads OOB. Padded sample idx
+    # mappings point to -1, which is ignored during sampling to prevent
+    # writing stale values to draft logits.
+    j = num_reqs * num_speculative_steps + offs
+    pad_end = max_num_reqs * num_speculative_steps
+    tl.store(out_sample_indices_ptr + j, 0, mask=j < pad_end)
+    tl.store(out_sample_pos_ptr + j, 0, mask=j < pad_end)
+    tl.store(out_sample_idx_mapping_ptr + j, -1, mask=j < pad_end)
+
+    # Pad query slot mappings past num_query_tokens with PAD so the captured CG
+    # sees PAD slots (no K/V write) for replay sizes larger than the current
+    # request count.
+    k = last_query_end + offs
+    tl.store(out_query_slot_mapping_ptr + k, PAD_SLOT_ID, mask=k < max_num_tokens)
 
 
 def prepare_dflash_inputs(
@@ -785,8 +806,6 @@ def prepare_dflash_inputs(
         block_size,
         num_query_per_req,
         num_speculative_steps,
-        max_num_reqs,
-        max_num_tokens,
         max_model_len,
         cp_rank,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
@@ -795,3 +814,31 @@ def prepare_dflash_inputs(
         CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+    # Pad the unused tail of the buffers in its own launch. The spans below are
+    # set by the buffer capacities rather than by the batch, so folding them
+    # into the kernel above left one program walking the whole padded range
+    # serially; here they are covered by the grid. A wider block is used than
+    # the main kernel's because these are plain contiguous fills.
+    last_query_end = num_reqs * num_query_per_req
+    pad_span = max(
+        max_num_reqs + 1 - num_reqs,
+        (max_num_reqs - num_reqs) * num_speculative_steps,
+        max_num_tokens - last_query_end,
+    )
+    if pad_span > 0:
+        PAD_BLOCK_SIZE = 1024
+        _pad_dflash_buffers_kernel[(triton.cdiv(pad_span, PAD_BLOCK_SIZE),)](
+            input_buffers.query_start_loc,
+            input_buffers.seq_lens,
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            query_slot_mapping,
+            num_reqs,
+            num_query_per_req,
+            num_speculative_steps,
+            max_num_reqs,
+            max_num_tokens,
+            PAD_SLOT_ID=PAD_SLOT_ID,
+            BLOCK_SIZE=PAD_BLOCK_SIZE,
+        )
