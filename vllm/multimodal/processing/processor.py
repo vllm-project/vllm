@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -1219,6 +1219,31 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         return find_mm_placeholders(new_token_ids, mm_prompt_updates)
 
+    def _find_applied_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> Mapping[str, list[PlaceholderFeaturesInfo]] | None:
+        """Locate the updates if the prompt already contains all of them."""
+        # A content is absent unless its most repeated token is frequent
+        # enough. A 1-token content looks the same either way, so skip it.
+        probes = [
+            Counter(u.content.full).most_common(1)[0]
+            for us in mm_prompt_updates.values()
+            for u in flatten_2d_lists(us)
+            if len(u.content.full) > 1
+        ]
+        if not any(token_ids.count(t) >= n for t, n in probes):
+            return None
+
+        # A partial match is ambiguous: adjacent targets can look exactly
+        # like one applied content, so it counts as no match at all.
+        found = self._find_mm_placeholders(token_ids, mm_prompt_updates)
+        if any(len(found.get(m, ())) != len(us) for m, us in mm_prompt_updates.items()):
+            return None
+
+        return {m: ps for m, ps in found.items() if ps}
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str | None:
         """Get the text to pass to the HF processor alongside the multi-modal data.
 
@@ -1685,6 +1710,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """Apply multi-modal prompt updates to token IDs."""
+        applied = self._find_applied_updates(token_ids, mm_prompt_updates)
+        if applied is not None:
+            return token_ids, applied
+
         new_token_ids, match_result, placeholders = (
             self._apply_token_matches_with_placeholders(
                 token_ids,

@@ -1396,3 +1396,74 @@ def test_dummy_inputs_scheduler_budget(
 
     result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
     assert len(result["prompt_token_ids"]) == expected_seq_len
+
+
+def test_apply_prompt_updates_is_idempotent():
+    """An already-expanded prompt must not be expanded a second time."""
+    processor = _text_fallback_processor()
+    mm_prompt_updates = {
+        "image": [[PromptReplacement("image", [1], [2, 2, 2]).resolve(0)]]
+    }
+
+    expanded, placeholders = processor._apply_prompt_updates(
+        [0, 1, 3], mm_prompt_updates
+    )
+    assert expanded == [0, 2, 2, 2, 3]
+
+    again, placeholders_again = processor._apply_prompt_updates(
+        expanded, mm_prompt_updates
+    )
+    assert again == expanded
+    assert [p.to_range() for p in placeholders_again["image"]] == [
+        p.to_range() for p in placeholders["image"]
+    ]
+
+
+def test_apply_prompt_updates_is_idempotent_for_mixed_content():
+    """Detection must not assume a content is a run of one repeated token."""
+    processor = _text_fallback_processor()
+    mm_prompt_updates = {
+        "image": [[PromptReplacement("image", [1], [1, 2]).resolve(0)]]
+    }
+
+    expanded, _ = processor._apply_prompt_updates([1], mm_prompt_updates)
+    assert expanded == [1, 2]
+
+    again, _ = processor._apply_prompt_updates(expanded, mm_prompt_updates)
+    assert again == expanded
+
+
+def test_apply_prompt_updates_expands_targets_aliasing_one_content():
+    """Two targets can look like one applied content; they must still expand."""
+    processor = _text_fallback_processor()
+    mm_prompt_updates = {
+        "image": [
+            [PromptReplacement("image", [1], [1, 1]).resolve(0)],
+            [PromptReplacement("image", [1], [1, 1]).resolve(1)],
+        ]
+    }
+
+    new_token_ids, placeholders = processor._apply_prompt_updates(
+        [1, 1], mm_prompt_updates
+    )
+
+    assert new_token_ids == [1, 1, 1, 1]
+    assert [p.to_range().offset for p in placeholders["image"]] == [0, 2]
+
+
+def test_apply_prompt_updates_still_expands_single_token_items():
+    """A 1-token content is identical either way, so it decides nothing."""
+    processor = _text_fallback_processor()
+    mm_prompt_updates = {
+        "image": [
+            [PromptReplacement("image", [1], [1]).resolve(0)],
+            [PromptReplacement("image", [1], [4, 4, 4]).resolve(1)],
+        ]
+    }
+
+    new_token_ids, placeholders = processor._apply_prompt_updates(
+        [1, 0, 1], mm_prompt_updates
+    )
+
+    assert new_token_ids == [1, 0, 4, 4, 4]
+    assert [p.tokens for p in placeholders["image"]] == [[1], [4, 4, 4]]
