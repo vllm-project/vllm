@@ -15,6 +15,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _sparse_kv_row_offset,
+    _sparse_query_row_offset,
     _validate_dsv4_sparse_dims,
     _validate_sparse_dims,
 )
@@ -24,6 +25,14 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 def _store_sparse_kv_row_offset_kernel(slot_ptr, output_ptr, stride: tl.constexpr):
     slot = tl.load(slot_ptr)
     tl.store(output_ptr, _sparse_kv_row_offset(slot, stride))
+
+
+@triton.jit
+def _store_sparse_query_row_offset_kernel(
+    query_idx_ptr, output_ptr, stride: tl.constexpr
+):
+    query_idx = tl.load(query_idx_ptr)
+    tl.store(output_ptr, _sparse_query_row_offset(query_idx, stride))
 
 
 def test_fit_kpool_indices_preserves_tail_and_best_history():
@@ -74,11 +83,14 @@ def test_fit_kpool_indices_rejects_narrow_input():
         ("auto", 512, 1, 0, 0, 32, True),
         ("auto", 512, 1, 2, 2, 32, True),
         ("auto", 512, 0, 2, 2, 1, True),
-        ("fp8", 512, 1, 0, 0, 32, False),
+        ("fp8", 512, 1, 0, 0, 32, True),
+        ("fp8_e4m3", 512, 0, 2, 2, 1, True),
         ("auto", 576, 1, 0, 0, 32, False),
         ("auto", 512, 0, 2, 4, 2, True),
         ("auto", 512, 0, 2, 12, 6, True),
-        ("auto", 512, 0, 0, 0, 0, False),
+        ("fp8", 512, 0, 2, 12, 6, True),
+        ("fp8", 576, 1, 0, 0, 32, False),
+        ("auto", 512, 0, 0, 0, 0, True),
     ],
 )
 def test_rocm_sparse_triton_route(
@@ -139,7 +151,8 @@ def test_rocm_sparse_triton_route_preserves_padded_sinks(monkeypatch, num_heads)
         paged_kv_indptr=torch.zeros(3, dtype=torch.int32),
     )
 
-    output, lse = impl._forward_mla(SimpleNamespace(), q, kv, metadata)
+    layer = SimpleNamespace(_k_scale_float=1.0)
+    output, lse = impl._forward_mla(layer, q, kv, metadata)
 
     if num_heads == 8:
         expected_sinks = impl.sinks.repeat_interleave(2)
@@ -180,3 +193,54 @@ def test_sparse_prefill_kv_row_offset_does_not_overflow_int32():
     _store_sparse_kv_row_offset_kernel[(1,)](slot, output, stride=512)
 
     assert output.item() == 6554 * 640 * 512
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_sparse_prefill_query_row_offset_does_not_overflow_int32():
+    # A padded 128-head, 512-wide output row has a 65,536-element stride.
+    # Query 131,071 therefore addresses almost 2**33 elements into the tensor.
+    query_idx = torch.tensor([131071], dtype=torch.int32, device="cuda")
+    output = torch.empty(1, dtype=torch.int64, device="cuda")
+
+    _store_sparse_query_row_offset_kernel[(1,)](query_idx, output, stride=128 * 512)
+
+    assert output.item() == 131071 * 128 * 512
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_sparse_prefill_fp8_nope_matches_bf16_reference():
+    """NoPE FP8 KV must dequantize in Triton, not reach 576-wide AITER asm."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    num_queries, num_heads, head_dim = 4, 16, 512
+    num_kv = 32
+    kv_scale = 1.5
+    q = torch.randn(
+        num_queries, num_heads, head_dim, dtype=torch.bfloat16, device=device
+    )
+    kv_source = torch.randn(num_kv, head_dim, dtype=torch.float32, device=device)
+    kv_fp8 = (kv_source / kv_scale).to(current_platform.fp8_dtype())
+    kv_bf16 = (kv_fp8.float() * kv_scale).to(torch.bfloat16)
+    indices = torch.arange(num_queries * 8, device=device, dtype=torch.int32) % num_kv
+    indptr = torch.arange(0, num_queries * 8 + 1, 8, device=device, dtype=torch.int32)
+
+    def run(kv, scale):
+        return _rocm_sparse_attn_prefill_ragged_triton(
+            q=q,
+            kv=kv,
+            indices=indices,
+            indptr=indptr,
+            scale=head_dim**-0.5,
+            attn_sink=None,
+            nope_head_dim=head_dim,
+            rope_head_dim=0,
+            kv_scale=scale,
+        )
+
+    out_fp8 = run(kv_fp8, kv_scale)
+    out_bf16 = run(kv_bf16, 1.0)
+    torch.testing.assert_close(out_fp8, out_bf16, rtol=5e-3, atol=5e-3)
