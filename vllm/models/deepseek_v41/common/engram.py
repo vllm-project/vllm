@@ -716,8 +716,11 @@ class ParallelEngramEmbedding(nn.Module):
         weight, scales = self._storage()
         # The table dwarfs TLB reach, so a persistent grid near the SM count
         # beats one program per row; halve it to leave SMs for the main stream.
-        tiles = triton.cdiv(rows, 16)
-        grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
+        max_grid = self._num_sms // 2 if background else self._num_sms
+        # Spread small decode batches over more SMs without adding loop iterations.
+        block_rows = 2 if rows <= min(128, 2 * max_grid) else 16
+        tiles = triton.cdiv(rows, block_rows)
+        grid = min(tiles, max_grid)
         _engram_lookup_kernel[(grid,)](
             weight,
             scales,
@@ -733,7 +736,7 @@ class ParallelEngramEmbedding(nn.Module):
             TOTAL_HEADS=self.n_hash_cols,
             DIM=self.dim,
             QUANT_BLOCK=self.block_size,
-            BLOCK_R=16,
+            BLOCK_R=block_rows,
             GRID=grid,
         )
 

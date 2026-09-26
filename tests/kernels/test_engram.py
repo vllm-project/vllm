@@ -680,15 +680,24 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_engram_lookup_reuses_jit_across_token_shapes():
-    """Runtime token counts and launch grids must share one JIT variant."""
+    """Token counts and grids reuse the small-batch and persistent variants."""
     layer = _make_embedding(cpu_offload=False)
     kernel = engram_ops._engram_lookup_kernel
     kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
     kernel_cache.clear()
 
+    for num_tokens in (1, 256):
+        ids = torch.zeros(num_tokens, 24, dtype=torch.int32, device="cuda")
+        out = torch.empty(
+            num_tokens, 24, layer.dim, dtype=torch.bfloat16, device="cuda"
+        )
+        layer.lookup(ids, out)
+    num_variants = len(kernel_cache)
+    assert 1 <= num_variants <= 2
+
     cache_sizes = []
     for background in (False, True):
-        for num_tokens in (1, 7, 256):
+        for num_tokens in (1, 2, 4, 7, 16, 256):
             ids = torch.zeros(num_tokens, 24, dtype=torch.int32, device="cuda")
             out = torch.empty(
                 num_tokens,
@@ -700,7 +709,7 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
             layer.lookup(ids, out, background=background)
             cache_sizes.append(len(kernel_cache))
 
-    assert cache_sizes == [1] * len(cache_sizes)
+    assert cache_sizes == [num_variants] * len(cache_sizes)
 
 
 @pytest.mark.skipif(
@@ -708,7 +717,7 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 )
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+@pytest.mark.parametrize("num_tokens", [0, 1, 2, 4, 5, 6, 7, 256])
 def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
@@ -878,9 +887,12 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
     [(False, None), (True, None), (True, "producer"), (True, "lookup")],
 )
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
-def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
+@pytest.mark.parametrize("num_tokens", [4, 64])
+def test_engram_prepared_rows_survive_graph_breaks(
+    cpu_offload, capture, delay, num_tokens
+):
     """Temporary lookup IDs survive allocator reuse and graph replay."""
-    _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
+    _run_engram_prepared_rows(cpu_offload, capture, delay=delay, num_tokens=num_tokens)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -923,7 +935,13 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, delay=None
+    cpu_offload,
+    capture,
+    tp_size=1,
+    rank=0,
+    use_sequence_parallel=False,
+    delay=None,
+    num_tokens=None,
 ):
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,
@@ -939,7 +957,9 @@ def _run_engram_prepared_rows(
             lookup(indices, out, background=background)
 
         layer.lookup = delayed_lookup
-    cols, num_tokens = (23, 65) if use_sequence_parallel else (24, 64)
+    cols = 23 if use_sequence_parallel else 24
+    if num_tokens is None:
+        num_tokens = 65 if use_sequence_parallel else 64
     layer.n_hash_cols = cols
     layer.tp_size = tp_size
     layer.part_n_hash_cols = (cols + tp_size - 1) // tp_size
