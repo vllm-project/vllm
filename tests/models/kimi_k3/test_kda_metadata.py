@@ -504,6 +504,86 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
     )
 
 
+@pytest.mark.parametrize(
+    ("batch", "num_decode_draft_tokens", "is_prefilling", "use_recoverssm"),
+    [
+        pytest.param(
+            BatchSpec(seq_lens=[50, 30], query_lens=[3, 3]),
+            [2, 2],
+            [False, False],
+            False,
+            id="pure-spec-decode",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3]),
+            [-1, -1, 2],
+            [True, True, False],
+            True,
+            id="recoverssm-mixed-prefill-and-spec-decode",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[40, 30], query_lens=[1, 1]),
+            None,
+            [False, False],
+            False,
+            id="regular-decode",
+        ),
+    ],
+)
+def test_cross_group_build(
+    batch: BatchSpec,
+    num_decode_draft_tokens: list[int] | None,
+    is_prefilling: list[bool],
+    use_recoverssm: bool,
+):
+    """A second KV cache group of the same pass shares the first group's
+    batch-level metadata and builds only its own state indices."""
+    first, second, ref = (
+        _make_builder(
+            KimiK3KDAMetadataBuilder,
+            num_speculative_tokens=2,
+            full_cuda_graph=False,
+            use_recoverssm=use_recoverssm,
+        )
+        for _ in range(3)
+    )
+    kwargs: dict[str, torch.Tensor] = {}
+    if num_decode_draft_tokens is not None:
+        kwargs = {
+            "num_decode_draft_tokens_cpu": torch.tensor(
+                num_decode_draft_tokens, dtype=torch.int32
+            ),
+            "num_accepted_tokens": torch.ones(batch.batch_size, dtype=torch.int32),
+        }
+    cache: dict = {}
+    first_common, second_common = (
+        create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+            is_prefilling=torch.tensor(is_prefilling), _cross_group_cache=cache
+        )
+        for _ in range(2)
+    )
+    first_meta = first.build(0, first_common, **kwargs)
+    meta = second.build(0, second_common, **kwargs)
+    expected = ref.build(0, second_common.replace(_cross_group_cache=None), **kwargs)
+
+    state_fields = (
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+        "recoverssm_commit",
+        "checkpoint",
+    )
+    for field in fields(KimiK3KDAMetadata):
+        actual = getattr(meta, field.name)
+        if field.name == "recoverssm_context":
+            assert actual is second.recoverssm_context
+        elif field.name not in state_fields:
+            assert actual is getattr(first_meta, field.name)
+        elif field.name == "recoverssm_commit" and actual is not None:
+            torch.testing.assert_close(vars(actual), vars(expected.recoverssm_commit))
+        else:
+            torch.testing.assert_close(actual, getattr(expected, field.name))
+
+
 def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():
     batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
     common_attn_metadata = create_common_attn_metadata(
