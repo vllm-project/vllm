@@ -60,11 +60,11 @@ _BAD_SF_CODES = {0, 1, 3, 4}
 
 # Audio decoding backends selectable via `load_audio(backend=...)` or
 # `--media-io-kwargs '{"audio": {"audio_backend": ...}}'`.
-# "auto" tries soundfile, then torchcodec, then PyAV.
+# "auto" tries torchcodec, then soundfile, then PyAV.
 AUDIO_BACKENDS = ("auto", "soundfile", "pyav", "torchcodec")
 
 # Raised as ImportError when the torchcodec backend cannot be used, so
-# `load_audio(backend="auto")` can continue to PyAV.
+# `load_audio(backend="auto")` falls back to the soundfile → PyAV chain.
 _TORCHCODEC_UNAVAILABLE_MSG = (
     "torchcodec audio backend is unavailable (requires the torchcodec "
     "package and a system ffmpeg installation)"
@@ -73,6 +73,11 @@ _TORCHCODEC_UNAVAILABLE_MSG = (
 # Slack on the torchcodec decode window when enforcing `max_duration_s`, so an
 # over-long stream is rejected rather than truncated to the limit.
 _DURATION_GUARD_MARGIN_S = 1.0
+
+# Largest Vorbis block (window) size in samples. Trailing encoder padding is
+# shorter than one block, which bounds the correction `load_audio_torchcodec`
+# applies for FFmpeg < 5.0's missing Ogg end_trimming.
+_VORBIS_MAX_BLOCK_SAMPLES = 8192
 
 
 def load_audio_pyav(
@@ -364,6 +369,20 @@ def load_audio_torchcodec(
             "audio or video file (e.g. a complete WAV, MP3, or MP4)."
         ) from e
 
+    # FFmpeg < 5.0 does not trim trailing Vorbis encoder padding (Ogg
+    # end_trimming landed in FFmpeg 5.0), so on those builds the decoded PCM
+    # runs past the end of the stream by up to one Vorbis block. For Vorbis
+    # the container duration comes from the final Ogg page's granule position
+    # and is exactly the valid sample count, so the tail can be trimmed down
+    # to it. Only trim a plausible padding amount: a larger mismatch means
+    # the metadata disagrees with the stream, and trimming would cut real
+    # audio.
+    if metadata.codec == "vorbis" and metadata.duration_seconds is not None:
+        expected_samples = round(metadata.duration_seconds * samples.sample_rate)
+        padding = samples.data.shape[-1] - expected_samples
+        if 0 < padding <= _VORBIS_MAX_BLOCK_SAMPLES:
+            samples.data = samples.data[..., :expected_samples]
+
     # Authoritative post-decode checks: the metadata estimates above can be
     # bypassed by a container that lies about its duration or size.
     if max_duration_s is not None:
@@ -425,8 +444,8 @@ def load_audio(
         max_decode_bytes: Reject audio that would decode to more than this
             many bytes.
         backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
-            ``"auto"``, which tries soundfile, then torchcodec, then PyAV;
-            the other values select a single
+            ``"auto"``, which tries torchcodec, then falls back to the
+            soundfile → PyAV chain; the other values select a single
             backend with no fallback.
 
     """
@@ -446,11 +465,27 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
 
-    # Keep soundfile first to preserve decoding and padding of supported formats.
-    # "auto": soundfile → torchcodec → PyAV. Each backend is called by its
+    # "auto": torchcodec → soundfile → PyAV. Each backend is called by its
     # bare name so tests that monkeypatch it take effect. Only an ImportError
     # (backend missing) or, for soundfile, an unsupported-format error defers
     # to the next; any other error (decode failure, guard ValueError) raises.
+    if isinstance(path, BytesIO):
+        path.seek(0)
+    try:
+        return load_audio_torchcodec(
+            path,
+            sr=sr,
+            mono=mono,
+            max_duration_s=max_duration_s,
+            max_decode_bytes=max_decode_bytes,
+        )
+    except ImportError as exc:
+        # Decode errors don't defer: torchcodec is FFmpeg-based like PyAV, so
+        # retrying would just fail the same way.
+        logger.warning(
+            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
+        )
+
     if isinstance(path, BytesIO):
         path.seek(0)
     try:
@@ -473,21 +508,6 @@ def load_audio(
         # recognised) since PyAV would hit the same corruption.
         if exc.code not in _BAD_SF_CODES:
             raise
-
-    if isinstance(path, BytesIO):
-        path.seek(0)
-    try:
-        return load_audio_torchcodec(
-            path,
-            sr=sr,
-            mono=mono,
-            max_duration_s=max_duration_s,
-            max_decode_bytes=max_decode_bytes,
-        )
-    except ImportError as exc:
-        # Decode errors don't defer: torchcodec is FFmpeg-based like PyAV, so
-        # retrying would just fail the same way.
-        logger.warning("torchcodec unavailable (%r); falling back to PyAV.", exc)
 
     # PyAV is terminal: nothing left to fall back to. Normalize an FFmpeg
     # failure to ValueError; let a missing soundfile/PyAV surface its
