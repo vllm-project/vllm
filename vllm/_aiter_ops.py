@@ -1894,6 +1894,11 @@ def _sync_aiter_situv2_moe_env() -> None:
         os.environ.pop("AITER_SITUV2_A4W4", None)
 
 
+_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
+_GFX950_C4A_NATIVE_MAX_ROWS = 256
+_GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -2472,6 +2477,100 @@ class rocm_aiter_ops:
     def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
         """Whether AITER has DSV4 native-I384 configs through the given M."""
         return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
+
+    @classmethod
+    @if_aiter_supported
+    def is_indexer_top_k_enabled(cls) -> bool:
+        """gfx950 is the only arch with tuned AITER indexer top-k kernels."""
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and on_gfx950()
+
+    @classmethod
+    def is_indexer_top_k_supported(
+        cls,
+        *,
+        is_prefill: bool,
+        compress_ratio: int,
+        num_rows: int,
+        max_valid_seq_len: int | None = None,
+    ) -> bool:
+        """Whether AITER's sparse indexer top-k beats the in-tree kernel for
+        this shape."""
+        if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
+            return False
+
+        if not is_prefill:
+            assert max_valid_seq_len is not None
+            # AITER v0.1.19 decode is one-block only. This measured gfx950
+            # FP32/k=1024 compressed-row boundary is independent of the native
+            # split-count boundary in sampler.cu.
+            if (
+                num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
+                and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
+            ):
+                return False
+
+        return True
+
+    @staticmethod
+    def dsv4_indexer_prefers_native_top_k(
+        *,
+        num_rows: int,
+        num_columns: int,
+        topk_tokens: int,
+    ) -> bool:
+        """The in-tree decode kernel's measured advantage window over AITER.
+        Tuned on DSV4's compressed-KV logits, so it applies to that indexer
+        only."""
+        return (
+            topk_tokens == 512
+            and 0 < num_rows <= 384
+            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
+        )
+
+    @staticmethod
+    def indexer_top_k_decode(
+        logits: torch.Tensor,
+        next_n: int,
+        seq_lens: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        from aiter.ops.topk import top_k_per_row_decode
+
+        top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            topk_indices,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            k=topk_tokens,
+        )
+
+    @staticmethod
+    def indexer_top_k_prefill(
+        logits: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        from aiter.ops.topk import top_k_per_row_prefill
+
+        top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            None,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            k=topk_tokens,
+        )
 
     @staticmethod
     def register_ops_once() -> None:
