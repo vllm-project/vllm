@@ -452,6 +452,34 @@ steps:
     - tests/kernels/test_gemm_rs_ar.py
   commands:
     - pytest -v -s tests/kernels/test_gemm_rs_ar.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) GEMM-RS/AR"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 20
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/distributed.yaml
+      - tests/kernels/test_gemm_rs_ar.py
+      - tests/kernels/test_rocm_gemm_rs_ar.py
+      - tests/conftest.py
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/model_executor/layers/linear.py
+      - vllm/model_executor/layers/utils.py
+      - vllm/model_executor/layers/quantization/online/
+      - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/_custom_ops.py
+      - csrc/rocm/skinny_gemms.cu
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
 
 - label: ":nvidia: (L4) Distributed 2-Node"
   key: 2-node-test-4-gpus

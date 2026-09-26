@@ -2973,6 +2973,33 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_producer.py
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
 
+- label: ":amd: (MI355) GEMM-RS/AR"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - .buildkite/test-amd.yaml
+  - tests/kernels/test_gemm_rs_ar.py
+  - tests/kernels/test_rocm_gemm_rs_ar.py
+  - tests/conftest.py
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/model_executor/layers/quantization/online/
+  - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/distributed/
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - csrc/rocm/skinny_gemms.cu
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
+
 - label: ":amd: (MI355) Distributed DP Basic" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
