@@ -5,6 +5,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -87,6 +88,54 @@ def test_multiproc_executor_worker_termination_timeout(
     proc = _FakeProcess(clock, exits_at=exits_at)
     executor._ensure_worker_termination([proc])
     assert proc.terminate_called is expected_terminate
+
+
+def test_worker_monitor_ignores_spurious_sentinel_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Process:
+        sentinel = 17
+        name = "Worker"
+
+        def __init__(self):
+            self.exitcode: int | None = None
+
+    proc = Process()
+    executor = object.__new__(MultiprocExecutor)
+    executor.workers = [SimpleNamespace(proc=proc)]
+    executor.shutting_down = False
+    executor.is_failed = False
+    events = []
+    executor.shutdown = lambda: events.append(("shutdown", proc.exitcode))
+    executor.failure_callback = lambda: events.append(("callback", proc.exitcode))
+
+    wait_calls = []
+
+    def report_ready(*_args, **_kwargs):
+        wait_calls.append(1)
+        return [proc.sentinel]
+
+    def finish_process(seconds):
+        events.append(("sleep", seconds))
+        proc.exitcode = 1
+
+    monkeypatch.setattr(
+        multiproc_executor_module.multiprocessing.connection,
+        "wait",
+        report_ready,
+    )
+    monkeypatch.setattr(
+        multiproc_executor_module.time,
+        "sleep",
+        finish_process,
+    )
+
+    executor.start_worker_monitor(inline=True)
+
+    assert wait_calls == [1]
+    assert events == [("sleep", 1), ("shutdown", 1), ("callback", 1)]
+    assert executor.is_failed
+    assert executor.failure_callback is None
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
