@@ -244,6 +244,11 @@ class DeepseekSparseSWAMetadata:
     flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
+    # Decode topk global slot ids and lengths keyed by (index source layer,
+    # compress ratio); every layer consuming that source reuses them.
+    decode_global_topk_cache: dict[
+        tuple[int, int], tuple[torch.Tensor, torch.Tensor]
+    ] = field(default_factory=dict)
 
     def get_prefill_chunk_plan(
         self,
@@ -862,6 +867,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         metadata.tile_sched_c1a = tile_sched[_LAYER_TYPE_C1A]
         metadata.tile_sched_c2a = tile_sched[_LAYER_TYPE_C2A]
         metadata.flashinfer_sparse_index_cache.clear()
+        metadata.decode_global_topk_cache.clear()
 
     def build_tile_scheduler(
         self, num_decode_tokens: int

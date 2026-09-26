@@ -29,12 +29,14 @@ from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
+    compute_global_topk_indices_and_lens,
     fused_indexer_q_rope_quant,
     indexer_k_norm_rope_store,
 )
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -1133,6 +1135,35 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert self.compressed_cache_prefix is not None
         source = self._static_forward_context[self.compressed_cache_prefix]
         return source.kv_cache
+
+    def _decode_global_topk(
+        self,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        attn_metadata: "DeepseekV4FlashMLAMetadata",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Global slot ids and lengths of the decode topk indices this layer's
+        index source published.
+
+        Every consumer of one index source maps the same local indices through
+        the same block table, so the first one per step builds them and the
+        rest read the per-step metadata cache.
+        """
+        assert self.index_source_layer_id is not None
+        assert self.topk_indices_buffer is not None
+        assert swa_metadata.is_valid_token is not None
+        key = (self.index_source_layer_id, self.compress_ratio)
+        cached = swa_metadata.decode_global_topk_cache.get(key)
+        if cached is None:
+            num_decode_tokens = swa_metadata.num_decode_tokens
+            cached = compute_global_topk_indices_and_lens(
+                self.topk_indices_buffer[:num_decode_tokens],
+                swa_metadata.token_to_req_indices,
+                attn_metadata.block_table[: swa_metadata.num_decodes],
+                attn_metadata.block_size // self.compress_ratio,
+                swa_metadata.is_valid_token[:num_decode_tokens],
+            )
+            swa_metadata.decode_global_topk_cache[key] = cached
+        return cached
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
