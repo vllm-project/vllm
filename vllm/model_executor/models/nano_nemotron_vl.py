@@ -16,7 +16,7 @@ from typing import Annotated, Literal, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -34,6 +34,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsMultiModalPruning,
@@ -238,7 +239,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_mm_config().video_pruning_rate
 
     @property
-    def sound_config(self) -> PretrainedConfig | None:
+    def sound_config(self) -> PreTrainedConfig | None:
         return getattr(self.get_hf_config(), "sound_config", None)
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -928,6 +929,7 @@ class NemotronH_Nano_VL_V2(
     nn.Module,
     HasInnerState,
     IsHybrid,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsMultiModalPruning,
     SupportsLoRA,

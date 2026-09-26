@@ -36,7 +36,7 @@ def temporary_environ(env_vars):
 model_backends_full_cudagraph = []
 
 # deepseek-ai/DeepSeek-V2-Lite with MLA
-MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA"]
+MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA", "FlashInferMLA"]
 for mla_backend in MLA_backends:
     model_backends_full_cudagraph.append(
         ("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend])
@@ -53,26 +53,27 @@ for backend_config in other_backend_configs:
 @pytest.fixture(scope="class")
 def llm_pair(request):
     model, backend_config, use_inductor_graph_partition = request.param
-    backend_config.comp_config["use_inductor_graph_partition"] = (
-        use_inductor_graph_partition
-    )
-
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
 
+    backend = AttentionBackendEnum[backend_config.attention_config["backend"]]
+    if current_platform.is_rocm() and backend not in (
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+    ):
+        pytest.skip(f"{backend_config.name} is a CUDA-only attention backend")
+    if backend == AttentionBackendEnum.ROCM_ATTN and not current_platform.is_rocm():
+        pytest.skip("ROCM_ATTN requires ROCm")
+
     # Dynamically skip test if GPU capability is not met
-    if (
-        backend_config.specific_gpu_arch
-        and backend_config.specific_gpu_arch != current_platform.get_device_capability()
+    if backend_config.specific_gpu_arch and (
+        not current_platform.is_cuda()
+        or backend_config.specific_gpu_arch != current_platform.get_device_capability()
     ):
         if backend_config.specific_gpu_arch == (9, 0):
             pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
         elif backend_config.specific_gpu_arch == (10, 0):
             pytest.skip("Only Blackwell GPUs support Cutlass MLA")
-
-    # FlashInfer is not supported on ROCm
-    if backend_config == AttentionBackendEnum.FLASHINFER and current_platform.is_rocm():
-        pytest.skip("FlashInfer is not supported on ROCm")
 
     env_vars = {
         # Force native sampler to avoid potential nondeterminism in FlashInfer
@@ -86,7 +87,11 @@ def llm_pair(request):
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
-            compilation_config=CompilationConfig(**backend_config.comp_config),
+            attention_config=backend_config.attention_config,
+            compilation_config=CompilationConfig(
+                **backend_config.comp_config,
+                use_inductor_graph_partition=use_inductor_graph_partition,
+            ),
             generation_config="vllm",
             seed=42,
         )
@@ -96,8 +101,10 @@ def llm_pair(request):
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
+            attention_config=backend_config.attention_config,
             compilation_config=CompilationConfig(
-                cudagraph_mode=CUDAGraphMode.PIECEWISE
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                use_inductor_graph_partition=use_inductor_graph_partition,
             ),
             generation_config="vllm",
             seed=42,
@@ -117,7 +124,10 @@ def llm_pair(request):
 @pytest.mark.parametrize(
     "llm_pair",
     [
-        pytest.param((model, backend_config, use_inductor_graph_partition))
+        pytest.param(
+            (model, backend_config, use_inductor_graph_partition),
+            id=f"{backend_config.name}-partition={use_inductor_graph_partition}",
+        )
         for model, backend_config in model_backends_full_cudagraph
         for use_inductor_graph_partition in [True, False]
     ],
