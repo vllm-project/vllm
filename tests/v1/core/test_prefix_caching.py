@@ -5624,6 +5624,7 @@ def test_prefix_cache_stats_no_sparse_retention_miss_on_clean_hit():
         "1", tokens + [8 for _ in range(block_size)], block_size, sha256
     )
     _, num_hits, boundary = manager.get_computed_blocks(req1)
+    assert num_hits == 4 * block_size
     req1.shared_prefix_boundary = boundary
 
     manager.record_prefix_cache_stats(req1, num_hits)
