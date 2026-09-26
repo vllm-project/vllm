@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from tests.entrypoints.serve.dev.rlhf.conftest import (
+from tests.entrypoints.rlhf.conftest import (
     cached_tokens,
     completion_with_cache_details,
     gen,

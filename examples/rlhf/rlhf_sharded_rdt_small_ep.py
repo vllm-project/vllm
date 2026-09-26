@@ -44,7 +44,7 @@ What it checks (a smoke test, not a numerical equivalence check):
   - generation is UNCHANGED by a second sync — replay is stable.
 
 Run:
-    python examples/rl/rlhf_sharded_rdt_small_ep.py
+    python examples/rlhf/rlhf_sharded_rdt_small_ep.py
 
 Needs 4 GPUs on one node, each big enough for the whole model, since every rank
 builds it before ``fully_shard`` splits it: the default is ~29 GiB in bf16, so

@@ -7,7 +7,7 @@ reproducible results:
   or enable [batch invariance](../features/batch_invariance.md) to make the outputs insensitive to scheduling.
 - In online mode, you can only enable [batch invariance](../features/batch_invariance.md).
 
-Example: [examples/features/batch_invariance/reproducibility_offline.py](../../examples/features/batch_invariance/reproducibility_offline.py)
+Example: [examples/rlhf/batch_invariance/reproducibility_offline.py](../../examples/rlhf/batch_invariance/reproducibility_offline.py)
 
 !!! warning
 

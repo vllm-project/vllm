@@ -58,7 +58,7 @@ def _json_safe_update_payload(
 class HTTPVLLMWeightSyncClient:
     """Talks to a vLLM server over the RLHF HTTP routes.
 
-    Mirrors `vllm/entrypoints/serve/dev/rlhf/api_router.py`:
+    Mirrors `vllm/entrypoints/rlhf/online/api_router.py`:
     `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`,
     `/finish_weight_update`.
     """
