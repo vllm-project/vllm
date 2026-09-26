@@ -234,10 +234,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes = 0
         else:
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            # The mask stays a tensor: it is handed to async_tensor_h2d below
+            # and indexes device tensors later. These two quantities are plain
+            # scalars though, so read them through zero-copy numpy views rather
+            # than a chain of torch dispatches over a handful of elements.
+            spec_sequence_masks_np = spec_sequence_masks_cpu.numpy()
+            num_spec_decodes = int(spec_sequence_masks_np.sum())
             if (
                 num_spec_decodes == 0
-                or num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
+                or int(
+                    num_decode_draft_tokens_cpu.numpy()[spec_sequence_masks_np].sum()
+                )
                 == 0
             ):
                 num_spec_decodes = 0
@@ -272,9 +279,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             # Exclude trailing padding from both prefill counts.
             if num_prefills:
-                num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
+                # Scalars again: query_lens_cpu itself is still needed as a
+                # tensor above, but these reductions are not.
+                num_prefills -= int((query_lens_cpu.numpy()[num_decodes:] == 0).sum())
                 num_prefill_tokens = (
-                    int(query_start_loc_cpu[num_decodes + num_prefills])
+                    int(query_start_loc_cpu.numpy()[num_decodes + num_prefills])
                     - num_decode_tokens
                 )
             num_spec_decode_tokens = 0
@@ -299,18 +308,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 ):
                     uniform_spec_sequence_length = first_spec_sequence_length
 
-            # Use CPU tensors to avoid CPU-GPU sync
-            non_spec_query_lens_cpu = query_lens_cpu[non_spec_sequence_masks_cpu]
-            num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
+            # Use CPU tensors to avoid CPU-GPU sync. query_lens_cpu and the two
+            # masks stay tensors -- they index device tensors further down --
+            # but everything derived from them here is a scalar, so derive it
+            # from numpy views of the same memory.
+            query_lens_np = query_lens_cpu.numpy()
+            non_spec_query_lens_np = query_lens_np[~spec_sequence_masks_np]
+            num_decodes = int((non_spec_query_lens_np == 1).sum())
             # Exclude zero-length padded sequences from prefill count.
-            num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
-            num_prefills = non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len
+            num_zero_len = int((non_spec_query_lens_np == 0).sum())
+            num_prefills = non_spec_query_lens_np.shape[0] - num_decodes - num_zero_len
             num_decode_tokens = num_decodes
-            num_prefill_tokens = (
-                non_spec_query_lens_cpu.sum().item() - num_decode_tokens
-            )
+            num_prefill_tokens = int(non_spec_query_lens_np.sum()) - num_decode_tokens
             num_spec_decode_tokens = (
-                query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
+                int(query_lens_np.sum()) - num_prefill_tokens - num_decode_tokens
             )
 
             # num_decodes and num_spec_decodes are mutually exclusive.

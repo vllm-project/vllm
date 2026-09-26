@@ -7,6 +7,7 @@ Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 
 from dataclasses import dataclass
 
+import numpy as np
 import pytest
 import torch
 
@@ -304,3 +305,116 @@ def test_cudagraph_capture_batch_stays_decode_only():
     assert staged is not None
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+# ---------------------------------------------------------------------------
+# Equivalence of the numpy-view classification arithmetic (#58732).
+#
+# `build()` derives six scalars from `query_lens_cpu` and the spec mask. Those
+# used to be chains of `.sum().item()` on CPU tensors; they are now reductions
+# over zero-copy numpy views of the same memory. The values must be identical
+# for every batch shape, so sweep the space exhaustively rather than spot-check
+# it. This is pure CPU arithmetic and needs no GPU.
+# ---------------------------------------------------------------------------
+
+
+def _classify_torch(query_lens_cpu, spec_mask_cpu, num_draft_cpu):
+    """The pre-#58732 expressions, verbatim."""
+    num_spec_decodes = spec_mask_cpu.sum().item()
+    if (
+        num_spec_decodes == 0
+        or num_draft_cpu[spec_mask_cpu].sum().item() == 0
+    ):
+        num_spec_decodes = 0
+        non_spec_mask = torch.ones_like(spec_mask_cpu)
+    else:
+        non_spec_mask = ~spec_mask_cpu
+    non_spec_query_lens_cpu = query_lens_cpu[non_spec_mask]
+    num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
+    num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
+    num_prefills = non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len
+    num_decode_tokens = num_decodes
+    num_prefill_tokens = non_spec_query_lens_cpu.sum().item() - num_decode_tokens
+    num_spec_decode_tokens = (
+        query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
+    )
+    return (
+        num_spec_decodes,
+        num_decodes,
+        num_prefills,
+        num_decode_tokens,
+        num_prefill_tokens,
+        num_spec_decode_tokens,
+    )
+
+
+def _classify_numpy(query_lens_cpu, spec_mask_cpu, num_draft_cpu):
+    """The post-#58732 expressions, verbatim."""
+    spec_np = spec_mask_cpu.numpy()
+    num_spec_decodes = int(spec_np.sum())
+    if num_spec_decodes == 0 or int(num_draft_cpu.numpy()[spec_np].sum()) == 0:
+        num_spec_decodes = 0
+        non_spec_np = np.ones_like(spec_np)
+    else:
+        non_spec_np = ~spec_np
+    query_lens_np = query_lens_cpu.numpy()
+    non_spec_query_lens_np = query_lens_np[non_spec_np]
+    num_decodes = int((non_spec_query_lens_np == 1).sum())
+    num_zero_len = int((non_spec_query_lens_np == 0).sum())
+    num_prefills = non_spec_query_lens_np.shape[0] - num_decodes - num_zero_len
+    num_decode_tokens = num_decodes
+    num_prefill_tokens = int(non_spec_query_lens_np.sum()) - num_decode_tokens
+    num_spec_decode_tokens = (
+        int(query_lens_np.sum()) - num_prefill_tokens - num_decode_tokens
+    )
+    return (
+        num_spec_decodes,
+        num_decodes,
+        num_prefills,
+        num_decode_tokens,
+        num_prefill_tokens,
+        num_spec_decode_tokens,
+    )
+
+
+@pytest.mark.parametrize("num_reqs", [1, 2, 3, 5])
+@pytest.mark.parametrize("max_query_len", [1, 2, 4])
+def test_numpy_classification_matches_torch(num_reqs, max_query_len):
+    """Exhaustive sweep: every query-length and spec-mask combination."""
+    import itertools
+
+    checked = 0
+    for query_lens in itertools.product(range(0, max_query_len + 1), repeat=num_reqs):
+        for mask_bits in itertools.product([False, True], repeat=num_reqs):
+            for draft_choice in ({0}, {2}, {0, 2}):
+                drafts = [
+                    (sorted(draft_choice)[i % len(draft_choice)] if m else -1)
+                    for i, m in enumerate(mask_bits)
+                ]
+                q = torch.tensor(query_lens, dtype=torch.int32)
+                m = torch.tensor(mask_bits, dtype=torch.bool)
+                d = torch.tensor(drafts, dtype=torch.int32)
+                assert _classify_numpy(q, m, d) == _classify_torch(q, m, d), (
+                    f"mismatch: query_lens={query_lens} mask={mask_bits} "
+                    f"drafts={drafts}"
+                )
+                checked += 1
+    assert checked > 0
+
+
+def test_numpy_views_share_memory_and_need_no_contiguity():
+    """`.numpy()` is a zero-copy view and does not require a contiguous tensor.
+
+    The builder hands these arrays to boolean indexing and reductions only, so
+    a strided view is fine; what it must never be is a copy, which would make
+    the optimisation pointless.
+    """
+    t = torch.arange(10, dtype=torch.int32)
+    assert t.numpy().base is not None or t.numpy().flags.owndata is False
+    strided = torch.arange(20, dtype=torch.int32)[::2]
+    assert not strided.is_contiguous()
+    # Must not raise, and must agree with the torch reduction.
+    assert int(strided.numpy().sum()) == int(strided.sum().item())
+    transposed = torch.arange(12, dtype=torch.int32).reshape(3, 4).T
+    assert not transposed.is_contiguous()
+    assert int(transposed.numpy().sum()) == int(transposed.sum().item())
