@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import defaultdict
 from types import SimpleNamespace
 
 import pytest
@@ -255,7 +256,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
     worker.world_size = 4
-    worker.moriio_wrapper = FakeWrapper()
+    worker.moriio_wrapper = FakeWrapper()  # type: ignore[assignment]
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
@@ -298,12 +299,17 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
         def shutdown(self):
             pass
 
+    wrapper = FakeWrapper()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
-    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
-    worker.moriio_wrapper = FakeWrapper()
+    worker.moriio_config = SimpleNamespace(  # type: ignore[assignment]
+        recv_abort_timeout=600.0
+    )
+    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
     # A layer maps to the list of reads posted for it (a KDA layer posts two).
-    worker._recving_transfers = {"req": {"layer0": [DoneStatus(), DoneStatus()]}}
+    worker._recving_transfers = defaultdict(
+        dict, {"req": {"layer0": [DoneStatus(), DoneStatus()]}}
+    )
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-release")
     }
@@ -314,7 +320,7 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     worker._invalid_block_ids = set()
 
     assert worker._pop_done_transfers() == {"tx-release"}
-    assert worker.moriio_wrapper.sent == [
+    assert wrapper.sent == [
         (
             "tx-release",
             "127.0.0.1",
@@ -345,10 +351,11 @@ def test_aborted_read_without_local_blocks_only_releases_remote_blocks():
         def shutdown(self):
             pass
 
+    wrapper = FakeWrapper()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.mode = MoRIIOMode.READ
     worker.world_size = 8
-    worker.moriio_wrapper = FakeWrapper()
+    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
 
     worker._read_blocks(
         local_block_ids=[],
@@ -363,7 +370,7 @@ def test_aborted_read_without_local_blocks_only_releases_remote_blocks():
         chosen_tp=2,
     )
 
-    assert worker.moriio_wrapper.sent == [
+    assert wrapper.sent == [
         (
             "tx-aborted",
             "127.0.0.1",
@@ -398,13 +405,16 @@ def test_read_completion_waits_for_every_posted_read():
         def shutdown(self):
             pass
 
+    wrapper = FakeWrapper()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
-    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
-    worker.moriio_wrapper = FakeWrapper()
-    worker._recving_transfers = {
-        "req": {"kda_layer": [Status(done=True), Status(done=False)]}
-    }
+    worker.moriio_config = SimpleNamespace(  # type: ignore[assignment]
+        recv_abort_timeout=600.0
+    )
+    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
+    worker._recving_transfers = defaultdict(
+        dict, {"req": {"kda_layer": [Status(done=True), Status(done=False)]}}
+    )
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-pending")
     }
@@ -414,7 +424,7 @@ def test_read_completion_waits_for_every_posted_read():
 
     assert worker._pop_done_transfers() == set()
     assert "req" in worker._recving_transfers
-    assert worker.moriio_wrapper.sent == []
+    assert wrapper.sent == []
 
 
 @pytest.mark.parametrize(
@@ -444,7 +454,7 @@ def test_hybrid_step_barrier_fails_closed(monkeypatch):
     worker._has_mamba = True
     worker._reads_issued_this_step = [object()]
     worker._mamba_reads_this_step = [object()]
-    worker.moriio_wrapper = FailingWrapper()
+    worker.moriio_wrapper = FailingWrapper()  # type: ignore[assignment]
     monkeypatch.setattr(
         "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.get_forward_context",
         lambda: SimpleNamespace(cudagraph_runtime_mode=None),
