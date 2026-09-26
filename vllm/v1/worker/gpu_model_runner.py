@@ -210,6 +210,10 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.eplb_utils import (
+    draft_model_supports_eplb,
+    eplb_draft_model_name,
+)
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -5286,25 +5290,34 @@ class GPUModelRunner(
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
+                    drafter_moe_model = None
+                    if self.parallel_config.enable_eplb and hasattr(
+                        self.drafter, "model"
+                    ):
+                        drafter_moe_model = get_mixture_of_experts_model(
+                            self.drafter.model
+                        )
+                        if not draft_model_supports_eplb(
+                            self.vllm_config.speculative_config,
+                            drafter_moe_model,
+                        ):
+                            drafter_moe_model = None
+
                     if (
                         self.parallel_config.enable_eplb
                         and hasattr(self.drafter, "model")
-                        and (
-                            drafter_moe_model := get_mixture_of_experts_model(
-                                self.drafter.model
-                            )
-                        )
-                        is not None
+                        and drafter_moe_model is not None
                     ):
                         assert not self.parallel_config.enable_elastic_ep, (
                             "Elastic EP is not supported with drafter model."
                         )
                         spec_config = self.vllm_config.speculative_config
                         assert spec_config is not None
-                        assert spec_config.draft_model_config is not None
+                        draft_model_config = spec_config.draft_model_config
+                        assert draft_model_config is not None
                         logger.info_once(
                             "EPLB is enabled for MoE part of drafter model %s.",
-                            spec_config.draft_model_config.model,
+                            draft_model_config.model,
                         )
                         if self.eplb_state is None:
                             self.eplb_state = EplbState(
@@ -5312,7 +5325,8 @@ class GPUModelRunner(
                             )
                         self.eplb_state.add_model(
                             drafter_moe_model,
-                            spec_config.draft_model_config,
+                            draft_model_config,
+                            model_name=eplb_draft_model_name(draft_model_config),
                         )
                         assert hasattr(self.drafter, "set_eplb_state")
                         self.drafter.set_eplb_state(self.eplb_state)

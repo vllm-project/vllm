@@ -12,10 +12,31 @@ from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     get_mixture_of_experts_model,
 )
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 
 logger = init_logger(__name__)
+
+
+def eplb_draft_model_name(model_config: ModelConfig) -> str:
+    """Return the EPLB step-log display name for a draft model."""
+    return f"{model_config.model} (draft)"
+
+
+def draft_model_supports_eplb(
+    speculative_config: Any | None,
+    draft_moe_model: MixtureOfExperts | None,
+) -> bool:
+    """Return whether a draft MoE model should register with EPLB."""
+    if draft_moe_model is None:
+        return False
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return False
+    if getattr(speculative_config, "method", None) == "dspark":
+        return dspark_draft_supports_eplb(speculative_config.draft_model_config)
+    return True
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:
@@ -68,16 +89,26 @@ class EPLBController:
 
         draft_model = speculator.model
         draft_moe_model = get_mixture_of_experts_model(draft_model)
-        if draft_moe_model is None:
+        if not draft_model_supports_eplb(speculative_config, draft_moe_model):
             return False
+        assert draft_moe_model is not None
 
         assert not self.parallel_config.enable_elastic_ep, (
             "Elastic EP is not supported with draft model."
         )
         assert speculative_config is not None
-        assert speculative_config.draft_model_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        logger.info_once(
+            "EPLB is enabled for MoE part of drafter model %s.",
+            draft_model_config.model,
+        )
         assert self.state is not None
-        self.state.add_model(draft_moe_model, speculative_config.draft_model_config)
+        self.state.add_model(
+            draft_moe_model,
+            draft_model_config,
+            model_name=eplb_draft_model_name(draft_model_config),
+        )
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True

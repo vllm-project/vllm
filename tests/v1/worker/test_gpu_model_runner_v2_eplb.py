@@ -29,15 +29,21 @@ class FakeEplbState:
     def __init__(self, parallel_config: Any, device: torch.device):
         self.parallel_config = parallel_config
         self.device = device
-        self.add_model_calls: list[tuple[Any, Any]] = []
+        self.add_model_calls: list[tuple[Any, Any, str | None]] = []
         self.step_calls: list[tuple[bool, bool, bool]] = []
         self.async_started = False
         self.is_async = True
         self.built_from_mapping = False
         FakeEplbState.instances.append(self)
 
-    def add_model(self, model: Any, model_config: Any) -> None:
-        self.add_model_calls.append((model, model_config))
+    def add_model(
+        self,
+        model: Any,
+        model_config: Any,
+        *,
+        model_name: str | None = None,
+    ) -> None:
+        self.add_model_calls.append((model, model_config, model_name))
 
     def step(self, is_dummy: bool, is_profile: bool, *, log_stats: bool) -> None:
         self.step_calls.append((is_dummy, is_profile, log_stats))
@@ -99,6 +105,15 @@ def _make_runner(**overrides: Any) -> Any:
     runner.execute_model_state = None
     for key, value in overrides.items():
         setattr(runner, key, value)
+    spec_config = runner.speculative_config
+    runner._draft_workspace_lane = int(
+        spec_config is not None
+        and (
+            spec_config.use_dspark()
+            if hasattr(spec_config, "use_dspark")
+            else getattr(spec_config, "method", None) == "dspark"
+        )
+    )
     return runner
 
 
@@ -132,7 +147,7 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     assert runner.model is model
     assert runner.model_state is not None
     assert runner.eplb_state is not None
-    assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
+    assert runner.eplb_state.add_model_calls == [(model, runner.model_config, None)]
     assert runner.eplb_state.async_started is True
 
 
@@ -177,6 +192,64 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
     assert runner.eplb_state.built_from_mapping is True
     assert FakeEplbState.from_mapping_kwargs is not None
     assert FakeEplbState.from_mapping_kwargs["expanded_physical_to_logical"] is mapping
+
+
+def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
+    FakeEplbState.instances.clear()
+    target_model = SimpleNamespace(is_moe=True)
+    draft_model = SimpleNamespace(is_moe=True)
+    draft_model_config = SimpleNamespace(
+        model="dspark-draft",
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+    )
+
+    class FakeDSparkSpeculator:
+        def __init__(self):
+            self.model = draft_model
+            self.eplb_state = None
+
+        def load_model(self, target_model):
+            return None
+
+        def set_eplb_state(self, state) -> None:
+            self.eplb_state = state
+
+    monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
+    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
+    monkeypatch.setattr(mrv2, "DraftModelSpeculator", FakeDSparkSpeculator)
+    monkeypatch.setattr(
+        mrv2,
+        "get_model_loader",
+        lambda load_config: SimpleNamespace(load_model=lambda **_: target_model),
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "init_model_state",
+        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+    )
+    monkeypatch.setattr(
+        eplb,
+        "get_mixture_of_experts_model",
+        lambda model: model if getattr(model, "is_moe", False) else None,
+    )
+
+    speculator = FakeDSparkSpeculator()
+    runner = _make_runner(
+        is_last_pp_rank=False,
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=draft_model_config,
+        ),
+        speculator=speculator,
+    )
+    mrv2.GPUModelRunner.load_model(runner)
+
+    assert runner.eplb_state is not None
+    assert runner.eplb_state.add_model_calls == [
+        (draft_model, draft_model_config, "dspark-draft (draft)"),
+        (target_model, runner.model_config, None),
+    ]
+    assert speculator.eplb_state is runner.eplb_state
 
 
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):

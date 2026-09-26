@@ -77,6 +77,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -1968,23 +1969,13 @@ class DeepseekV4ForCausalLM(
         self.set_moe_parameters()
 
     def set_moe_parameters(self) -> None:
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-        self.num_moe_layers = self.config.num_hidden_layers
-        self.moe_layers: list[nn.Module] = []
-        self.moe_mlp_layers: list[DeepseekV4MoE] = []
-        example_moe: DeepseekV4MoE | None = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-            if not isinstance(layer, DeepseekV4DecoderLayer):
-                continue
-            if isinstance(layer.ffn, DeepseekV4MoE):
-                example_moe = layer.ffn
-                self.moe_mlp_layers.append(layer.ffn)
-                self.moe_layers.append(layer.ffn.experts)
-
-        self.num_moe_layers = len(self.moe_layers)
-        self.extract_moe_parameters(example_moe)
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
