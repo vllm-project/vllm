@@ -95,6 +95,10 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         """Get all data items."""
         return [self.get(idx) for idx in range(self.get_count())]
 
+    def get_item_for_reparse(self, index: int) -> object:
+        """Get an item in a representation accepted by the data parser."""
+        return self.get(index)
+
     def get_item_for_hash(self, index: int) -> object:
         return self.get(index)
 
@@ -125,9 +129,14 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
     def get(self, index: int) -> _T:
         return self._unwrap(self.data[index])
 
-    def get_item_for_hash(self, index: int) -> _T | MediaWithBytes[_T]:
-        # Return raw item for hashing (preserves original_bytes if present)
+    def _get_raw_item(self, index: int) -> _T | MediaWithBytes[_T]:
         return self.data[index]
+
+    def get_item_for_reparse(self, index: int) -> _T | MediaWithBytes[_T]:
+        return self._get_raw_item(index)
+
+    def get_item_for_hash(self, index: int) -> _T | MediaWithBytes[_T]:
+        return self._get_raw_item(index)
 
     def get_processor_data(self) -> Mapping[str, object]:
         return {f"{self.modality}s": self.get_all()}
@@ -409,7 +418,7 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
             return super()._unwrap(frames), metadata
         return super()._unwrap(item)
 
-    def get_item_for_hash(self, index: int) -> Any:
+    def _get_raw_item(self, index: int) -> Any:
         item = self.data[index]
         if isinstance(item, MediaWithBytes) and isinstance(self.metadata, list):
             metadata = self.metadata[index]
