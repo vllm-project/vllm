@@ -859,7 +859,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
         # build() narrows it to whatever the kernel actually schedules.
-        self.scheduler_metadata_buffer = torch.empty(
+        # Zeroed, not empty: when the paged-MQA gate declines to build (a
+        # compress-128 page has 2 states, which the dispatch rejects), build()
+        # returns this buffer unfilled, and that branch is now reachable on CUDA.
+        # Zeroing here rather than on the skip path is enough because the gate
+        # reads only the frozen spec's num_states plus process-constant platform
+        # state, so it cannot flip between steps: the buffer is either always
+        # written or always left at these initial zeros.
+        self.scheduler_metadata_buffer = torch.zeros(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
