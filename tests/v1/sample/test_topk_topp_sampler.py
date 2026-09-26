@@ -812,6 +812,36 @@ class TestTritonTopkTopp:
         )
         assert len(kept_idx) == pytorch_kept
 
+    # Both sizes take the split top-p pipeline (64 is its max batch). 1e9 / 0.6
+    # models the forced logit after temperature=0.6.
+    @pytest.mark.parametrize("batch_size", [4, 64], ids=["split", "split-boundary"])
+    @pytest.mark.parametrize(
+        "forced_logit", [1e9, 1e9 / 0.6], ids=["1e9", "1e9_over_temp0.6"]
+    )
+    def test_topp_keeps_forced_huge_logit(self, batch_size: int, forced_logit: float):
+        """A forced logit of huge magnitude must survive top-p.
+
+        Regression: thinking-budget forcing writes 1e9 to the end-of-thinking
+        logit. The split top-p mask kernel mapped its pivot back to logit
+        space as log(pivot) + log(Z) + M, which fp32 rounds to M at that
+        magnitude, so every token was masked and sampling produced token 0.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab_size, forced_token = 131072, 13
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[:, forced_token] = forced_logit
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+
+        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        assert (result[:, forced_token] == forced_logit).all()
+        assert ((result != float("-inf")).sum(-1) == 1).all()
+        probs = result.softmax(dim=-1)
+        assert not probs.isnan().any()
+        assert (probs.argmax(dim=-1) == forced_token).all()
+
 
 # =============================================================================
 # FlashInfer top-k/top-p robustness tests
