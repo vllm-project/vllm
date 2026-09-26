@@ -387,7 +387,20 @@ class HFConfigParser(ConfigParserBase):
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
-        if model_type in _SPECULATIVE_DECODING_CONFIGS:
+        rope_parameters = config_dict.get("rope_parameters") or {}
+        if model_type == "gemma4_text" and "full_attention" in rope_parameters:
+            from transformers import Gemma4TextConfig
+
+            # Published DSpark configs mix redundant scalar entries with per-layer
+            # RoPE dicts. Remove them before Transformers' constructor validates.
+            config_dict["rope_parameters"] = {
+                k: v
+                for k, v in rope_parameters.items()
+                if k not in ("rope_type", "rope_theta")
+            }
+            kwargs.setdefault("name_or_path", str(model))
+            config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,

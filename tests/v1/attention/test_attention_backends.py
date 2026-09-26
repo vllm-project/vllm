@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+from transformers import LlamaConfig
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -28,8 +30,10 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
@@ -1064,6 +1068,378 @@ def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
     assert q_lens is None
     assert q_cu_seq_lens is not None
     assert q_cu_seq_lens.tolist() == qo_indptr_values
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    "adaptive,decode_kernel,dcp_size,expected_bound",
+    [
+        (None, "TRTLLM_GEN", 1, None),
+        (False, "TRTLLM_GEN", 1, None),
+        (True, "TRTLLM_GEN", 1, 8),
+        (True, "XQA", 1, None),
+        (True, "TRTLLM_GEN", 2, None),
+    ],
+)
+def test_flashinfer_varlen_cudagraph_capability(
+    monkeypatch, adaptive, decode_kernel, dcp_size, expected_bound
+):
+    """Only the trtllm-gen path that adaptive verification enables replays
+    varlen decode graphs, up to the decode width; the uniform level is fixed."""
+    from vllm.model_executor.layers.attention.chunked_local_attention import (
+        create_chunked_local_attention_backend,
+    )
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(use_non_causal=False),
+        speculative_config=SimpleNamespace(
+            enable_adaptive_verification=adaptive,
+            num_speculative_tokens=7,
+            parallel_drafting=True,
+        )
+        if adaptive is not None
+        else None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+        model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
+        use_v2_model_runner=True,
+    )
+    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    monkeypatch.setattr(
+        fi.FlashInferMetadataBuilder,
+        "_get_flashinfer_trtllm_api_decode_kernel",
+        staticmethod(lambda: fi.FlashInferDecodeKernel[decode_kernel]),
+    )
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    builder_cls = fi.FlashInferMetadataBuilder
+    assert builder_cls.get_cudagraph_support(config, spec) == (
+        AttentionCGSupport.UNIFORM_BATCH
+        if dcp_size == 1
+        else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+    bound = builder_cls.get_varlen_cudagraph_max_query_len(config, spec)
+    assert bound == expected_bound
+    if bound is not None:
+        # A wrapper forcing NEVER inherits the override but not the bound.
+        chunked_local = create_chunked_local_attention_backend(fi.FlashInferBackend, 16)
+        wrapped_cls = chunked_local.get_builder_cls()
+        assert wrapped_cls.get_varlen_cudagraph_max_query_len(config, spec) is None
+
+
+@pytest.mark.parametrize(
+    "use_v2_model_runner,parallel_drafting,expected",
+    [
+        (True, None, 1),
+        (True, False, 8),
+        (True, True, 8),
+        (False, False, 8),
+        (False, True, 15),
+    ],
+)
+def test_spec_as_decode_width_follows_model_runner(
+    use_v2_model_runner, parallel_drafting, expected
+):
+    """Only model runner V1's parallel drafter widens decode requests."""
+
+    class Builder(AttentionMetadataBuilder):
+        def __init__(self, vllm_config):
+            self.vllm_config = vllm_config
+
+        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+            raise NotImplementedError
+
+    config = SimpleNamespace(
+        speculative_config=None
+        if parallel_drafting is None
+        else SimpleNamespace(
+            num_speculative_tokens=7, parallel_drafting=parallel_drafting
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    assert max_decode_query_len(config) == expected
+    builder = Builder(config)
+    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+    assert builder.reorder_batch_threshold == expected
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or not current_platform.is_device_capability_family(100),
+    reason="TRTLLM-GEN varlen decode graphs require FlashInfer on SM100-family GPUs",
+)
+@pytest.mark.parametrize(
+    "head_size,sliding_window,num_tokens,num_reqs,num_heads,num_kv_heads",
+    [
+        pytest.param(64, None, 8, 8, 32, 4, id="single-token-capture"),
+        pytest.param(
+            256,
+            1024,
+            40,
+            32,
+            16,
+            8,
+            id="gemma4-sliding-gqa",
+        ),
+        pytest.param(
+            512,
+            None,
+            40,
+            32,
+            16,
+            1,
+            id="gemma4-global-mqa",
+        ),
+    ],
+)
+def test_flashinfer_varlen_decode_graph_replays_changed_layout(
+    tmp_path,
+    monkeypatch,
+    head_size,
+    sliding_window,
+    num_tokens,
+    num_reqs,
+    num_heads,
+    num_kv_heads,
+):
+    """Replay changes device offsets, active slots, context, and KV writes.
+
+    The graph is captured with evenly spread dummy queries and an explicit
+    bound of eight. CPU offsets then remain stale while device offsets change.
+    Compare real output rows with independent FP32 causal/windowed attention,
+    and verify cache writes including preservation of the null padding block.
+    """
+    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    set_random_seed(0)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    block_size = 16
+    dtype = torch.bfloat16
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=num_heads * head_size,
+        head_dim=head_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        num_hidden_layers=1,
+        max_position_embeddings=4096,
+    ).save_pretrained(tmp_path)
+    num_blocks = 1 + num_reqs * cdiv(2112, block_size)
+    config = create_vllm_config(
+        model_name=str(tmp_path),
+        max_model_len=4096,
+        dtype=dtype,
+        num_gpu_blocks=num_blocks,
+        block_size=block_size,
+        max_num_seqs=32,
+        max_num_batched_tokens=256,
+    )
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=7,
+        enable_adaptive_verification=True,
+        parallel_drafting=False,
+    )
+    spec = create_standard_kv_cache_spec(config)
+    scale = head_size**-0.5
+    monkeypatch.setattr(
+        fi,
+        "get_per_layer_parameters",
+        lambda *_: {
+            "layer": PerLayerParameters(
+                window_left=-1 if sliding_window is None else sliding_window - 1,
+                logits_soft_cap=0.0,
+                sm_scale=scale,
+                has_sinks=False,
+            ),
+        },
+    )
+    device = torch.device("cuda")
+    layout = KVCacheLayout.BLHNC
+    query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype, device=device)
+    key = torch.empty(num_tokens, num_kv_heads, head_size, dtype=dtype, device=device)
+    value = torch.empty_like(key)
+    output = torch.empty_like(query)
+    dummy_lens = [
+        num_tokens // num_reqs + (i < num_tokens % num_reqs) for i in range(num_reqs)
+    ]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[2112] * num_reqs, query_lens=dummy_lens),
+        block_size,
+        device,
+    )
+    common.max_query_len = 8
+    cache = None
+
+    def prepare(query_lens):
+        nonlocal cache
+        query_lens = query_lens + [0] * (num_reqs - len(query_lens))
+        query.normal_()
+        key.normal_()
+        value.normal_()
+        # Alternating short prefills, nonempty decode contexts, and contexts
+        # beyond the sliding window; inactive requests have zero sequence length.
+        contexts = [
+            ([0, 17, 2079, 39][i % 4] if q else 0) for i, q in enumerate(query_lens)
+        ]
+        ks = [
+            torch.randn(c, num_kv_heads, head_size, dtype=dtype, device=device)
+            for c in contexts
+        ]
+        vs = [torch.randn_like(k) for k in ks]
+        actual = create_common_attn_metadata(
+            BatchSpec(
+                seq_lens=[c + q for c, q in zip(contexts, query_lens)],
+                query_lens=query_lens,
+            ),
+            block_size,
+            device,
+        )
+        fresh_cache = create_and_prepopulate_kv_cache(
+            ks,
+            vs,
+            block_size,
+            num_kv_heads,
+            head_size,
+            dtype,
+            device,
+            num_blocks,
+            actual,
+            layout,
+            randomize_blocks=True,
+        )
+        if cache is None:
+            cache = fresh_cache
+        else:
+            cache.copy_(fresh_cache)
+        common.query_start_loc.copy_(actual.query_start_loc)
+        common.seq_lens.copy_(actual.seq_lens)
+        common.block_table_tensor.zero_()
+        common.block_table_tensor[:, : actual.block_table_tensor.shape[1]].copy_(
+            actual.block_table_tensor
+        )
+        common.slot_mapping.fill_(-1)
+        common.slot_mapping[: sum(query_lens)].copy_(actual.slot_mapping)
+        return contexts, ks, vs
+
+    prepare(dummy_lens)
+    with set_current_vllm_config(config):
+        builder = fi.FlashInferMetadataBuilder(spec, ["layer"], config, device)
+        metadata = builder.build(0, common)
+        assert metadata.num_prefills == 0
+        assert metadata.decode.q_len_per_req == 8
+        impl = fi.FlashInferImpl(
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            scale=scale,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.DECODER,
+        )
+    layer = MockAttentionLayer(device)
+
+    def forward(attn_metadata=metadata):
+        impl.do_kv_cache_update(layer, key, value, cache, common.slot_mapping)
+        impl.forward(layer, query, key, value, cache, attn_metadata, output=output)
+
+    for _ in range(3):
+        forward()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
+
+    layouts = [[8], [1] * num_reqs]
+    if num_tokens >= 16:
+        layouts.append([8, 4, 3, 1])
+    if num_tokens >= 40:
+        layouts.append([8] * 5)
+
+    def check(query_lens, run):
+        contexts, ks, vs = prepare(query_lens)
+        assert cache is not None
+        output.fill_(float("nan"))
+        run()
+        start = 0
+        for i, q_len in enumerate(query_lens):
+            if q_len == 0:
+                continue
+            end = start + q_len
+            full_k = (
+                torch.cat((ks[i], key[start:end]))
+                .float()
+                .repeat_interleave(num_heads // num_kv_heads, dim=1)
+            )
+            full_v = (
+                torch.cat((vs[i], value[start:end]))
+                .float()
+                .repeat_interleave(num_heads // num_kv_heads, dim=1)
+            )
+            scores = (
+                torch.einsum("qhd,khd->hqk", query[start:end].float(), full_k) * scale
+            )
+            q_pos = torch.arange(q_len, device=device) + contexts[i]
+            k_pos = torch.arange(full_k.shape[0], device=device)
+            allowed = k_pos[None, :] <= q_pos[:, None]
+            if sliding_window is not None:
+                allowed &= k_pos[None, :] > q_pos[:, None] - sliding_window
+            probs = scores.masked_fill(~allowed[None], float("-inf")).softmax(-1)
+            reference = torch.einsum("hqk,khd->qhd", probs, full_v)
+            torch.testing.assert_close(
+                output[start:end].float(),
+                reference,
+                atol=2e-2,
+                rtol=2e-2,
+            )
+            slots = common.slot_mapping[start:end]
+            written = cache[slots // block_size, :, slots % block_size, :]
+            torch.testing.assert_close(written[..., :head_size], key[start:end])
+            torch.testing.assert_close(written[..., head_size:], value[start:end])
+            start = end
+        assert torch.count_nonzero(cache[0]) == 0
+
+    for query_lens in layouts:
+        check(query_lens, graph.replay)
+
+    if num_tokens == 40:
+        # A longer prefill forces a separate launch in eager/piecewise mode.
+        # Its length must not become the decode kernel's query bound, and
+        # compacted CPU placeholders still need not match the GPU allocation.
+        common.num_reqs = 5
+        common.max_query_len = 24
+        common.query_start_loc_cpu[:6] = torch.tensor([0, 4, 8, 12, 16, 40])
+        common.query_start_loc_cpu[6:] = 40
+
+        def mixed_forward():
+            with set_current_vllm_config(config):
+                metadata = builder.build(
+                    0,
+                    replace(
+                        common,
+                        query_start_loc=common.query_start_loc[:6],
+                        query_start_loc_cpu=common.query_start_loc_cpu[:6],
+                        seq_lens=common.seq_lens[:5],
+                        seq_lens_cpu_upper_bound=common.seq_lens_cpu_upper_bound[:5],
+                        block_table_tensor=common.block_table_tensor[:5],
+                    ),
+                )
+            assert metadata.num_decodes == 4
+            assert metadata.num_prefills == 1
+            assert metadata.decode.q_len_per_req == 8
+            forward(metadata)
+
+        check([8, 4, 3, 1, 24], mixed_forward)
 
 
 @pytest.mark.skipif(

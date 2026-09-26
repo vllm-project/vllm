@@ -243,7 +243,8 @@ def dispatch_cg_and_sync_dp(
         dp_size: Data-parallel world size. 1 skips all cross-rank work.
         dp_rank: This rank's index in the DP group.
         max_query_len: Upper bound on per-request query length, for selecting
-            varlen decode graphs. None means the graph must not constrain it.
+            varlen decode graphs. None, as for a batch with a prefill, keeps
+            the batch out of graphs that constrain it.
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.

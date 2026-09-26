@@ -24,7 +24,11 @@ from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
-from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
+from .qwen3_dspark import (
+    DSparkConfidenceHead,
+    DSparkMarkovHead,
+    Qwen3DSparkForCausalLM,
+)
 from .utils import extract_layer_index, maybe_prefix
 
 
@@ -187,6 +191,18 @@ class Gemma4DSparkModel(DFlashQwen3Model):
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(config, "enable_confidence_head", False):
+            with_markov = getattr(config, "confidence_head_with_markov", False)
+            input_dim = config.hidden_size
+            if with_markov:
+                input_dim += config.markov_rank
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=True,
+                with_markov=with_markov,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.normalizer
@@ -295,9 +311,8 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
         params = dict(self.named_parameters())
         params.update(dict(self.named_buffers()))
         loaded: set[str] = set()
+        includes_confidence_head = False
         for name, w in weights:
-            if "confidence_head" in name:
-                continue
             if "lm_head" not in name:
                 name = "model." + name
             for pn, wn, shard in stacked:
@@ -310,5 +325,9 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     p = params[name]
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
+                    if "confidence_head" in name:
+                        includes_confidence_head = True
+        if not includes_confidence_head:
+            self.model.confidence_head = None
         self.model._build_fused_kv_buffers()
         return loaded
