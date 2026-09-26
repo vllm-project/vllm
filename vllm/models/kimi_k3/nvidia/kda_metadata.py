@@ -327,7 +327,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             isinstance(additional_config, dict)
             and additional_config.get("kda_prefill_backend") == "flashinfer"
         )
-        self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
+        self.use_recoverssm = vllm_config.cache_config.use_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
         self.recoverssm_context: KDARecoverSSMCommitContext | None = None

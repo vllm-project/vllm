@@ -105,7 +105,7 @@ def test_kda_recoverssm_config_state_layout():
         cache_config=SimpleNamespace(
             mamba_cache_dtype="auto",
             mamba_ssm_cache_dtype="auto",
-            use_kda_recoverssm=True,
+            use_recoverssm=True,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         speculative_config=SimpleNamespace(num_speculative_tokens=2),

@@ -78,7 +78,7 @@ class MambaBase(AttentionLayerBase):
             # never writes the baseline's per-draft-token state slots.
             num_speculative_blocks=(
                 0
-                if vllm_config.cache_config.use_kda_recoverssm
+                if vllm_config.cache_config.use_recoverssm
                 else vllm_config.num_speculative_tokens
             ),
         )

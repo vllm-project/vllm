@@ -342,7 +342,7 @@ class CudaGraphManager:
 
             # recoverSSM cannot capture a dummy query wider than its workspace.
             if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
+                not self.vllm_config.cache_config.use_recoverssm
                 or num_tokens <= max_decode_tokens
             ):
                 # for PIECEWISE graphs there is no limit on requests when replaying

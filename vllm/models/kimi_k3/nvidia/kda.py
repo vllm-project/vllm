@@ -486,7 +486,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.cache_config.use_kda_recoverssm:
+        if self.cache_config.use_recoverssm:
             return MambaStateDtypeCalculator.append_kda_recoverssm_record(
                 base_dtypes, self.model_config.dtype
             )
@@ -502,7 +502,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
-        if self.cache_config.use_kda_recoverssm:
+        if self.cache_config.use_recoverssm:
             return MambaStateShapeCalculator.append_kda_recoverssm_record(
                 base_shapes,
                 self.num_heads,
@@ -521,7 +521,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
-        self.use_recoverssm = self.cache_config.use_kda_recoverssm
+        self.use_recoverssm = self.cache_config.use_recoverssm
         if self.cache_config.use_replayssm and not self.use_recoverssm:
             raise ValueError(
                 "Kimi-K3 supports --use-replayssm only with speculative decoding"
