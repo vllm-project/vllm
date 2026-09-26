@@ -10,6 +10,7 @@ from uuid import uuid4
 import numpy as np
 import pybase64 as base64
 from fastapi import WebSocket
+from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
@@ -17,14 +18,19 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.outputs import CompletionOutput
+from vllm.tokenizers import TokenizerLike
 
 from .protocol import (
+    TRANSCRIPTION_LOGPROBS_INCLUDE,
     ErrorEvent,
     InputAudioBufferAppend,
     InputAudioBufferCommit,
     SessionCreated,
+    SessionUpdate,
     TranscriptionDelta,
     TranscriptionDone,
+    TranscriptionLogProb,
 )
 from .serving import OpenAIServingRealtime
 
@@ -51,6 +57,7 @@ class RealtimeConnection:
 
         self._is_connected = False
         self._is_model_validated = False
+        self._include_logprobs = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
@@ -104,7 +111,12 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            model = event.get("model")
+            try:
+                session_update = SessionUpdate(**event)
+            except ValidationError as e:
+                await self.send_error(sanitize_message(str(e)), "invalid_event")
+                return
+            model = session_update.model
             if model is None:
                 await self.send_error("Missing required field: model", "invalid_event")
                 return
@@ -113,6 +125,10 @@ class RealtimeConnection:
                 await self.send_error(err.error.message, "model_not_found")
                 return
             self._is_model_validated = True
+            if session_update.include is not None:
+                self._include_logprobs = (
+                    TRANSCRIPTION_LOGPROBS_INCLUDE in session_update.include
+                )
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
             try:
@@ -217,7 +233,13 @@ class RealtimeConnection:
                 temperature=0.0,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
+                logprobs=0 if self._include_logprobs else None,
                 skip_clone=True,
+            )
+            tokenizer = (
+                self.serving.renderer.get_tokenizer()
+                if sampling_params.logprobs is not None
+                else None
             )
 
             # Pass the streaming input generator to the engine
@@ -240,7 +262,12 @@ class RealtimeConnection:
 
                     # append output to input
                     input_stream.put_nowait(list(output.outputs[0].token_ids))
-                    await self.send(TranscriptionDelta(delta=delta))
+                    logprobs = (
+                        self._delta_logprobs(output.outputs[0], tokenizer)
+                        if sampling_params.logprobs is not None
+                        else None
+                    )
+                    await self.send(TranscriptionDelta(delta=delta, logprobs=logprobs))
 
                     completion_tokens_len += len(output.outputs[0].token_ids)
 
@@ -264,6 +291,23 @@ class RealtimeConnection:
         except Exception as e:
             logger.exception("Error in generation: %s", e)
             await self.send_error(sanitize_message(str(e)), "processing_error")
+
+    def _delta_logprobs(
+        self, completion: CompletionOutput, tokenizer: TokenizerLike | None
+    ) -> list[TranscriptionLogProb]:
+        assert completion.logprobs is not None
+        entries = []
+        for position, token_id in zip(completion.logprobs, completion.token_ids):
+            logprob = position[token_id]
+            token = self.serving._get_decoded_token(logprob, token_id, tokenizer)
+            entries.append(
+                TranscriptionLogProb(
+                    token=token,
+                    logprob=max(logprob.logprob, -9999.0),
+                    bytes=list(token.encode("utf-8", errors="replace")),
+                )
+            )
+        return entries
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
