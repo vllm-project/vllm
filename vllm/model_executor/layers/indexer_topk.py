@@ -7,6 +7,7 @@ import functools
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -19,6 +20,10 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 # back to persistent_topk past it; explicit ``cooperative`` requests are
 # validated against the same bound.
 AUTO_COOPERATIVE_MAX_ROWS = 64
+
+# Row-local reference path: it masks each row to its own length and takes a
+# plain topk, so a row's selection does not depend on the rest of the batch.
+BATCH_INVARIANT_BACKEND = "torch"
 
 # ---------------------------------------------------------------------------
 # DeepSelect (vllm._deepselect_C)
@@ -153,6 +158,22 @@ class SparseIndexerTopk(torch.nn.Module):
             backend = (
                 get_current_vllm_config().kernel_config.sparse_indexer_topk_backend
             )
+        if envs.VLLM_BATCH_INVARIANT:
+            if backend == "auto":
+                # "auto" is batch-conditional by construction: it switches
+                # kernels at AUTO_COOPERATIVE_MAX_ROWS rows, so a row's
+                # selection can change with the rest of the batch.
+                backend = BATCH_INVARIANT_BACKEND
+            elif backend != BATCH_INVARIANT_BACKEND:
+                raise ValueError(
+                    f"sparse_indexer_topk_backend='{backend}' cannot be used "
+                    "with VLLM_BATCH_INVARIANT: its launch configuration "
+                    "follows the batch (row count for cooperative, occupancy "
+                    "and max sequence length for persistent), so the indices a "
+                    "row selects can change with the rest of the batch. Use "
+                    f"'{BATCH_INVARIANT_BACKEND}' or leave the backend on "
+                    "'auto', which resolves to it under this flag."
+                )
         self._backend = backend
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
@@ -332,17 +353,35 @@ class SparseIndexerTopk(torch.nn.Module):
             indices = top_k_ragged_transform(logits, offsets, row_ends, topk_tokens)
             topk_indices.copy_(indices)
         elif backend == "torch":
-            # Debug reference: mask everything past each row's end, then topk.
+            # Row-local reference: mask everything past each row's end, then
+            # topk. Each row is selected from its own scores only, so the
+            # result does not depend on the rest of the batch.
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
             cols = torch.arange(logits.shape[1], device=logits.device)
-            masked = logits.masked_fill(
-                cols.unsqueeze(0) >= row_ends.unsqueeze(1), float("-inf")
+            in_row = cols.unsqueeze(0) < row_ends.unsqueeze(1)
+            masked = torch.where(in_row, logits, float("-inf"))
+            # Order by (in row, score, column). Sorting rather than topk pins
+            # the order of equal scores, which topk leaves undefined and which
+            # a filtered row is full of; the second, stable sort then lifts a
+            # row's own columns above the padding they tie with, because the
+            # kernels return every in-row token once the row is shorter than
+            # the budget.
+            by_score = masked.sort(dim=-1, descending=True, stable=True).indices
+            in_row_first = (
+                in_row.gather(1, by_score)
+                .to(torch.int8)
+                .sort(dim=-1, descending=True, stable=True)
+                .indices
             )
-            indices = masked.topk(topk_tokens, dim=-1).indices
-            in_range = torch.arange(topk_tokens, device=logits.device).unsqueeze(
-                0
-            ) < row_ends.unsqueeze(1)
-            indices = torch.where(in_range, indices, -1)
+            indices = by_score.gather(1, in_row_first)[:, :topk_tokens]
+            # Padding columns are still selected once a row is shorter than
+            # the budget; filtering by output rank instead would let them
+            # through as real token indices.
+            indices = torch.where(in_row.gather(1, indices), indices, -1)
+            if indices.shape[1] < topk_tokens:
+                indices = torch.nn.functional.pad(
+                    indices, (0, topk_tokens - indices.shape[1]), value=-1
+                )
             topk_indices.copy_(indices)
         else:
             assert backend == "per_row", f"unknown topk backend: {backend}"
