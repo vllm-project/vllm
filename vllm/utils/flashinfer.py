@@ -111,6 +111,33 @@ def has_flashinfer() -> bool:
 
 
 @functools.cache
+def has_flashinfer_jit_cache() -> bool:
+    """Return `True` if the flashinfer-jit-cache package is installed."""
+    return importlib.util.find_spec("flashinfer_jit_cache") is not None
+
+
+def warn_flashinfer_jit_cache_sm75() -> None:
+    """Warn on SM75 that the installed flashinfer-jit-cache lacks SM75 kernels.
+
+    The official flashinfer-jit-cache wheel dropped SM75 (Turing) kernels for
+    package size, so on SM75 FlashInfer cannot load pre-built kernels and must
+    JIT-compile them instead. Uninstalling flashinfer-jit-cache triggers that
+    fallback. No-op off SM75 or when the package is not installed.
+    """
+    if not current_platform.is_device_capability(75):
+        return
+    if not has_flashinfer_jit_cache():
+        return
+    logger.warning_once(
+        "flashinfer-jit-cache is installed but its wheel does not include "
+        "SM75 (Turing) kernels, so FlashInfer cannot load pre-built kernels "
+        "on this GPU. Uninstall it (pip uninstall flashinfer-jit-cache) so "
+        "FlashInfer falls back to JIT compilation, which requires nvcc "
+        "(bundled in the official vLLM image)."
+    )
+
+
+@functools.cache
 def has_flashinfer_bf16_gemm() -> bool:
     """Return whether FlashInfer exposes the BF16 dense GEMM API."""
     if not has_flashinfer():
@@ -1262,6 +1289,8 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "has_flashinfer_jit_cache",
+    "warn_flashinfer_jit_cache_sm75",
     "flashinfer_bf16_mm",
     "autotune_bf16_only",
     "has_flashinfer_bf16_gemm",
