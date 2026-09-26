@@ -199,14 +199,18 @@ class QuantFP8(CustomOp):
             and scale_ub.numel() == 1
         )
 
+        # Replace NaN with 0 to match the CUDA kernel's behavior, since the underlying
+        # CUDA kernels use fmaxf, which won't propagate NaNs if we have numeric values.
+        x_f = torch.nan_to_num(x.to(torch.float32), nan=0.0)
+
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
-                x_max, _ = x.abs().max(dim=-1)
-                x_max = x_max.unsqueeze(-1).to(torch.float32)
+                x_max, _ = x_f.abs().max(dim=-1)
+                x_max = x_max.unsqueeze(-1)
                 if scale_ub is not None:
                     x_max = x_max.clamp(max=scale_ub)
             else:
-                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
+                x_max = x_f.abs().max().unsqueeze(-1)
 
             scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
         else:
@@ -214,10 +218,7 @@ class QuantFP8(CustomOp):
 
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
-        out = (
-            x.to(torch.float32)
-            * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-        )
+        out = x_f * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
         out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
 
         # This currently generates an extra Triton kernel in compilation.
