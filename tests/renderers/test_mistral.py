@@ -9,10 +9,14 @@ from unittest.mock import Mock
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from vllm.renderers import ChatParams
-from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.renderers.mistral import (
+    MistralRenderer,
+    _adapt_tool_images_for_mistral,
+    safe_apply_chat_template,
+)
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 
@@ -52,6 +56,78 @@ class MockVllmConfig:
     parallel_config: MockParallelConfig
 
 
+def test_adapt_tool_images_for_pre_v15_mistral():
+    messages = [
+        {"role": "user", "content": "use both tools"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "abc123XYZ",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                },
+                {
+                    "id": "def456UVW",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{}"},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "abc123XYZ",
+            "content": [
+                {"type": "text", "text": "before"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+                {"type": "text", "text": "after"},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "def456UVW", "content": "result B"},
+    ]
+
+    result = _adapt_tool_images_for_mistral(messages, tokenizer_version=13)
+
+    assert [message["role"] for message in result] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+    ]
+    assert result[2]["content"] == [
+        {"type": "text", "text": "before"},
+        {"type": "text", "text": "after"},
+    ]
+    assert result[3]["tool_call_id"] == "def456UVW"
+    assert result[4]["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        }
+    ]
+
+
+def test_mistral_v15_keeps_images_in_tool_message():
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "abc123XYZ",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                }
+            ],
+        }
+    ]
+
+    assert _adapt_tool_images_for_mistral(messages, tokenizer_version=15) is messages
+
+
 @pytest.mark.asyncio
 async def test_async_mistral_tokenizer_does_not_block_event_loop():
     expected_tokens = [1, 2, 3]
@@ -63,6 +139,7 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
 
     mock_model_config = MockModelConfig(skip_tokenizer_init=True)
     mock_tokenizer = Mock(spec=MistralTokenizer)
+    mock_tokenizer.version = 15
     mock_tokenizer.apply_chat_template = mocked_apply_chat_template
     mock_renderer = MistralRenderer(
         MockVllmConfig(mock_model_config, parallel_config=MockParallelConfig()),
