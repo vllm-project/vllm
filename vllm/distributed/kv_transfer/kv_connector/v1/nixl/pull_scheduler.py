@@ -33,7 +33,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         """For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
 
@@ -62,6 +62,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
+                if self.background_receiver and (
+                    len(self._receiver_pending) >= self._receiver_max_pending
+                ):
+                    return None, False
                 return count, True
 
         if (
@@ -100,6 +104,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         self.kv_recompute_threshold,
                     )
                     return 0, False
+                if self.background_receiver and (
+                    len(self._receiver_pending) >= self._receiver_max_pending
+                ):
+                    return None, False
                 return count, True
 
         # No remote prefill for this request.
@@ -167,13 +175,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
-                    self._reqs_need_recv[request.request_id] = (
+                    self._queue_receiver_request(
                         request,
                         local_block_ids,
-                        local_num_computed_blocks,
-                        # Parked in WAITING_FOR_REMOTE_KVS only when there is
-                        # something to pull; a full local hit stays RUNNING.
-                        num_external_tokens > 0,
+                        is_async=num_external_tokens > 0,
+                        local_num_computed_blocks=local_num_computed_blocks,
                     )
 
                 else:
@@ -225,7 +231,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], (), False)
+            empty_blocks: BlockIds = () if self.background_receiver else []
+            self._queue_receiver_request(request, empty_blocks, is_async=False)
             params["do_remote_prefill"] = False
             return False, None
 
