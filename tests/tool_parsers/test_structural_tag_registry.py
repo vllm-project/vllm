@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1030,3 +1032,24 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("strict")
     with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("off")
+
+
+def test_import_without_xgrammar():
+    """Importing vLLM must not require xgrammar (it has no wheels on some
+    platforms); structural tag builders fail only when actually used."""
+    code = """
+import sys
+
+sys.modules["xgrammar"] = None
+
+from vllm import LLM  # noqa: F401
+from vllm.tool_parsers.structural_tag_registry import get_hermes_structural_tag
+
+try:
+    get_hermes_structural_tag([], [], "auto", False)
+except ImportError as error:
+    assert "xgrammar" in str(error), error
+else:
+    raise AssertionError("expected ImportError when xgrammar is unavailable")
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
