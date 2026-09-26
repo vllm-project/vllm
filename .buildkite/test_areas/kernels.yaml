@@ -398,23 +398,93 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
+- label: ":nvidia: (H200 MIG 35GB) Mamba SSD Single Example"
   device: h200_35gb
-  key: kernels-mamba-test
-  timeout_in_minutes: 60
+  key: kernels-mamba-ssd-single-example
+  timeout_in_minutes: 25
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba/ssd
+  - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/mamba/ops
+  commands:
+    - pytest -v -s kernels/mamba/ssd/single_example
+  mirror:
+    amd:
+      label: ":amd: (MI250) Mamba SSD Single Example"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/third_party/flash_linear_attention/
+
+- label: ":nvidia: (H200 MIG 35GB) Mamba SSD Continuous Batch"
+  device: h200_35gb
+  key: kernels-mamba-ssd-cont-batch
+  timeout_in_minutes: 25
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba/ssd
+  - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/mamba/ops
+  commands:
+    - pytest -v -s kernels/mamba/ssd/cont_batch
+  mirror:
+    amd:
+      label: ":amd: (MI250) Mamba SSD Continuous Batch"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/third_party/flash_linear_attention/
+
+- label: ":nvidia: (H200 MIG 35GB) Mamba Ops Kernels"
+  device: h200_35gb
+  key: kernels-mamba-ops-test
+  timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
   commands:
-    - pytest -v -s kernels/mamba
+    - pytest -v -s kernels/mamba/ops
   mirror:
     amd:
-      label: ":amd: (MI250) Mamba Kernels"
+      label: ":amd: (MI250) Mamba Ops Kernels"
       dind: false
       device: mi250_1
-      timeout_in_minutes: 55
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/third_party/flash_linear_attention/
+
+- label: ":nvidia: (H200 MIG 35GB) Mamba GDN Kernels"
+  device: h200_35gb
+  key: kernels-mamba-gdn-test
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/mamba/ops
+  commands:
+    - pytest -v -s kernels/mamba/gdn
+    - "find kernels/mamba -maxdepth 1 -name 'test_*.py' | xargs -r pytest -v -s"
+  mirror:
+    amd:
+      label: ":amd: (MI250) Mamba GDN Kernels"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 20
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -495,7 +565,7 @@ steps:
   - tests/kernels/attention/test_cache.py
   - tests/kernels/quantization/nvfp4_utils.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
-  - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+  - tests/kernels/mamba/gdn/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
@@ -542,7 +612,7 @@ steps:
           pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
           pytest -v -s tests/kernels/moe/test_flashinfer.py
           pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
-          pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+          pytest -v -s tests/kernels/mamba/gdn/test_gdn_prefill_cutedsl.py
           pytest -v -s tests/kernels/attention/test_minimax_m3.py
           ;;
         *)
