@@ -96,30 +96,8 @@ class TestInternLM2ToolParser(ToolParserTests):
             # Parser-specific settings
             allow_empty_or_json_empty_args=True,
             # xfail markers
-            xfail_streaming={
-                "test_single_tool_call_simple_args": (
-                    "InternLM2 streaming not fully implemented"
-                ),
-                "test_parallel_tool_calls": (
-                    "InternLM2 streaming not fully implemented"
-                ),
-                "test_various_data_types": (
-                    "InternLM2 streaming not fully implemented"
-                ),
-                "test_empty_arguments": ("InternLM2 streaming not fully implemented"),
-                "test_surrounding_text": ("InternLM2 streaming not fully implemented"),
-                "test_escaped_strings": ("InternLM2 streaming not fully implemented"),
-                "test_streaming_reconstruction": (
-                    "InternLM2 streaming parser returns '<|action_start|' as "
-                    "content instead of None - streaming/non-streaming inconsistency"
-                ),
-            },
-            xfail_nonstreaming={
-                "test_malformed_input": (
-                    "InternLM2 parser raises JSONDecodeError on malformed JSON "
-                    "instead of gracefully handling it"
-                ),
-            },
+            xfail_streaming={},
+            xfail_nonstreaming={},
         )
 
 
@@ -162,3 +140,62 @@ def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -
                 streamed += arguments
 
     assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}
+
+
+def test_streaming_split_opening_marker(default_tokenizer: TokenizerLike) -> None:
+    """Opening marker split across chunks must not leak content or lose
+    tool calls (issue #57490).
+    """
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+
+    full_response = (
+        "Here is the result: <|action_start|><|plugin|>"
+        '{"name": "lookup", "parameters": {"id": 123}}<|action_end|>'
+    )
+
+    for chunk_size in [1, 4, 8]:
+        parser = Internlm2ToolParser(default_tokenizer)
+        deltas = [
+            full_response[i : i + chunk_size]
+            for i in range(0, len(full_response), chunk_size)
+        ]
+
+        streamed_content = ""
+        tool_name = None
+        tool_args = ""
+        current_text = ""
+
+        for delta_text in deltas:
+            previous_text = current_text
+            current_text += delta_text
+            delta_message = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=None,
+            )
+            if delta_message:
+                if delta_message.content:
+                    streamed_content += delta_message.content
+                if delta_message.tool_calls:
+                    fn = delta_message.tool_calls[0].function
+                    if fn.name:
+                        tool_name = fn.name
+                    if fn.arguments:
+                        tool_args += fn.arguments
+
+        assert streamed_content == "Here is the result: "
+        assert tool_name == "lookup"
+        assert json.loads(tool_args) == {"id": 123}
