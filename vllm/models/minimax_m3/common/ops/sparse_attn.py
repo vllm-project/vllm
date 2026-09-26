@@ -94,6 +94,11 @@ def _gqa_sparse_fwd_kernel(
     KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
+    # Scalar KV scales are loop invariant. Fold them into the QK scale and
+    # normalized output instead of scaling every K/V element.
+    if KV_SCALE_MODE == 1:
+        sm_scale_log2e *= tl.load(k_scale_ptr)
+        value_scale = tl.load(v_scale_ptr)
     pid_q = tl.program_id(0)
     pid_kh = tl.program_id(1)
     pid_b = tl.program_id(2)
@@ -155,9 +160,7 @@ def _gqa_sparse_fwd_kernel(
             )
             if USE_FP8:
                 k = k.to(q.dtype)
-                if KV_SCALE_MODE == 1:
-                    k = (k * tl.load(k_scale_ptr)).to(q.dtype)
-                elif KV_SCALE_MODE == 2:
+                if KV_SCALE_MODE == 2:
                     k_scale = tl.load(
                         k_scale_ptr
                         + pid_kh * stride_ks_h
@@ -187,9 +190,7 @@ def _gqa_sparse_fwd_kernel(
             )
             if USE_FP8:
                 v = v.to(q.dtype)
-                if KV_SCALE_MODE == 1:
-                    v = (v * tl.load(v_scale_ptr)).to(q.dtype)
-                elif KV_SCALE_MODE == 2:
+                if KV_SCALE_MODE == 2:
                     v_scale = tl.load(
                         v_scale_ptr
                         + pid_kh * stride_vs_h
@@ -202,6 +203,8 @@ def _gqa_sparse_fwd_kernel(
             m_i = m_ij
             lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
+        if KV_SCALE_MODE == 1:
+            acc_o *= value_scale
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
         o_ptrs = tl.make_block_ptr(
             base=o_ptr + q_start * stride_on + pid_h * stride_oh,
@@ -278,6 +281,11 @@ def _gqa_sparse_decode_kernel(
     USE_PDL: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
+    # Scalar KV scales are loop invariant. Fold them into the QK scale and
+    # normalized output instead of scaling every K/V element.
+    if KV_SCALE_MODE == 1:
+        sm_scale_log2e *= tl.load(k_scale_ptr)
+        value_scale = tl.load(v_scale_ptr)
     # split-K over the topk dimension: pid(0) folds (query-token, chunk).
     pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
     pid_b = pid_bc % total_q
@@ -341,9 +349,7 @@ def _gqa_sparse_decode_kernel(
         )
         if USE_FP8:
             k = k.to(q.dtype)
-            if KV_SCALE_MODE == 1:
-                k = (k * tl.load(k_scale_ptr)).to(q.dtype)
-            elif KV_SCALE_MODE == 2:
+            if KV_SCALE_MODE == 2:
                 k_scale = tl.load(
                     k_scale_ptr
                     + pid_kh * stride_ks_h
@@ -370,9 +376,7 @@ def _gqa_sparse_decode_kernel(
         )
         if USE_FP8:
             v = v.to(q.dtype)
-            if KV_SCALE_MODE == 1:
-                v = (v * tl.load(v_scale_ptr)).to(q.dtype)
-            elif KV_SCALE_MODE == 2:
+            if KV_SCALE_MODE == 2:
                 v_scale = tl.load(
                     v_scale_ptr
                     + pid_kh * stride_vs_h
@@ -392,6 +396,8 @@ def _gqa_sparse_decode_kernel(
     # can hit 0 * NaN. All-empty padded rows may still produce NaNs in merge.
     scale = tl.where(lse_i > float("-inf"), tl.exp2(m_i - lse_i), tl.zeros_like(lse_i))
     acc_o = acc_o * scale[:, None]
+    if KV_SCALE_MODE == 1:
+        acc_o *= value_scale
     o_ptrs = tl.make_block_ptr(
         base=o_ptr + pid_c * stride_o_c + pid_b * stride_o_b + pid_h * stride_o_h,
         shape=(gqa_group_size, head_dim),
