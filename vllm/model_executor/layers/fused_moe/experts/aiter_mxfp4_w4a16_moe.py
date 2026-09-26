@@ -287,6 +287,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         )
 
     @staticmethod
@@ -336,6 +337,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         ]
 
     @staticmethod
@@ -365,11 +367,20 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        score_mode = (
-            "sqrtsoftplus"
-            if self.moe_config.routing_method == RoutingMethodType.DeepseekV4
-            else None
-        )
+        routing_method = self.moe_config.routing_method
+        if routing_method == RoutingMethodType.DeepseekV4:
+            score_mode = "sqrtsoftplus"
+        elif routing_method == RoutingMethodType.DeepSeekV3:
+            # MiMo-V2.6: an ungrouped sigmoid router with a per-expert
+            # correction bias. aiter's flat top-k implements this natively
+            # (select on sigmoid(logits) + bias, return the unbiased sigmoid
+            # scores).
+            assert e_score_correction_bias is not None, (
+                "DeepSeekV3 routing requires e_score_correction_bias"
+            )
+            score_mode = "sigmoid"
+        else:
+            score_mode = None
         return aiter_triton_kernel_w4a16_moe_forward(
             hidden_states=hidden_states,
             w1=w1,
