@@ -37,6 +37,12 @@ def register_generate_api_routers(app: FastAPI):
 
     register_completion_api_router(app)
 
+    from vllm.entrypoints.openai.translation_text.api_router import (
+        attach_router as register_translation_text_api_router,
+    )
+
+    register_translation_text_api_router(app)
+
     from vllm.entrypoints.anthropic.api_router import (
         attach_router as register_anthropic_api_router,
     )
@@ -148,6 +154,20 @@ async def init_generate_state(
     )
     state.openai_serving_chat = (
         OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None
+    )
+
+    from vllm.entrypoints.openai.translation_text.serving import (
+        OpenAIServingTextTranslation,
+    )
+
+    state.openai_serving_text_translation = (
+        OpenAIServingTextTranslation(
+            state.openai_serving_chat,
+            request_logger=request_logger,
+            default_prompt_template=getattr(args, "translation_prompt_template", None),
+        )
+        if state.openai_serving_chat is not None
+        else None
     )
     state.openai_serving_chat_batch = (
         OpenAIServingChatBatch(**_chat_kwargs)
