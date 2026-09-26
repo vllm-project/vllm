@@ -499,6 +499,8 @@ def _coalesce_contiguous_transfer_regions(
             return merged_local, merged_remote
         # Each KV group overlays the row from offset 0. Promoting that run to
         # the full row copies bytes the group's block ids exclusively own.
+        # Equal block_len is the row-structure check: both peers packed the
+        # same stride, so row_offset does not need a second compare in align.
         promoted_local: list[TransferRegion] = []
         promoted_remote: list[TransferRegion] = []
         for local_region, remote_region in zip(merged_local, merged_remote):
@@ -545,6 +547,26 @@ def _coalesce_contiguous_transfer_regions(
         run_remote = [remote_region]
     flush()
     return promote(merged_local, merged_remote)
+
+
+def _has_opaque_packed_row(
+    row_offsets: list[int], kv_block_lens: list[int], block_lens: list[int]
+) -> bool:
+    """Branch B is one row-sized region at offset 0, so later layer names are gone.
+
+    Page-contiguous views keep kv_block_len below the stride until promotion,
+    and promotion happens after this handshake check.
+    """
+    if (
+        not row_offsets
+        or len(row_offsets) != len(kv_block_lens)
+        or len(row_offsets) != len(block_lens)
+    ):
+        return False
+    return any(
+        offset == 0 and length == stride
+        for offset, length, stride in zip(row_offsets, kv_block_lens, block_lens)
+    )
 
 
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
@@ -1175,6 +1197,10 @@ class MooncakeConnectorWorker:
         self.region_row_offsets: list[int] = []
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
+        # Aligned regions depend only on the peer's registered layout.
+        self._prepared_transfer_regions: dict[
+            tuple, tuple[list[TransferRegion], list[TransferRegion]]
+        ] = {}
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
@@ -1427,15 +1453,18 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        if (
-            meta.remote_pp_size > 1
-            and meta.remote_pp_size != self.pp_size
-            and self.opaque_packed_storages
+        if meta.remote_pp_size != self.pp_size and (
+            self.opaque_packed_storages
+            or _has_opaque_packed_row(
+                meta.registered_row_offsets,
+                meta.kv_block_lens,
+                meta.block_lens,
+            )
         ):
             msg = (
                 "Mooncake non-page-contiguous packed regions keep only the "
-                "first layer name, so they cannot be aligned to PP size "
-                f"{meta.remote_pp_size}."
+                "first layer name, so they cannot be aligned across PP sizes "
+                f"{self.pp_size} and {meta.remote_pp_size}."
             )
             logger.error(msg)
             response = MooncakeXferResponse(
@@ -1444,95 +1473,14 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        shared_groups = self.region_shared_groups
-        if len(shared_groups) != len(self.registered_layer_names):
-            if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
-                msg = (
-                    "Mooncake shared-group metadata does not match registered "
-                    "layers, so a shared packed region cannot be transferred."
-                )
-                logger.error(msg)
-                response = MooncakeXferResponse(
-                    status=MooncakeXferResponseStatus.ERROR,
-                    err_msg=msg,
-                )
-                await sock.send_multipart((identity, self._encoder.encode(response)))
-                return
-            shared_groups = None
-        local_regions = self._get_transfer_regions(
-            self.kv_caches_base_addr,
-            self.block_len_per_layer,
-            self.kv_block_len_per_layer,
-            self.registered_layer_names,
-            self.registered_layer_indices,
-            self.registered_group_indices,
-            shared_groups,
-            self.region_row_offsets
-            if len(self.region_row_offsets) == len(self.registered_layer_names)
-            else None,
-        )
-        remote_shared = [tuple(groups) for groups in meta.registered_shared_group_ids]
-        if len(remote_shared) != len(meta.registered_layer_names):
-            remote_shared = None
-        remote_row_offsets = meta.registered_row_offsets
-        if len(remote_row_offsets) != len(meta.registered_layer_names):
-            remote_row_offsets = None
-        remote_regions = self._get_transfer_regions(
-            meta.kv_caches_base_addr,
-            meta.block_lens,
-            meta.kv_block_lens,
-            meta.registered_layer_names,
-            meta.registered_layer_indices,
-            meta.registered_group_indices,
-            remote_shared,
-            remote_row_offsets,
-        )
-        pre_align_local = local_regions
-        pre_align_remote = remote_regions
-        local_regions, remote_regions, align_err = _align_transfer_regions(
-            local_regions,
-            remote_regions,
-            allow_partial_layers=(
-                meta.remote_pp_size > 1 and meta.remote_pp_size != self.pp_size
-            ),
-        )
-        if align_err is not None:
+        local_regions, remote_regions, prep_err = self._prepare_transfer_regions(meta)
+        if prep_err is not None:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
-                err_msg=align_err,
+                err_msg=prep_err,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        # Head checks must see every layer name. Coalesce keeps only the first.
-        head_err = self._validate_head_resharding_layout(
-            meta.remote_tp_size, local_regions
-        )
-        if head_err is not None:
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=head_err,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
-        # Hetero TP indexes kv_block_len as one head-sharded payload. A merged
-        # multi-layer span would land that offset on the wrong layer. MLA is
-        # replicated, so the offset stays 0.
-        tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self.use_mla or self._producer_cache_is_replicated():
-            covered_both_sides = len(local_regions) == len(pre_align_local) and len(
-                remote_regions
-            ) == len(pre_align_remote)
-            n_aligned = len(local_regions)
-            local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
-                local_regions,
-                remote_regions,
-                promote_full_row=covered_both_sides,
-            )
-            logger.info(
-                "Mooncake packed coalesce: %s aligned regions -> %s transfer regions.",
-                n_aligned,
-                len(local_regions),
-            )
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
@@ -1980,6 +1928,7 @@ class MooncakeConnectorWorker:
         self.region_shared_groups: list[tuple[int, ...]] = []
         self.region_row_offsets = []
         self.opaque_packed_storages = set()
+        self._prepared_transfer_regions.clear()
 
         packed_storage_to_region: dict[int, int] = {}
         packed_view_to_region: dict[tuple[int, int, int], int] = {}
@@ -2548,6 +2497,111 @@ class MooncakeConnectorWorker:
 
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
+
+    def _prepare_transfer_regions(
+        self, meta: MooncakeXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+        """Align and coalesce once per peer layout.
+
+        ``send_kv_to_decode`` runs on every scheduler batch. The registered
+        layout does not change until the next ``register_kv_caches``.
+        """
+        cache_key = (
+            meta.remote_hostname,
+            meta.remote_port,
+            meta.remote_tp_size,
+            meta.remote_tp_rank,
+            meta.remote_pp_size,
+            tuple(meta.kv_caches_base_addr),
+            tuple(meta.block_lens),
+            tuple(meta.kv_block_lens),
+            tuple(meta.registered_layer_names),
+            tuple(meta.registered_layer_indices),
+            tuple(meta.registered_group_indices),
+            tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
+            tuple(meta.registered_row_offsets),
+        )
+        cached = self._prepared_transfer_regions.get(cache_key)
+        if cached is not None:
+            return cached[0], cached[1], None
+
+        shared_groups = self.region_shared_groups
+        if len(shared_groups) != len(self.registered_layer_names):
+            if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
+                return (
+                    [],
+                    [],
+                    "Mooncake shared-group metadata does not match registered "
+                    "layers, so a shared packed region cannot be transferred.",
+                )
+            shared_groups = None
+        local_rows = self.region_row_offsets
+        if len(local_rows) != len(self.registered_layer_names):
+            local_rows = None
+        local_regions = self._get_transfer_regions(
+            self.kv_caches_base_addr,
+            self.block_len_per_layer,
+            self.kv_block_len_per_layer,
+            self.registered_layer_names,
+            self.registered_layer_indices,
+            self.registered_group_indices,
+            shared_groups,
+            local_rows,
+        )
+        remote_shared = [tuple(groups) for groups in meta.registered_shared_group_ids]
+        if len(remote_shared) != len(meta.registered_layer_names):
+            remote_shared = None
+        remote_row_offsets = meta.registered_row_offsets
+        if len(remote_row_offsets) != len(meta.registered_layer_names):
+            remote_row_offsets = None
+        remote_regions = self._get_transfer_regions(
+            meta.kv_caches_base_addr,
+            meta.block_lens,
+            meta.kv_block_lens,
+            meta.registered_layer_names,
+            meta.registered_layer_indices,
+            meta.registered_group_indices,
+            remote_shared,
+            remote_row_offsets,
+        )
+        pre_align_local = local_regions
+        pre_align_remote = remote_regions
+        local_regions, remote_regions, align_err = _align_transfer_regions(
+            local_regions,
+            remote_regions,
+            allow_partial_layers=meta.remote_pp_size != self.pp_size,
+        )
+        if align_err is not None:
+            return [], [], align_err
+        # Head checks must see every layer name. Coalesce keeps only the first.
+        head_err = self._validate_head_resharding_layout(
+            meta.remote_tp_size, local_regions
+        )
+        if head_err is not None:
+            return [], [], head_err
+        # Hetero TP indexes kv_block_len as one head-sharded payload. A merged
+        # multi-layer span would land that offset on the wrong layer.
+        # Replicated KV keeps that offset at 0. MLA is replicated in practice;
+        # gating on use_mla alone would promote and then fail the length check
+        # for a non-replicated MLA rank with tp_ratio != 1.
+        tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
+        if tp_ratio == 1 or self._producer_cache_is_replicated():
+            covered_both_sides = len(local_regions) == len(pre_align_local) and len(
+                remote_regions
+            ) == len(pre_align_remote)
+            n_aligned = len(local_regions)
+            local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
+                local_regions,
+                remote_regions,
+                promote_full_row=covered_both_sides,
+            )
+            logger.info(
+                "Mooncake packed coalesce: %s aligned regions -> %s transfer regions.",
+                n_aligned,
+                len(local_regions),
+            )
+        self._prepared_transfer_regions[cache_key] = (local_regions, remote_regions)
+        return local_regions, remote_regions, None
 
     def _validate_head_resharding_layout(
         self, remote_tp_size: int, local_regions: list[TransferRegion]

@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _block_ids_for_region,
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
+    _has_opaque_packed_row,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
@@ -1800,6 +1801,13 @@ def test_coalesce_does_not_promote_a_mid_row_run():
     assert len(merged) == 1
     assert merged[0].row_offset == 1024
     assert merged[0].kv_block_len == 1024 + page
+
+
+def test_opaque_packed_row_is_full_stride_at_offset_zero():
+    """Branch B is row-sized at offset 0. A page view at offset 0 is not."""
+    assert _has_opaque_packed_row([0], [4096], [4096])
+    assert not _has_opaque_packed_row([0, 1024], [1000, 1000], [4096, 4096])
+    assert not _has_opaque_packed_row([], [4096], [4096])
 
 
 def test_coalesce_keeps_a_run_inside_its_starting_row():
