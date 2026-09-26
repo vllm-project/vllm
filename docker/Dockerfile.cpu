@@ -110,6 +110,8 @@ ENV TARGETARCH=${TARGETARCH}
 ######################### COMMON BASE IMAGE + PYTHON DEPS #########################
 FROM base-common AS base-common-pydeps
 
+ENV UV_COMPILE_BYTECODE=1
+
 # PyTorch provides its own indexes for standard and nightly builds.
 # PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
 # GPU torch-nightly lane); default 0 keeps the pinned release CPU build.
