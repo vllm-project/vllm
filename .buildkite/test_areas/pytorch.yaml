@@ -87,6 +87,20 @@ steps:
     - tests/compile/h100/
   commands:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) PyTorch Compilation H100 Cases"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/utils.py
+      - csrc/
+      commands:
+      - pytest -v -s compile/h100/test_startup.py
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests
@@ -178,10 +192,14 @@ steps:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
-      label: ":amd: (MI355) PyTorch Fullgraph"
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 90
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
       depends_on:
       - image-build-amd
 

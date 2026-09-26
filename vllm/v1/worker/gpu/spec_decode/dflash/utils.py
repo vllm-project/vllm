@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
@@ -38,7 +39,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
-        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
+        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
@@ -60,8 +61,12 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(dflash_model, "lm_head", None)
-    if target_lm_head is not None and _should_share(
-        dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
+    if (
+        target_lm_head is not None
+        and not getattr(dflash_model.config, "has_own_lm_head", False)
+        and _should_share(
+            dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
+        )
     ):
         if draft_lm_head is not None:
             del dflash_model.lm_head

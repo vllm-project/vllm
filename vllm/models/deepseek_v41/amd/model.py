@@ -61,8 +61,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import Engram, EngramLayout, NgramHashState
+from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+
+# Engram host offload and its prefetch stream are neither ROCm- nor
+# NVIDIA-specific, so they are imported rather than duplicated.
+from ..nvidia.engram import Engram
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -891,6 +895,11 @@ def _make_deepseek_v4_weights_mapper(
             # renames the engram fp8 table but not its scale; route the
             # scale explicitly to the same module.
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
+            re.compile(
+                r"(engram\.embed)\.weight_scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     else:
@@ -904,6 +913,11 @@ def _make_deepseek_v4_weights_mapper(
             ): r"\1.weight_scale_inv",
             # Same engram reroute as the fp4 branch above.
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
+            re.compile(
+                r"(engram\.embed)\.weight_scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     return WeightsMapper(
