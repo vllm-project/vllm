@@ -1521,6 +1521,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
 
+  # W8A8 block-scaled FP8 GEMM built on the gfx12 fp8 WMMA instruction. The
+  # kernel bodies are compiled only under __gfx1201__ (empty stubs elsewhere),
+  # so the source is harmless in a multi-arch build, but there is no point
+  # adding it at all unless gfx1201 is a target.
+  set(VLLM_ROCM_HAS_GFX1201 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1201")
+    set(VLLM_ROCM_HAS_GFX1201 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/w8a8_block_fp8_gemm_rdna4.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1539,6 +1550,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
+
+  if(VLLM_ROCM_HAS_GFX1201)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1201)
   endif()
 endif()
 
