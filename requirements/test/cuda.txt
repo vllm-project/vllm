@@ -1072,9 +1072,10 @@ s3transfer==0.10.3
     # via boto3
 sacrebleu==2.4.3
     # via lm-eval
-safetensors==0.8.0
+safetensors==0.9.0rc1
     # via
     #   -c requirements/common.txt
+    #   -c requirements/cuda.txt
     #   -r requirements/test/../common.txt
     #   accelerate
     #   open-clip-torch
