@@ -5931,8 +5931,10 @@ dependencies = [
 name = "vllm-parser"
 version = "0.1.0"
 dependencies = [
+ "auto_impl",
  "criterion",
  "easy-ext",
+ "educe",
  "expect-test",
  "futures",
  "openai-protocol",

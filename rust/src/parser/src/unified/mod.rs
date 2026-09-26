@@ -21,6 +21,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::reasoning::ReasoningError;
 use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
+use crate::utils::SpecialToken;
 
 /// Result alias for unified parser operations.
 pub type Result<T> = std::result::Result<T, UnifiedParserError>;
@@ -222,6 +223,25 @@ mod tests {
     }
 }
 
+/// Whether parser input carries generated-token attribution.
+///
+/// This is a property of the caller's pipeline, known before the first delta,
+/// so it is chosen once when the parser is constructed and never inferred from
+/// the data. A token-aware parser applies it when building its markers: under
+/// [`AttributionMode::TextOnly`] they carry no token guards.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AttributionMode {
+    /// Every delta carries one [`TokenAttribution`](vllm_tokenizer::TokenAttribution) per generated token, as
+    /// produced by the incremental detokenizer. Structural markers must be
+    /// spelled by their dedicated special tokens; equal text from ordinary
+    /// tokens stays content.
+    #[default]
+    Tokens,
+    /// Deltas carry text only. Markers are matched by spelling alone, which
+    /// cannot tell model-written marker text from structure.
+    TextOnly,
+}
+
 /// Incremental parser that extracts reasoning and tool-call events from assistant output.
 pub trait UnifiedParser: Send {
     /// Construct a boxed parser instance for one request stream.
@@ -286,5 +306,13 @@ pub enum UnifiedParserError {
 fn token_id(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<u32> {
     tokenizer.token_to_id(token).ok_or_else(|| UnifiedParserError::MissingToken {
         token: token.to_string(),
+    })
+}
+
+/// Resolves `token` to a [`SpecialToken`], or an error if it's not found.
+fn special_token(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<SpecialToken> {
+    Ok(SpecialToken {
+        id: token_id(tokenizer, token)?,
+        text: token.to_string(),
     })
 }

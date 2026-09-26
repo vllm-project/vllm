@@ -783,7 +783,7 @@ fn decoded_completion_stream(
             split_by_chars(body, TEXT_COMPLETION_CHUNK_CHARS)
                 .into_iter()
                 .map(|delta| DecodedCompletionChunk {
-                    delta,
+                    delta: vllm_text::DecodedText::unattributed(delta),
                     token_ids: Vec::new(), // unused for text-level roundtrip cases
                 })
                 .collect()
@@ -836,7 +836,7 @@ fn decoded_completion_stream(
                 sampling_mask: None,
             });
             events.push(DecodedTextEvent::TextDelta {
-                decoded: vllm_text::DecodedText::unattributed(chunk.delta),
+                decoded: chunk.delta,
                 sampled: vllm_text::SampledDelta {
                     token_ids: chunk.token_ids,
                     logprobs: None,
@@ -851,7 +851,8 @@ fn decoded_completion_stream(
 
 /// One decoded completion chunk fed into the output processor.
 struct DecodedCompletionChunk {
-    delta: String,
+    /// Attributed for token-id completions, as the production decoder emits it.
+    delta: vllm_text::DecodedText,
     token_ids: Vec<u32>,
 }
 
@@ -893,11 +894,11 @@ fn incremental_decode_chunks(
     let mut decoder = tokenizer.create_decode_stream(prompt_token_ids, false, 0);
     let mut chunks = Vec::new();
     for chunk_token_ids in split_by_count(token_ids, chunk_size) {
-        let mut delta = String::new();
+        let mut delta = vllm_text::DecodedText::default();
         for token_id in chunk_token_ids.iter().copied() {
             decoder.push_token(token_id)?;
             while let Some(chunk) = decoder.next_chunk() {
-                delta.push_str(&chunk.text);
+                delta.append(chunk);
             }
         }
         chunks.push(DecodedCompletionChunk {
@@ -909,10 +910,10 @@ fn incremental_decode_chunks(
     let (last_chunk, _) = decoder.flush(None)?;
     if let Some(last_chunk) = last_chunk {
         if let Some(delta) = chunks.last_mut() {
-            delta.delta.push_str(&last_chunk.text);
+            delta.delta.append(last_chunk);
         } else {
             chunks.push(DecodedCompletionChunk {
-                delta: last_chunk.text,
+                delta: last_chunk,
                 token_ids: Vec::new(),
             });
         }
