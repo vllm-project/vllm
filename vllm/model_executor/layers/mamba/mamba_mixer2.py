@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
@@ -26,6 +27,11 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.exact_replay import (
+    ExactReplayBuffers,
+    exact_replay_emit,
+    exact_replay_ssd,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -63,7 +69,10 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionBackend,
+    Mamba2AttentionMetadata,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
@@ -109,7 +118,7 @@ class Mixer2RMSNormGated(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        gate: torch.Tensor,
+        gate: torch.Tensor | None,
     ):
         # Three tensor-parallel cases:
         #   1. n_groups is 1
@@ -121,12 +130,24 @@ class Mixer2RMSNormGated(CustomOp):
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
-        x = x * nn.functional.silu(gate.to(torch.float32))
+        if gate is not None:
+            x = x * nn.functional.silu(gate.to(torch.float32))
+        else:
+            # The gate product used to upcast; keep the variance in fp32. This
+            # fallback still rounds before the weight multiply and is only used
+            # where the fp32 grouped kernel cannot run (see forward_cuda).
+            x = x.to(torch.float32)
         if not self.use_rms_norm:
             return x.to(input_dtype)
 
         if self.n_groups == 1:
-            if self.tp_size > 1:
+            if self.tp_size > 1 and envs.VLLM_BATCH_INVARIANT:
+                # Batch-invariant mode overrides mean but not sum: reduce the
+                # per-rank mean of squares so the result does not depend on
+                # the number of tokens in the batch.
+                local_means = x.pow(2).mean(dim=-1, keepdim=True)
+                variance = tensor_model_parallel_all_reduce(local_means) / self.tp_size
+            elif self.tp_size > 1:
                 # Compute local sum and then reduce to obtain global sum
                 local_sums = x.pow(2).sum(dim=-1, keepdim=True)
                 global_sums = tensor_model_parallel_all_reduce(local_sums)
@@ -160,12 +181,28 @@ class Mixer2RMSNormGated(CustomOp):
     def forward_cuda(
         self,
         x: torch.Tensor,
-        gate: torch.Tensor,
+        gate: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
+            if gate is None:
+                return x
             # Keep gate in float32 for numerical stability during silu
             return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
+
+        if envs.VLLM_BATCH_INVARIANT and self.n_groups % self.tp_size == 0:
+            # Each rank holds whole groups: run the fp32 grouped Triton norm,
+            # the arithmetic of the training-side RMSNormGated, for any group
+            # count (the torch path below rounds differently).
+            return rms_norm_gated(
+                x,
+                self.weight.data,
+                bias=None,
+                z=gate,
+                eps=self.variance_epsilon,
+                group_size=self.group_size,
+                norm_before_gate=False,
+            )
 
         if ((self.n_groups % self.tp_size) != 0) or self.n_groups != 1:
             return self.forward_native(x, gate)
@@ -531,6 +568,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
         # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
         _n_state = 5 if self.use_replayssm else 2
+        # Batch-invariant mode replays every SSD step from the last chunk
+        # boundary and appends the partial-chunk input buffers (x, dt, B).
+        self.exact_replay = envs.VLLM_BATCH_INVARIANT
+        # Batch-invariant mode applies the gate inside the scan kernel, the
+        # order of the Megatron memory-efficient training path; the norm
+        # then runs ungated.
+        self.gate_in_scan = self.exact_replay
+        self.replay_chunk_size: int | None = None
+        if self.exact_replay:
+            Mamba2AttentionBackend.check_batch_invariant_config(vllm_config)
+            assert model_config is not None
+            self.replay_chunk_size = model_config.get_mamba_chunk_size()
+            _n_state = 5
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
@@ -596,7 +646,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
         gate = projected_states[..., : self.tped_intermediate_size]
-        hidden_states = self.norm(ssm_output, gate)
+        # In batch-invariant mode the scan kernel already multiplied its output
+        # by silu(gate) in fp32, the order of the fused training path; the norm
+        # then runs ungated.
+        hidden_states = self.norm(ssm_output, None if self.gate_in_scan else gate)
 
         # 5. Final linear projection
         output, _ = self.out_proj(hidden_states)
@@ -649,6 +702,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         seq_idx = torch.zeros(nchunks, device=device, dtype=torch.int32)
         out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
+        # Batch-invariant mode applies the gate inside the scan (HAS_Z), a
+        # separate specialization that must be compiled here as well.
+        z = (
+            torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
+            if self.gate_in_scan
+            else None
+        )
 
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
         # HAS_INITSTATES as a constexpr, producing separate compiled
@@ -681,7 +741,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     seq_idx=seq_idx,
                     out=out,
                     D=self.D,
-                    z=None,
+                    z=z,
                     dt_bias=self.dt_bias,
                     initial_states=initial_states,
                     dt_softplus=True,
@@ -710,6 +770,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             projected_states[..., self.tped_intermediate_size :],
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
+        )
+        gate = (
+            projected_states[..., : self.tped_intermediate_size]
+            if self.gate_in_scan
+            else None
         )
 
         forward_context = get_forward_context()
@@ -746,6 +811,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     prev_num_accepted = self._replayssm_prev_num_accepted
             else:
                 x_cache = dt_cache = B_cache = None
+            if self.exact_replay:
+                replay_bufs = ExactReplayBuffers(*self.kv_cache[2:5])
+                exact_replay_p = attn_metadata.exact_replay_p
+                exact_replay_pos_d = attn_metadata.exact_replay_pos_d
+            else:
+                replay_bufs = None
+                exact_replay_p = exact_replay_pos_d = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -787,6 +859,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
             [num_decode_tokens, num_prefill_tokens],
             dim=0,
         )
+        gate_d = gate_p = None
+        if gate is not None:
+            gate_d, gate_p = torch.split(
+                gate[:num_actual_tokens].view(
+                    num_actual_tokens, self.num_heads // self.tp_size, self.head_dim
+                ),
+                [num_decode_tokens, num_prefill_tokens],
+                dim=0,
+            )
 
         if is_mamba_cache_all:
             # If prefix caching is enabled, retrieve the relevant variables
@@ -874,7 +955,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # 3. State Space Model sequence transformation
             initial_states = None
-            if has_initial_states_p is not None and prep_initial_states:
+            # Exact replay gathers its own boundary states inside
+            # exact_replay_ssd; skip the baseline gather to avoid a second
+            # (num_prefills, nheads, headdim, dstate) temporary.
+            if (
+                has_initial_states_p is not None
+                and prep_initial_states
+                and not self.exact_replay
+            ):
                 assert state_indices_tensor_p is not None
                 kernel_ssm_indices = state_indices_tensor_p
                 if is_mamba_cache_all:
@@ -887,31 +975,64 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     0,
                 )
 
-            # NOTE: final output is an in-place update of out tensor
-            assert preallocated_ssm_out_p is not None
-            varlen_states = mamba_chunk_scan_combined_varlen(
-                hidden_states_p.view(
-                    num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
-                ),
-                dt_p,
-                self.A,
-                B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                chunk_size=chunk_size,
-                D=self.D,
-                z=None,
-                dt_bias=self.dt_bias,
-                seq_idx=seq_idx_p,
-                cu_seqlens=query_start_loc_p,
-                cu_chunk_seqlens=cu_chunk_seqlen_p,
-                last_chunk_indices=last_chunk_indices_p,
-                initial_states=initial_states,
-                return_intermediate_states=is_mamba_cache_all,
-                dt_softplus=True,
-                dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                state_dtype=ssm_state.dtype,
-            )
+            if self.exact_replay:
+                # Exact replay: start every sequence at its last chunk boundary.
+                assert exact_replay_p is not None
+                assert preallocated_ssm_out_p is not None
+                assert state_indices_tensor_p is not None
+                assert replay_bufs is not None
+                exact_replay_ssd(
+                    hidden_states_p.view(
+                        num_prefill_tokens,
+                        self.num_heads // self.tp_size,
+                        self.head_dim,
+                    ),
+                    dt_p,
+                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    A=self.A,
+                    D=self.D,
+                    dt_bias=self.dt_bias,
+                    out=preallocated_ssm_out_p.view(
+                        num_prefill_tokens, -1, self.head_dim
+                    ),
+                    ssm_state=ssm_state,
+                    slots=state_indices_tensor_p,
+                    meta=exact_replay_p,
+                    chunk_size=chunk_size,
+                    buffers=replay_bufs,
+                    z=gate_p,
+                )
+            else:
+                # NOTE: final output is an in-place update of out tensor
+                assert preallocated_ssm_out_p is not None
+                varlen_states = mamba_chunk_scan_combined_varlen(
+                    hidden_states_p.view(
+                        num_prefill_tokens,
+                        self.num_heads // self.tp_size,
+                        self.head_dim,
+                    ),
+                    dt_p,
+                    self.A,
+                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    chunk_size=chunk_size,
+                    D=self.D,
+                    z=None,
+                    dt_bias=self.dt_bias,
+                    seq_idx=seq_idx_p,
+                    cu_seqlens=query_start_loc_p,
+                    cu_chunk_seqlens=cu_chunk_seqlen_p,
+                    last_chunk_indices=last_chunk_indices_p,
+                    initial_states=initial_states,
+                    return_intermediate_states=is_mamba_cache_all,
+                    dt_softplus=True,
+                    dt_limit=(0.0, float("inf")),
+                    out=preallocated_ssm_out_p.view(
+                        num_prefill_tokens, -1, self.head_dim
+                    ),
+                    state_dtype=ssm_state.dtype,
+                )
 
             if is_mamba_cache_all:
                 assert mamba_block_size is not None
@@ -983,7 +1104,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ).squeeze(1)
                 ] = varlen_states[last_chunk_indices_p]
 
-            else:
+            elif not self.exact_replay:
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
@@ -1048,30 +1169,64 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 hidden_states_B_C_d
             )
 
-            # 3. State Space Model sequence transformation
-            n_groups = self.n_groups // self.tp_size
-            A_d = (
-                self.A[:, None, ...][:, :, None]
-                .expand(-1, self.head_dim, self.ssm_state_size)
-                .to(dtype=torch.float32)
-            )
-            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
-            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
-            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
-            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
-            hidden_states_d = hidden_states_d.view(
-                -1, self.num_heads // self.tp_size, self.head_dim
-            )
+            if self.exact_replay:
+                assert exact_replay_pos_d is not None
+                assert preallocated_ssm_out_d is not None
+                assert replay_bufs is not None
+                # One token per row without speculative decoding: compute only
+                # that row from the buffered chunk instead of re-running the
+                # scan over the partial chunk. Rows may include CUDA graph
+                # padding, which points at the null block.
+                assert num_decode_tokens == num_decodes
+                n_groups = self.n_groups // self.tp_size
+                slots_d = state_indices_tensor_d_input
+                if slots_d.dim() == 2:
+                    slots_d = slots_d[:, 0]
+                exact_replay_emit(
+                    hidden_states_d.view(
+                        -1, self.num_heads // self.tp_size, self.head_dim
+                    ),
+                    dt_d,
+                    B_d.view(-1, n_groups, B_d.shape[1] // n_groups),
+                    C_d.view(-1, n_groups, C_d.shape[1] // n_groups),
+                    A=self.A,
+                    D=self.D,
+                    dt_bias=self.dt_bias,
+                    out=preallocated_ssm_out_d.view(
+                        num_decode_tokens, -1, self.head_dim
+                    ),
+                    ssm_state=ssm_state,
+                    slots=slots_d,
+                    pos=exact_replay_pos_d,
+                    chunk_size=chunk_size,
+                    buffers=replay_bufs,
+                    z=gate_d,
+                )
+            else:
+                # 3. State Space Model sequence transformation
+                n_groups = self.n_groups // self.tp_size
+                A_d = (
+                    self.A[:, None, ...][:, :, None]
+                    .expand(-1, self.head_dim, self.ssm_state_size)
+                    .to(dtype=torch.float32)
+                )
+                dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
+                dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
+                D_d = self.D[:, None, ...].expand(-1, self.head_dim)
+                B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
+                C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
+                hidden_states_d = hidden_states_d.view(
+                    -1, self.num_heads // self.tp_size, self.head_dim
+                )
 
-            assert preallocated_ssm_out_d is not None
-            # - the hidden is reshaped into (bs, num_heads, head_dim)
-            # - mamba_cache_params.ssm_state's slots will be selected
-            #   using state_indices_tensor_d
-            # NOTE: final output is an in-place update of out tensor
-            preallocated_ssm_out_d = preallocated_ssm_out_d.view(
-                num_decode_tokens, -1, self.head_dim
-            )
+                assert preallocated_ssm_out_d is not None
+                # - the hidden is reshaped into (bs, num_heads, head_dim)
+                # - mamba_cache_params.ssm_state's slots will be selected
+                #   using state_indices_tensor_d
+                # NOTE: final output is an in-place update of out tensor
+                preallocated_ssm_out_d = preallocated_ssm_out_d.view(
+                    num_decode_tokens, -1, self.head_dim
+                )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
                 if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
@@ -1132,7 +1287,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                             self.mamba_config.stochastic_rounding_philox_rounds
                         ),
                     )
-            else:
+            elif not self.exact_replay:
                 selective_state_update(
                     ssm_state,
                     hidden_states_d,
@@ -1176,9 +1331,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
+            chunk_size=self.replay_chunk_size,
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
+            # Batch-invariant mode rejects ReplaySSM, so this is the plain
+            # (conv, ssm) pair.
+            assert len(base_shape) == 2
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=self.n_groups,
