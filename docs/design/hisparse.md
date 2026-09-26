@@ -137,12 +137,13 @@ has consumed it.
 
 ## P/D import target
 
-The decoder chooses the landing target once per request from the normal cache
-admission calculation. If the complete imported prefix fits the device pools,
-NIXL transfers it directly into resident GPU pages. Otherwise, if the fixed
-host-backed GPU footprint and host source blocks fit, the request imports into
-the host tier. There is no context-length threshold or other heuristic, and a
-request waiting for capacity retains its choice across admission retries.
+The decoder first tries to admit a NIXL import with its complete prefix in
+resident GPU pages, using the normal cache admission calculation. If that
+allocation fails, the scheduler retries the request on a later step and
+`HiSparseCoordinator` switches it to the host tier, which needs only the fixed
+host-backed GPU footprint plus host source blocks. The request keeps the host
+tier across further admission retries. There is no context-length threshold or
+other heuristic, and the generic KV cache manager is unaware of the choice.
 
 A host import reads through a bounded decoder-GPU staging pool before copying
 into registered host memory. Pages needed immediately are mirrored into their

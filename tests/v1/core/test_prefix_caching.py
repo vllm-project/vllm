@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -528,9 +528,13 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
 
 
 def allocate_external_prefix(
-    manager: KVCacheManager, request: Request, num_tokens: int
+    manager: KVCacheManager,
+    request: Request,
+    num_tokens: int,
+    gpu_landing: bool = True,
 ) -> KVCacheBlocks | None:
-    get_hisparse_coordinator(manager).prepare_gpu_import(request.request_id)
+    if gpu_landing:
+        get_hisparse_coordinator(manager).prepare_gpu_import(request.request_id)
     return manager.allocate_slots(
         request,
         num_new_tokens=0,
@@ -913,7 +917,10 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     )
     imported_tokens = 4 * HISPARSE_BLOCK_SIZE
 
-    assert allocate_external_prefix(manager, request, imported_tokens) is not None
+    assert (
+        allocate_external_prefix(manager, request, imported_tokens, gpu_landing=False)
+        is not None
+    )
     required = manager.coordinator.get_num_blocks_to_allocate(
         request_id=request.request_id,
         num_tokens=request.num_tokens,
@@ -1358,14 +1365,10 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
         sha256,
     )
 
-    indexer = manager.coordinator.single_type_managers[1]
-    with patch.object(
-        indexer, "get_num_blocks_to_allocate", wraps=indexer.get_num_blocks_to_allocate
-    ) as count_indexer:
-        allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
-    # Full-sequence admission and actual allocation each count the indexer once,
-    # even when HiSparse switches the sparse groups to host landing.
-    assert count_indexer.call_count == 2
+    # The full prefix does not fit on GPU, so the admission retry lands on host.
+    assert allocate_external_prefix(manager, request, num_prompt_tokens) is None
+    assert not get_hisparse_coordinator(manager).imports_to_host(request.request_id)
+    allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
 
     assert allocated is not None
     assert get_hisparse_coordinator(manager).imports_to_host(request.request_id)
@@ -1395,7 +1398,7 @@ def test_hisparse_external_import_survives_capacity_retry():
     assert first.request_id not in get_hisparse_coordinator(manager)._pending_imports
 
     assert allocate_external_prefix(manager, second, len(tokens)) is None
-    assert get_hisparse_coordinator(manager).imports_to_host(second.request_id)
+    assert not get_hisparse_coordinator(manager).imports_to_host(second.request_id)
     assert second.request_id not in get_hisparse_coordinator(manager)._pending_imports
 
     manager.free(first)

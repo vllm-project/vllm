@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
@@ -29,9 +29,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 
 
 def _validate_prefix_cache_retention_interval(
@@ -87,7 +84,6 @@ class KVCacheCoordinator(ABC):
         num_prefill_lookahead: int = 0,
     ):
         self.kv_cache_config = kv_cache_config
-        self.hisparse: HiSparseCoordinator | None = None
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
         assert scheduler_block_size % hash_block_size == 0 and all(
@@ -180,7 +176,6 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
-        available_blocks: int | None = None,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -202,25 +197,11 @@ class KVCacheCoordinator(ABC):
                 per-request admission cap (SWA / chunked-local). Set only by
                 the full-sequence admission gate; per-step allocation must
                 leave it False so the predictor matches `allocate_new_blocks`.
-            available_blocks: Allocation budget after reservations and watermark,
-                used by adaptive cache tiers to select a destination.
 
         Returns:
             The number of blocks to allocate.
 
         """
-        if self.hisparse is not None:
-            return self.hisparse.get_num_blocks_to_allocate(
-                request_id,
-                num_tokens,
-                new_computed_blocks,
-                num_encoder_tokens,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap,
-                available_blocks,
-            )
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):

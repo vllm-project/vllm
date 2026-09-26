@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -185,83 +184,18 @@ class HiSparseCoordinator:
         return state
 
     def prepare_gpu_import(self, request_id: str) -> None:
-        """Prefer direct landing, preserving a host fallback chosen on a retry."""
+        """Land a connector import directly on GPU on the first attempt.
+
+        The scheduler only asks again after the previous allocation failed,
+        so a retry falls back to the host tier.
+        """
         state = self._get_request_state(request_id)
-        if state.host_import is None:
-            state.host_import = False
+        state.host_import = state.host_import is not None
 
     def imports_to_host(self, request_id: str) -> bool:
         """Keep legacy connectors on host unless direct landing was requested."""
         state = self.request_states.get(request_id)
         return state is None or state.host_import is not False
-
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        num_encoder_tokens: int,
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool,
-        available_blocks: int | None,
-    ) -> int:
-        """Choose the landing tier within one allocation query."""
-        sparse_managers = []
-        other_cost = 0
-        for i, manager in enumerate(self.managers):
-            if isinstance(
-                manager,
-                (HiSparseSourceManager, HiSparseHotManager, HiSparseResidentManager),
-            ):
-                sparse_managers.append((i, manager))
-                continue
-            if isinstance(manager, CrossAttentionManager):
-                other_cost += manager.get_num_blocks_to_allocate(
-                    request_id,
-                    num_encoder_tokens,
-                    [],
-                    0,
-                    0,
-                    num_encoder_tokens,
-                    apply_admission_cap=apply_admission_cap,
-                )
-            else:
-                other_cost += manager.get_num_blocks_to_allocate(
-                    request_id,
-                    num_tokens,
-                    new_computed_blocks[i],
-                    total_computed_tokens,
-                    num_local_computed_tokens,
-                    num_tokens_main_model,
-                    apply_admission_cap=apply_admission_cap,
-                )
-
-        def sparse_cost() -> int:
-            return sum(
-                manager.get_num_blocks_to_allocate(
-                    request_id,
-                    num_tokens,
-                    new_computed_blocks[i],
-                    total_computed_tokens,
-                    num_local_computed_tokens,
-                    num_tokens_main_model,
-                    apply_admission_cap=apply_admission_cap,
-                )
-                for i, manager in sparse_managers
-            )
-
-        cost = other_cost + sparse_cost()
-        if (
-            available_blocks is not None
-            and cost > available_blocks
-            and total_computed_tokens > num_local_computed_tokens
-            and not self.imports_to_host(request_id)
-        ):
-            self._get_request_state(request_id).host_import = True
-            cost = other_cost + sparse_cost()
-        return cost
 
     def commit_computed_blocks(self, request_id: str, num_host_pages: int) -> None:
         """Account for a prefix hit on host pages the request now references."""
@@ -850,12 +784,10 @@ def get_hisparse_coordinator(
         coordinator = getattr(manager, "coordinator", None)
         if coordinator is not None:
             assert isinstance(coordinator, HiSparseCoordinator)
-            kv_cache_manager.coordinator.hisparse = coordinator
             return coordinator
     coordinator = HiSparseCoordinator(
         kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
-    kv_cache_manager.coordinator.hisparse = coordinator
     return coordinator
