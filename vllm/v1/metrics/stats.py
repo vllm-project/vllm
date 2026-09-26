@@ -433,6 +433,7 @@ class IterationStats:
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
+        self.num_preempted_reqs_by_reason: dict[str, int] = {}
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
@@ -526,6 +527,9 @@ class IterationStats:
                 lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
+                if event.reason is not None:
+                    by_reason = self.num_preempted_reqs_by_reason
+                    by_reason[event.reason] = by_reason.get(event.reason, 0) + 1
                 req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
 
