@@ -4045,12 +4045,14 @@ steps:
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+  - tests/kernels/attention/test_rocm_aiter_mla_head_padding.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - amd-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_head_padding.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
@@ -4087,7 +4089,7 @@ steps:
   - vllm/utils/flashinfer.py
   optional: true
   commands:
-  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --ignore=kernels/attention/test_rocm_aiter_mla_head_padding.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) MoE Kernels Shard %N (MI355 suite)" # TBD
   timeout_in_minutes: 55
