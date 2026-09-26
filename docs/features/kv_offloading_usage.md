@@ -160,6 +160,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `compact_groups` | no | `false` | Omit unused CPU-slot padding from unequal packed BLHNC groups. Uses a separate file namespace and adds CPU copies, which may slow fast storage. Supported for non-canonical, single-node TP layouts; other layouts keep fixed-size files. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 

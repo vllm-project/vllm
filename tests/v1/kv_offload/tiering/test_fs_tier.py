@@ -11,6 +11,7 @@ import mmap
 import os
 import threading
 import time
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -31,9 +32,11 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
+    OffloadingGroupConfig,
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
@@ -528,7 +531,11 @@ def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
-def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("negative", [False, True])
+def test_out_of_bounds_block_id_smoke(
+    fs_tier, tmp_path, monkeypatch, use_c_ext, packed, negative
+):
     """Smoke test: a block id beyond the primary tensor's block count must
     fail the job, for both the C extension and the Python fallback."""
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
@@ -538,17 +545,22 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
 
     tier, tensor = fs_tier
-    out_of_bounds_bid = tensor.shape[0]  # one past the last valid block
+    if packed:
+        tier, tensor, _ = _packed_fs_tier(tmp_path, monkeypatch, use_c_ext)
+    try:
+        out_of_bounds_bid = -1 if negative else tensor.shape[0]
+        tier.submit_store(make_job(1, [key(1)], [out_of_bounds_bid]))
+        store_results = drain(tier)
+        assert len(store_results) == 1
+        assert not store_results[0].success
 
-    tier.submit_store(make_job(1, [key(1)], [out_of_bounds_bid]))
-    store_results = drain(tier)
-    assert len(store_results) == 1
-    assert not store_results[0].success
-
-    tier.submit_load(make_job(2, [key(1)], [out_of_bounds_bid], is_promotion=True))
-    load_results = drain(tier)
-    assert len(load_results) == 1
-    assert not load_results[0].success
+        tier.submit_load(make_job(2, [key(1)], [out_of_bounds_bid], is_promotion=True))
+        load_results = drain(tier)
+        assert len(load_results) == 1
+        assert not load_results[0].success
+    finally:
+        if packed:
+            tier.shutdown()
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
@@ -968,3 +980,124 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         assert torch.allclose(reader_tensor[1], expected)
     finally:
         reader.shutdown()
+
+
+def _packed_fs_tier(tmp_path, monkeypatch, use_c_ext, copies=1, compact=True):
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+    block_bytes, blocks_per_chunk = 16384, 4
+    spec = _make_offloading_spec(tp_size=2, replicated_layout=copies == 1)
+    spec.config = replace(
+        spec.config,
+        worker_kv_bytes_per_block=block_bytes,
+        cache=replace(spec.config.cache, blocks_per_chunk=blocks_per_chunk),
+        kv_cache_layout="BLHNC",
+        groups=(
+            OffloadingGroupConfig(16, ("a", "b"), 0, ((0, 1024), (1024, 3072))),
+            OffloadingGroupConfig(16, ("c",), 2, ((0, block_bytes),)),
+        ),
+    )
+    spec.blocks_per_chunk = blocks_per_chunk
+    spec.replicated_layout = copies == 1
+    spec.cpu_page_size_per_worker = block_bytes * blocks_per_chunk
+    spec.kv_bytes_per_chunk = spec.cpu_page_size_per_worker * copies
+    tensor = _page_aligned_zero_tensor(8, spec.kv_bytes_per_chunk, torch.uint8)
+    tier = FileSystemTierManager(
+        spec,
+        memoryview(tensor.numpy()),
+        "fs",
+        str(tmp_path),
+        n_read_threads=1,
+        n_write_threads=1,
+        compact_groups=compact,
+    )
+    return tier, tensor.view(8, copies * blocks_per_chunk, block_bytes), spec
+
+
+@pytest.mark.parametrize("copies", [1, 2], ids=["replicated", "sharded"])
+@pytest.mark.parametrize("use_c_ext", [True, False], ids=["native", "python"])
+@pytest.mark.parametrize("buffered", [False, True])
+@pytest.mark.parametrize("compact", [False, True])
+def test_packed_group_files_roundtrip(
+    tmp_path, monkeypatch, copies, use_c_ext, buffered, compact
+):
+    if buffered:
+        monkeypatch.setattr(
+            "vllm.v1.kv_offload.tiering.fs.manager.probe_o_direct", lambda _: False
+        )
+    tier, tensor, spec = _packed_fs_tier(
+        tmp_path, monkeypatch, use_c_ext, copies, compact
+    )
+    keys = [make_offload_key(bytes([i]), group) for i, group in enumerate((0, 2, 0, 0))]
+    payloads = [4096, 16384, 4096, 4096] if compact else [16384] * 4
+    try:
+        for i in range(4):
+            for block in range(tensor.shape[1]):
+                tensor[i, block].fill_(i * 16 + block + 1)
+        expected = torch.full_like(tensor[:4], 239)
+        for i, payload in enumerate(payloads):
+            expected[i, :, :payload] = tensor[i, :, :payload]
+        transfer_bytes = sum(payloads) * tensor.shape[1]
+        tier.submit_store(make_job(1, keys, [0, 1, 2, 3]))
+        stored = drain(tier)
+        assert len(stored) == 1 and stored[0].success
+        assert stored[0].transfer_bytes == transfer_bytes
+        for i, payload in enumerate(payloads):
+            with open(tier.file_mapper.get_file_name(keys[i]), "rb") as f:
+                assert f.read() == tensor[i, :, :payload].contiguous().numpy().tobytes()
+
+        tensor[4:].fill_(239)
+        tier.submit_load(make_job(2, keys, [4, 5, 6, 7], is_promotion=True))
+        loaded = drain(tier)
+        assert len(loaded) == 1 and loaded[0].success
+        assert loaded[0].transfer_bytes == transfer_bytes
+        assert torch.equal(tensor[4:], expected)
+        assert tensor.numel() == 8 * 16384 * 4 * copies
+
+        legacy = FileMapper.from_offloading_spec(
+            str(tmp_path), spec, blocks_per_file=4, parallel_agnostic=True
+        )
+        assert (tier.file_mapper.base_path != legacy.base_path) == compact
+        run_config = tier.file_mapper.get_run_config()
+        assert ("storage_format" in run_config) == compact
+        assert run_config["tp_size"] == (2 if compact else copies)
+    finally:
+        tier.shutdown()
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False], ids=["native", "python"])
+@pytest.mark.parametrize("groups", [(0, 2, 2, 0), (2, 0, 0, 2)])
+def test_packed_group_partial_load_keeps_original_prefix(
+    tmp_path, monkeypatch, use_c_ext, groups
+):
+    tier, tensor, _ = _packed_fs_tier(tmp_path, monkeypatch, use_c_ext)
+    keys = [make_offload_key(bytes([i]), group) for i, group in enumerate(groups)]
+    try:
+        tensor.fill_(83)
+        tier.submit_store(make_job(1, keys, [0, 1, 2, 3]))
+        assert all(result.success for result in drain(tier))
+        assert lookup_and_wait(tier, keys) == [LookupResult.HIT] * 4
+        with open(tier.file_mapper.get_file_name(keys[2]), "wb") as f:
+            f.write(b"short")
+        tensor[4:].fill_(239)
+        tier.submit_load(make_job(2, keys, [4, 5, 6, 7], is_promotion=True))
+        results = drain(tier)
+        assert len(results) == 1 and not results[0].success
+        assert tuple(results[0].successful_keys) == tuple(keys[:2])
+        assert results[0].transfer_bytes == (4096 + 16384) * 4
+        for i, group in enumerate(groups[:2]):
+            payload = 4096 if group == 0 else 16384
+            assert torch.all(tensor[4 + i, :, :payload] == 83)
+            assert torch.all(tensor[4 + i, :, payload:] == 239)
+        assert torch.all(tensor[7] == 239)
+        assert [tier.lookup(k, _CTX) for k in keys] == [
+            LookupResult.HIT,
+            LookupResult.HIT,
+            LookupResult.MISS,
+            LookupResult.MISS,
+        ]
+    finally:
+        tier.shutdown()
