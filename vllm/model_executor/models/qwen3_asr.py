@@ -274,7 +274,7 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen3ASRMultiModalProcessor(
-    Qwen3OmniMoeThinkerMultiModalProcessor,
+    Qwen3OmniMoeThinkerMultiModalProcessor[Qwen3ASRProcessingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -316,6 +316,7 @@ class Qwen3ASRMultiModalProcessor(
             if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
+                assert audio is not None
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model"
