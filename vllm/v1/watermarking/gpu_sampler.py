@@ -24,12 +24,14 @@ class GPUWatermarkSampler(Sampler):
         *args,
         deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn",
         deduplicate_contexts_max_history: int | None = 8192,
+        enforce: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.watermarker = watermarker
         self.deduplicate_contexts = deduplicate_contexts
         self.deduplicate_contexts_max_history = deduplicate_contexts_max_history
+        self.enforce = enforce
         self.watermarking = UvaBackedTensor(
             self.sampling_states.max_num_reqs, dtype=torch.bool
         )
@@ -38,8 +40,15 @@ class GPUWatermarkSampler(Sampler):
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         super().add_request(req_idx, sampling_params)
-        self.watermarking.np[req_idx] = sampling_params.watermarking
-        if sampling_params.watermarking and sampling_params.temperature == 0:
+        watermarking = sampling_params.watermarking
+        if self.enforce and not watermarking:
+            logger.warning_once(
+                "Watermarking is enforced by the server (watermark_config.enforce"
+                "=True); ignoring the request's watermarking=False."
+            )
+            watermarking = True
+        self.watermarking.np[req_idx] = watermarking
+        if watermarking and sampling_params.temperature == 0:
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
                 "(temperature=0) cannot be watermarked. This request will use "

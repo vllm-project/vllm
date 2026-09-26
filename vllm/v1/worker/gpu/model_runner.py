@@ -476,6 +476,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     deduplicate_contexts_max_history=(
                         wm_config.deduplicate_contexts_max_history
                     ),
+                    enforce=wm_config.enforce,
                     **sampler_kwargs,
                 )
             custom = self.model_state.custom_sampler(self.sampler)
