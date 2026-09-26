@@ -345,6 +345,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -359,6 +360,26 @@ def _rocm_aiter_fused_moe_impl(
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
+
+    # ``fused_moe()``'s public signature has no hook to override the
+    # activation quant dtype it picks internally, and aiter's own
+    # ``fused_moe_`` custom op (``torch.ops.aiter.fused_moe_``) has a fixed
+    # schema that drops the ``_q_dtype_a`` kwarg entirely. The only reachable
+    # override point is aiter's private, un-registered ``_fused_moe_impl``
+    # Python function, which is what both of the above ultimately call. This
+    # is depended-on internal API, not aiter's public surface — see
+    # ``_use_mxfp4_w4a4_moe_activation`` in ``rocm_aiter_moe.py`` for why this
+    # override exists and https://github.com/ROCm/aiter/blob/v0.1.13.post1
+    # (the version this file is already pinned to elsewhere) for the pin this
+    # relies on. vLLM's own ``rocm_aiter_fused_moe`` custom op already forms
+    # the opaque torch.compile/CUDA-graph boundary here, so calling aiter's
+    # internal function directly instead of its own custom op is safe: the
+    # underlying kernel launches are identical either way.
+    _fused_moe_call = fused_moe
+    if q_dtype_a is not None:
+        from aiter.fused_moe import _fused_moe_impl
+
+        _fused_moe_call = _fused_moe_impl
 
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
@@ -378,16 +399,27 @@ def _rocm_aiter_fused_moe_impl(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
         )
+    if q_dtype_a is not None:
+        extra_kwargs["_q_dtype_a"] = q_dtype_a
 
-    return fused_moe(
+    # ``fused_moe_`` (the private entry point) expects plain enum values,
+    # matching what ``fused_moe()`` itself passes down internally.
+    activation_arg = (
+        activation.value if _fused_moe_call is not fused_moe else activation
+    )
+    quant_type_arg = (
+        quant_type.value if _fused_moe_call is not fused_moe else quant_type
+    )
+
+    return _fused_moe_call(
         hidden_states,
         w1,
         w2,
         topk_weight,
         topk_ids,
         expert_mask,
-        activation,
-        quant_type,
+        activation_arg,
+        quant_type_arg,
         doweight_stage1,
         w1_scale,
         w2_scale,
@@ -435,6 +467,7 @@ def _rocm_aiter_fused_moe_fake(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -2955,6 +2988,7 @@ class rocm_aiter_ops:
         shared_w1_scale: torch.Tensor | None = None,
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
+        q_dtype_a: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2986,6 +3020,7 @@ class rocm_aiter_ops:
             shared_w1_scale,
             shared_w2_scale,
             shared_expert_id,
+            q_dtype_a,
         )
 
     @staticmethod
