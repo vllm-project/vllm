@@ -1402,6 +1402,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        seen_region_keys: list[tuple[int, int]] = []
         self._ssm_region_indices = []
         self._scratch_region_indices = []
         self._ple_region_index = None
@@ -1630,8 +1631,14 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
-                    region_index = seen_base_addresses.index(base_addr)
+                # Distinct transfer geometries must stay distinct regions even
+                # when they alias the same base address (e.g. an MLA swa_cache
+                # and a compressor state_cache sharing one HMA allocation):
+                # collapsing them would make the later layer silently transfer
+                # with the earlier layer's block length.
+                region_key = (base_addr, block_len)
+                if region_key in seen_region_keys:
+                    region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1643,6 +1650,7 @@ class NixlBaseConnectorWorker:
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
+                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
@@ -1695,6 +1703,7 @@ class NixlBaseConnectorWorker:
         assert (
             len(self.block_len_per_layer)
             == len(seen_base_addresses)
+            == len(seen_region_keys)
             == len(self._region_is_mla)
             == len(self.block_stride_per_layer)
             == len(self.region_group_ids)
