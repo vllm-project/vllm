@@ -1462,6 +1462,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
     ),
+    "Xing4_0ForCausalLM": _HfExamplesInfo(
+        "XingChen-AGI/Xing4.0-29B-A4B",
+        trust_remote_code=True,
+    ),
     "VoxtralRealtimeGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-4B-Realtime-2602",
         enforce_eager=True,

@@ -160,6 +160,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "inkling_reasoning_parser",
         "InklingParserReasoningAdapter",
     ),
+    "xing4_0": (
+        "xing4_0_reasoning_parser",
+        "Xing4_0ReasoningParser",
+    ),
 }
 
 
