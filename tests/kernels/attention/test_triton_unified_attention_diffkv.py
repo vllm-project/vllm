@@ -35,6 +35,8 @@ NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
 HEAD_SIZES = [(128, 128), (192, 128)]
 BLOCK_SIZES = [16]
 DTYPES = [torch.bfloat16]
+# None keeps the KV cache in the query dtype.
+KV_CACHE_DTYPES = [None, current_platform.fp8_dtype()]
 
 NUM_BLOCKS = 2048
 
@@ -80,6 +82,7 @@ def _alloc_segm_buffers(seq_threshold_3D: int, num_query_heads: int, head_size_v
 @pytest.mark.parametrize("sliding_window", [None, 128])
 @pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
 def test_triton_unified_attn_diffkv_vs_reference(
@@ -89,13 +92,16 @@ def test_triton_unified_attn_diffkv_vs_reference(
     sliding_window: int | None,
     soft_cap: float | None,
     dtype: torch.dtype,
+    kv_cache_dtype: torch.dtype | None,
     block_size: int,
     seq_threshold_3D: int,
 ) -> None:
     head_size_qk, head_size_v = head_sizes
 
-    # Keep the FA3/FA4 comparison on NVIDIA; ROCm uses the PyTorch oracle.
-    if not current_platform.is_rocm():
+    # FA3/FA4 is the reference on NVIDIA; ROCm and the FP8 KV cache (FA would
+    # also quantize Q) use the PyTorch oracle.
+    use_torch_ref = current_platform.is_rocm() or kv_cache_dtype is not None
+    if not use_torch_ref:
         fa_version = get_flash_attn_version(
             head_size=head_size_qk, head_size_v=head_size_v
         )
@@ -126,6 +132,16 @@ def test_triton_unified_attn_diffkv_vs_reference(
     )
     key_cache = kv_cache[..., :head_size_qk]
     value_cache = kv_cache[..., head_size_qk:]
+    k_descale = v_descale = None
+    if kv_cache_dtype is not None:
+        # Non-unit scales so the K/V descales are exercised.
+        k_descale = torch.tensor(0.5, dtype=torch.float32)
+        v_descale = torch.tensor(0.25, dtype=torch.float32)
+        kv_cache = torch.cat(
+            [key_cache / k_descale, value_cache / v_descale], dim=-1
+        ).to(kv_cache_dtype)
+        key_cache = kv_cache[..., :head_size_qk]
+        value_cache = kv_cache[..., head_size_qk:]
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
@@ -137,12 +153,17 @@ def test_triton_unified_attn_diffkv_vs_reference(
         0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
     )
 
-    if current_platform.is_rocm():
+    if use_torch_ref:
+        ref_key_cache = key_cache.float()
+        ref_value_cache = value_cache.float()
+        if kv_cache_dtype is not None:
+            ref_key_cache *= k_descale
+            ref_value_cache *= v_descale
         # FP32 also keeps the helper's in-place scaling off the kernel input.
         ref_out = ref_paged_attn(
             query.float(),
-            key_cache.float(),
-            value_cache.float(),
+            ref_key_cache,
+            ref_value_cache,
             query_lens,
             kv_lens,
             block_tables,
@@ -199,6 +220,8 @@ def test_triton_unified_attn_diffkv_vs_reference(
         softmax_segm_output=segm_output,
         softmax_segm_max=segm_max,
         softmax_segm_expsum=segm_expsum,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
     torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
