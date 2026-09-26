@@ -247,6 +247,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import FlashInferNVLinkOneSidedManager
 
                 self.all2all_manager = FlashInferNVLinkOneSidedManager(self.cpu_group)
+            elif self.all2all_backend == "flashinfer_cft_counted_write":
+                from .all2all import FlashInferCFTCountedWriteManager
+
+                self.all2all_manager = FlashInferCFTCountedWriteManager(self.cpu_group)
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 

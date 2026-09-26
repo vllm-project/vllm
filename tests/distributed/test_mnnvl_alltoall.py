@@ -16,6 +16,7 @@ import torch.multiprocessing as mp
 from vllm.distributed import get_ep_group
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    has_flashinfer_cft_counted_write,
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
@@ -205,6 +206,13 @@ requires_ptrace = pytest.mark.skipif(
 requires_deep_ep_v2 = pytest.mark.skipif(
     not has_deep_ep_v2(),
     reason="DeepEP v2 (ElasticBuffer) not available or NCCL < 2.30.4",
+)
+requires_cft_counted_write = pytest.mark.skipif(
+    not has_flashinfer_cft_counted_write(),
+    reason=(
+        "FlashInfer CFT counted-write not available "
+        "(requires sm_100+, CUDA 13.4+, NVLink fabric)"
+    ),
 )
 
 # NOTE: No module-level pytestmark here. The FlashInfer lifecycle tests have
@@ -983,3 +991,173 @@ def _deepep_v2_lifecycle_worker(rank, world_size):
 def test_deepep_v2_manager_lifecycle(world_size):
     """Test DeepEP v2 ElasticBuffer manager init, caching, and destroy."""
     _spawn_workers(_deepep_v2_lifecycle_worker, world_size)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: FlashInfer CFT counted-write manager lifecycle
+# ---------------------------------------------------------------------------
+#
+# Tests FlashInferCFTCountedWriteManager initialization, workspace growth,
+# dispatch, and combine using the CFT counted-write kernel.
+#
+# Requires: sm_100+ (Blackwell), CUDA 13.4+, NVLink fabric,
+#           flashinfer.comm.cft_alltoall module.
+# ---------------------------------------------------------------------------
+
+
+def _cft_lifecycle_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferCFTCountedWriteManager,
+    )
+
+    ep_group = get_ep_group()
+    manager = FlashInferCFTCountedWriteManager(ep_group.cpu_group)
+
+    assert manager.rank == rank
+    assert manager.world_size == world_size
+    assert not manager.initialized
+    assert manager.cft_moe is None
+
+    hidden_size = 7168
+    num_experts = world_size * 32
+    top_k = 8
+    max_tokens = 256
+    x_bytes_per_token = hidden_size * 2  # bf16
+    x_sf_bytes_per_token = 0
+
+    manager.initialize(
+        max_num_tokens=max_tokens,
+        top_k=top_k,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        x_bytes_per_token=x_bytes_per_token,
+        x_sf_bytes_per_token=x_sf_bytes_per_token,
+    )
+    assert manager.initialized
+    assert manager.cft_moe is not None
+    assert manager.top_k == top_k
+    assert manager.num_experts == num_experts
+
+    torch.distributed.barrier()
+
+    # Re-initialize with same params should be a no-op
+    cft_moe_before = manager.cft_moe
+    manager.initialize(
+        max_num_tokens=max_tokens,
+        top_k=top_k,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        x_bytes_per_token=x_bytes_per_token,
+        x_sf_bytes_per_token=x_sf_bytes_per_token,
+    )
+    assert manager.cft_moe is cft_moe_before
+
+    torch.distributed.barrier()
+
+    # Re-initialize with larger max_tokens should grow the workspace
+    manager.initialize(
+        max_num_tokens=max_tokens * 2,
+        top_k=top_k,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        x_bytes_per_token=x_bytes_per_token,
+        x_sf_bytes_per_token=x_sf_bytes_per_token,
+    )
+    assert manager.max_num_tokens == max_tokens * 2
+    assert manager.initialized
+
+    torch.distributed.barrier()
+
+    manager.cleanup()
+    assert not manager.initialized
+    assert manager.cft_moe is None
+
+    torch.distributed.barrier()
+
+
+def _cft_dispatch_combine_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferCFTCountedWriteManager,
+    )
+
+    device = torch.device(f"cuda:{rank}")
+    ep_group = get_ep_group()
+    manager = FlashInferCFTCountedWriteManager(ep_group.cpu_group)
+
+    hidden_size = 1024
+    num_experts = world_size * 8
+    top_k = 2
+    tokens_per_rank = 32
+    x_bytes_per_token = hidden_size * 2  # bf16
+    x_sf_bytes_per_token = 0
+
+    manager.initialize(
+        max_num_tokens=tokens_per_rank,
+        top_k=top_k,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        x_bytes_per_token=x_bytes_per_token,
+        x_sf_bytes_per_token=x_sf_bytes_per_token,
+    )
+
+    torch.manual_seed(rank + 7)
+    x = torch.randn(tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16)
+    topk_ids = torch.randint(
+        0,
+        num_experts,
+        (tokens_per_rank, top_k),
+        device=device,
+        dtype=torch.int32,
+    )
+    topk_weights = torch.rand(
+        tokens_per_rank, top_k, device=device, dtype=torch.float32
+    )
+
+    payloads = [x, topk_ids, topk_weights]
+    assert manager.cft_moe is not None
+    recv_payloads = manager.cft_moe.dispatch(
+        token_selected_experts=topk_ids,
+        input_payloads=payloads,
+        runtime_max_tokens_per_rank=tokens_per_rank,
+        invalid_token_expert_id=-1,
+        expert_id_payload_index=1,
+    )
+    assert len(recv_payloads) == 3
+    recv_x, recv_ids, recv_weights = recv_payloads
+    assert recv_x.numel() > 0
+    assert recv_ids.numel() > 0
+
+    # Combine: all-ones expert output → result == number of distinct expert ranks
+    expert_output = torch.ones(
+        world_size, tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    output = torch.zeros(
+        tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    manager.combine_into(
+        payload=expert_output,
+        runtime_max_tokens_per_rank=tokens_per_rank,
+        output=output,
+    )
+    assert output.shape == (tokens_per_rank, hidden_size)
+
+    torch.distributed.barrier()
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_cft_counted_write
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_cft_manager_lifecycle(world_size):
+    """Test FlashInfer CFT counted-write manager init, workspace growth, and cleanup."""
+    _spawn_workers(_cft_lifecycle_worker, world_size, dp_size=world_size)
+
+
+@requires_multi_gpu
+@requires_cft_counted_write
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_cft_dispatch_combine(world_size):
+    """Test FlashInfer CFT counted-write dispatch/combine with actual data flow."""
+    _spawn_workers(_cft_dispatch_combine_worker, world_size, dp_size=world_size)

@@ -17,6 +17,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import (
+    has_flashinfer_cft_counted_write,
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
@@ -44,6 +45,14 @@ if has_flashinfer_nvlink_one_sided():
         MoeAlltoAll,  # type: ignore[import-not-found]
         moe_a2a_get_workspace_size_per_rank,
     )
+
+if has_flashinfer_cft_counted_write():
+    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
+    from flashinfer.comm.cft_alltoall import (  # type: ignore[import-not-found]
+        CftMoe,
+        cft_a2a_get_workspace_size_per_rank,
+    )
+    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
 
 
 logger = init_logger(__name__)
@@ -1014,6 +1023,176 @@ class MoriAll2AllManager(All2AllManagerBase):
             mori_kwargs, self._make_handle
         )
         return handle
+
+
+class FlashInferCFTCountedWriteManager(All2AllManagerBase):
+    """All2All using FlashInfer CFT counted-write MoE all-to-all kernel.
+
+    Uses CUDA Logical Endpoints and ``fabric.try_put.counted`` operations to
+    write directly into peer receive buffers over the NVLink fabric.  A
+    counted write transfers data to a remote Logical Endpoint while atomically
+    incrementing a destination-side counter by the number of bytes delivered.
+    The receiver waits until the counter reaches the expected byte count before
+    consuming the data, combining data transfer and arrival notification in a
+    single operation.
+
+    Requirements:
+        - ``flashinfer.comm.cft_alltoall`` module (FlashInfer CFT support)
+        - sm_100+ (Blackwell) hardware
+        - CUDA 13.4+
+        - Compatible NVLink fabric environment
+    """
+
+    rank: int
+    world_size: int
+
+    def __init__(self, cpu_group):
+        assert has_flashinfer_cft_counted_write(), (
+            "flashinfer CFT counted-write module not found or prerequisites "
+            "not met (requires sm_100+, CUDA 13.4+, and NVLink fabric). "
+            "Please install/check flashinfer."
+        )
+        super().__init__(cpu_group)
+        logger.debug(
+            "Initialize FlashInfer CFT Counted-Write rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.initialized = False
+        self.cft_moe: Any | None = None
+        self.mapping = None
+        self.workspace_size = 0
+        self.max_num_tokens = 0
+        self.top_k = 0
+        self.num_experts = 0
+
+    def initialize(
+        self,
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+        x_bytes_per_token: int,
+        x_sf_bytes_per_token: int,
+    ):
+        """Initialize (or grow) the CFT counted-write workspace."""
+        total_dispatch_payload_size_per_token = (
+            x_bytes_per_token
+            + x_sf_bytes_per_token
+            + top_k * 4  # int32 topk ids
+            + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        needed_workspace_size = cft_a2a_get_workspace_size_per_rank(
+            ep_size=self.world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
+
+        if self.initialized:
+            assert top_k == self.top_k, (
+                "FlashInfer CFT counted-write MoeAlltoAll does not support "
+                f"heterogeneous top_k across MoE layers (got {top_k}, "
+                f"was built with {self.top_k})"
+            )
+            assert num_experts == self.num_experts, (
+                "FlashInfer CFT counted-write MoeAlltoAll does not support "
+                f"heterogeneous num_experts across MoE layers (got "
+                f"{num_experts}, was built with {self.num_experts})"
+            )
+            if (
+                needed_workspace_size <= self.workspace_size
+                and max_num_tokens <= self.max_num_tokens
+            ):
+                return
+
+        self.workspace_size = max(self.workspace_size, needed_workspace_size)
+        self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
+        self.top_k = top_k
+        self.num_experts = num_experts
+
+        self.cleanup()
+        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+        gpus_per_node = (
+            len(assigned_physical_gpu_ids)
+            if assigned_physical_gpu_ids is not None
+            else torch.accelerator.device_count()
+        )
+        logger.debug(
+            "Making CFT counted-write mapping: rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.mapping = Mapping(
+            self.world_size,
+            self.rank,
+            gpus_per_node,
+            tp_size=self.world_size,
+            moe_ep_size=self.world_size,
+        )
+
+        from vllm.distributed.device_communicators.mnnvl_compat import (
+            CustomCommunicator,
+        )
+
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
+        )
+
+        torch.accelerator.empty_cache()
+
+        self.cft_moe = CftMoe(
+            mapping=self.mapping,
+            max_num_tokens=self.max_num_tokens,
+            top_k=self.top_k,
+            num_experts=self.num_experts,
+            workspace_size_per_rank=self.workspace_size,
+            mnnvl_config=ep_config,
+        )
+
+        self.gpus_per_node = gpus_per_node
+        self.initialized = True
+
+        logger.info(
+            "FlashInfer CFT Counted-Write initialized for rank %s, size %s",
+            self.rank,
+            self.world_size,
+        )
+        dist.barrier(group=self.cpu_group)
+
+    def combine_into(
+        self,
+        payload: torch.Tensor,
+        runtime_max_tokens_per_rank: int,
+        output: torch.Tensor,
+    ) -> None:
+        """Combine counted-write results into ``output``."""
+        assert self.cft_moe is not None
+        combined = self.cft_moe.combine(
+            payload=payload,
+            runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
+        )
+        output.copy_(combined)
+
+    def get_handle(self, kwargs):
+        return self
+
+    def cleanup(self):
+        """Release resources."""
+        if self.initialized and self.cft_moe is not None:
+            try:
+                del self.cft_moe
+            except Exception as e:
+                logger.warning(
+                    "Failed to cleanup FlashInfer CFT workspace: %s", e
+                )
+            finally:
+                self.cft_moe = None
+                self.mapping = None
+                self.initialized = False
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):

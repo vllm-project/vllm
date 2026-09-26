@@ -347,6 +347,51 @@ def has_flashinfer_nvlink_one_sided() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cft_counted_write() -> bool:
+    """Return `True` if FlashInfer CFT counted-write MoE all-to-all is available.
+
+    The CFT (Compute Fabric Transport) counted-write path requires:
+    - FlashInfer with the ``flashinfer.comm.cft_alltoall`` module
+    - sm_100+ (Blackwell) hardware
+    - CUDA 13.4+
+    - A compatible NVLink fabric environment
+    """
+    if not has_flashinfer_comm():
+        return False
+    if importlib.util.find_spec("flashinfer.comm.cft_alltoall") is None:
+        return False
+
+    required = [
+        ("flashinfer.comm.cft_alltoall", "CftMoe"),
+        ("flashinfer.comm.cft_alltoall", "cft_a2a_get_workspace_size_per_rank"),
+    ]
+    for module_name, attr_name in required:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+
+    if not current_platform.has_device_capability(100):
+        logger.debug_once(
+            "flashinfer CFT counted-write all-to-all requires sm_100+ hardware"
+        )
+        return False
+
+    try:
+        cuda_version = tuple(int(x) for x in torch.version.cuda.split(".")[:2])
+        if cuda_version < (13, 4):
+            logger.debug_once(
+                "flashinfer CFT counted-write all-to-all requires CUDA 13.4+, "
+                "found CUDA %s",
+                torch.version.cuda,
+            )
+            return False
+    except (AttributeError, ValueError):
+        return False
+
+    return True
+
+
+@functools.cache
 def has_flashinfer_moe() -> bool:
     """Return `True` if FlashInfer MoE module is available."""
     return (
@@ -1290,6 +1335,7 @@ __all__ = [
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",
+    "has_flashinfer_cft_counted_write",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
