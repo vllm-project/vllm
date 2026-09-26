@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import importlib.metadata
+import math
 import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+import weakref
+from collections import deque
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -732,6 +735,117 @@ def async_tensor_h2d(
 def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     t = torch.from_numpy(array)
     return t.pin_memory() if PIN_MEMORY else t
+
+
+def _pinned_uint8_buffer(nbytes: int) -> torch.Tensor:
+    """Allocate a pinned buffer of exactly `nbytes`.
+
+    `pin_memory=True` rounds the size up to a power of two, so register a
+    regular allocation with cudaHostRegister instead when possible.
+    """
+    if torch.cuda.is_available():
+        buf = torch.empty(nbytes, dtype=torch.uint8)
+        cudart = torch.cuda.cudart()
+        if cudart.cudaHostRegister(buf.data_ptr(), nbytes, 0).value == 0:
+            weakref.finalize(buf, cudart.cudaHostUnregister, buf.data_ptr())
+            return buf
+    return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+
+
+class PinnedStagingBuffer:
+    """Fixed-size pinned host buffer for staging async host-to-device copies.
+
+    Pinning a new tensor per copy makes PyTorch's host caching allocator keep
+    a block for every power-of-two size it has seen and never release it, so
+    inputs of varying size (e.g. images and videos) grow pinned memory without
+    bound. This buffer is carved up as a ring instead, and a region is reused
+    only after the copies issued from it have completed. Not thread-safe.
+    """
+
+    _ALIGN = 256
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._buf: torch.Tensor | None = None
+        self._head = 0
+        # [start, end, event] of regions in use, oldest first. The event is
+        # None until `record()` is called after the region's copy is issued.
+        self._regions: deque[list] = deque()
+
+    def empty(self, shape: Sequence[int], dtype: torch.dtype) -> torch.Tensor | None:
+        """Return a pinned tensor carved from the buffer, or None if it does
+        not fit. Call `record()` after issuing the copies that read it."""
+        nbytes = math.prod(shape) * dtype.itemsize
+        start = self._reserve(nbytes)
+        if start is None:
+            return None
+        assert self._buf is not None
+        return self._buf[start : start + nbytes].view(dtype).view(shape)
+
+    def record(self) -> None:
+        """Allow reusing the regions returned by `empty()` so far once the work
+        issued on the current stream has completed."""
+        if not self._regions or self._regions[-1][2] is not None:
+            return
+        event = torch.Event()
+        event.record()
+        for region in reversed(self._regions):
+            if region[2] is not None:
+                break
+            region[2] = event
+
+    def copy_to_device(
+        self, x: torch.Tensor, device: torch.types.Device
+    ) -> torch.Tensor:
+        """Asynchronously copy host tensor `x` to `device` through the buffer,
+        in chunks if it is larger than half of the buffer."""
+        out = torch.empty(x.shape, dtype=x.dtype, device=device)
+        chunk_bytes = self.capacity // 2
+        if x.nbytes <= chunk_bytes:
+            buf = self.empty(x.shape, x.dtype)
+            if buf is not None:
+                out.copy_(buf.copy_(x), non_blocking=True)
+                self.record()
+                return out
+        src = x.contiguous().view(-1).view(torch.uint8)
+        dst = out.view(-1).view(torch.uint8)
+        for start in range(0, src.numel(), chunk_bytes):
+            chunk = src[start : start + chunk_bytes]
+            buf = self.empty(chunk.shape, torch.uint8)
+            if buf is None:
+                # Only blocked by regions whose copies were not issued yet.
+                dst[start : start + chunk.numel()].copy_(chunk)
+                continue
+            dst[start : start + chunk.numel()].copy_(
+                buf.copy_(chunk), non_blocking=True
+            )
+            self.record()
+        return out
+
+    def _reserve(self, nbytes: int) -> int | None:
+        size = -(-nbytes // self._ALIGN) * self._ALIGN
+        if size > self.capacity:
+            return None
+        if self._buf is None:
+            self._buf = _pinned_uint8_buffer(self.capacity)
+        regions = self._regions
+        # Drop regions whose copies have completed.
+        while regions and regions[0][2] is not None and regions[0][2].query():
+            regions.popleft()
+        while True:
+            start = self._head if self._head + size <= self.capacity else 0
+            end = start + size
+            if not any(s < end and start < e for s, e, _ in regions):
+                break
+            # Wait for the oldest region, which frees space in ring order.
+            event = regions[0][2]
+            if event is None:
+                return None
+            event.synchronize()
+            regions.popleft()
+        regions.append([start, end, None])
+        self._head = end
+        return start
 
 
 def make_ndarray_with_pad(

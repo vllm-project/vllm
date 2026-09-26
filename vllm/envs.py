@@ -225,6 +225,7 @@ if TYPE_CHECKING:
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_MM_PINNED_STAGING_BUFFER_MB: int = 512
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
@@ -1679,6 +1680,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD": lambda: int(
         os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")
     ),
+    # Size in MB of the reused pinned host buffer that multimodal inputs are
+    # staged through for async host-to-device copies. Larger inputs are
+    # copied through it in chunks.
+    "VLLM_MM_PINNED_STAGING_BUFFER_MB": lambda: int(
+        os.getenv("VLLM_MM_PINNED_STAGING_BUFFER_MB", "512")
+    ),
     # If set, allow insecure serialization using pickle.
     # This is useful for environments where it is deemed safe to use the
     # insecure method and it is needed for some reason.
@@ -2352,6 +2359,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+        "VLLM_MM_PINNED_STAGING_BUFFER_MB",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
         "VLLM_WORKER_MULTIPROC_METHOD",

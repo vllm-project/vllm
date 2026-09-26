@@ -101,6 +101,17 @@ class MyRequest(msgspec.Struct):
     mm: list[MultiModalKwargsItems] | None
 
 
+def test_decode_without_shared_memory():
+    """Decoded tensors must not alias or pin the received buffers."""
+    tensor = torch.arange(1024, dtype=torch.int32)
+    bufs = [bytearray(buf) for buf in MsgpackEncoder().encode(tensor)]
+    decoded = MsgpackDecoder(torch.Tensor, share_mem=False).decode(bufs)
+    for buf in bufs:
+        buf[:] = bytes(len(buf))
+    assert torch.equal(decoded, tensor)
+    assert not decoded.is_pinned()
+
+
 def test_multimodal_kwargs():
     e1 = MultiModalFieldElem(
         torch.zeros(1000, dtype=torch.bfloat16),

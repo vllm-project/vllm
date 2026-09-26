@@ -6,6 +6,7 @@ import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    PinnedStagingBuffer,
     async_tensor_h2d,
     available_cpu_count,
     common_broadcastable_dtype,
@@ -217,3 +218,22 @@ def test_async_tensor_h2d_staging(device):
         async_tensor_h2d([1, 2, 3], device=device, dtype=torch.int32),
         torch.tensor([1, 2, 3], dtype=torch.int32, device=device),
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_pinned_staging_buffer():
+    """Copies of any size are staged through one fixed-size pinned buffer."""
+    capacity = 1 << 20
+    staging = PinnedStagingBuffer(capacity)
+    pinned_before = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+
+    # Sizes below and above half the capacity (chunked), plus a permuted view.
+    srcs = [torch.randn(n) for n in (1, 1000, 100_000, 300_000, 1_000_000)]
+    srcs.append(torch.randn(256, 512).T)
+    outs = [staging.copy_to_device(x, "cuda") for _ in range(3) for x in srcs]
+    for out, x in zip(outs, srcs * 3):
+        assert torch.equal(out.cpu(), x)
+
+    pinned_after = torch.cuda.host_memory_stats()["allocated_bytes.current"]
+    assert pinned_after - pinned_before <= capacity
+    assert staging.empty((capacity + 1,), torch.uint8) is None
