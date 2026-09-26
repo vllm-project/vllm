@@ -359,6 +359,9 @@ def _rocm_aiter_fused_moe_impl(
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
+    moe_sorting_dispatch_policy = (
+        0 if moe_sorting_dispatch_policy is None else moe_sorting_dispatch_policy
+    )
 
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
@@ -1960,9 +1963,14 @@ class rocm_aiter_ops:
     _MOE_DISPATCH_POLICY: int | None = None
 
     @classmethod
-    @if_aiter_supported
+    def _is_fused_moe_supported_on_current_arch(cls) -> bool:
+        return is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+
+    @classmethod
     def get_moe_dispatch_policy(cls) -> int:
         """Cached MoE sorting dispatch policy."""
+        if not cls._is_fused_moe_supported_on_current_arch():
+            return 0
         if cls._MOE_DISPATCH_POLICY is None:
             import vllm.envs as envs
 
@@ -2120,9 +2128,12 @@ class rocm_aiter_ops:
         return cls.is_linear_enabled()
 
     @classmethod
-    @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FMOE_ENABLED
+        if is_aiter_found_and_supported():
+            return cls._AITER_ENABLED and cls._FMOE_ENABLED
+        if cls.is_rdna_aiter_enabled():
+            return cls._FMOE_ENABLED and envs.is_set("VLLM_ROCM_USE_AITER_MOE")
+        return False
 
     @classmethod
     @if_aiter_supported
@@ -2421,7 +2432,6 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
-    @if_aiter_supported
     @functools.cache
     def fused_moe_supports_gate_mode(cls) -> bool:
         """Probe whether the installed aiter.fused_moe accepts `gate_mode`.
@@ -2429,6 +2439,8 @@ class rocm_aiter_ops:
         Added in https://github.com/ROCm/aiter/pull/3123 (>=0.1.14).
         Builds with older AITER must omit this argument.
         """
+        if not cls._is_fused_moe_supported_on_current_arch():
+            return False
         import inspect
 
         from aiter.fused_moe import fused_moe
