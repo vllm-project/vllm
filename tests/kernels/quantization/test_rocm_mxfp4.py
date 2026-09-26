@@ -652,6 +652,8 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
         ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
         ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
         ((30, 8), False),  # rows not a multiple of 32
+        ((96, 160), False),  # Qwen3.8 TP1 GDN in_proj_ba
+        ((128, 160), True),  # rows % 32 == 0 and rows != 96 still ASM
     ],
 )
 def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
