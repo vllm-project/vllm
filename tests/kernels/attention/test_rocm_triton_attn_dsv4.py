@@ -46,6 +46,12 @@ requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(),
     reason="optimized sparse decode partial is gfx950-only",
 )
+# combine_topk_swa_indices is selected by the source on every ROCm arch, so its
+# tests run wherever the kernel does.
+requires_rocm_cdna3_or_newer = pytest.mark.skipif(
+    not _on_split_decode_arch(),
+    reason="V4.1 combine kernel needs an AMD gfx942/gfx950 device",
+)
 
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
@@ -2170,3 +2176,140 @@ def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
     torch.testing.assert_close(
         gated_c4a[:, :seq_len], ref[:, :seq_len], atol=2e-3, rtol=2e-3
     )
+
+
+def _combine_topk_swa_indices_torch(
+    topk_indices,
+    query_start_loc,
+    seq_lens,
+    gather_lens,
+    window_size,
+    compress_ratio,
+    topk,
+    M,
+    N,
+):
+    """The Torch path this kernel replaces, copied from before the switch.
+
+    Kept verbatim so the reference cannot drift toward the kernel.
+    """
+    from vllm.models.deepseek_v41.amd.rocm import _SPARSE_PREFILL_TOPK_ALIGNMENT
+
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
+    num_tokens = topk_indices.shape[0]
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+    combined_indices = torch.full(
+        (num_tokens, combined_topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+
+    # query_start_loc may have a non-zero base for a narrowed mixed batch.
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    req_ids = torch.repeat_interleave(
+        torch.arange(seq_lens.shape[0], device=seq_lens.device), query_lens
+    )
+    query_starts = query_start_loc[:-1] - query_start_loc[0]
+    token_offsets = torch.arange(num_tokens, device=seq_lens.device) - (
+        torch.repeat_interleave(query_starts, query_lens)
+    )
+    positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
+
+    logical_topk_width = min(topk, topk_indices.shape[1])
+    topk_lens = torch.minimum(
+        (positions + 1) // compress_ratio,
+        torch.full_like(positions, logical_topk_width),
+    ).clamp_min(0)
+    topk_offsets = torch.arange(logical_topk_width, device=seq_lens.device)
+    topk_mask = topk_offsets[None, :] < topk_lens[:, None]
+    topk_values = topk_indices[:, :logical_topk_width].to(torch.int32)
+    topk_valid = topk_mask & (topk_values >= 0) & (topk_values < N)
+    combined_indices[:, :logical_topk_width] = torch.where(
+        topk_valid,
+        topk_values + (M * req_ids).to(torch.int32)[:, None],
+        -1,
+    )
+
+    swa_lens = torch.minimum(
+        positions + 1, torch.full_like(positions, window_size)
+    ).clamp_min(0)
+    swa_offsets = torch.arange(window_size, device=seq_lens.device)
+    swa_mask = swa_offsets[None, :] < swa_lens[:, None]
+    swa_columns = topk_lens[:, None] + swa_offsets[None, :]
+    gather_starts = seq_lens - gather_lens
+    swa_values = (
+        M * req_ids[:, None]
+        + N
+        + swa_offsets[None, :]
+        + positions[:, None]
+        - swa_lens[:, None]
+        + 1
+        - gather_starts[req_ids, None]
+    ).to(torch.int32)
+    rows = torch.arange(num_tokens, device=seq_lens.device)[:, None].expand_as(
+        swa_columns
+    )
+    flat_dst = rows[swa_mask] * combined_topk + swa_columns[swa_mask]
+    combined_indices.view(-1).index_copy_(0, flat_dst, swa_values[swa_mask])
+    combined_lens.copy_((topk_lens + swa_lens).to(torch.int32))
+    return combined_indices, combined_lens
+
+
+def _v41_combine_case(case, window):
+    dev = "cuda"
+    ratio, topk = 2, 512
+    if case == "seq_len_below_query_len":
+        qsl = torch.tensor([0, 64], dtype=torch.int32, device=dev)
+        sl = torch.tensor([32], dtype=torch.int32, device=dev)
+        rows = 64
+    elif case == "seq_len_zero":
+        # The warmup batch: every pos is negative, so both lengths clamp to 0.
+        qsl = torch.tensor([0, 32, 64], dtype=torch.int32, device=dev)
+        sl = torch.zeros(2, dtype=torch.int32, device=dev)
+        rows = 64
+    elif case == "compress_ratio_zero":
+        qsl = torch.tensor([0, 4, 8], dtype=torch.int32, device=dev)
+        sl = torch.tensor([4, 4], dtype=torch.int32, device=dev)
+        rows, ratio, topk = 8, 0, 0
+    else:
+        qsl = torch.tensor([0, 32, 96], dtype=torch.int32, device=dev)
+        sl = torch.tensor([48, 80], dtype=torch.int32, device=dev)
+        rows = 96
+    gl = torch.minimum(sl, torch.full_like(sl, window))
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    ti = torch.randint(
+        0, 4096, (rows, max(topk, 1)), generator=gen, dtype=torch.int32
+    ).to(dev)
+    return ti, qsl, sl, gl, window, ratio, topk, 100000, 4096
+
+
+@requires_rocm_cdna3_or_newer
+@pytest.mark.parametrize(
+    "case,window",
+    [
+        ("seq_len_below_query_len", 128),
+        ("seq_len_zero", 128),
+        ("compress_ratio_zero", 128),
+        ("plain", 64),
+        ("plain", 128),
+        ("plain", 256),
+    ],
+)
+def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
+    from vllm.models.deepseek_v41.amd.rocm import combine_topk_swa_indices
+
+    args = _v41_combine_case(case, window)
+    got_indices, got_lens = combine_topk_swa_indices(*args)
+    ref_indices, ref_lens = _combine_topk_swa_indices_torch(*args)
+    assert torch.equal(got_lens, ref_lens), (
+        f"lens differ: ref={ref_lens.tolist()} got={got_lens.tolist()}"
+    )
+    assert torch.equal(got_indices, ref_indices)
