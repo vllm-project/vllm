@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
+    VLLM_MAX_VIDEO_DECODE_FRAMES: int = 36_000
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -1054,6 +1055,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # built-in 2x decompression-bomb threshold (~179M pixels, ~680 MB RGB).
     "VLLM_MAX_IMAGE_PIXELS": lambda: int(
         os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970")
+    ),
+    # Maximum number of source frames the OpenCV video decoder may walk
+    # (one sequential cap.grab() per frame up to the last sampled index).
+    # Uniform sampling still includes the last frame, so this bounds decode
+    # CPU for long, highly compressible videos. Set to 0 to disable.
+    # Default is 36000 (10 minutes at 60 FPS).
+    "VLLM_MAX_VIDEO_DECODE_FRAMES": lambda: int(
+        os.getenv("VLLM_MAX_VIDEO_DECODE_FRAMES", "36000")
     ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
@@ -2349,6 +2358,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_EMBED_DECODE_BYTES",
         "VLLM_MAX_IMAGE_PIXELS",
+        "VLLM_MAX_VIDEO_DECODE_FRAMES",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

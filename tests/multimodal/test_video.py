@@ -12,9 +12,11 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from PIL import Image
 from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
+from vllm import envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
@@ -57,6 +59,16 @@ assert ASSETS_DIR.exists()
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
+
+
+def _tiny_video_bytes(tmp_path: Path, num_frames: int = 20) -> bytes:
+    image_path = tmp_path / "frame.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    video_path = tmp_path / "clip.mp4"
+    create_video_from_image(
+        str(image_path), str(video_path), num_frames=num_frames, fps=10
+    )
+    return video_path.read_bytes()
 
 
 @contextmanager
@@ -876,6 +888,43 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             f"Expected fewer than {metadata['total_num_frames']} frames, "
             f"but loaded {frames.shape[0]} frames"
         )
+
+
+def test_opencv_decode_frame_limit_respected(tmp_path: Path):
+    """A short video under the walk cap loads successfully."""
+    video_bytes = _tiny_video_bytes(tmp_path)
+    assert envs.VLLM_MAX_VIDEO_DECODE_FRAMES >= 20
+    frames, metadata = VideoBackend.load_bytes(
+        video_bytes, num_frames=8, backend="opencv"
+    )
+    assert frames.shape[0] == 8
+    assert metadata["total_num_frames"] == 20
+
+
+@pytest.mark.parametrize("frame_recovery", [False, True])
+def test_opencv_decode_frame_limit_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frame_recovery: bool
+):
+    """Uniform sampling walks up to the last source frame; that walk is capped."""
+    monkeypatch.setattr(envs, "VLLM_MAX_VIDEO_DECODE_FRAMES", 5)
+    video_bytes = _tiny_video_bytes(tmp_path)
+    with pytest.raises(ValueError, match="VLLM_MAX_VIDEO_DECODE_FRAMES"):
+        VideoBackend.load_bytes(
+            video_bytes,
+            num_frames=8,
+            backend="opencv",
+            frame_recovery=frame_recovery,
+        )
+
+
+def test_opencv_decode_frame_limit_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Setting VLLM_MAX_VIDEO_DECODE_FRAMES=0 disables the walk cap."""
+    monkeypatch.setattr(envs, "VLLM_MAX_VIDEO_DECODE_FRAMES", 0)
+    video_bytes = _tiny_video_bytes(tmp_path)
+    frames, _ = VideoBackend.load_bytes(video_bytes, num_frames=8, backend="opencv")
+    assert frames.shape[0] == 8
 
 
 def test_video_backend_handles_edit_list_trimmed_video(
