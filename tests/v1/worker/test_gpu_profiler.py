@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
@@ -18,11 +18,19 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
+from vllm.profiler import graph_capture
+from vllm.profiler.graph_capture import (
+    graph_capture_profiler,
+    graph_capture_step,
+    skip_graph_capture_tracing,
+)
 from vllm.profiler.wrapper import (
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
     WorkerProfiler,
     create_worker_profiler,
+    default_torch_profiler_activities,
+    graph_capture_profiler_config,
     validate_worker_profiler_config,
 )
 from vllm.v1.core.sched.output import CachedRequestData
@@ -553,17 +561,198 @@ def test_profiler_entered_during_capture():
     confirming it is active during the actual graph capture run."""
     runner = MagicMock()
     runner.compilation_config.cudagraph_num_of_warmups = 0
-    mock_profiler = MagicMock()
 
-    GPUModelRunner._warmup_and_capture(
-        runner,
-        desc=MagicMock(num_tokens=4, uniform=True),
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        profiler=mock_profiler,
+    with bound_graph_capture() as profiler:
+        GPUModelRunner._warmup_and_capture(
+            runner,
+            desc=MagicMock(num_tokens=4, uniform=True),
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        )
+
+    profiler.__enter__.assert_called_once()
+    profiler.__exit__.assert_called_once()
+
+
+@contextmanager
+def bound_graph_capture(label_prefix=None):
+    """Enter a graph-capture binding backed by a mock profiler."""
+    profiler = MagicMock()
+    with (
+        patch.object(
+            graph_capture, "make_graph_capture_profiler", return_value=profiler
+        ),
+        graph_capture_profiler(MagicMock(), label_prefix=label_prefix),
+    ):
+        yield profiler
+
+
+class TestGraphCaptureProfiler:
+    """V2 binds one profiler per subsystem; capture loops only call
+    graph_capture_step and inherit whichever binding is active."""
+
+    @pytest.fixture
+    def annotation(self):
+        with patch.object(torch.profiler, "record_function") as record_function:
+            yield record_function
+
+    def test_step_is_noop_without_binding(self, annotation):
+        with graph_capture_step(32, "FULL"):
+            pass
+
+        annotation.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "label_prefix,num_tokens,mode,expected",
+        [
+            (None, 512, "PIECEWISE", "capture_512_PIECEWISE"),
+            ("draft", 32, "FULL", "capture_32_draft_FULL"),
+            ("encoder", 1024, "default", "capture_1024_encoder_default"),
+        ],
     )
+    def test_annotation_label(
+        self, annotation, label_prefix, num_tokens, mode, expected
+    ):
+        with (
+            bound_graph_capture(label_prefix) as profiler,
+            graph_capture_step(num_tokens, mode),
+        ):
+            pass
 
-    mock_profiler.__enter__.assert_called_once()
-    mock_profiler.__exit__.assert_called_once()
+        annotation.assert_called_once_with(expected)
+        profiler.__enter__.assert_called_once()
+        profiler.__exit__.assert_called_once()
+
+    def test_profiler_cycles_once_per_shape(self, annotation):
+        """Each shape re-enters the profiler, which is what splits capture
+        into one trace file per shape."""
+        with bound_graph_capture() as profiler:
+            for num_tokens in (32, 64, 128):
+                with graph_capture_step(num_tokens, "FULL"):
+                    pass
+
+        assert profiler.__enter__.call_count == 3
+        assert profiler.__exit__.call_count == 3
+        assert annotation.call_count == 3
+
+    def test_binding_cleared_when_capture_raises(self):
+        with pytest.raises(RuntimeError), bound_graph_capture():
+            raise RuntimeError("capture failed")
+
+        assert graph_capture._active_binding.get() is None
+
+    @pytest.mark.parametrize(
+        "subsystem,expected",
+        [
+            (None, "graph_capture_rank_0"),
+            ("encoder", "graph_capture_rank_0_encoder"),
+            ("speculator", "graph_capture_rank_0_speculator"),
+        ],
+    )
+    def test_trace_file_name_per_subsystem(self, subsystem, expected):
+        config = MagicMock(
+            profiler_config=ProfilerConfig(
+                profiler="torch",
+                torch_profiler_dir="/traces",
+                capture_torch_profiler=True,
+            ),
+            device_config=SimpleNamespace(device_type="xpu"),
+        )
+        profiler = MagicMock()
+        wrapper = MagicMock(profiler=profiler)
+
+        with (
+            patch.object(
+                graph_capture, "get_world_group", return_value=MagicMock(local_rank=0)
+            ),
+            patch.object(
+                graph_capture, "TorchProfilerWrapper", return_value=wrapper
+            ) as wrapper_cls,
+        ):
+            result = graph_capture.make_graph_capture_profiler(config, subsystem)
+
+        assert result is profiler
+        capture_config = wrapper_cls.call_args.args[0]
+        assert capture_config.torch_profiler_dir == "/traces/capture_traces"
+        assert wrapper_cls.call_args.kwargs["worker_name"] == expected
+        # Activities follow the runner device, not a hardcoded CUDA list.
+        assert wrapper_cls.call_args.kwargs["activities"] == ["CPU", "XPU"]
+        wrapper.start.assert_not_called()
+
+    def test_capture_config_overrides(self):
+        config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/traces",
+            delay_iterations=2,
+            max_iterations=3,
+            warmup_iterations=4,
+            wait_iterations=5,
+            torch_profiler_record_shapes=False,
+            torch_profiler_with_stack=False,
+            torch_profiler_with_flops=True,
+            torch_profiler_with_memory=True,
+            torch_profiler_use_gzip=False,
+            ignore_frontend=True,
+        )
+
+        capture_config = graph_capture_profiler_config(config)
+
+        assert capture_config.delay_iterations == 0
+        assert capture_config.max_iterations == 0
+        assert capture_config.warmup_iterations == 0
+        assert capture_config.wait_iterations == 0
+        assert capture_config.torch_profiler_record_shapes
+        assert capture_config.torch_profiler_with_stack
+        assert capture_config.torch_profiler_with_flops
+        assert capture_config.torch_profiler_with_memory
+        assert not capture_config.torch_profiler_use_gzip
+
+    @pytest.mark.parametrize(
+        "device_type,expected",
+        [
+            ("cuda", ["CPU", "CUDA"]),
+            ("xpu", ["CPU", "XPU"]),
+            ("cpu", ["CPU"]),
+            ("tpu", ["CPU"]),
+        ],
+    )
+    def test_activities_follow_runner_device(self, device_type, expected):
+        assert default_torch_profiler_activities(device_type) == expected
+
+    @pytest.mark.parametrize("local_rank,enabled", [(0, False), (1, True)])
+    def test_no_profiler_when_disabled_or_off_rank(self, local_rank, enabled):
+        config = MagicMock()
+        config.profiler_config.capture_torch_profiler = enabled
+
+        with patch.object(
+            graph_capture,
+            "get_world_group",
+            return_value=MagicMock(local_rank=local_rank),
+        ):
+            profiler = graph_capture.make_graph_capture_profiler(config, None)
+
+        assert isinstance(profiler, nullcontext)
+
+    def test_nested_bind_keeps_outer_prefix(self, annotation):
+        with (
+            bound_graph_capture("draft") as profiler,
+            graph_capture_profiler(MagicMock(), label_prefix="ignored"),
+            graph_capture_step(32, "FULL"),
+        ):
+            pass
+
+        annotation.assert_called_once_with("capture_32_draft_FULL")
+        profiler.__enter__.assert_called_once()
+
+    def test_skip_tracing_is_noop_even_if_capture_binds(self, annotation):
+        with (
+            skip_graph_capture_tracing(),
+            graph_capture_profiler(MagicMock(), label_prefix="encoder"),
+            graph_capture_step(32, "FULL"),
+        ):
+            pass
+
+        annotation.assert_not_called()
+        assert graph_capture._active_binding.get() is None
 
 
 def make_proton(session_id: int | None = 7):

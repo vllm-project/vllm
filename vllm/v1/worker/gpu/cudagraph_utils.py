@@ -32,6 +32,11 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.profiler.graph_capture import (
+    graph_capture_profiler,
+    graph_capture_step,
+    skip_graph_capture_tracing,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
@@ -412,7 +417,11 @@ class CudaGraphManager:
             progress_bar_desc: Description shown on the capture progress bar.
 
         """
-        with graph_capture(device=self.device), ExitStack() as stack:
+        with (
+            graph_capture_profiler(self.vllm_config),
+            graph_capture(device=self.device),
+            ExitStack() as stack,
+        ):
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
@@ -451,12 +460,14 @@ class CudaGraphManager:
                         desc.cg_mode == CUDAGraphMode.PIECEWISE
                         and not self.use_breakable_cg
                     ):
-                        forward_fn(CUDAGraphMode.PIECEWISE)
+                        with graph_capture_step(desc.num_tokens, desc.cg_mode.name):
+                            forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         # Capture with fresh attention state.
                         forward_fn = create_forward_fn(desc, warmup=False)
                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                            forward_fn(CUDAGraphMode.PIECEWISE)
+                            with graph_capture_step(desc.num_tokens, desc.cg_mode.name):
+                                forward_fn(CUDAGraphMode.PIECEWISE)
                             continue
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
@@ -472,8 +483,11 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(
-                            graph, self.pool, stream=self._capture_stream(desc)
+                        with (
+                            graph_capture_step(desc.num_tokens, desc.cg_mode.name),
+                            torch.cuda.graph(
+                                graph, self.pool, stream=self._capture_stream(desc)
+                            ),
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -925,7 +939,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            measured = int(runner.capture_model(profile_only=True))
+            with skip_graph_capture_tracing():
+                measured = int(runner.capture_model(profile_only=True))
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs
             # plus the sampled FULL graphs; swap the sampled FULL cost for the

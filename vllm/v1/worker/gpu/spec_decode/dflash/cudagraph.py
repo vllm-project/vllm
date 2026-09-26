@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.profiler.graph_capture import graph_capture_profiler
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -127,4 +128,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
 
             return forward
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        with graph_capture_profiler(
+            self.vllm_config, subsystem="speculator", label_prefix="draft"
+        ):
+            super().capture(create_forward_fn, progress_bar_desc)
