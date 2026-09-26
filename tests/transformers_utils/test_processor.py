@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+from functools import lru_cache
 
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
 from vllm.transformers_utils.processor import (
+    HashableDict,
+    HashableList,
     get_processor_kwargs_keys,
     get_processor_kwargs_type,
 )
@@ -65,3 +68,32 @@ def test_get_processor_kwargs_from_processor_module_scan_returns_full_union():
     proc = _ProcWithoutUnpack()
     keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))  # type: ignore[arg-type]
     _assert_has_all_expected(keys)
+
+
+def test_hashable_dict_handles_nested_values():
+    # Regression for unhashable nested dict/list values fed to lru_cache.
+    nested = HashableDict({"images_kwargs": {"num_buckets": 4}, "tags": ["a", "b"]})
+    assert hash(nested) == hash(
+        HashableDict({"images_kwargs": {"num_buckets": 4}, "tags": ["a", "b"]})
+    )
+
+
+def test_hashable_list_handles_dicts():
+    nested = HashableList([{"a": 1}, {"b": [2, 3]}])
+    assert hash(nested) == hash(HashableList([{"a": 1}, {"b": [2, 3]}]))
+
+
+@lru_cache
+def _identity(**kwargs: object) -> int:
+    return len(kwargs)
+
+
+def test_nested_kwargs_usable_in_lru_cache():
+    # Mirrors _merge_mm_kwargs: each top-level value is wrapped as a
+    # HashableDict/HashableList whose own nested values stay native dicts.
+    _identity.cache_clear()
+    kwargs = {"images_kwargs": HashableDict({"num_buckets": 4})}
+    _identity(**kwargs)
+    # Second call with equal keys must hit the cache rather than raise.
+    _identity(**kwargs)
+    assert _identity.cache_info().hits == 1
