@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Protocol, TypeAlias, TypedDict
+from typing import Annotated, Any, Literal, Protocol, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
@@ -31,9 +31,15 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
 
 from .clip import CLIPVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (
     BaseLlavaNextMultiModalProcessor,
@@ -47,6 +53,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -465,7 +472,10 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     info=LlavaOnevisionProcessingInfo,
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
-class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaOnevisionForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
+    supports_encoder_cudagraph = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -486,6 +496,386 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         raise ValueError("Only image or video modality is supported")
 
+    def _get_image_output_tokens(self, image_size: torch.Tensor) -> int:
+        orig_height, orig_width = [int(v) for v in image_size.tolist()]
+        grid_h, grid_w = get_anyres_image_grid_shape(
+            (orig_height, orig_width),
+            self.config.image_grid_pinpoints,
+            self.config.vision_config.image_size,
+        )
+        patch_grid = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        )
+        current_height = patch_grid * grid_h
+        current_width = patch_grid * grid_w
+
+        aspect_ratio = orig_width / orig_height
+        current_aspect_ratio = current_width / current_height
+        if aspect_ratio > current_aspect_ratio:
+            new_height = int(round(orig_height * current_width / orig_width, 7))
+            current_height -= 2 * ((current_height - new_height) // 2)
+        else:
+            new_width = int(round(orig_width * current_height / orig_height, 7))
+            current_width -= 2 * ((current_width - new_width) // 2)
+
+        ratio = math.sqrt(current_height * current_width / (9 * patch_grid**2))
+        if ratio > 1.1:
+            current_height = int(current_height // ratio)
+            current_width = int(current_width // ratio)
+
+        return patch_grid**2 + current_height * current_width + current_height
+
+    def _get_video_output_tokens(self, num_frames: int) -> int:
+        vision_config = self.config.vision_config
+        patch_grid = vision_config.image_size // vision_config.patch_size
+        stride = getattr(self.config, "spatial_pool_stride", 2)
+        pooled_grid = math.ceil(patch_grid / stride)
+        return num_frames * pooled_grid**2 + 1
+
+    def get_input_modality(self, mm_kwargs: dict[str, object]) -> str:
+        return "video" if "pixel_values_videos" in mm_kwargs else "image"
+
+    def _encoder_tokens_per_tile(self) -> int:
+        encoder_info = get_vision_encoder_info(self.config)
+        tile_size = encoder_info.get_image_size()
+        tokens_per_tile = encoder_info.get_num_image_tokens(
+            image_width=tile_size,
+            image_height=tile_size,
+        )
+        return get_num_selected_vision_tokens(
+            tokens_per_tile,
+            self.config.vision_feature_select_strategy,
+        )
+
+    def _get_pixel_items(
+        self, mm_kwargs: dict[str, Any], modality: str
+    ) -> list[torch.Tensor]:
+        key = "pixel_values" if modality == "image" else "pixel_values_videos"
+        pixel_values = mm_kwargs[key]
+        if isinstance(pixel_values, torch.Tensor):
+            return list(pixel_values.unbind(0))
+        return list(pixel_values)
+
+    def _get_image_tile_counts(
+        self,
+        pixel_items: list[torch.Tensor],
+        image_sizes: torch.Tensor | None,
+    ) -> list[int]:
+        if image_sizes is None:
+            return [int(item.shape[0]) for item in pixel_items]
+
+        counts: list[int] = []
+        for item, image_size in zip(pixel_items, image_sizes):
+            orig_height, orig_width = [int(v) for v in image_size.tolist()]
+            grid_h, grid_w = get_anyres_image_grid_shape(
+                (orig_height, orig_width),
+                self.config.image_grid_pinpoints,
+                self.config.vision_config.image_size,
+            )
+            count = 1 + grid_h * grid_w
+            if count > item.shape[0]:
+                raise ValueError(
+                    f"Image needs {count} vision tiles, but only "
+                    f"{item.shape[0]} were provided."
+                )
+            counts.append(count)
+        return counts
+
+    def _encoder_cudagraph_token_budgets(self) -> list[int]:
+        vllm_config = getattr(self, "vllm_config", None)
+        if vllm_config is None:
+            return []
+
+        comp_config = vllm_config.compilation_config
+        user_budgets = list(comp_config.encoder_cudagraph_token_budgets or [])
+        if user_budgets:
+            return sorted(user_budgets)
+
+        min_budget, max_budget = self.get_encoder_cudagraph_budget_range(vllm_config)
+        user_max_vision_items = getattr(
+            comp_config, "encoder_cudagraph_max_vision_items_per_batch", 0
+        )
+        effective_min = (
+            max(min_budget, user_max_vision_items)
+            if user_max_vision_items > 0
+            else min_budget
+        )
+        budgets: list[int] = []
+        budget = effective_min
+        while budget <= max_budget:
+            budgets.append(budget)
+            budget *= 2
+        if not budgets or budgets[-1] < max_budget:
+            budgets.append(max_budget)
+        return budgets
+
+    def _encoder_padding_axis_values(self) -> tuple[int, ...]:
+        budgets = self._encoder_cudagraph_token_budgets()
+        if not budgets:
+            return (0,)
+
+        tokens_per_tile = self._encoder_tokens_per_tile()
+        max_padding = 0
+        previous_budget = 0
+        for budget in budgets:
+            bucket_tiles = (budget + tokens_per_tile - 1) // tokens_per_tile
+            min_tiles = previous_budget // tokens_per_tile + 1
+            max_padding = max(max_padding, bucket_tiles - min_tiles)
+            previous_budget = budget
+        return tuple(range(max_padding + 1))
+
+    def _encoder_padding_axis(self, total_tiles: int) -> int:
+        budgets = self._encoder_cudagraph_token_budgets()
+        if not budgets:
+            return 0
+        tokens_per_tile = self._encoder_tokens_per_tile()
+        raw_tokens = total_tiles * tokens_per_tile
+        budget = next((b for b in budgets if b >= raw_tokens), None)
+        if budget is None:
+            return 0
+        bucket_tiles = (budget + tokens_per_tile - 1) // tokens_per_tile
+        return max(bucket_tiles - total_tiles, 0)
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.config.text_config.hidden_size,
+            max_frames_per_video=_MAX_FRAMES_PER_VIDEO,
+            capture_axes=(self._encoder_padding_axis_values(),)
+            if hasattr(self, "vllm_config")
+            else (),
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        min_budget = self._encoder_tokens_per_tile()
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return min_budget, max(min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        modality = self.get_input_modality(mm_kwargs)
+        pixel_items = self._get_pixel_items(mm_kwargs, modality)
+        tokens_per_tile = self._encoder_tokens_per_tile()
+
+        if modality == "video":
+            return [
+                EncoderItemSpec(
+                    input_size=int(item.shape[0]),
+                    output_tokens=self._get_video_output_tokens(int(item.shape[0])),
+                    path_output_tokens={
+                        "default": int(item.shape[0]) * tokens_per_tile
+                    },
+                )
+                for item in pixel_items
+            ]
+
+        image_sizes = mm_kwargs.get("image_sizes")
+        tile_counts = self._get_image_tile_counts(pixel_items, image_sizes)
+        if image_sizes is None:
+            default_size = self.config.vision_config.image_size
+            default_image_size = torch.tensor([default_size, default_size])
+            multi_tile_tokens = self._get_image_output_tokens(default_image_size)
+            output_tokens = [
+                tokens_per_tile + 1 if tile_count == 1 else multi_tile_tokens
+                for tile_count in tile_counts
+            ]
+        else:
+            output_tokens = [
+                self._get_image_output_tokens(image_size) for image_size in image_sizes
+            ]
+
+        return [
+            EncoderItemSpec(
+                input_size=tile_count,
+                output_tokens=num_output_tokens,
+                path_output_tokens={"default": tile_count * tokens_per_tile},
+            )
+            for tile_count, num_output_tokens in zip(tile_counts, output_tokens)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        modality = self.get_input_modality(mm_kwargs)
+        pixel_items = self._get_pixel_items(mm_kwargs, modality)
+
+        if modality == "video":
+            selected_videos = [pixel_items[i] for i in indices]
+            selected: dict[str, Any] = {"pixel_values_videos": selected_videos}
+            if hasattr(self, "vllm_config"):
+                total_tiles = sum(int(item.shape[0]) for item in selected_videos)
+                selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] = (
+                    self._encoder_padding_axis(total_tiles),
+                )
+            return selected
+
+        image_sizes = mm_kwargs.get("image_sizes")
+        tile_counts = self._get_image_tile_counts(pixel_items, image_sizes)
+        selected_pixels = [pixel_items[i][: tile_counts[i]] for i in indices]
+        selected_sizes = None if image_sizes is None else image_sizes[indices]
+        selected = {
+            "pixel_values": selected_pixels,
+            "image_sizes": selected_sizes,
+        }
+        if hasattr(self, "vllm_config"):
+            total_tiles = sum(int(item.shape[0]) for item in selected_pixels)
+            selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] = (
+                self._encoder_padding_axis(total_tiles),
+            )
+        return selected
+
+    def get_max_frames_per_video(self) -> int:
+        return _MAX_FRAMES_PER_VIDEO
+
+    def _flatten_encoder_pixels(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        modality = self.get_input_modality(mm_kwargs)
+        pixel_items = self._get_pixel_items(mm_kwargs, modality)
+        if pixel_items:
+            return torch.cat(pixel_items, dim=0)
+
+        image_size = self.config.vision_config.image_size
+        return torch.empty(
+            (0, 3, image_size, image_size),
+            device=self.image_newline.device,
+            dtype=self.image_newline.dtype,
+        )
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Any, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
+
+        del max_batch_size, max_frames_per_batch
+        assert path == "default"
+        tokens_per_tile = self._encoder_tokens_per_tile()
+        bucket_tiles = max(
+            (token_budget + tokens_per_tile - 1) // tokens_per_tile,
+            1,
+        )
+        padding_tiles = int(axis_keys[0]) if axis_keys else 0
+        num_tiles = max(bucket_tiles - padding_tiles, 1)
+        vision_config = self.config.vision_config
+        pixel_values = torch.randn(
+            num_tiles,
+            getattr(vision_config, "num_channels", 3),
+            vision_config.image_size,
+            vision_config.image_size,
+            device=device,
+            dtype=dtype,
+        )
+        return EncoderCudaGraphCaptureInputs(values={"pixel_values": pixel_values})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
+
+        del max_batch_size, max_frames_per_batch
+        assert path == "default"
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": self._flatten_encoder_pixels(mm_kwargs)}
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path == "default"
+        image_features = self._image_pixels_to_features(
+            cast(CLIPVisionModel | SiglipVisionModel, self.vision_tower),
+            inputs["pixel_values"],
+        )
+        projected = self.multi_modal_projector(image_features)
+        return projected.flatten(0, 1)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path == "default"
+        return self.encoder_cudagraph_forward(
+            {"pixel_values": self._flatten_encoder_pixels(mm_kwargs)}
+        )
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        assert batch_mm_kwargs is not None
+        modality = self.get_input_modality(batch_mm_kwargs)
+        pixel_items = self._get_pixel_items(batch_mm_kwargs, modality)
+        item_sizes = [int(item.shape[0]) for item in pixel_items]
+        tokens_per_tile = self._encoder_tokens_per_tile()
+        total_tiles = sum(item_sizes)
+
+        output = outputs["default"]
+        hidden_size = output.shape[-1]
+        tile_features = output[: total_tiles * tokens_per_tile].reshape(
+            total_tiles, tokens_per_tile, hidden_size
+        )
+
+        if modality == "video":
+            pooled_features = self.apply_pooling(tile_features)
+            cursor = 0
+            for orig_idx, num_frames in zip(indices, item_sizes):
+                video_features = pooled_features[cursor : cursor + num_frames].reshape(
+                    -1, hidden_size
+                )
+                cursor += num_frames
+                merged = torch.cat((video_features, self.image_newline[None]), dim=0)
+                if merged.shape[0] != per_item_out_tokens[orig_idx]:
+                    raise ValueError("Unexpected LLaVA-OneVision video output length")
+                dest[orig_idx] = merged.clone() if clone else merged
+            return
+
+        image_sizes = batch_mm_kwargs.get("image_sizes")
+        if image_sizes is None:
+            image_size = self.config.vision_config.image_size
+            image_sizes = torch.tensor(
+                [[image_size, image_size]] * len(pixel_items), dtype=torch.long
+            )
+
+        cursor = 0
+        for orig_idx, num_tiles, image_size in zip(indices, item_sizes, image_sizes):
+            patch_features = tile_features[cursor : cursor + num_tiles]
+            cursor += num_tiles
+            merged = self._merge_image_patch_embeddings(
+                image_size,
+                patch_features,
+                image_newline=self.image_newline,
+                strategy="spatial_unpad",
+            )
+            if merged.shape[0] != per_item_out_tokens[orig_idx]:
+                raise ValueError("Unexpected LLaVA-OneVision image output length")
+            dest[orig_idx] = merged.clone() if clone else merged
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -493,6 +883,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):

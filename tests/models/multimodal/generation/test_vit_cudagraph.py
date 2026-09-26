@@ -211,6 +211,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "llava_onevision": VitCudagraphTestConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        image_prompt=(
+            "<|im_start|>user\n<image>\nWhat is in this image?"
+            "<|im_end|>\n<|im_start|>assistant\n"
+        ),
+        video_prompt=(
+            "<|im_start|>user\n<video>\nDescribe this video in one sentence."
+            "<|im_end|>\n<|im_start|>assistant\n"
+        ),
+        num_video_frames=4,
+        needs_video_metadata=False,
+        max_model_len=16384,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [8192],
+            "encoder_cudagraph_max_frames_per_batch": 4,
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "idefics3": VitCudagraphTestConfig(
         model="HuggingFaceTB/SmolVLM-256M-Instruct",
         modalities=["image"],
