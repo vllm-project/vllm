@@ -71,6 +71,9 @@ class MiniMaxM3MultiTokenPredictorLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.eh_proj",
         )
+        # is_mtp_block=True forces the FFN all-reduce here: the MTP layer adds
+        # the residual directly (``hidden_states += residual``) with no following
+        # fused norm to complete a deferred all-reduce.
         self.transformer_layer = MiniMaxM3DecoderLayer(
             config=config,
             prefix=prefix,
@@ -78,6 +81,7 @@ class MiniMaxM3MultiTokenPredictorLayer(nn.Module):
             quant_config=quant_config,
             force_sparse_attn=True,
             force_moe=True,
+            is_mtp_block=True,
         )
         self.final_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
