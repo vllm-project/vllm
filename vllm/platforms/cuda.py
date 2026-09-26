@@ -707,10 +707,17 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """Currently, only Hopper and Blackwell GPUs are supported."""
+        """Currently, only Hopper and Blackwell GPUs are supported.
+
+        Within the SM100 family, only SM100 and SM103 are supported: the
+        vendored DeepGEMM/CuTe kernels are not built for native sm_107, so
+        `is_device_capability_family(100)` (which matches any 10.x) would
+        wrongly admit it and crash with CUDA_ERROR_ASSERT at kernel load.
+        """
         return (
             cls.is_device_capability(90)
-            or cls.is_device_capability_family(100)
+            or cls.is_device_capability(100)
+            or cls.is_device_capability(103)
             or cls.is_device_capability_family(120)
         )
 
