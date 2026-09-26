@@ -1548,6 +1548,51 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
     assert set(indices[target_row].cpu().tolist()) == set(expected.cpu().tolist())
 
 
+# Rows of at most 32768 candidates keep persistent_topk on its single-CTA
+# paths on every arch. Rows up to 8192 take the 2048-bin path and longer rows
+# the 256-bin path, so both paths see overflow below.
+OVERFLOW_ROW_LENGTHS = [6000, 8192, 10500, 20000, 32768]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize("distribution", ["one_bin", "one_bin_ties", "normal"])
+@torch.inference_mode()
+def test_persistent_topk_overflowing_threshold_bin(
+    top_k: int, distribution: str
+) -> None:
+    """When many scores share the bin that holds the k-th value, the bin does
+    not fit the kernel's shared buffer. The selection must still be exact."""
+    set_random_seed(0)
+    lengths = torch.tensor(OVERFLOW_ROW_LENGTHS, dtype=torch.int32, device="cuda")
+    num_rows, width = len(OVERFLOW_ROW_LENGTHS), max(OVERFLOW_ROW_LENGTHS)
+    if distribution == "normal":
+        logits = torch.randn(num_rows, width, device="cuda") * 0.5 + 5.0
+    else:
+        # Every score in [4, 4.12] lands in the same bin on both paths, so the
+        # bin holds the whole row and overflows the buffer.
+        logits = 4.0 + torch.rand(num_rows, width, device="cuda") * 0.12
+        if distribution == "one_bin_ties":
+            logits = logits.mul(1000).round().div(1000)
+    positions = torch.arange(width, device="cuda")
+    logits.masked_fill_(positions[None] >= lengths[:, None], float("-inf"))
+    indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("persistent_topk", logits, lengths, indices, top_k, width)
+    torch.accelerator.synchronize()
+
+    assert torch.all((indices >= 0) & (indices < lengths[:, None]))
+    ordered = indices.sort(dim=1).values
+    assert torch.all(ordered[:, 1:] != ordered[:, :-1])
+    # Comparing sorted values accepts any choice among tied scores.
+    torch.testing.assert_close(
+        logits.gather(1, indices.long()).sort(dim=1, descending=True).values,
+        logits.topk(top_k, dim=1).values,
+        atol=0,
+        rtol=0,
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
