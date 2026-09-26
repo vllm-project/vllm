@@ -301,7 +301,8 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
     assert scheduled_chunks == [384, 128, 384, 128, 276]
 
 
-def test_hybrid_mamba_align_partial_hash_hit():
+@pytest.mark.parametrize("joint_lookup", [False, True])
+def test_hybrid_mamba_align_partial_hash_hit(joint_lookup):
     hash_block_size = 2
     mamba_block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -355,7 +356,29 @@ def test_hybrid_mamba_align_partial_hash_hit():
     assert num_computed == 6
     assert [len(group) for group in computed_blocks.blocks] == [3, 2]
 
-    new_blocks = manager.allocate_slots(req1, 2, num_computed, computed_blocks)
+    joint_hit = None
+    if joint_lookup:
+        from vllm.v1.core.block_pool import BlockPool
+        from vllm.v1.core.kv_cache_lookup import JointCacheHit, JointCacheLookup
+
+        lookup = JointCacheLookup(
+            manager.block_pool, BlockPool(20, True, hash_block_size)
+        )
+        joint_hit = JointCacheHit.find(
+            manager.coordinator,
+            lookup,
+            req1.block_hashes,
+            req1.num_tokens - 1,
+            mamba_block_size,
+        )
+        assert joint_hit.num_computed_tokens == num_computed
+        assert not joint_hit.needs_load
+        joint_hit.pin()
+    new_blocks = manager.allocate_slots(
+        req1, 2, num_computed, computed_blocks, joint_cache_hit=joint_hit
+    )
+    if joint_hit is not None:
+        joint_hit.release()
     assert new_blocks is not None
     mamba_new_block_ids = new_blocks.get_block_ids()[1]
     assert len(mamba_new_block_ids) == 1

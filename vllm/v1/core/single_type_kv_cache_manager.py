@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_lookup import CacheHitBlock, CacheLookup
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
@@ -134,6 +135,7 @@ class SingleTypeKVCacheManager(ABC):
         # This is only used to track the RUNNING requests, we do not track the
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
+        self._joint_cache_reused_blocks: dict[str, set[int]] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
@@ -322,6 +324,46 @@ class SingleTypeKVCacheManager(ABC):
             block_idx = num_local_computed_tokens // self.block_size
             self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
             self.num_cached_block[request_id] = block_idx
+
+    def add_joint_computed_blocks(
+        self,
+        request_id: str,
+        hits: Sequence[CacheHitBlock],
+        num_computed_tokens: int,
+    ) -> None:
+        """Adopt pinned GPU hits and allocate CPU load targets by position.
+
+        All groups' source blocks must be pinned before allocating targets.
+        CPU targets remain uncached until their transfer completes.
+        """
+        skipped_blocks = (
+            self.get_num_skipped_tokens(num_computed_tokens) // self.block_size
+        )
+        blocks = [self._null_block if hit.block.is_null else hit.block for hit in hits]
+        cpu_positions = [
+            index
+            for index, hit in enumerate(hits)
+            if index >= skipped_blocks and hit.is_cpu and not hit.block.is_null
+        ]
+        targets = (
+            self.block_pool.get_new_blocks(len(cpu_positions)) if cpu_positions else []
+        )
+        for index, target in zip(cpu_positions, targets, strict=True):
+            blocks[index] = target
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in targets)
+
+        self.add_local_computed_blocks(request_id, blocks, num_computed_tokens, 0)
+        # The request now owns the targets; drop their allocation references.
+        self.block_pool.free_blocks(targets)
+        if cpu_positions:
+            first_cpu = cpu_positions[0]
+            self.num_cached_block[request_id] = first_cpu
+            self._joint_cache_reused_blocks[request_id] = {
+                index
+                for index, hit in enumerate(hits)
+                if index > first_cpu and not hit.is_cpu and not hit.block.is_null
+            }
 
     def allocate_external_computed_blocks(
         self,
@@ -517,6 +559,16 @@ class SingleTypeKVCacheManager(ABC):
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
         )
+        if reused := self._joint_cache_reused_blocks.get(request.request_id):
+            block_mask = [
+                (block_mask is None or block_mask[i - num_cached_blocks])
+                and i not in reused
+                for i in range(num_cached_blocks, num_full_blocks)
+            ]
+            reused.difference_update(range(num_cached_blocks, num_full_blocks))
+            if not reused:
+                self._joint_cache_reused_blocks.pop(request.request_id, None)
+
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -572,6 +624,7 @@ class SingleTypeKVCacheManager(ABC):
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
+        self._joint_cache_reused_blocks.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return req_blocks
 
@@ -607,7 +660,7 @@ class SingleTypeKVCacheManager(ABC):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -747,7 +800,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -973,7 +1026,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1239,7 +1292,7 @@ class CircularBufferManager(FullAttentionManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1297,7 +1350,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1490,7 +1543,7 @@ class MambaManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -2171,7 +2224,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -2391,7 +2444,7 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,

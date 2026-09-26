@@ -926,6 +926,7 @@ def test_multi_connector_overrides_all_base_methods():
         "role",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",
+        "get_joint_cache_hit",  # Joint lookup is disabled for composed connectors.
     }
 
     base_members = {

@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
+    from vllm.v1.core.kv_cache_lookup import JointCacheHit
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -238,6 +240,19 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
+
+    def get_joint_cache_hit(
+        self, request: "Request", coordinator: "KVCacheCoordinator"
+    ) -> "JointCacheHit | None":
+        if self.scheduler_manager is None:
+            return None
+        # HiSparse groups can own host pools outside this connector's two pools.
+        if any(
+            manager.block_pool is not coordinator.block_pool
+            for manager in coordinator.single_type_managers
+        ):
+            return None
+        return self.scheduler_manager.get_joint_cache_hit(request, coordinator)
 
     def get_num_new_matched_tokens(
         self,

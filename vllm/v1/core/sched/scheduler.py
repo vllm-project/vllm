@@ -927,19 +927,46 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
+                joint_cache_hit = None
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    (
-                        new_computed_blocks,
-                        num_new_local_computed_tokens,
-                        request.shared_prefix_boundary,
-                        hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request)
+                    if (
+                        self.connector is not None
+                        and self.kv_cache_manager.prefix_cache_lookup_enabled(request)
+                    ):
+                        joint_cache_hit = self.connector.get_joint_cache_hit(
+                            request, self.kv_cache_manager.coordinator
+                        )
+                    if joint_cache_hit is not None:
+                        num_new_local_computed_tokens = (
+                            joint_cache_hit.num_gpu_prefix_tokens
+                        )
+                        num_external_computed_tokens = (
+                            joint_cache_hit.num_computed_tokens
+                            - num_new_local_computed_tokens
+                        )
+                        load_kv_async = joint_cache_hit.needs_load
+                        request.shared_prefix_boundary = (
+                            joint_cache_hit.shared_prefix_boundary
+                        )
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        connector_prefix_cache_queries = request.num_tokens
+                        connector_prefix_cache_hits = joint_cache_hit.num_cpu_tokens
+                        hit_diverged = False
+                    else:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                            hit_diverged,
+                        ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if self.connector is not None and joint_cache_hit is None:
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -1019,6 +1046,9 @@ class Scheduler(SchedulerInterface):
                     if 0 < num_computed_tokens <= self.prefix_replay_tokens:
                         # SWA bounded replay: a hit no longer than the replayed
                         # window would be recomputed in full and save nothing.
+                        if joint_cache_hit is not None:
+                            joint_cache_hit.release()
+                            joint_cache_hit = None
                         new_computed_blocks = (
                             self.kv_cache_manager.empty_kv_cache_blocks
                         )
@@ -1039,8 +1069,16 @@ class Scheduler(SchedulerInterface):
                         assert num_computed_tokens <= request.num_prompt_tokens
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
-                            num_local_cached_tokens=num_new_local_computed_tokens,
-                            num_external_cached_tokens=num_external_computed_tokens,
+                            num_local_cached_tokens=(
+                                joint_cache_hit.num_gpu_tokens
+                                if joint_cache_hit is not None
+                                else num_new_local_computed_tokens
+                            ),
+                            num_external_cached_tokens=(
+                                joint_cache_hit.num_cpu_tokens
+                                if joint_cache_hit is not None
+                                else num_external_computed_tokens
+                            ),
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
@@ -1223,9 +1261,12 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    joint_cache_hit=joint_cache_hit,
                 )
 
                 if new_blocks is None:
+                    if joint_cache_hit is not None:
+                        joint_cache_hit.release()
                     # The request cannot be scheduled.
 
                     # NOTE: we need to untouch the request from the encode cache
@@ -1257,7 +1298,10 @@ class Scheduler(SchedulerInterface):
                 # Record at admission so unscheduled lookups are not counted.
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(
-                        request, num_new_local_computed_tokens
+                        request,
+                        joint_cache_hit.num_gpu_tokens
+                        if joint_cache_hit is not None
+                        else num_new_local_computed_tokens,
                     )
 
                 request = request_queue.pop_request()
