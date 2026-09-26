@@ -1119,3 +1119,34 @@ def test_absent_flashinfer_falls_back_instead_of_aborting(monkeypatch):
     # Not explicitly opted in: fall back rather than raise.
     monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
     assert flashinfer_sampler_supported() is False
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only gate")
+def test_unbuildable_flashinfer_sampler_is_reported_not_raised(monkeypatch):
+    """FlashInfer builds its sampling kernel on first use, so a toolkit that
+    passes the arch check can still fail to compile (nvcc without the CUDA
+    headers its build includes). That has to be an unavailability reason, not
+    an exception inside the first sample call, where no fallback is left.
+    """
+    import types
+    from typing import Any
+
+    import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
+
+    def cannot_build(*args, **kwargs):
+        raise RuntimeError("Ninja build failed")
+
+    fake: Any = types.ModuleType("flashinfer")
+    fake.sampling = types.SimpleNamespace(top_k_top_p_sampling_from_logits=cannot_build)
+    monkeypatch.setitem(sys.modules, "flashinfer", fake)
+    sampler_ops._flashinfer_sampling_build_failure.cache_clear()
+
+    reason = sampler_ops._flashinfer_sampling_build_failure()
+    assert reason is not None and "failed to build" in reason
+
+    fake.sampling.top_k_top_p_sampling_from_logits = lambda logits, k, p, **kw: (
+        torch.zeros(logits.shape[0], dtype=torch.int32, device=logits.device)
+    )
+    sampler_ops._flashinfer_sampling_build_failure.cache_clear()
+    assert sampler_ops._flashinfer_sampling_build_failure() is None
+    sampler_ops._flashinfer_sampling_build_failure.cache_clear()

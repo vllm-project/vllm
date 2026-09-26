@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 import torch.nn as nn
 
@@ -74,6 +76,36 @@ def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | No
     return reason
 
 
+@functools.cache
+def _flashinfer_sampling_build_failure() -> str | None:
+    """Compile FlashInfer's sampling kernel now, returning the build error if it
+    fails and None once it is usable.
+
+    ``check_cuda_arch`` above only validates the target architecture. A toolkit
+    can clear it and still not compile -- ``nvcc`` installed without the CUDA
+    headers its own build includes is the common case -- and FlashInfer builds
+    lazily, so that failure would otherwise surface inside the first sampling
+    call and kill the engine during startup profiling, with no fallback left.
+    Nothing is wasted by building here: vLLM JIT-warms this kernel at startup
+    anyway.
+    """
+    try:
+        import flashinfer
+    except ImportError:
+        return None
+    try:
+        logits = torch.zeros(1, 8, device=current_platform.device_type)
+        flashinfer.sampling.top_k_top_p_sampling_from_logits(
+            logits,
+            torch.ones(1, dtype=torch.int32, device=logits.device),
+            torch.ones(1, device=logits.device),
+            deterministic=True,
+        )
+    except Exception as e:
+        return f"sampling kernel failed to build ({e})"
+    return None
+
+
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
@@ -124,7 +156,10 @@ def flashinfer_sampler_supported() -> bool:
                 f"top-k masking requires more than 16 SMs; device has {num_sms}"
             )
         else:
-            unsupported_reason = _flashinfer_jit_unsupported_reason(capability)
+            unsupported_reason = (
+                _flashinfer_jit_unsupported_reason(capability)
+                or _flashinfer_sampling_build_failure()
+            )
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
