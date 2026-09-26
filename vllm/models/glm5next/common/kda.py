@@ -275,6 +275,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Lazily-built merged q|k|v conv weight (built on first forward, after
         # weights are loaded). See _forward.
         self._merged_conv_weight: torch.Tensor | None = None
+        # Paired f_b/g_b projection weight, built in
+        # process_weights_after_loading (runs on every load/refit, so it
+        # cannot go stale and never allocates inside the captured forward).
+        self._paired_fg_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -352,6 +356,39 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 ),
             )
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        # f_b_proj and g_b_proj are two same-shape projections; pairing their
+        # weights lets forward run them as one batched GEMM. Built here (not
+        # in forward) so weight refit rebuilds it and CUDA graph capture never
+        # sees the allocation. KDA projections stay BF16 (fp8 checkpoints omit
+        # their scales); anything else keeps the two-Linear path.
+        self._paired_fg_weight = None
+        if self.f_b_proj.weight.dtype == torch.bfloat16:
+            self._paired_fg_weight = (
+                torch.stack([self.f_b_proj.weight, self.g_b_proj.weight])
+                .transpose(1, 2)
+                .contiguous()
+            )
+
+    def _paired_fg_projections(
+        self, projected: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the paired f_b/g_b projections on the merged projection output.
+
+        f_a and g_a are adjacent head_dim-wide shards of each ``projected``
+        row (after q|k|v|b), read in place as one strided batch — no copies.
+        """
+        assert self._paired_fg_weight is not None
+        fg = projected.as_strided(
+            (2, projected.size(0), self.head_dim),
+            (self.head_dim, projected.stride(0), 1),
+            projected.storage_offset()
+            + 3 * self.local_projection_size
+            + self.local_num_heads,
+        )
+        g1, g2 = torch.bmm(fg, self._paired_fg_weight).unbind(0)
+        return g1, g2
+
     def _flashkda_prefill(
         self,
         q: torch.Tensor,
@@ -421,10 +458,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # / spec-verify steps then skip the _cast_sigmoid kernel and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
+        if self._paired_fg_weight is not None:
+            # One batched GEMM for both gate projections (paired post-load).
+            g1, g_proj_states = self._paired_fg_projections(projected)
+        else:
+            g1 = self.f_b_proj(f_a)[0]
+            g_proj_states = self.g_b_proj(g_a)[0]
         g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
-
-        g_proj_states = self.g_b_proj(g_a)[0]
         # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
         g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
 
