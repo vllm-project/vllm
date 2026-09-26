@@ -71,6 +71,10 @@ export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
 
+# ionic/AINIC RoCE userspace: leave the image's own provider in place, and/or bake
+# a specific repo.radeon.com channel into the run image.
+export SKIP_IONIC_MOUNTS AINIC_SWAP_CHANNEL
+
 # Model selection.
 [[ -n "${MODEL_NAME:-}" ]] && export MODEL_NAME
 [[ -n "${MODEL_DIR:-}" ]] && export MODEL_DIR
