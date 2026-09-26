@@ -157,6 +157,147 @@ class _FinishedProcess:
         return 1
 
 
+class _SpuriousThenDeadProcess:
+    """A process whose sentinel is already poll-ready (its pipe's write end
+    is closed), but whose exitcode only becomes real after `spurious_reads`
+    readiness events -- simulating a stale/invalid descriptor that reports
+    readiness before the process has actually exited."""
+
+    name = "RustFrontend"
+
+    def __init__(self, sentinel, spurious_reads: int):
+        self.sentinel = sentinel
+        self.remaining_spurious = spurious_reads
+
+    @property
+    def exitcode(self):
+        if self.remaining_spurious > 0:
+            self.remaining_spurious -= 1
+            return None
+        return 1
+
+
+def test_wait_for_engine_startup_ignores_spurious_sentinel_readiness():
+    ctx = zmq.Context()
+    handshake_socket = ctx.socket(zmq.ROUTER)
+    recv, send = connection.Pipe(duplex=False)
+    send.close()
+
+    parallel_config = SimpleNamespace(
+        data_parallel_size_local=1,
+        data_parallel_hybrid_lb=False,
+        data_parallel_external_lb=False,
+    )
+
+    proc = _SpuriousThenDeadProcess(recv, spurious_reads=2)
+
+    try:
+        launch = CoreEngineLaunch(
+            engine_manager=None,
+            coordinator=None,
+            addresses=EngineZmqAddresses(inputs=[], outputs=[]),
+            tensor_queue=None,
+        )
+        launch.watched_frontend_processes = [proc]
+        with pytest.raises(RuntimeError) as exc_info:
+            wait_for_engine_startup(
+                handshake_socket,
+                [CoreEngine()],
+                parallel_config,  # type: ignore[arg-type]
+                coordinated_dp=False,
+                cache_config=None,  # type: ignore[arg-type]
+                launch=launch,
+            )
+    finally:
+        recv.close()
+        handshake_socket.close(linger=0)
+        ctx.term()
+
+    # The first two readiness events were spurious (exitcode still None)
+    # and must not raise; only the third, real exit is reported.
+    assert proc.remaining_spurious == 0
+    assert "Frontend process failed during engine core initialization" in str(
+        exc_info.value
+    )
+    assert "Failed frontend proc(s): {'RustFrontend': 1}" in str(exc_info.value)
+
+
+def test_monitor_engine_liveness_ignores_spurious_sentinel_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recv, send = connection.Pipe(duplex=False)
+    send.close()
+    proc = _SpuriousThenDeadProcess(recv, spurious_reads=2)
+    proc.name = "EngineCore"
+
+    manager = object.__new__(CoreEngineProcManager)
+    manager.processes = [proc]
+    manager.manager_stopped = Event()
+    manager.failed_proc_name = None
+
+    shutdown_calls = []
+    monkeypatch.setattr(manager, "shutdown", lambda: shutdown_calls.append(1))
+
+    try:
+        manager.monitor_engine_liveness()
+    finally:
+        recv.close()
+
+    # A sentinel that reports readiness twice with exitcode still None must
+    # not be mistaken for a dead process; only the real, non-zero exit on
+    # the third readiness event should be recorded and trigger shutdown.
+    assert proc.remaining_spurious == 0
+    assert manager.failed_proc_name == "EngineCore"
+    assert shutdown_calls == [1]
+
+
+def test_monitor_engine_liveness_polls_a_persistently_invalid_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A sentinel that never resolves to a real exit code -- a persistently
+    stale or invalid descriptor rather than a briefly spurious one -- must
+    stop being handed to connection.wait once recognized. Left in the wait
+    set, it would report ready on every single call and spin this loop at
+    full speed instead of blocking. A second, healthy process's real exit
+    must still be caught promptly while the first sits in fallback
+    polling."""
+    stuck = SimpleNamespace(sentinel=1, exitcode=None, name="stuck")
+    healthy = SimpleNamespace(sentinel=2, exitcode=None, name="healthy")
+
+    manager = object.__new__(CoreEngineProcManager)
+    manager.processes = [stuck, healthy]
+    manager.manager_stopped = Event()
+    manager.failed_proc_name = None
+
+    shutdown_calls = []
+    monkeypatch.setattr(manager, "shutdown", lambda: shutdown_calls.append(1))
+
+    wait_calls = []
+
+    def fake_wait(object_list, timeout=None):
+        wait_calls.append((set(object_list), timeout))
+        if len(wait_calls) == 1:
+            return [1]  # only the stuck sentinel is ready at first
+        healthy.exitcode = 1  # the healthy process actually exits now
+        return [2]
+
+    monkeypatch.setattr(engine_utils.connection, "wait", fake_wait)
+    monkeypatch.setattr(engine_utils.time, "sleep", lambda _: None)
+
+    manager.monitor_engine_liveness()
+
+    # The stuck sentinel was handed to connection.wait exactly once, then
+    # never again -- moved to bounded polling instead of staying in the
+    # wait set and reporting ready every call.
+    assert wait_calls[0] == ({1, 2}, 1)
+    assert all(1 not in sentinels for sentinels, _ in wait_calls[1:])
+    # Once something needed polling, the remaining wait used the shorter
+    # cadence instead of blocking for a full second.
+    assert all(timeout == 0.1 for _, timeout in wait_calls[1:])
+    assert manager.failed_proc_name == "healthy"
+    assert shutdown_calls == [1]
+
+
 def test_wait_for_engine_startup_reports_watched_process_exit():
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
