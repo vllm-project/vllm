@@ -493,6 +493,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            if self.speculator is not None and isinstance(self.sampler, Sampler):
+                # The target samples within the requests' top-k / top-p. The
+                # drafter copies them on every step, as it does with the
+                # temperature. A custom sampler may not apply them.
+                self.speculator.set_draft_sampling_params(
+                    self.sampler.sampling_states.top_k,
+                    self.sampler.sampling_states.top_p,
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs, logprobs_mode=self.model_config.logprobs_mode
             )

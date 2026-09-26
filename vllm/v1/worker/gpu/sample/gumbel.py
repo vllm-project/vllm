@@ -281,6 +281,7 @@ def _gumbel_sample_kernel(
     seeds_ptr,
     pos_ptr,
     temp_ptr,
+    logits_threshold_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
@@ -298,6 +299,10 @@ def _gumbel_sample_kernel(
         other=float("-inf"),
     )
     logits = logits.to(tl.float32)
+    if logits_threshold_ptr is not None:
+        # Drop logits below the row's threshold, for sampling and for the cache.
+        threshold = tl.load(logits_threshold_ptr + token_idx)
+        logits = tl.where(logits < threshold, float("-inf"), logits)
 
     value, idx = gumbel_block_argmax(
         logits,
@@ -334,6 +339,8 @@ def gumbel_sample(
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    # [num_tokens] float32; logits below it are treated as -inf, also in the cache
+    logits_threshold: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -368,6 +375,7 @@ def gumbel_sample(
         seed,
         pos,
         temperature,
+        logits_threshold,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_DRAFTING=is_drafting,
