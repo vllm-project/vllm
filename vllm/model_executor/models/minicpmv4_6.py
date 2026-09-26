@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniCPM-V 4.6 model (MiniCPMV4_6ForConditionalGeneration)."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -64,7 +64,6 @@ from .minicpmv import (
 from .module_mapping import MultiModelKeys
 from .qwen3_5 import Qwen3_5ForCausalLM
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
     flatten_bn,
@@ -1292,13 +1291,6 @@ class MiniCPMV4_6ForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     # ----- Weight loading -----
-
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         return MultiModelKeys.from_string_field(

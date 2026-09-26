@@ -23,7 +23,6 @@
 # limitations under the License.
 """Inference-only SeedOss model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -55,7 +54,6 @@ from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
@@ -426,7 +424,3 @@ class SeedOssForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

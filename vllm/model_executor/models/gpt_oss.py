@@ -60,7 +60,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -1478,7 +1477,3 @@ class GptOssForCausalLM(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
