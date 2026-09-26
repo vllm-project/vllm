@@ -152,6 +152,44 @@ def test_scoped_max_split_ignores_async_allocator(monkeypatch):
     set_settings.assert_not_called()
 
 
+@pytest.mark.parametrize("kv_cache_memory_bytes", [None, 1])
+def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_bytes):
+    """ROCm decode workspace uses max_num_seqs during startup profiling."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=16),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+
+    class Profiled(Exception):
+        pass
+
+    def profile_run():
+        # Without the config context, the helper falls back to all 32768
+        # batched tokens, which would reserve 128 GiB at 1M context.
+        assert _max_decode_logits_rows(32768) == 16 * (1 + 5)
+        raise Profiled
+
+    worker = SimpleNamespace(
+        vllm_config=config,
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
+        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        init_snapshot=SimpleNamespace(free_memory=2),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *args, **kwargs: nullcontext()
+    )
+
+    assert get_current_vllm_config_or_none() is None
+    with pytest.raises(Profiled):
+        gpu_worker.Worker.determine_available_memory(worker)
+    assert get_current_vllm_config_or_none() is None
+
+
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
