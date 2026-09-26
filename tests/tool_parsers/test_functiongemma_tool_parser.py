@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -118,6 +119,61 @@ class TestParseArguments:
     def test_argument_with_spaces(self, parser):
         result = parser._parse_arguments("message:<escape>Hello World<escape>")
         assert result == {"message": "Hello World"}
+
+
+class TestExtractToolCallsStreaming:
+    def _stream(self, parser, chunks):
+        current_text = ""
+        collected_args = ""
+        for chunk in chunks:
+            previous_text = current_text
+            current_text += chunk
+            result = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=None,
+            )
+            if result and result.tool_calls:
+                function = result.tool_calls[0].function
+                arguments = getattr(function, "arguments", None)
+                if arguments:
+                    collected_args += arguments
+        return collected_args
+
+    def test_streamed_arguments_form_valid_json_with_two_keys(self, parser):
+        # Regression test: each streaming delta previously diffed
+        # json.dumps(current_args) by raw string length against the last-sent
+        # string. Since json.dumps() closes the object with '}' on every call,
+        # the delta after the first key arrived re-sent a stale closing brace
+        # mid-object, corrupting the client-side reconstructed JSON.
+        chunks = [
+            "<start_function_call>call:get_weather{",
+            "ci",
+            "ty:<escape>NYC<escape>",
+            "unit:<escape>celsius<escape>",
+            "}<end_function_call>",
+        ]
+        reconstructed = self._stream(parser, chunks)
+        assert json.loads(reconstructed) == {"city": "NYC", "unit": "celsius"}
+
+    def test_streamed_arguments_form_valid_json_with_three_keys(self, parser):
+        chunks = [
+            "<start_function_call>call:search{",
+            "query:<escape>python<escape>",
+            "limit:<escape>10<escape>",
+            "sort:<escape>relevance<escape>",
+            "}<end_function_call>",
+        ]
+        reconstructed = self._stream(parser, chunks)
+        assert json.loads(reconstructed) == {
+            "query": "python",
+            "limit": 10,
+            "sort": "relevance",
+        }
 
 
 class TestAdjustRequest:
