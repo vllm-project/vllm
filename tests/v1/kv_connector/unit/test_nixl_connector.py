@@ -7,6 +7,7 @@ import os
 import queue
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -49,6 +50,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    RemoteMeta,
+    ReqMeta,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -2087,6 +2090,10 @@ def recv_worker():
     worker._recving_transfers = defaultdict(list)
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
+    worker._handshake_lock = threading.RLock()
+    worker._handshake_futures = {}
+    worker._remote_agents = {}
+    worker._engine_by_address = {}
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2679,6 +2686,162 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
     # Nothing should be evicted.
     assert engine_id in worker._remote_agents
     assert engine_id in worker.dst_xfer_side_handles
+
+
+@pytest.mark.cpu_test
+class TestPeerReplacement:
+    @pytest.fixture(autouse=True)
+    def setup(self, monkeypatch):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        config = create_vllm_config(kv_connector_extra_config={"engine_ttl": 0})
+        config.kv_transfer_config.kv_buffer_device = "cpu"
+        platform = SimpleNamespace(
+            device_type="cpu",
+            discover_numa_topology=lambda: [],
+            get_nixl_memory_type=lambda: "DRAM",
+            is_rocm=lambda: False,
+        )
+        with (
+            patch.object(bw, "NixlWrapper", FakeNixlWrapper),
+            patch.object(bw, "current_platform", platform),
+            patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+            patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+            patch.object(
+                bw, "get_current_attn_backends", return_value=[FlashAttentionBackend]
+            ),
+        ):
+            self.worker = FakeNixlConnectorWorker(config, "local", hand_shake_latency=0)
+            self.nixl = self.worker.nixl_wrapper
+            self.transport = MagicMock(wraps=self.nixl)
+            self.worker.nixl_wrapper = self.transport
+            monkeypatch.setattr(
+                self.worker._handshake_initiation_executor,
+                "submit",
+                lambda *args: Future(),
+            )
+            self._connect("old")
+            yield
+            self.worker.shutdown()
+
+    def _connect(self, engine_id="new", host="localhost", port=1234):
+        future = self.worker._ensure_handshake(engine_id, host, port, 1)
+        self.worker.REMOTE_ENGINE_ID = engine_id
+        self.nixl.REMOTE_AGENT_NAME = engine_id
+        future.set_result(self.worker._nixl_handshake(host, port, 1, engine_id))
+
+    def _request(self, engine_id="new", blocks=(1,), awaiting_kvs=True):
+        metadata = NixlConnectorMetadata()
+        metadata.reqs_to_recv[f"{engine_id}-req"] = ReqMeta(
+            local_block_ids=(blocks,),
+            local_physical_block_ids=(blocks,),
+            tp_size=1,
+            remote=RemoteMeta(
+                ([2],), "localhost", 1234, engine_id, f"{engine_id}-prefill"
+            ),
+            awaiting_kvs=awaiting_kvs,
+        )
+        return metadata
+
+    def test_cleans_old_peer_after_confirmed_handshake(self):
+        self._connect("healthy", host="other-host")
+        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        self.worker.start_load_kv(self._request())
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        self._connect()
+        self.worker.get_transfer_results()
+        self.transport.release_dlist_handle.assert_called_once_with(old_handle)
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert set(self.worker._remote_agents) == {"new", "healthy"}
+        assert self.worker._engine_by_address == {
+            ("localhost", 1234): "new",
+            ("other-host", 1234): "healthy",
+        }
+        with pytest.raises(KeyError):
+            self.worker.transfer_topo.get_engine_info("old")
+
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert self.worker.get_transfer_results().finished_recving == {"new-req"}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    @pytest.mark.parametrize("host,port", [("other-host", 1234), ("localhost", 5678)])
+    def test_preserves_other_addresses(self, host, port):
+        self._connect(host=host, port=port)
+        self.worker.get_transfer_results()
+        assert "old" in self.worker._remote_agents
+        self.transport.remove_remote_agent.assert_not_called()
+
+    def test_preserves_old_peer_when_handshake_fails(self):
+        self.worker.start_load_kv(self._request())
+        self.worker._handshake_futures["new"].set_exception(
+            RuntimeError("handshake failed")
+        )
+        assert self.worker.get_transfer_results().failed_recving == {"new-req"}
+        assert "old" in self.worker._remote_agents
+        assert self.worker._engine_by_address == {("localhost", 1234): "old"}
+        self.transport.remove_remote_agent.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "states,failed",
+        [
+            (["PROC", "DONE"], False),
+            (["ERR", "PROC", "DONE"], True),
+            (["ERR", "PROC", "ERR"], True),
+        ],
+        ids=["healthy", "failed-sibling-completes", "failed-sibling-fails"],
+    )
+    def test_waits_for_reads_before_cleanup_and_failure_reporting(self, states, failed):
+        self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
+        self.worker._recving_transfers["old-req"] = [1, 2] if failed else [1]
+        self.transport.check_xfer_state.side_effect = states
+        self._connect()
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == set()
+        assert self.worker.get_block_ids_with_load_errors() == set()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"old-req"}
+        assert result.failed_recving == ({"old-req"} if failed else set())
+        assert self.worker.get_block_ids_with_load_errors() == (
+            {1} if failed else set()
+        )
+        assert self.transport.release_xfer_handle.call_count == (2 if failed else 1)
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    @pytest.mark.parametrize("awaiting_kvs", [False, True])
+    def test_waits_for_queued_notification(self, awaiting_kvs):
+        metadata = self._request("old", blocks=(), awaiting_kvs=awaiting_kvs)
+        self.worker._recving_metadata.update(metadata.reqs_to_recv)
+        self.worker._background_nixl_handshake(
+            "old-req", "old", metadata.reqs_to_recv["old-req"]
+        )
+        self._connect()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        self.transport.send_notif.assert_called_once_with(
+            "old", notif_msg=b"old-prefill:1"
+        )
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == ({"old-req"} if awaiting_kvs else set())
+        assert result.failed_recving == set()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    def test_waits_for_other_handshakes(self):
+        self.worker._ensure_handshake("other", "other-host", 1234, 1)
+        self._connect()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        self._connect("other", host="other-host")
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
 
 
 def test_transfer_topology_unregister():
