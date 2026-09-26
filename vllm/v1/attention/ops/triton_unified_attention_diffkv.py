@@ -28,6 +28,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
@@ -422,6 +423,21 @@ def unified_attention_diffkv(
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
+    # With 16 query heads per KV head a 16-row block covers one query position,
+    # so every position reloads its KV prefix. Prefills share those loads
+    # between two positions; measured on SM12x only. Batch invariance forbids
+    # a tile shape that depends on the batch's longest query.
+    if (
+        max_seqlen_q >= 256
+        and num_queries_per_kv == 16
+        and head_size_qk == 192
+        and head_size_v == 128
+        and q.dtype == torch.bfloat16
+        and not is_batch_invariant
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+    ):
+        BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
