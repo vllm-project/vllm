@@ -23,6 +23,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
+    is_deep_gemm_supported,
     native_next_n_supported,
 )
 from vllm.utils.math_utils import round_down
@@ -809,6 +810,20 @@ def _supports_varlen_paged_mqa_logits() -> bool:
     )
 
 
+def _should_build_paged_mqa_logits_metadata(num_states: int) -> bool:
+    """Whether decode should fill DeepGEMM paged-MQA schedule metadata.
+
+    ``has_deep_gemm()`` is only "the package imported". The metadata helper
+    asserts 32 or 64 states (Hopper/Blackwell pages). DSV4 compress-128
+    pages have 2 states and trip that host assert.
+    """
+    return (
+        current_platform.is_cuda()
+        and is_deep_gemm_supported()
+        and num_states in (32, 64)
+    )
+
+
 def _supports_flattened_device_query_lens() -> bool:
     return (
         current_platform.is_cuda()
@@ -958,7 +973,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
         # build() narrows it to whatever the kernel actually schedules.
-        self.scheduler_metadata_buffer = torch.empty(
+        # Zeroed, not empty: when the paged-MQA gate declines to build (a
+        # compress-128 page has 2 states, which the dispatch rejects), build()
+        # returns this buffer unfilled, and that branch is now reachable on CUDA.
+        # Zeroing here rather than on the skip path is enough because the gate
+        # reads only the frozen spec's num_states plus process-constant platform
+        # state, so it cannot flip between steps: the buffer is either always
+        # written or always left at these initial zeros.
+        self.scheduler_metadata_buffer = torch.zeros(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
@@ -1589,9 +1611,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
+            # DeepGEMM paged MQA metadata helper asserts 32 or 64 states
             schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            if _should_build_paged_mqa_logits_metadata(self.kv_cache_spec.num_states):
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.num_states,
