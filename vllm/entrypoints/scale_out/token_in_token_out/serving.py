@@ -461,11 +461,9 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    # Still emit a terminal empty chunk while prompt metadata
-                    # is pending, so zero-token completions deliver it.
-                    if not delta_token_ids and (
-                        finish_reason is None or prompt_token_ids is None
-                    ):
+                    # Skip empty outputs unless prompt metadata is still
+                    # pending, so zero-token completions deliver it.
+                    if not delta_token_ids and prompt_token_ids is None:
                         continue
 
                     if sampling_params.logprobs is not None:

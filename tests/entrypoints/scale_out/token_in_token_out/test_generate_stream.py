@@ -634,8 +634,8 @@ async def test_non_stream_encoder_decoder_omits_mm_placeholders():
 
 @pytest.mark.asyncio
 async def test_stream_prompt_metadata_lands_on_first_emitted_chunk():
-    """An empty first output is skipped; metadata goes on the first real chunk,
-    once, and never on the sibling chunk of the same iteration (n=2)."""
+    """Metadata goes on the first emitted chunk, once, and never on the
+    sibling chunk of the same iteration (n=2)."""
     engine = _mock_engine()
 
     def _two_outputs(tokens0: list[int], tokens1: list[int], **kwargs):
@@ -671,7 +671,10 @@ async def test_stream_prompt_metadata_lands_on_first_emitted_chunk():
     parsed = _parse_sse_chunks([chunk async for chunk in response])
     data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
 
+    # Empty outputs are emitted only while prompt metadata is pending: the
+    # first (empty) chunk carries it, then its empty sibling is skipped.
     assert [c["choices"][0]["token_ids"] for c in data_chunks] == [
+        [],
         [10],
         [11],
         [20],

@@ -205,7 +205,9 @@ async fn generate_chunk_stream(
                     );
                 }
 
-                if token_ids.is_empty() && finish_reason.is_none() {
+                // Skip empty outputs unless prompt metadata is still pending,
+                // so zero-token completions deliver it.
+                if token_ids.is_empty() && prompt_token_ids.is_none() {
                     continue;
                 }
 
@@ -649,7 +651,8 @@ mod tests {
 
     #[tokio::test]
     async fn generate_chunk_stream_sends_prompt_metadata_on_first_emitted_chunk() {
-        // An empty first output is skipped and must not consume the metadata.
+        // An empty output is emitted while metadata is pending, so it carries
+        // the metadata; later chunks do not repeat it.
         let chunks = collect_chunks(
             vec![
                 stream_output(Some(&[11, 22]), Vec::new(), None),
@@ -661,11 +664,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[0].choices[0].token_ids.is_empty());
         assert_eq!(chunks[0].prompt_token_ids, Some(vec![11, 22]));
         assert!(chunks[0].mm_placeholders.is_none());
-        assert!(chunks[1].prompt_token_ids.is_none());
-        assert!(chunks[1].mm_placeholders.is_none());
+        assert!(chunks[1..].iter().all(|c| c.prompt_token_ids.is_none()));
+        assert!(chunks[1..].iter().all(|c| c.mm_placeholders.is_none()));
     }
 
     #[tokio::test]
@@ -779,6 +783,41 @@ mod tests {
 
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_zero_token_completion_delivers_prompt_metadata() {
+        let chunks = collect_chunks(
+            vec![stream_output(
+                Some(&[11, 22]),
+                Vec::new(),
+                Some(FinishReason::stop_eos()),
+            )],
+            true,
+            None,
+        )
+        .await;
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].choices[0].token_ids.is_empty());
+        assert_eq!(chunks[0].choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(chunks[0].prompt_token_ids, Some(vec![11, 22]));
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_zero_token_completion_emits_nothing_by_default() {
+        let chunks = collect_chunks(
+            vec![stream_output(
+                Some(&[11, 22]),
+                Vec::new(),
+                Some(FinishReason::stop_eos()),
+            )],
+            false,
+            None,
+        )
+        .await;
+
+        assert!(chunks.is_empty());
     }
 
     #[test]
