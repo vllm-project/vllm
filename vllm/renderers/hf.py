@@ -277,7 +277,7 @@ def resolve_chat_template(
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
-            revision=model_config.revision,
+            revision=model_config.tokenizer_revision,
             code_revision=model_config.code_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
