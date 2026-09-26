@@ -197,7 +197,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
                 if getattr(self.config, "vision_n_layers", 0) > 0
                 else None,
             )
-        hidden_states, residual, post_mix, res_mix = self.mtp_block(
+        hidden_states, residual, post_mix, res_mix, _ = self.mtp_block(
             positions=positions,
             x=hidden_states,
             input_ids=input_ids,
