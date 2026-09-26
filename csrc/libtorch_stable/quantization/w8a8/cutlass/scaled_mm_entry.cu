@@ -1,3 +1,5 @@
+#include <cstdint>
+
 #include <cuda.h>
 #include <cudaTypedefs.h>
 
@@ -194,6 +196,35 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
   return false;
 }
 
+namespace {
+
+bool has_packed_leading_dimension(const torch::stable::Tensor& tensor,
+                                  int leading_dim, int extent_dim) {
+  return tensor.size(leading_dim) <= 1 ||
+         tensor.stride(leading_dim) == tensor.size(extent_dim);
+}
+
+void check_c3x_scaled_mm_operand(const torch::stable::Tensor& tensor,
+                                 const char* name, int leading_dim,
+                                 int extent_dim) {
+  STD_TORCH_CHECK(has_packed_leading_dimension(tensor, leading_dim, extent_dim),
+                  "CUTLASS 3.x scaled_mm requires packed operands; ", name,
+                  " is not packed");
+  STD_TORCH_CHECK(reinterpret_cast<std::uintptr_t>(tensor.data_ptr()) % 16 == 0,
+                  "CUTLASS 3.x scaled_mm requires 16-byte-aligned pointers; ",
+                  name, " is misaligned");
+}
+
+void check_c3x_scaled_mm_operands(const torch::stable::Tensor& c,
+                                  const torch::stable::Tensor& a,
+                                  const torch::stable::Tensor& b) {
+  check_c3x_scaled_mm_operand(a, "A", 0, 1);
+  check_c3x_scaled_mm_operand(b, "B", 1, 0);
+  check_c3x_scaled_mm_operand(c, "output", 0, 1);
+}
+
+}  // namespace
+
 void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
                        torch::stable::Tensor const& b,
                        torch::stable::Tensor const& a_scales,
@@ -221,6 +252,7 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
 
 #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
   if (version_num >= 120) {
+    check_c3x_scaled_mm_operands(c, a, b);
     cutlass_scaled_mm_sm120(c, a, b, a_scales, b_scales, bias);
     return;
   }
@@ -228,6 +260,7 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
 
 #if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
   if (version_num >= 100 && version_num < 120) {
+    check_c3x_scaled_mm_operands(c, a, b);
     cutlass_scaled_mm_sm100(c, a, b, a_scales, b_scales, bias);
     return;
   }
@@ -237,6 +270,7 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
 #if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
   if (version_num >= 90 && version_num < 100) {
     // Hopper
+    check_c3x_scaled_mm_operands(c, a, b);
     cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
     return;
   }
@@ -425,6 +459,7 @@ void cutlass_scaled_mm_azp(torch::stable::Tensor& c,
 
 #if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
   if (version_num >= 90) {
+    check_c3x_scaled_mm_operands(c, a, b);
     cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
     return;
   }
