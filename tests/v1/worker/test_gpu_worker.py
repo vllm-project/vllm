@@ -387,3 +387,39 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
+    """The runner caches the DCP interleave size in `initialize_kv_cache`; the
+    connector-time adjustment is deferred under the extensible cache, so the
+    worker must apply it beforehand."""
+    from vllm.v1.worker.gpu_worker import Worker
+
+    log: list[str] = []
+    runner = SimpleNamespace(
+        initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
+        extensible_kv_cache=SimpleNamespace(
+            reserved_headroom_bytes=0, committable_blocks=lambda: 42
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=8, kv_cache_layout=None, needs_kv_cache_zeroing=False
+    )
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
+        model_config=SimpleNamespace(enable_return_routed_experts=False),
+        vllm_config=SimpleNamespace(
+            adjust_dcp_kv_cache_interleave_size=lambda config: log.append(
+                f"adjust_dcp:{config.num_blocks}"
+            )
+        ),
+        model_runner=runner,
+        _maybe_get_memory_pool_context=lambda tag: nullcontext(),
+        _v2_model_runner=lambda: runner,
+    )
+    # The rank's committable count is both used for warmup and returned for
+    # the engine to agree on.
+    assert Worker.initialize_from_config(worker, kv_cache_config) == 42
+    assert runner.extensible_kv_cache.warmup_committable_blocks == 42
+    assert log == ["adjust_dcp:8", "initialize_kv_cache"]
+    assert worker._kv_cache_config is kv_cache_config

@@ -26,7 +26,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+from vllm.v1.worker.extensible_kv_cache import (
+    ensure_kv_cache_blocks,
+    num_committable_kv_blocks,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.prompt_logprob import PROMPT_LOGPROBS_CHUNK_SIZE
 
 logger = init_logger(__name__)
 
@@ -122,14 +128,16 @@ def run_mixed_prefill_decode_warmup(
     ]
     prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
     required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
-    if model_runner.kv_cache_config.num_blocks <= required_blocks:
+    num_blocks = num_committable_kv_blocks(model_runner)
+    if num_blocks <= required_blocks:
         logger.warning(
             "Skipping V2 mixed prefill+decode warmup because only %d KV blocks "
             "are available for %d required warmup blocks.",
-            model_runner.kv_cache_config.num_blocks,
+            num_blocks,
             required_blocks,
         )
         return False
+    ensure_kv_cache_blocks(model_runner, 1 + required_blocks)
 
     next_block_id = 1
 
@@ -240,6 +248,34 @@ def warmup_kernels(
             rejection_sampler.enable_adaptive_verification = True
 
 
+def _warmup_prompt_logprobs(model_runner: GPUModelRunner) -> None:
+    """Materialize one prompt-logprobs logits chunk for memory sizing."""
+    model_config = model_runner.model_config
+    if (
+        model_runner.prompt_logprobs_worker is None
+        # The LoRA logits head applies adapters through the per-token mapping
+        # of a scheduled batch, which a standalone chunk does not have.
+        or model_runner.lora_config is not None
+        or model_config.max_logprobs == 0
+        or not hasattr(model_runner.model, "compute_logits")
+    ):
+        return
+    hidden_size = model_config.get_hidden_size()
+    if hidden_size <= 0:
+        # Composite configs (e.g. encoder-decoder ASR) expose no head width.
+        return
+    # A chunk never holds more rows than a prompt can have.
+    num_rows = min(PROMPT_LOGPROBS_CHUNK_SIZE, model_runner.max_model_len)
+    hidden_states = torch.zeros(
+        num_rows, hidden_size, dtype=model_config.dtype, device=model_runner.device
+    )
+    logits = model_runner.model.compute_logits(hidden_states)
+    max_logprobs = model_config.max_logprobs
+    num_logprobs = logits.shape[-1] if max_logprobs == -1 else max_logprobs
+    token_ids = torch.zeros(num_rows, dtype=torch.int64, device=model_runner.device)
+    compute_topk_scores(logits, num_logprobs, token_ids)
+
+
 def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -247,6 +283,8 @@ def _warmup_kernels(
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
+
+    _warmup_prompt_logprobs(model_runner)
 
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
@@ -299,8 +337,9 @@ def _warmup_kernels(
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
             num_reqs,
-            max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+            max(1, (num_committable_kv_blocks(model_runner) - 1) // max_blocks_per_req),
         )
+        ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 

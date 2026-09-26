@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
     run_mixed_prefill_decode_warmup,
@@ -107,6 +108,8 @@ def _make_runner(
         ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+        extensible_kv_cache=None,
+        prompt_logprobs_worker=None,
     )
 
 
@@ -187,6 +190,49 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+
+
+class _StubExtensibleCache:
+    def __init__(self, warmup_committable_blocks: int) -> None:
+        self.warmup_committable_blocks = warmup_committable_blocks
+        self.commits: list[int] = []
+
+    def commit(self, num_blocks: int) -> None:
+        self.commits.append(num_blocks)
+
+
+def test_warmup_sizes_batches_by_the_rank_agreed_committable_count():
+    """Each rank measures its own free memory; the warmup batch and what it
+    commits must follow the smallest count across ranks, or ranks run
+    different shapes and can skip steps the others wait on."""
+    runner = _make_runner(
+        [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
+    )
+    # The engine agreed on 3 blocks, whatever this rank alone could commit.
+    cache = _StubExtensibleCache(3)
+    runner.extensible_kv_cache = cache
+    recorder = _StepRecorder()
+
+    warmup_kernels(runner, recorder.execute_model, recorder.sample_tokens)
+
+    # One block per request at this length: 3 blocks less the null block fit
+    # two requests, not the four `max_num_seqs` allows.
+    assert len(recorder._held) == 2
+    assert cache.commits[0] == 3
+
+
+def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks():
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    cache = _StubExtensibleCache(9)
+    runner.extensible_kv_cache = cache
+    recorder = _StepRecorder()
+
+    # 128 tokens need 9 blocks (8 prefill + 1 decode) beyond the null block.
+    assert not run_mixed_prefill_decode_warmup(
+        runner, recorder.execute_model, recorder.sample_tokens, num_tokens=128
+    )
+    assert cache.commits == []
+    assert recorder.steps == []
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "all", "align"])
@@ -375,3 +421,79 @@ def test_num_lookahead_tokens_without_speculation():
     config = _Config()
 
     assert config.num_lookahead_tokens == 0
+
+
+def _prompt_logprobs_runner(
+    max_logprobs: int, calls: list, max_model_len: int = 4096
+) -> SimpleNamespace:
+    hidden_size, vocab_size = 8, 32
+
+    def compute_logits(hidden_states: torch.Tensor) -> torch.Tensor:
+        calls.append(("logits", tuple(hidden_states.shape)))
+        return torch.zeros(hidden_states.shape[0], vocab_size)
+
+    return SimpleNamespace(
+        prompt_logprobs_worker=object(),
+        model=SimpleNamespace(compute_logits=compute_logits),
+        model_config=SimpleNamespace(
+            max_logprobs=max_logprobs,
+            get_hidden_size=lambda: hidden_size,
+            dtype=torch.float32,
+        ),
+        device=torch.device("cpu"),
+        max_model_len=max_model_len,
+        lora_config=None,
+    )
+
+
+@pytest.mark.parametrize(("max_logprobs", "expected_topk"), [(5, 5), (-1, 32)])
+def test_prompt_logprobs_warmup_materializes_one_chunk(
+    monkeypatch, max_logprobs, expected_topk
+):
+    """One chunk of full-vocab logits is computed and scored with the configured
+    (or, uncapped, the whole-vocab) number of logprobs."""
+    calls: list = []
+    monkeypatch.setattr(
+        warmup,
+        "compute_topk_scores",
+        lambda logits, num_logprobs, token_ids: calls.append(
+            ("topk", tuple(logits.shape), num_logprobs, tuple(token_ids.shape))
+        ),
+    )
+    warmup._warmup_prompt_logprobs(_prompt_logprobs_runner(max_logprobs, calls))
+    chunk = warmup.PROMPT_LOGPROBS_CHUNK_SIZE
+    assert calls == [
+        ("logits", (chunk, 8)),
+        ("topk", (chunk, 32), expected_topk, (chunk,)),
+    ]
+
+
+def test_prompt_logprobs_warmup_chunk_is_capped_by_model_len(monkeypatch):
+    """A prompt cannot exceed max_model_len, so neither does the warmup chunk."""
+    calls: list = []
+    monkeypatch.setattr(
+        warmup,
+        "compute_topk_scores",
+        lambda logits, num_logprobs, token_ids: calls.append(tuple(logits.shape)),
+    )
+    warmup._warmup_prompt_logprobs(_prompt_logprobs_runner(5, calls, max_model_len=100))
+    assert calls == [("logits", (100, 8)), (100, 32)]
+
+
+def test_prompt_logprobs_warmup_skips_when_unavailable():
+    """Nothing runs for pooling / non-last-PP ranks (no worker), LoRA (no
+    per-token adapter mapping outside a batch), disabled logprobs, or models
+    without a logits head."""
+    calls: list = []
+    runner = _prompt_logprobs_runner(5, calls)
+    runner.prompt_logprobs_worker = None
+    warmup._warmup_prompt_logprobs(runner)
+    runner = _prompt_logprobs_runner(5, calls)
+    runner.lora_config = object()
+    warmup._warmup_prompt_logprobs(runner)
+    runner = _prompt_logprobs_runner(0, calls)
+    warmup._warmup_prompt_logprobs(runner)
+    runner = _prompt_logprobs_runner(5, calls)
+    runner.model = SimpleNamespace()
+    warmup._warmup_prompt_logprobs(runner)
+    assert calls == []

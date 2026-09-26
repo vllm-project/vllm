@@ -5,6 +5,7 @@ from argparse import ArgumentError
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -196,3 +197,225 @@ def test_external_lb_infers_rank_for_multinode_replicas():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.parallel_config.data_parallel_rank == 0
+
+
+def test_extensible_kv_cache_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache is None
+    assert engine_args.gpu_memory_utilization is None
+
+    args = parser.parse_args(["--enable-extensible-kv-cache"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache
+
+    args = parser.parse_args(["--no-enable-extensible-kv-cache"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache is False
+
+
+# Off CUDA the platform check trips first, before the behavior under test.
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA"
+)
+
+
+@requires_cuda
+def test_extensible_kv_cache_defaults():
+    """Unset, the extensible KV cache is on for the V2 runner on CUDA and the
+    budget is the whole device; turned off, or where unsupported, the standard
+    0.92 default returns. An explicit utilization is always kept."""
+    config = EngineArgs(model="facebook/opt-125m").create_engine_config(
+        UsageContext.OPENAI_API_SERVER
+    )
+    assert config.cache_config.enable_extensible_kv_cache
+    assert config.cache_config.gpu_memory_utilization is None
+    assert config.cache_config.resolved_gpu_memory_utilization == 1.0
+
+    config.cache_config.enable_extensible_kv_cache = False
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.92
+
+    config = EngineArgs(
+        model="facebook/opt-125m", enable_extensible_kv_cache=False
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.92
+
+    config = EngineArgs(
+        model="facebook/opt-125m", gpu_memory_utilization=0.5
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert config.cache_config.enable_extensible_kv_cache
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.5
+    config.cache_config.enable_extensible_kv_cache = False
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.5
+
+    # Manual KV sizing leaves the feature off by default but rejects an
+    # explicit request.
+    config = EngineArgs(
+        model="facebook/opt-125m", kv_cache_memory_bytes=1 << 30
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert not config.cache_config.enable_extensible_kv_cache
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.92
+    config = EngineArgs(
+        model="facebook/opt-125m", num_gpu_blocks_override=64
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert not config.cache_config.enable_extensible_kv_cache
+
+
+@pytest.mark.parametrize(
+    "manual_size",
+    [dict(kv_cache_memory_bytes=1 << 30), dict(num_gpu_blocks_override=64)],
+)
+@requires_cuda
+def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
+    """Measured sizing and a manual size conflict: silently clamping the manual
+    one would misreport the cache, so an explicit request is an error."""
+    (arg_name,) = manual_size
+    engine_args = EngineArgs(
+        model="facebook/opt-125m", enable_extensible_kv_cache=True, **manual_size
+    )
+    with pytest.raises(ValueError, match=arg_name):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def _fake_executor(vllm_config, collective_rpc):
+    from types import MethodType, SimpleNamespace
+
+    from vllm.v1.executor.abstract import Executor
+
+    fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
+    fake._extensible_kv_cache_unsupported_reason = MethodType(
+        Executor._extensible_kv_cache_unsupported_reason, fake
+    )
+    return fake
+
+
+@requires_cuda
+def test_extensible_kv_cache_falls_back_when_driver_unsupported():
+    from vllm.v1.executor.abstract import Executor
+
+    calls: list[str] = []
+
+    def collective_rpc(method: str):
+        calls.append(method)
+        if method == "extensible_kv_cache_unsupported_reason":
+            return [None, "no VMM support"]
+        return [None, None]
+
+    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+    assert vllm_config.cache_config.resolved_gpu_memory_utilization == 1.0
+    specs = [{"layer": object()}]
+    fake = _fake_executor(vllm_config, collective_rpc)
+    Executor.resolve_extensible_kv_cache(fake, specs)
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert vllm_config.cache_config.resolved_gpu_memory_utilization == 0.92
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
+
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    fake = _fake_executor(vllm_config, lambda method: [None, None])
+    Executor.resolve_extensible_kv_cache(fake, specs)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+
+    # No KV cache at all: nothing to size, so the feature is turned off.
+    Executor.resolve_extensible_kv_cache(fake, [{}])
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+
+
+@requires_cuda
+def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
+    """Under torchrun each rank probes only its own driver; a rank whose probe
+    passes must still follow one whose probe fails, or it hangs waiting for
+    the others in the block-count all-reduce."""
+    import torch.distributed as dist
+
+    from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
+
+    class FakeExecutor(ExecutorWithExternalLauncher):
+        def __init__(self, vllm_config, collective_rpc):
+            self.vllm_config = vllm_config
+            self.collective_rpc = collective_rpc
+
+    calls: list[str] = []
+
+    def collective_rpc(method: str):
+        calls.append(method)
+        return [None]
+
+    reduced: list[tuple[int, object]] = []
+
+    def all_reduce(value: int, op):
+        reduced.append((value, op))
+        return 1  # Some other rank reported "unsupported".
+
+    monkeypatch.setattr(
+        ExecutorWithExternalLauncher, "_all_reduce", staticmethod(all_reduce)
+    )
+    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    FakeExecutor(vllm_config, collective_rpc).resolve_extensible_kv_cache(
+        [{"layer": object()}]
+    )
+    assert reduced == [(0, dist.ReduceOp.MAX)]
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
+
+
+def test_executor_agrees_committable_blocks_across_workers():
+    """Workers report what warmup may commit from `initialize_from_config`;
+    the executor passes the minimum to `compile_or_warm_up_model`. Workers
+    without an extensible cache report None and get no argument."""
+    from types import SimpleNamespace
+
+    from vllm.v1.executor.abstract import Executor
+
+    calls: list[tuple[str, tuple]] = []
+    reported: list[int | None] = [120, 96]
+
+    def collective_rpc(method: str, args=()):
+        calls.append((method, args))
+        return reported if method == "initialize_from_config" else []
+
+    fake = SimpleNamespace(collective_rpc=collective_rpc)
+    Executor.compile_or_warm_up_model(
+        fake, Executor.initialize_from_config(fake, ["cfg"])
+    )
+    reported = [None, None]
+    Executor.compile_or_warm_up_model(
+        fake, Executor.initialize_from_config(fake, ["cfg"])
+    )
+    assert calls == [
+        ("initialize_from_config", (["cfg"],)),
+        ("compile_or_warm_up_model", (96,)),
+        ("initialize_from_config", (["cfg"],)),
+        ("compile_or_warm_up_model", ()),
+    ]
+
+
+@requires_cuda
+def test_extensible_kv_cache_connector_needs_block_compact_layout():
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    def make_config():
+        engine_args = EngineArgs(
+            model="facebook/opt-125m",
+            enable_extensible_kv_cache=True,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="ExampleConnector", kv_role="kv_both"
+            ),
+        )
+        return engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    layout = resolve_kv_cache_layout(make_config(), [["LHBNC", "LBNHC"]])
+    assert layout.name == "LBNHC"
+    with pytest.raises(ValueError, match="block-compact"):
+        resolve_kv_cache_layout(make_config(), [["LHBNC"]])

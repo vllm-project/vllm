@@ -16,6 +16,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.extensible_tensor import granule_aligned_blocks
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -54,6 +55,7 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.worker.worker_base import CompilationTimes
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -886,18 +888,31 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def _more_kv_cache_memory_hint(vllm_config: VllmConfig) -> str:
+    """How the user can make room for the KV cache, for error messages."""
+    if vllm_config.cache_config.enable_extensible_kv_cache:
+        return (
+            "The extensible KV cache already takes all device memory left after "
+            "the model and its activations; decrease `max_model_len` or "
+            "`max_num_seqs`, or the model needs a device with more memory."
+        )
+    return (
+        "Try increasing `gpu_memory_utilization` when initializing the engine "
+        "(this flag also controls CPU memory reservation on the CPU backend, "
+        "despite its name)."
+    )
+
+
 def _check_enough_kv_cache_memory(
     available_memory: int,
     get_needed_memory: Callable[[], int],
     max_model_len: int,
     estimate_max_model_len: Callable[[int], int],
+    hint: str,
 ):
     if available_memory <= 0:
         raise ValueError(
-            "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when initializing the engine "
-            "(this flag also controls CPU memory reservation on the CPU "
-            "backend, despite its name). "
+            f"No available memory for the cache blocks. {hint} "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )
@@ -918,9 +933,7 @@ def _check_enough_kv_cache_memory(
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
-            f"Try increasing `gpu_memory_utilization` (which also controls "
-            f"CPU memory on the CPU backend) or decreasing `max_model_len` "
-            f"when initializing the engine. "
+            f"{hint} Decreasing `max_model_len` also reduces what is needed. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
         )
@@ -1020,6 +1033,7 @@ def check_enough_kv_cache_memory(
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            _more_kv_cache_memory_hint(vllm_config),
         )
 
 
@@ -2418,6 +2432,117 @@ def get_kv_cache_capacity(
     return int(max_concurrency * max_model_len), max_concurrency
 
 
+def shrink_kv_cache_configs(
+    vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig], num_blocks: int
+) -> None:
+    """Lower ``num_blocks`` of every config in place after measured sizing. The
+    tensors' ``size`` follows (their strides and offsets keep describing the
+    reservation). Raises if ``max_model_len`` no longer fits.
+    """
+    for kv_cache_config in kv_cache_configs:
+        assert num_blocks <= kv_cache_config.num_blocks
+        kv_cache_config.kv_cache_tensors = [
+            replace(tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks)
+            for tensor in kv_cache_config.kv_cache_tensors
+        ]
+        groups = kv_cache_config.kv_cache_groups
+        if groups:
+            # The null block is held back by the BlockPool, as in the capacity
+            # check of `get_kv_cache_configs`.
+            _check_enough_kv_cache_memory(
+                (num_blocks - 1) * _pool_bytes_per_block(groups),
+                partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+                vllm_config.model_config.max_model_len,
+                partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+                _more_kv_cache_memory_hint(vllm_config),
+            )
+        kv_cache_config.num_blocks = num_blocks
+
+
+def granule_aligned_kv_cache_blocks(
+    num_blocks: int, kv_cache_configs: list[KVCacheConfig], commit_granule: int
+) -> int:
+    """Round ``num_blocks`` down so every worker's KV cache segments (one per
+    layer or one overall, ``num_blocks`` blocks of one tensor's block stride)
+    span whole commit granules. A KV connector registers each committed
+    segment for RDMA, which cannot span several physical chunks."""
+    strides = {
+        tensor.block_stride
+        for kv_cache_config in kv_cache_configs
+        for tensor in kv_cache_config.kv_cache_tensors
+    }
+    return granule_aligned_blocks(num_blocks, strides, commit_granule)
+
+
+def align_extensible_kv_cache_capacity(
+    vllm_config: VllmConfig,
+    kv_cache_configs: list[KVCacheConfig],
+    scheduler_kv_cache_config: KVCacheConfig,
+    commit_granule: int,
+) -> None:
+    """Lower the reserved capacity to a granule-aligned block count, so that
+    segment offsets (multiples of the capacity) sit on granule boundaries."""
+    num_blocks = granule_aligned_kv_cache_blocks(
+        scheduler_kv_cache_config.num_blocks, kv_cache_configs, commit_granule
+    )
+    if num_blocks >= scheduler_kv_cache_config.num_blocks:
+        return
+    for kv_cache_config in kv_cache_configs + [scheduler_kv_cache_config]:
+        old_num_blocks = kv_cache_config.num_blocks
+        shrink_kv_cache_configs(vllm_config, [kv_cache_config], num_blocks)
+        # Unlike the post-warmup shrink, this happens before allocation: the
+        # placements must describe the smaller reservation. Layer-outermost
+        # tensors place layers `num_blocks` blocks apart.
+        kv_cache_config.kv_cache_tensors = [
+            replace(
+                tensor,
+                layer_stride=num_blocks * tensor.block_stride,
+                offset=tensor.offset // old_num_blocks * num_blocks,
+            )
+            if tensor.layer_stride == old_num_blocks * tensor.block_stride
+            else tensor
+            for tensor in kv_cache_config.kv_cache_tensors
+        ]
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+
+
+def finalize_extensible_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_configs: list[KVCacheConfig],
+    scheduler_kv_cache_config: KVCacheConfig,
+    compilation_times: list["CompilationTimes"],
+    commit_granule: int | None = None,
+) -> int:
+    """Settle the KV cache size from the memory workers measured after warmup.
+
+    Every rank must agree on one block count, so the minimum becomes the
+    scheduler's ``num_blocks``; the caller commits it on the workers. With
+    ``commit_granule`` (set when a KV connector is configured) the count is
+    also granule-aligned, see `granule_aligned_kv_cache_blocks`.
+    """
+    # No measurements: the elastic-EP scale-up path skips warmup. It forces the
+    # V1 runner today, so this branch is not reached; it keeps the capacity.
+    num_blocks = min(
+        (
+            times.num_kv_blocks
+            for times in compilation_times
+            if times.num_kv_blocks is not None
+        ),
+        default=scheduler_kv_cache_config.num_blocks,
+    )
+    num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
+    if commit_granule is not None:
+        num_blocks = granule_aligned_kv_cache_blocks(
+            num_blocks, kv_cache_configs, commit_granule
+        )
+    shrink_kv_cache_configs(
+        vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+    return num_blocks
+
+
 def update_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> None:
@@ -2583,7 +2708,7 @@ def _auto_fit_max_model_len(
     if auto_fit_max <= 0:
         raise ValueError(
             "Cannot auto-fit max_model_len: not enough GPU memory available "
-            "to serve even a single token. Try increasing `gpu_memory_utilization`."
+            f"to serve even a single token. {_more_kv_cache_memory_hint(vllm_config)}"
         )
 
     if auto_fit_max >= original_max:
@@ -2766,6 +2891,7 @@ def get_kv_cache_configs(
             partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            _more_kv_cache_memory_hint(vllm_config),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []

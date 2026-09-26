@@ -4414,3 +4414,86 @@ def test_trailing_layer_fallback_requires_exact_partition():
     _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
 
     assert not any(g.is_eagle_group for g in trimmed)
+
+
+def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
+    """Shrinking to the measured block count lowers `num_blocks` and the
+    tensors' sizes; their placements keep describing the reserved capacity.
+    A count too small for `max_model_len` is rejected."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    assert config.num_blocks == 16
+    tensors_before = copy.deepcopy(config.kv_cache_tensors)
+
+    kv_cache_utils.shrink_kv_cache_configs(vllm_config, [config, scheduler_config], 10)
+    assert config.num_blocks == 10
+    assert scheduler_config.num_blocks == 10
+    assert config.kv_cache_tensors == [
+        replace(tensor, size=tensor.size * 10 // 16) for tensor in tensors_before
+    ]
+
+    # 4 blocks are needed for max_model_len plus the null block.
+    with pytest.raises(ValueError, match="max seq len"):
+        kv_cache_utils.shrink_kv_cache_configs(vllm_config, [config], 4)
+    kv_cache_utils.shrink_kv_cache_configs(vllm_config, [config], 5)
+    assert config.num_blocks == 5
+
+
+def test_extensible_kv_cache_granule_alignment_under_connector():
+    """With a KV connector, capacity and the final measured count are rounded
+    down so every layer segment spans whole commit granules (one RDMA
+    registration each); without one the measured count is kept as is."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()  # 1 head x 128 x fp16 x 2 x block 16 = 8 KiB
+    granule = 2 << 20
+    blocks_per_granule = granule // spec.page_size_bytes
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    capacity = 3 * blocks_per_granule + 7
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    assert config.num_blocks == capacity
+
+    kv_cache_utils.align_extensible_kv_cache_capacity(
+        vllm_config, [config], scheduler_config, granule
+    )
+    aligned = 3 * blocks_per_granule
+    assert config.num_blocks == aligned
+    assert scheduler_config.num_blocks == aligned
+    assert vllm_config.cache_config.num_gpu_blocks == aligned
+    # The placements describe the smaller reservation to be allocated: the
+    # one two-layer tensor places its layers `aligned` blocks apart.
+    (tensor,) = config.kv_cache_tensors
+    assert tensor.layer_stride == aligned * spec.page_size_bytes
+    assert tensor.size == 2 * aligned * spec.page_size_bytes
+
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=2 * blocks_per_granule + 5)]
+    assert (
+        kv_cache_utils.finalize_extensible_kv_cache(
+            vllm_config, [config], scheduler_config, measured, commit_granule=granule
+        )
+        == 2 * blocks_per_granule
+    )
+    assert config.num_blocks == 2 * blocks_per_granule
+
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=blocks_per_granule + 5)]
+    assert (
+        kv_cache_utils.finalize_extensible_kv_cache(
+            vllm_config, [config], scheduler_config, measured
+        )
+        == blocks_per_granule + 5
+    )

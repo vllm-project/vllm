@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import logging
+import os
 import queue
 import threading
 import time
@@ -945,6 +946,19 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        # nvidia-peermem cannot pin VMM-backed memory; the transfer engine must
+        # register the extensible KV cache through DMA-BUF. Read at
+        # engine.initialize(), so settle it before constructing the engine.
+        if (
+            vllm_config.cache_config.enable_extensible_kv_cache
+            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
+        ):
+            raise RuntimeError(
+                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible KV "
+                "cache: nvidia-peermem cannot register VMM-backed memory. "
+                "Unset it to use Mooncake's DMA-BUF registration, or disable "
+                "the extensible KV cache."
+            )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()

@@ -1306,6 +1306,48 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 
+def test_rebind_kv_cache_keeps_replayssm_trackers():
+    """A rebind over the same or fewer blocks (the extensible KV cache rebinds
+    after CUDA graph capture) must keep the tracker tensors the captured graphs
+    address; a rebind needing more blocks gets new ones."""
+    mixers = [_TestReplaySSMMixer() for _ in range(2)]
+    layer_names = [f"layers.{i}.mixer" for i in range(2)]
+    ctx = dict(zip(layer_names, mixers))
+    groups = [SimpleNamespace(layer_names=layer_names)]
+    bind_kv_cache_to_layers(
+        {n: _packed_replayssm_cache(8) for n in layer_names},
+        ctx,
+        kv_cache_groups=groups,
+    )
+    ring_start = mixers[0]._replayssm_ring_start
+    prev_accepted = mixers[0]._replayssm_prev_num_accepted
+    ring_start[3] = 7
+
+    bind_kv_cache_to_layers(
+        {n: _packed_replayssm_cache(5) for n in layer_names},
+        ctx,
+        kv_cache_groups=groups,
+    )
+    # Same storage (captured graphs hold its address), length of the new cache.
+    for m in mixers:
+        assert m._replayssm_ring_start.data_ptr() == ring_start.data_ptr()
+        assert m._replayssm_ring_start.shape == (5,)
+        assert m._replayssm_prev_num_accepted.data_ptr() == prev_accepted.data_ptr()
+        assert m._replayssm_ring_start[3] == 7
+    assert mixers[0]._replayssm_ring_start is mixers[1]._replayssm_ring_start
+
+    bind_kv_cache_to_layers(
+        {n: _packed_replayssm_cache(9) for n in layer_names},
+        ctx,
+        kv_cache_groups=groups,
+    )
+    assert mixers[0]._replayssm_ring_start.data_ptr() != ring_start.data_ptr()
+    assert mixers[0]._replayssm_ring_start.shape == (9,)
+    assert all(
+        m._replayssm_ring_start is mixers[0]._replayssm_ring_start for m in mixers
+    )
+
+
 def test_bind_kv_cache(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 

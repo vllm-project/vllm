@@ -119,14 +119,26 @@ class Executor(ABC):
     def _init_executor(self) -> None:
         raise NotImplementedError
 
-    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """Initialize the KV caches on the underlying workers."""
-        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
+    def initialize_from_config(
+        self, kv_cache_configs: list[KVCacheConfig]
+    ) -> int | None:
+        """Initialize the KV caches on the underlying workers.
 
-    def compile_or_warm_up_model(self) -> None:
+        Returns the blocks warmup may commit to an extensible KV cache on every
+        worker (the minimum), or None without one.
+        """
+        committable: list[int | None] = self.collective_rpc(
+            "initialize_from_config", args=(kv_cache_configs,)
+        )
+        return min((c for c in committable if c is not None), default=None)
+
+    def compile_or_warm_up_model(
+        self, num_committable_kv_blocks: int | None = None
+    ) -> list[CompilationTimes]:
         """Compile/warm up the model and capture cudagraphs on workers."""
+        args = () if num_committable_kv_blocks is None else (num_committable_kv_blocks,)
         compilation_times: list[CompilationTimes] = self.collective_rpc(
-            "compile_or_warm_up_model"
+            "compile_or_warm_up_model", args=args
         )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
@@ -139,6 +151,36 @@ class Executor(ABC):
             self.vllm_config.compilation_config.encoder_compilation_time = max(
                 t.encoder for t in compilation_times
             )
+        return compilation_times
+
+    def resolve_extensible_kv_cache(
+        self, kv_cache_specs: list[dict[str, KVCacheSpec]]
+    ) -> None:
+        """Disable the extensible KV cache, everywhere, where it cannot be used."""
+        reason = self._extensible_kv_cache_unsupported_reason(kv_cache_specs)
+        if reason is None:
+            return
+        logger.warning(
+            "Disabling the extensible KV cache: %s. The KV cache will be sized "
+            "from profiling estimates instead of measured memory.",
+            reason,
+        )
+        self.vllm_config.cache_config.enable_extensible_kv_cache = False
+        self.collective_rpc("disable_extensible_kv_cache")
+
+    def _extensible_kv_cache_unsupported_reason(
+        self, kv_cache_specs: list[dict[str, KVCacheSpec]]
+    ) -> str | None:
+        if not any(kv_cache_specs):
+            return "the model has no KV cache"
+        unsupported: list[str | None] = self.collective_rpc(
+            "extensible_kv_cache_unsupported_reason"
+        )
+        return next((r for r in unsupported if r), None)
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache on the workers."""
+        self.collective_rpc("extend_kv_cache", args=(num_blocks,))
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """Register a function to be called if the executor enters a permanent
