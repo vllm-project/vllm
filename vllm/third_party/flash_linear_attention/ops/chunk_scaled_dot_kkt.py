@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE
+from .utils import FLA_CHUNK_SIZE, cpu_thread_choices
 
 # On RDNA (gfx11xx/gfx12xx) WMMA only
 # accepts 16-bit/int inputs, so a widened (e.g. fp32) tl.dot is lowered to a
@@ -27,20 +27,33 @@ if current_platform.is_rocm():
 
     _CAST_DOT_TO_K_DTYPE = on_gfx1x()
 
+IS_CPU = current_platform.is_cpu()
+CPU_THREADS = cpu_thread_choices()
+
+if IS_CPU:
+    _kkt_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _kkt_configs = [
+        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64, 128]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ]
+
 
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        **(
+            {"BK": lambda args: min(triton.next_power_of_2(args["K"]), 128)}
+            if IS_CPU
+            else {}
+        ),
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
+    configs=_kkt_configs,
     key=["H", "K", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
