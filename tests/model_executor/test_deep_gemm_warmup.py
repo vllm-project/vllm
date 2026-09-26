@@ -10,6 +10,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.warmup import deep_gemm_warmup
+from vllm.utils import deep_gemm as utils_deep_gemm
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
 
 def _block_fp8_layer(n: int, k: int, scale_name: str = "weight_scale"):
@@ -67,6 +69,67 @@ def test_unstamped_and_mismatched_block_layers_are_skipped(monkeypatch) -> None:
 
     assert len(calls) == 1
     assert calls[0]["w"] is layers[-1].weight
+
+
+class _Tripwire:
+    """Stands in for a MoERunner and fails if the predicate looks at it."""
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"grouped-GEMM warmup inspected .{name}")
+
+
+@pytest.mark.parametrize("scale_fmt_supported", [False, True])
+def test_grouped_gemm_warmup_honours_scale_fmt(
+    monkeypatch, scale_fmt_supported
+) -> None:
+    """The grouped GEMM is called directly rather than through the experts, so
+    it has to make the same scale format check they do. Without it a SM12x run
+    with E8M0 off selects Triton for every forward and still warms up DeepGEMM,
+    which then fails on float32 scales."""
+    monkeypatch.setattr(deep_gemm_warmup.envs, "VLLM_USE_DEEP_GEMM", True)
+    monkeypatch.setattr(deep_gemm_warmup.envs, "VLLM_MOE_USE_DEEP_GEMM", True)
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "deep_gemm_supports_scale_fmt",
+        lambda: scale_fmt_supported,
+    )
+    # isinstance() has to pass, so the only thing that can stop the predicate
+    # before it touches the module is the scale format check.
+    monkeypatch.setattr(deep_gemm_warmup, "MoERunner", object)
+
+    if scale_fmt_supported:
+        with pytest.raises(AssertionError):
+            deep_gemm_warmup._fused_moe_grouped_gemm_may_use_deep_gemm(_Tripwire())
+    else:
+        assert not deep_gemm_warmup._fused_moe_grouped_gemm_may_use_deep_gemm(
+            _Tripwire()
+        )
+
+
+@pytest.mark.parametrize(
+    "family_120,scale_fmt,expected",
+    [
+        (True, DeepGemmQuantScaleFMT.FLOAT32, False),
+        (True, DeepGemmQuantScaleFMT.UE8M0, True),
+        (False, DeepGemmQuantScaleFMT.FLOAT32, True),
+        (False, DeepGemmQuantScaleFMT.UE8M0, True),
+    ],
+)
+def test_scale_fmt_gate_only_declines_float32_on_family_120(
+    monkeypatch, family_120, scale_fmt, expected
+) -> None:
+    """Only the 120 family lacks float32-scale kernels; every other device
+    keeps whatever the oracle picked."""
+    monkeypatch.setattr(
+        utils_deep_gemm.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120 and family_120,
+    )
+    monkeypatch.setattr(
+        DeepGemmQuantScaleFMT, "from_oracle", classmethod(lambda cls: scale_fmt)
+    )
+
+    assert utils_deep_gemm.deep_gemm_supports_scale_fmt() is expected
 
 
 @pytest.mark.parametrize("is_bmm", [False, True])
