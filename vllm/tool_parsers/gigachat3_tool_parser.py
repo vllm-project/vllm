@@ -45,16 +45,23 @@ ARGS_REGEX = re.compile(
     re.DOTALL,
 )
 
+EOS_TOKEN = "</s>"
+CONTENT_STOP_TOKENS = ("<|message_sep|>", "<|function_call|>")
+CONTENT_HOLD_TOKENS = (*CONTENT_STOP_TOKENS, EOS_TOKEN)
+
 
 class GigaChat3ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
-        self.tool_started: bool = False
         self.tool_name_sent: bool = False
         self.tool_id: str | None = None
         self.prev_tool_call_arr: list[dict] = []
-        self.end_content: bool = False
         self.streamed_args_for_tool: list[str] = []
+        # Content scanner state: text before _content_consumed has been
+        # emitted (or dropped as special tokens); once _content_done is set,
+        # everything after belongs to the function call.
+        self._content_consumed: int = 0
+        self._content_done: bool = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -128,22 +135,15 @@ class GigaChat3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        content = None
         func_name = None
         cur_args = None
-        m_func = REGEX_FUNCTION_CALL.search(current_text)
-        if not self.tool_started:
-            m_content = REGEX_CONTENT_PATTERN.search(delta_text)
-            if m_content:
-                content = m_content.group(1)
-                self.end_content = True
-            else:
-                if not self.end_content:
-                    content = delta_text
-            if m_func:
-                self.tool_started = True
+        if not self._content_done:
+            content = self._stream_content(current_text)
             if content:
                 return DeltaMessage(content=content)
+            if not self._content_done:
+                return None
+        m_func = REGEX_FUNCTION_CALL.search(current_text)
         if not m_func:
             return None
         json_tail = m_func.group(1).strip()
@@ -153,15 +153,21 @@ class GigaChat3ToolParser(ToolParser):
         args_match = ARGS_REGEX.search(json_tail)
         if args_match:
             cur_args = args_match.group(1).strip()
-            if cur_args.endswith("</s>"):
-                cur_args = cur_args[: -len("</s>")]
-            if cur_args.endswith("}"):  # last '}' end of json
-                try:
-                    candidate = cur_args[:-1].strip()
-                    json.loads(candidate, strict=False)
-                    cur_args = candidate
-                except json.JSONDecodeError:
-                    pass
+            # The regex captures to the end of the payload, so cur_args may
+            # end with text that is not part of the arguments yet: a partial
+            # or complete EOS token, and the enclosing object's closing
+            # brace. Hold those back until later text resolves them, so the
+            # streamed prefix never has to shrink.
+            if cur_args.endswith(EOS_TOKEN):
+                cur_args = cur_args[: -len(EOS_TOKEN)]
+            else:
+                for k in range(len(EOS_TOKEN) - 1, 0, -1):
+                    if cur_args.endswith(EOS_TOKEN[:k]):
+                        cur_args = cur_args[:-k]
+                        break
+            cur_args = cur_args.rstrip()
+            if cur_args.endswith("}"):
+                cur_args = cur_args[:-1]
         if not self.prev_tool_call_arr:
             self.prev_tool_call_arr.append({})
         if not self.tool_name_sent:
@@ -212,3 +218,35 @@ class GigaChat3ToolParser(ToolParser):
                 )
             ],
         )
+
+    def _stream_content(self, current_text: str) -> str:
+        """Emit chat content up to the first special token.
+
+        Works on the accumulated text rather than a single delta, so special
+        tokens split across deltas are still recognized. A tail that could
+        still become a special token is held back until disambiguated.
+        """
+        out: list[str] = []
+        while not self._content_done and self._content_consumed < len(current_text):
+            seg = current_text[self._content_consumed :]
+            lt = seg.find("<")
+            if lt == -1:
+                out.append(seg)
+                self._content_consumed += len(seg)
+                break
+            if lt > 0:
+                out.append(seg[:lt])
+                self._content_consumed += lt
+                continue
+            if seg.startswith(CONTENT_STOP_TOKENS):
+                self._content_done = True
+                break
+            if seg.startswith(EOS_TOKEN):
+                # Dropped from content, as in non-streaming extraction.
+                self._content_consumed += len(EOS_TOKEN)
+                continue
+            if any(token.startswith(seg) for token in CONTENT_HOLD_TOKENS):
+                break
+            out.append("<")
+            self._content_consumed += 1
+        return "".join(out)
