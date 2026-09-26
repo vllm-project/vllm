@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
 )
@@ -356,17 +357,18 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
         Mxfp4MoeBackend.MARLIN,
+        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
-    return _AVAILABLE_BACKENDS
+    return prioritize_humming(_AVAILABLE_BACKENDS)
 
 
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
-    TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
+    TRTLLM MXFP8; SM90 falls through to Humming or Marlin (the
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
@@ -385,9 +387,10 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
         Mxfp4MoeBackend.MARLIN,
+        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.BATCHED_MARLIN,
     ]
-    return _AVAILABLE_BACKENDS
+    return prioritize_humming(_AVAILABLE_BACKENDS)
 
 
 def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
