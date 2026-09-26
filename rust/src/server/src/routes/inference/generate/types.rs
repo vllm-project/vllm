@@ -10,7 +10,7 @@ use validator::Validate;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -61,7 +61,7 @@ impl Normalizable for GenerateRequest {}
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
-    pub logprobs: Option<ChatLogProbs>,
+    pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
 }
@@ -71,7 +71,7 @@ pub(super) struct GenerateResponseChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseStreamChoice {
     pub index: u32,
-    pub logprobs: Option<ChatLogProbs>,
+    pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
 }
@@ -191,6 +191,34 @@ pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInf
 pub(super) struct PlaceholderRangeInfo {
     pub offset: usize,
     pub length: usize,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
+/// choice, carrying integer token ids rather than the OpenAI string token.
+///
+/// `content` is `None` when no per-token candidates were requested; that is the
+/// normal state, not an error.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProbs {
+    pub content: Option<Vec<GenerateLogProbsContent>>,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token
+/// at one position plus its top-k candidates, in rank order.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProbsContent {
+    pub token_id: u32,
+    pub logprob: f32,
+    pub rank: Option<u32>,
+    pub top_logprobs: Vec<GenerateLogProb>,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProb` class: one candidate token.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProb {
+    pub token_id: u32,
+    pub logprob: f32,
+    pub rank: Option<u32>,
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.

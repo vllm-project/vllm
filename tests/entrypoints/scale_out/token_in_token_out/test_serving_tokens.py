@@ -179,7 +179,7 @@ async def test_generate_sampling_mask(client):
         assert token_id in support
         # processed_logprobs: exactly the support carries finite probability.
         for top in entry["top_logprobs"]:
-            in_support = int(top["token"].removeprefix("token_id:")) in support
+            in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
 
 

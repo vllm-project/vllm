@@ -234,20 +234,47 @@ async def test_parity_reasoning_and_tool_call(client):
 
 
 @pytest.mark.asyncio
-async def test_parity_logprobs(client):
-    """token_id:N resolution parity vs. the coupled server's real strings.
+def _to_generate_logprobs(openai_logprobs: dict) -> dict:
+    """Turn a coupled response's `token_id:N` logprobs into `GenerateLogProbs`.
 
-    A real disaggregated worker only has token IDs so it emits logprobs
-    with `token_id:N` placeholders (`return_tokens_as_token_ids=True`
-    reproduces that shape here). `/derender` must resolve those
-    placeholders to the same token strings/bytes the coupled server
-    resolves them to directly.
+    A real GPU-less worker emits integer ids directly; here the coupled server
+    with `return_tokens_as_token_ids=True` is the only source of the same ids,
+    so the placeholders are parsed back out to build the generate-shaped
+    payload that `/derender` now consumes.
+    """
+
+    def _id(token: str) -> int:
+        assert token.startswith("token_id:"), token
+        return int(token.removeprefix("token_id:"))
+
+    return {
+        "content": [
+            {
+                "token_id": _id(entry["token"]),
+                "logprob": entry["logprob"],
+                "top_logprobs": [
+                    {"token_id": _id(top["token"]), "logprob": top["logprob"]}
+                    for top in entry["top_logprobs"]
+                ],
+            }
+            for entry in openai_logprobs["content"]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_parity_logprobs(client):
+    """Integer-id logprob decoding parity vs. the coupled server's strings.
+
+    A real disaggregated worker only has token IDs, so it emits
+    `GenerateLogProbs` with integer `token_id`s. `/derender` must decode those
+    to the same token strings/bytes the coupled server produces directly.
     """
     messages = [{"role": "user", "content": "What is 2+2?"}]
     extra = {"logprobs": True, "top_logprobs": 3}
 
-    # What a real GPU less worker would hand to /derender is token IDs plus
-    # logprobs still in token_id:N placeholder form
+    # The coupled server with placeholders is used only as a source of the
+    # token ids a GPU-less worker would have had.
     placeholder = await _coupled(
         client, messages, return_tokens_as_token_ids=True, **extra
     )
@@ -259,7 +286,7 @@ async def test_parity_logprobs(client):
         placeholder["usage"]["prompt_tokens"],
         ch["finish_reason"],
         chat_request,
-        logprobs=ch["logprobs"],
+        logprobs=_to_generate_logprobs(ch["logprobs"]),
     )
 
     # The coupled server resolving the same greedy generation
