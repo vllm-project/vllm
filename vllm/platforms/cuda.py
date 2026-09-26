@@ -825,6 +825,34 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    def get_process_memory_usage(cls, device_id: int = 0) -> int | None:
+        """Device memory used by this process on the visible device
+        ``device_id`` as reported by NVML.
+
+        Returns ``None`` whenever NVML cannot attribute memory to this
+        process (no entry for our PID, e.g. a container whose PID namespace
+        NVML does not see, WDDM, MIG, or an NVML error) so that callers fall
+        back to device-level accounting.
+
+        Keep this on the per-process query: ``nvmlDeviceGetMemoryInfo`` is
+        ``NVMLError_NotSupported`` on integrated parts such as GB10 (DGX Spark),
+        where this per-process path is exactly what still works.
+        """
+        try:
+            physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+            processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+        except (pynvml.NVMLError, IndexError, ValueError):
+            return None
+        pid = os.getpid()
+        for proc in processes:
+            if proc.pid == pid:
+                used = proc.usedGpuMemory
+                return int(used) if isinstance(used, int) else None
+        return None
+
+    @classmethod
+    @with_nvml_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """Query if the set of gpus are fully connected by nvlink (1 hop)."""
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
