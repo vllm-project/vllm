@@ -186,6 +186,7 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         """Get the number of blocks needed to be allocated for the request.
 
@@ -364,7 +365,11 @@ class SingleTypeKVCacheManager(ABC):
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_spec_override: int | None = None,
     ) -> list[KVCacheBlock]:
         """Allocate new blocks for the request to give it at least `num_tokens`
         token slots.
@@ -1217,11 +1222,16 @@ class CircularBufferManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_spec_override: int | None = None,
     ) -> list[KVCacheBlock]:
         return self._claim_ring_block(request_id)
 
@@ -1718,6 +1728,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
@@ -1732,9 +1743,14 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
-            if self.num_speculative_blocks > 0:
+            nsb = (
+                num_spec_override
+                if num_spec_override is not None
+                else self.num_speculative_blocks
+            )
+            if nsb > 0:
                 num_tokens += (
-                    self.kv_cache_spec.block_size * self.num_speculative_blocks
+                    self.kv_cache_spec.block_size * nsb
                 )
             return super().get_num_blocks_to_allocate(
                 request_id,
@@ -1806,14 +1822,23 @@ class MambaManager(SingleTypeKVCacheManager):
             return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_spec_override: int | None = None,
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
-            if self.num_speculative_blocks > 0:
-                num_tokens += self.block_size * self.num_speculative_blocks
+            nsb = (
+                num_spec_override
+                if num_spec_override is not None
+                else self.num_speculative_blocks
+            )
+            if nsb > 0:
+                num_tokens += self.block_size * nsb
             return super().allocate_new_blocks(
                 request_id, num_tokens, num_tokens_main_model
             )
@@ -2266,6 +2291,7 @@ class HiSparseSourceManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         if (
             total_computed_tokens > num_local_computed_tokens
@@ -2290,7 +2316,11 @@ class HiSparseSourceManager(FullAttentionManager):
         return 0
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_spec_override: int | None = None,
     ) -> list[KVCacheBlock]:
         req_blocks = self.req_to_blocks[request_id]
         num_required = cdiv(num_tokens, self.block_size)
@@ -2424,6 +2454,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         assert not new_computed_blocks
         # A hot region is needed to read host-backed history: an external
@@ -2465,7 +2496,11 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         self.require_hot(request_id)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_spec_override: int | None = None,
     ) -> list[KVCacheBlock]:
         # Cold admissions can bypass add_local_computed_blocks.
         self.num_cached_block[request_id] = 0
@@ -2496,6 +2531,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         del num_tokens_main_model
         assert not new_computed_blocks
@@ -2561,7 +2597,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_spec_override: int | None = None,
     ) -> list[KVCacheBlock]:
         del num_tokens_main_model
         req_blocks = self.req_to_blocks[request_id]

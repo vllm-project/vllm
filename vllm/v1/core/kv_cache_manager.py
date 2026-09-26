@@ -375,6 +375,7 @@ class KVCacheManager:
         num_new_computed_tokens: int = 0,
         new_computed_blocks: KVCacheBlocks | None = None,
         num_lookahead_tokens: int = 0,
+        num_spec_override: int | None = None,
         num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
@@ -525,6 +526,7 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
+                num_spec_override=num_spec_override,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
@@ -559,6 +561,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
+            num_spec_override=num_spec_override,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
@@ -587,6 +590,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            num_spec_override=num_spec_override,
         )
 
         # P/D: delay caching blocks if we have to recv from
