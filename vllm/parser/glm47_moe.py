@@ -66,13 +66,12 @@ def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
     for match in _ARG_RE.finditer(raw_args):
         params[match.group("key").strip()] = match.group("value")
 
-    if partial:
-        remaining = _ARG_RE.sub("", raw_args)
-        match = _PARTIAL_ARG_RE.search(remaining)
-        if match:
-            key = match.group("key").strip()
-            if key:
-                params[key] = match.group("value")
+    remaining = _ARG_RE.sub("", raw_args)
+    match = _PARTIAL_ARG_RE.search(remaining)
+    if match:
+        key = match.group("key").strip()
+        if key:
+            params[key] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
 
