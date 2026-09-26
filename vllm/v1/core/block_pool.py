@@ -99,10 +99,17 @@ class BlockHashToBlockMap:
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """Checks if block_hash exists and pop block_id from the cache"""
+        block, _ = self.pop_with_remaining_count(key, block_id)
+        return block
+
+    def pop_with_remaining_count(
+        self, key: BlockHashWithGroupId, block_id: int
+    ) -> tuple[KVCacheBlock | None, int]:
+        """Pop a block and return the number of same-hash copies remaining."""
         blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache
-            return None
+            return None, 0
         # TODO(Jialin): If key is found, block_id should always present
         # in blocks. We currently keep the original behaviour for safety.
         #
@@ -110,20 +117,21 @@ class BlockHashToBlockMap:
         # use del blocks[block_id] instead as followup.
         if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
-                return blocks
+                return blocks, 0
             # If the single block ID doesn't match, we should put the
             # block back (it should happen rarely)
             self._cache[key] = blocks
-            return None
+            return None, 1
         if isinstance(blocks, dict):
             # Try to pop block_id from the block dict, and if dict still
             # contain blocks, put back to the cache.
             block = blocks.pop(block_id, None)
-            if len(blocks) > 0:
+            remaining_count = len(blocks)
+            if remaining_count > 0:
                 self._cache[key] = blocks
-            return block
+            return block, remaining_count
         self._unexpected_blocks_type(blocks)
-        return None
+        return None, 0
 
     def __len__(self) -> int:
         return len(self._cache)
@@ -289,8 +297,7 @@ class BlockPool:
                     blk.block_hash_num_tokens is not None
                     and blk.block_hash_num_tokens < num_hash_tokens
                 )
-                removed_hashes = self._remove_cached_block_hashes(blk)
-                self._emit_block_removed_events(removed_hashes)
+                self._remove_cached_block_hashes(blk)
             self._insert_block_hash(
                 block_hash_with_group_id,
                 blk,
@@ -507,8 +514,7 @@ class BlockPool:
             )
         )
         if replace_existing_hashes:
-            removed_hashes = self._remove_cached_block_hashes(block)
-            self._emit_block_removed_events(removed_hashes)
+            self._remove_cached_block_hashes(block)
             already_cached = False
         elif (
             not already_cached
@@ -516,8 +522,7 @@ class BlockPool:
             and block.block_hash_num_tokens is not None
             and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
         ):
-            removed_hashes = self._remove_cached_block_hashes(block)
-            self._emit_block_removed_events(removed_hashes)
+            self._remove_cached_block_hashes(block)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
@@ -592,6 +597,7 @@ class BlockPool:
     def _remove_cached_block_hashes(
         self,
         block: KVCacheBlock,
+        emit_events: bool = True,
     ) -> list[BlockHashWithGroupId]:
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
@@ -602,28 +608,25 @@ class BlockPool:
 
         removed_hashes: list[BlockHashWithGroupId] = []
         for block_hash in block_hashes:
-            if (
-                self.cached_block_hash_to_block.pop(block_hash, block.block_id)
-                is not None
-            ):
-                removed_hashes.append(block_hash)
-        block.reset_hash()
-        return removed_hashes
-
-    def _emit_block_removed_events(
-        self,
-        block_hashes: list[BlockHashWithGroupId],
-    ) -> None:
-        if not self.enable_kv_cache_events:
-            return
-        for block_hash in block_hashes:
-            self.kv_event_queue.append(
-                BlockRemoved(
-                    block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
-                    medium=self.medium,
-                    group_idx=get_group_id(block_hash),
+            removed_block, remaining_count = (
+                self.cached_block_hash_to_block.pop_with_remaining_count(
+                    block_hash, block.block_id
                 )
             )
+            if removed_block is not None:
+                removed_hashes.append(block_hash)
+                if emit_events and self.enable_kv_cache_events and remaining_count == 0:
+                    self.kv_event_queue.append(
+                        BlockRemoved(
+                            block_hashes=[
+                                maybe_convert_block_hash(get_block_hash(block_hash))
+                            ],
+                            medium=self.medium,
+                            group_idx=get_group_id(block_hash),
+                        )
+                    )
+        block.reset_hash()
+        return removed_hashes
 
     def _insert_block_hash(
         self,
@@ -661,7 +664,9 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
-        for block_hash in self._remove_cached_block_hashes(src_block):
+        for block_hash in self._remove_cached_block_hashes(
+            src_block, emit_events=False
+        ):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
 
@@ -743,13 +748,7 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
 
-        evicted_hashes = self._remove_cached_block_hashes(block)
-        if not evicted_hashes:
-            # The block doesn't have hash, eviction is not needed
-            return False
-
-        self._emit_block_removed_events(evicted_hashes)
-        return True
+        return bool(self._remove_cached_block_hashes(block))
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
