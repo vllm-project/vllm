@@ -1787,11 +1787,15 @@ class OffloadingConnectorScheduler:
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
-            if req_status is None or not req_status.transfer_jobs:
+            if req_status is None:
                 continue
-            any_jid = next(iter(req_status.transfer_jobs))
-            assert self._jobs[any_jid].is_store
-            self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
+            # A wake-up that kept the offloaded tier resumes the request in the
+            # step that reports the preemption, so its load is already here; it
+            # reads no freed block, and only the earlier stores need flushing.
+            store_jobs = {
+                jid for jid in req_status.transfer_jobs if self._jobs[jid].is_store
+            }
+            self._current_batch_jobs_to_flush.update(store_jobs)
 
         # Flush jobs that contain re-allocated blocks.
         if (

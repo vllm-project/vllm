@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, FastAPI, Request
+from typing import Annotated
+
+from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
@@ -19,11 +21,14 @@ router = APIRouter()
 
 
 @router.post("/sleep")
-async def sleep(raw_request: Request):
+async def sleep(
+    raw_request: Request,
+    clear_connector_cache: Annotated[bool, Query()] = True,
+):
     # get POST params
     level = raw_request.query_params.get("level", "1")
     mode = raw_request.query_params.get("mode", "abort")
-    await engine_client(raw_request).sleep(int(level), mode)
+    await engine_client(raw_request).sleep(int(level), mode, clear_connector_cache)
     return Response(status_code=200)
 
 

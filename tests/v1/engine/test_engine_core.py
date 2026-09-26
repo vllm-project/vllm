@@ -692,6 +692,46 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 
 
 @pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize(
+    "kwargs,expected", [({}, True), (dict(clear_connector_cache=False), False)]
+)
+def test_pause_forwards_connector_flag(deferred: bool, kwargs, expected):
+    """Immediate and deferred pauses both forward it, and omitting it clears."""
+    core = _pausable_engine_core_proc()
+    core.engines_running = deferred
+    seen: list[bool] = []
+    core._reset_caches = lambda reset_connector=True: seen.append(reset_connector)
+
+    result = EngineCoreProc.pause_scheduler(
+        core, mode="keep", clear_cache=True, **kwargs
+    )
+    if deferred:
+        assert seen == []
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+        assert result.result(timeout=0) is None
+
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_sleep_forwards_connector_flag(level: int):
+    """sleep() is the entry point RL callers use, not pause_scheduler."""
+    core = object.__new__(EngineCore)
+    core.model_executor = MagicMock()
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.return_value = False
+    core.batch_queue = None
+    seen: list[bool] = []
+    core._reset_caches = lambda reset_connector=True: seen.append(reset_connector)
+
+    EngineCore.sleep(core, level=level, clear_connector_cache=False)
+
+    assert seen == [False]
+    core.model_executor.sleep.assert_called_once_with(level)
+
+
+@pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
     caches are cleared and before the caller is unblocked."""
@@ -699,7 +739,7 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     core.engines_running = deferred
     order: list[str] = []
     core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
-    core._reset_caches = lambda: order.append("reset_caches")
+    core._reset_caches = lambda **kwargs: order.append("reset_caches")
 
     result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
     if deferred:

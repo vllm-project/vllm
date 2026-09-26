@@ -126,6 +126,7 @@ enum PauseMode {
 message PauseGenerationRequest {
   PauseMode mode = 1;
   optional bool clear_cache = 2;
+  optional bool clear_connector_cache = 3;
 }
 message PauseGenerationResponse {}
 
@@ -138,6 +139,7 @@ message IsPausedResponse { bool paused = 1; }
 message SleepRequest {
   optional uint32 level = 1;
   PauseMode mode = 2;
+  optional bool clear_connector_cache = 3;
 }
 message SleepResponse {}
 

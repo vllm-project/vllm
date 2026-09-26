@@ -906,8 +906,19 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: u32, mode: PauseMode) -> Result<()> {
-        self.call_utility::<(), _>("sleep", (level, mode)).await?;
+    pub async fn sleep(
+        &self,
+        level: u32,
+        mode: PauseMode,
+        clear_connector_cache: bool,
+    ) -> Result<()> {
+        // Only the opt-out sends the third argument, so a default call still
+        // drives an engine that predates it.
+        if clear_connector_cache {
+            self.call_utility::<(), _>("sleep", (level, mode)).await?;
+        } else {
+            self.call_utility::<(), _>("sleep", (level, mode, false)).await?;
+        }
         Ok(())
     }
 
@@ -928,8 +939,18 @@ impl EngineCoreClient {
     }
 
     /// Pause the scheduler so generation can be halted
-    pub async fn pause_scheduler(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
-        self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
+    pub async fn pause_scheduler(
+        &self,
+        mode: PauseMode,
+        clear_cache: bool,
+        clear_connector_cache: bool,
+    ) -> Result<()> {
+        if clear_connector_cache {
+            self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
+        } else {
+            self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache, false))
+                .await?;
+        }
         Ok(())
     }
 

@@ -874,15 +874,30 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
-    def _finish_pause(self, clear_cache: bool) -> None:
+    def _refuse_unsafe_retention(self, clear_connector_cache: bool) -> None:
+        connector = getattr(self.scheduler, "connector", None)
+        if clear_connector_cache or connector is None:
+            return
+        if not connector.supports_retained_cache_on_pause:
+            raise ValueError(
+                f"{type(connector).__name__} cannot keep its cache across a "
+                "pause: the resume lands in the step that reports the pause's "
+                "preemptions, which this connector does not expect. Drop "
+                "clear_connector_cache=False."
+            )
+
+    def _finish_pause(self, clear_cache: bool, clear_connector_cache: bool) -> None:
         # A completed pause promises an idle device: nothing else waits on
         # the last dummy batch an idle DP rank launches.
         self.model_executor.collective_rpc("synchronize_device")
         if clear_cache:
-            self._reset_caches()
+            self._reset_caches(reset_connector=clear_connector_cache)
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        clear_connector_cache: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -896,18 +911,23 @@ class EngineCore:
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
+
+        ``clear_connector_cache=False`` keeps the external KV tier, which
+        survives the pause; unsafe if the weights change.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
+        if clear_cache:
+            self._refuse_unsafe_retention(clear_connector_cache)
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        self._finish_pause(clear_cache)
+        self._finish_pause(clear_cache, clear_connector_cache)
 
         return None
 
@@ -919,7 +939,12 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        clear_connector_cache: bool = True,
+    ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -930,11 +955,16 @@ class EngineCore:
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
+            clear_connector_cache: See pause_scheduler; ignored at level 0.
 
         """
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        pause_future = self.pause_scheduler(
+            mode=mode,
+            clear_cache=clear_prefix_cache,
+            clear_connector_cache=clear_connector_cache,
+        )
         if level < 1:
             return pause_future
 
@@ -1985,7 +2015,10 @@ class EngineCoreProc(EngineCore):
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        clear_connector_cache: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -1999,13 +2032,18 @@ class EngineCoreProc(EngineCore):
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
+
+        ``clear_connector_cache=False`` keeps the external KV tier, which
+        survives the pause; unsafe if the weights change.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
+        if clear_cache:
+            self._refuse_unsafe_retention(clear_connector_cache)
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
-                engine._finish_pause(clear_cache)
+                engine._finish_pause(clear_cache, clear_connector_cache)
             except Exception as e:
                 future.set_exception(e)
             else:
@@ -2021,7 +2059,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            self._finish_pause(clear_cache)
+            self._finish_pause(clear_cache, clear_connector_cache)
             return None
 
         future = Future[Any]()

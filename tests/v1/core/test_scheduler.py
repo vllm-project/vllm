@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -1664,6 +1665,47 @@ def test_kv_cache_release_rejects_nonresident_memory(sleeping_tags):
     core._reset_caches.assert_not_called()
     core.model_executor.collective_rpc.assert_not_called()
     assert core.model_executor.sleeping_tags == sleeping_tags
+
+
+@pytest.mark.parametrize("clear_connector_cache", [True, False])
+def test_pause_clear_connector_cache_opt_out(clear_connector_cache):
+    """The tier survives the pause, so a caller keeping the weights may keep it."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.connector = Mock(
+        supports_retained_cache_on_pause=True,
+        **{"has_pending_push_work.return_value": False},
+    )
+    scheduler.connector_prefix_cache_stats = PrefixCacheStats()
+
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.model_executor = Mock(is_sleeping=False)
+    core.mm_receiver_cache = None
+    core.batch_queue = None
+
+    core.pause_scheduler(
+        mode="abort",
+        clear_cache=True,
+        clear_connector_cache=clear_connector_cache,
+    )
+
+    assert scheduler.connector.reset_cache.called is clear_connector_cache
+
+
+def test_pause_refuses_retention_a_connector_cannot_take():
+    """Keeping the cache is only safe where the connector expects the resume."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.connector = Mock(supports_retained_cache_on_pause=False)
+
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.model_executor = Mock(is_sleeping=False)
+
+    with pytest.raises(ValueError, match="cannot keep its cache"):
+        core.pause_scheduler(clear_cache=True, clear_connector_cache=False)
+
+    scheduler.connector.reset_cache.assert_not_called()
+    assert scheduler.pause_state == PauseState.UNPAUSED
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():
