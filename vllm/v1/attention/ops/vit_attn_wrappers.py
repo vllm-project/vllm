@@ -71,8 +71,7 @@ def flash_attn_maxseqlen_wrapper(
         softmax_scale=scale,
         **kwargs,
     )
-    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
-    return context_layer
+    return einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size).contiguous()
 
 
 def flash_attn_maxseqlen_wrapper_fake(
@@ -86,7 +85,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -172,7 +171,7 @@ def triton_attn_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = torch.empty_like(q)
+    output = torch.empty_like(q, memory_format=torch.contiguous_format)
     context_attention_fwd(
         q,
         k,
@@ -186,9 +185,7 @@ def triton_attn_wrapper(
         sliding_window_k=None,
         softmax_scale=scale,
     )
-
-    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
-    return context_layer
+    return einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
 
 
 def triton_attn_wrapper_fake(
@@ -200,7 +197,7 @@ def triton_attn_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -274,7 +271,7 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa)
+        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa).contiguous()
 
     outputs = []
 
@@ -295,11 +292,11 @@ def torch_sdpa_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: float | None,
-    cu_seqlens: torch.Tensor | None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -386,7 +383,7 @@ def flashinfer_wrapper(
     if is_reshaped:
         output = einops.rearrange(output, "(b s) h d -> b s h d", b=reshape_batch_size)
 
-    return output
+    return output.contiguous()
 
 
 def vit_flashinfer_wrapper_fake(
@@ -403,7 +400,11 @@ def vit_flashinfer_wrapper_fake(
     v_scale: torch.Tensor | None = None,
     o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q, dtype=o_data_type or q.dtype)
+    return torch.empty_like(
+        q,
+        dtype=o_data_type,
+        memory_format=torch.contiguous_format,
+    )
 
 
 direct_register_custom_op(
