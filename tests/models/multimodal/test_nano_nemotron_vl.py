@@ -1,22 +1,132 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
+from PIL import Image
 
 from vllm import envs
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
 )
+from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
     VideoProcessorItems,
 )
+from vllm.transformers_utils.processors.nano_nemotron_vl import (
+    NanoNemotronVLProcessor,
+    _bicubic_resize_and_normalize,
+)
+
+
+def test_bicubic_resize_preserves_uint8_for_device_normalization():
+    pixels = torch.randint(0, 256, (1, 31, 47, 3), dtype=torch.uint8)
+    size = (48, 64)
+
+    output = _bicubic_resize_and_normalize(
+        pixels,
+        size=size,
+        norm_mean=None,
+        norm_std=None,
+        do_cpu_normalize=False,
+    )
+    expected = torch.nn.functional.interpolate(
+        pixels.permute(0, 3, 1, 2),
+        size=size,
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    ).contiguous()
+
+    assert output.dtype == torch.uint8
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+def test_nemotron_dynamic_device_normalization_matches_cpu_reference():
+    image_mean = [0.485, 0.456, 0.406]
+    image_std = [0.229, 0.224, 0.225]
+    shape = (1, 7, 3 * 16 * 16)
+    pixels = torch.randint(0, 256, shape, dtype=torch.uint8)
+
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    nn.Module.__init__(model)
+    model.input_norm = FusedInputNorm(image_mean, image_std, 1.0 / 255.0)
+    model.llm_dtype = torch.bfloat16
+
+    output = model._normalize_pixel_values(pixels)
+    batch, patches, _ = pixels.shape
+    expected = pixels.to(torch.float32).view(batch, patches, 3, -1)
+    expected = (
+        expected / 255.0 - torch.tensor(image_mean).view(1, 1, 3, 1)
+    ) / torch.tensor(image_std).view(1, 1, 3, 1)
+    expected = expected.view(shape)
+
+    torch.testing.assert_close(output, expected.to(torch.bfloat16), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_nemotron_processor_defers_normalization_to_device(modality: str):
+    config = SimpleNamespace(
+        force_image_size=16,
+        patch_size=4,
+        downsample_ratio=0.5,
+        use_thumbnail=False,
+        norm_mean=[0.485, 0.456, 0.406],
+        norm_std=[0.229, 0.224, 0.225],
+        dtype=torch.bfloat16,
+        vision_config=SimpleNamespace(args={}),
+        sound_config=None,
+    )
+    tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [1])
+    common_kwargs = {
+        "config": config,
+        "tokenizer": tokenizer,
+        "max_model_len": 1024,
+    }
+    cpu_processor = NanoNemotronVLProcessor(**common_kwargs)
+    device_processor = NanoNemotronVLProcessor(
+        **common_kwargs, do_rescale=False, do_normalize=False
+    )
+
+    pixels = np.random.default_rng(0).integers(0, 256, (4, 19, 23, 3), dtype=np.uint8)
+    if modality == "image":
+        image = Image.fromarray(pixels[0])
+        cpu_values = cpu_processor._images_to_pixel_values_lst([image], 1)[0]
+        raw_values = device_processor._images_to_pixel_values_lst([image], 1)[0]
+    else:
+        cpu_values = cpu_processor._videos_to_pixel_values_lst(
+            [pixels], dtype=torch.bfloat16
+        )[0]
+        raw_values = device_processor._videos_to_pixel_values_lst([pixels])[0]
+    assert raw_values.dtype == torch.uint8
+
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    nn.Module.__init__(model)
+    model.input_norm = FusedInputNorm(config.norm_mean, config.norm_std, 1.0 / 255.0)
+    model.llm_dtype = torch.bfloat16
+    normalized = model._normalize_pixel_values(raw_values)
+    torch.testing.assert_close(normalized, cpu_values, rtol=0, atol=0)
+
+
+def test_nemotron_processor_rejects_partial_normalization():
+    with pytest.raises(
+        ValueError, match="requires do_rescale and do_normalize to have the same value"
+    ):
+        NanoNemotronVLProcessor(
+            config=None,
+            tokenizer=None,
+            max_model_len=1024,
+            do_rescale=False,
+            do_normalize=True,
+        )
 
 
 @pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
