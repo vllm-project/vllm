@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
+    transfer_ordered,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -136,7 +137,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     The current logic is:
     - Load KV from the first connector that advertises available tokens from
       get_num_new_matched_tokens(), based on the order in the config.
-    - Save to all connectors.
+    - Save to all connectors. Worker-side save/load fan-out is ordered by
+      each connector's ``default_transfer_priority`` (CRITICAL / P→D before
+      BACKGROUND / Store). Equal priorities keep config order.
     """
 
     @classmethod
@@ -186,6 +189,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         ):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
+
+        # Fan-out order for worker ops that compete for the NIC: CRITICAL
+        # (P→D) before BACKGROUND (Store). Stable sort keeps config order
+        # within a priority. Precomputed because save_kv_layer runs once per
+        # layer per forward pass.
+        self._transfer_ordered_connectors = transfer_ordered(self._connectors)
 
         assert vllm_config.kv_transfer_config is not None
         self._all_support_hma = MultiConnector.all_children_support_hma(
@@ -295,7 +304,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker-side methods
     # ==============================
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
-        for c in self._connectors:
+        for c in self._transfer_ordered_connectors:
             c.start_load_kv(forward_context, **kwargs)
 
     def finish_forward(self) -> None:
@@ -317,7 +326,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
-        for c in self._connectors:
+        for c in self._transfer_ordered_connectors:
             c.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
     def wait_for_save(self):

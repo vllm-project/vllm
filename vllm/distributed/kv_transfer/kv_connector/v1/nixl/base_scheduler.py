@@ -458,6 +458,7 @@ class NixlBaseConnectorScheduler:
                 request_id=req_id,
                 local_block_ids=clipped_block_id_groups,
                 kv_transfer_params=req.kv_transfer_params,
+                priority=req.priority,
             )
             assert scheduler_output.num_scheduled_tokens is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -492,6 +493,7 @@ class NixlBaseConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
+                priority=req.priority,
             )
 
         if self.use_host_buffer:

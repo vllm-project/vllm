@@ -255,6 +255,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Copied from Request.priority. Lower number = higher priority (same
+    # convention as the scheduler). Default 0 keeps existing behavior.
+    priority: int = 0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -285,6 +288,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        priority: int = 0,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -296,6 +300,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
             awaiting_kvs=awaiting_kvs,
+            priority=priority,
         )
 
     def add_new_req_to_save(
@@ -303,9 +308,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        priority: int = 0,
     ):
         self.reqs_to_save[request_id] = self._add_new_req(
-            local_block_ids, kv_transfer_params
+            local_block_ids, kv_transfer_params, priority=priority
         )
 
     def add_new_req_to_recv(
@@ -315,12 +321,14 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        priority: int = 0,
     ):
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,
             local_num_computed_blocks,
             awaiting_kvs,
+            priority=priority,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
@@ -332,3 +340,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
         )
         self.reqs_to_recv[request_id] = req
+
+    @staticmethod
+    def iter_reqs_by_priority(
+        reqs: dict[ReqId, ReqMeta],
+    ) -> list[tuple[ReqId, ReqMeta]]:
+        """Order requests by ``Request.priority`` (lower number first)."""
+        return sorted(reqs.items(), key=lambda item: item[1].priority)
