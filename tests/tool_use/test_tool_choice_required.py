@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
     find_tool_properties,
@@ -394,3 +395,107 @@ class TestNonFunctionToolsSkipped:
         any_of = schema["items"]["anyOf"]
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+
+
+class TestMalformedToolSchemaDefs:
+    """`parameters` is an arbitrary caller-supplied dict, so `$defs` is
+    whatever the request said it was.
+
+    `_get_tool_schema_defs` defaulted it with `params.pop("$defs", {})`, which
+    only covers the key being *absent*. An explicit `"$defs": null` reached
+    `.items()` and raised `AttributeError`. Nothing between
+    `get_json_schema_from_tools` and the route catches that
+    (`ToolParser.adjust_request` -> `OnlineRenderer.render_chat` ->
+    `render_chat_request` -> `create_chat_completion`), so it surfaced as a
+    500 for a request the caller got wrong.
+    """
+
+    @staticmethod
+    def _tool(params: dict) -> ChatCompletionToolsParam:
+        return TypeAdapter(ChatCompletionToolsParam).validate_python(
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": params,
+                },
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "defs",
+        [
+            pytest.param(None, id="null"),
+            pytest.param([], id="list"),
+            pytest.param("nope", id="string"),
+            pytest.param(1, id="int"),
+        ],
+    )
+    def test_non_object_defs_is_a_client_error(self, defs):
+        tools = [
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "$defs": defs,
+                }
+            )
+        ]
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert exc_info.value.parameter == "tools"
+        assert "$defs" in str(exc_info.value)
+        assert "get_weather" in str(exc_info.value)
+
+    def test_duplicate_def_names_is_a_client_error(self):
+        """Also caller-caused, and it used to raise a plain `ValueError`."""
+        tools = [
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/D"}},
+                    "$defs": {"D": {"type": "string"}},
+                }
+            ),
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"b": {"$ref": "#/$defs/D"}},
+                    "$defs": {"D": {"type": "integer"}},
+                }
+            ),
+        ]
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert exc_info.value.parameter == "tools"
+        assert "multiple schemas" in str(exc_info.value)
+
+    def test_well_formed_defs_still_hoisted(self):
+        """The type check must not reject the shape it is guarding."""
+        tools = [
+            self._tool(
+                {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/D"}},
+                    "$defs": {"D": {"type": "string"}},
+                }
+            )
+        ]
+
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert schema["$defs"] == {"D": {"type": "string"}}
+
+    def test_absent_defs_still_works(self):
+        tools = [
+            self._tool({"type": "object", "properties": {"a": {"type": "string"}}})
+        ]
+
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+
+        assert isinstance(schema, dict)
