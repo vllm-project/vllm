@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -288,3 +288,90 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def _record_output(
+    stats: IterationStats,
+    req_stats: RequestStateStats,
+    token_ids: list[int],
+    timestamp: float,
+    is_prefilling: bool,
+    prefill_stats: PrefillStats | None = None,
+):
+    stats.iteration_timestamp = timestamp
+    stats.update_from_output(
+        EngineCoreOutput(
+            request_id="request-1",
+            new_token_ids=token_ids,
+            prefill_stats=prefill_stats,
+        ),
+        engine_core_timestamp=timestamp,
+        is_prefilling=is_prefilling,
+        req_stats=req_stats,
+        lora_states=None,
+        lora_name=None,
+    )
+
+
+def test_zero_token_abort_output_does_not_record_ttft():
+    """A client abort while the request is still prefilling emits a
+    zero-token finish output; it must not pollute TTFT samples."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=100.0)
+
+    _record_output(stats, req_stats, [], 260.0, is_prefilling=True)
+
+    assert stats.time_to_first_tokens_iter == []
+    assert req_stats.first_token_ts == 0.0
+    assert req_stats.last_token_ts == 0.0
+
+
+def test_zero_token_abort_output_does_not_record_itl():
+    """A client abort during decode emits a zero-token output long after the
+    last real token; it must not add a disconnect-delay ITL sample."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=100.0)
+
+    _record_output(stats, req_stats, [1], 110.0, is_prefilling=True)
+    _record_output(stats, req_stats, [], 260.0, is_prefilling=False)
+
+    assert stats.inter_token_latencies_iter == []
+    assert req_stats.last_token_ts == 110.0
+
+
+def test_token_outputs_still_record_ttft_and_itl():
+    """Positive control: outputs carrying tokens keep TTFT/ITL accounting."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=100.0)
+
+    _record_output(stats, req_stats, [1], 110.0, is_prefilling=True)
+    _record_output(stats, req_stats, [2], 130.0, is_prefilling=False)
+
+    assert stats.time_to_first_tokens_iter == [10.0]
+    assert stats.inter_token_latencies_iter == [20.0]
+    assert req_stats.first_token_ts == 110.0
+    assert req_stats.last_token_ts == 130.0
+
+
+def test_zero_token_output_still_accounts_prompt_tokens():
+    """Zero-token finish outputs keep prompt-token accounting (e.g. stopped
+    encoder-only inputs); only the latency samples are gated."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=100.0)
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=32, num_local_cached_tokens=0, num_external_cached_tokens=0
+    )
+
+    _record_output(
+        stats,
+        req_stats,
+        [],
+        260.0,
+        is_prefilling=True,
+        prefill_stats=prefill_stats,
+    )
+
+    assert stats.time_to_first_tokens_iter == []
+    assert stats.prompt_token_stats.computed == 32
+    assert stats.prompt_token_stats.total == 32
