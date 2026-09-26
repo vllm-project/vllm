@@ -60,3 +60,6 @@ opentelemetry-semantic-conventions-ai>=0.4.1
 
 cohere_melody>=0.11.1 # required for cohere command reasoning/tool parser tests
 cohere>=7.0.0 # required for cohere chat v2 api tests (protocol/serving import cohere.types)
+
+# --- ray ---
+dpctl

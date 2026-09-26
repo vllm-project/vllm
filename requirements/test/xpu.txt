@@ -183,6 +183,8 @@ dpcpp-cpp-rt==2026.1.0
     #   onemkl-sycl-rng
     #   onemkl-sycl-sparse
     #   torch
+dpctl==0.22.1
+    # via -r requirements/test/xpu.in
 einops==0.8.2
     # via -r requirements/test/../common.txt
 email-validator==2.3.0
@@ -336,6 +338,7 @@ iniconfig==2.3.0
     # via pytest
 intel-cmplr-lib-rt==2026.1.0
     # via
+    #   dpctl
     #   intel-sycl-rt
     #   torch
 intel-cmplr-lib-ur==2026.1.0
@@ -367,6 +370,7 @@ intel-pti==1.0.1
 intel-sycl-rt==2026.1.0
     # via
     #   dpcpp-cpp-rt
+    #   dpctl
     #   oneccl
     #   torch
 interegular==0.3.3
@@ -525,6 +529,7 @@ numpy==2.2.6
     #   contourpy
     #   datasets
     #   decord
+    #   dpctl
     #   evaluate
     #   librosa
     #   lm-eval
