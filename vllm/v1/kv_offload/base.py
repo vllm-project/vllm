@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core abstractions for KV cache offloading in vLLM v1."""
 
+import threading
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
@@ -197,6 +199,14 @@ The class provides the following primitives:
         as well as a list of blocks that were evicted as a result.
     complete_store() - marks a previous store as completed.
         Following this call, the given blocks will become loadable.
+
+Exclusion:
+    lock() / unlock() guard a manager's whole state subtree: the manager
+    itself, every tier it composes, and any front-end state those tiers own.
+    Manager methods never take the lock themselves, so a caller holds it
+    across as many operations as its invariants need -- notably a lookup()
+    HIT and the prepare_load() that pins the result, which must not be
+    separated by another thread's eviction.
 """
 
 
@@ -232,6 +242,54 @@ class OffloadingKVEventsConfig:
 
 
 class OffloadingManager(ABC):
+    def __init__(self) -> None:
+        self._manager_lock = threading.Lock()
+
+    def lock(self, timeout: float | None = None) -> bool:
+        """Acquire exclusive access to this manager's state subtree.
+
+        Scope is the manager, every tier it composes, and any front-end state
+        those tiers own (e.g. a tier's async lookup front end). Every caller of
+        an OffloadingManager method must hold this lock. Manager methods never
+        acquire it themselves, so a caller may hold it across an arbitrary
+        sequence of operations -- which is required wherever one call
+        establishes a fact a later call relies on, such as a lookup() HIT
+        followed by the prepare_load() that pins it.
+
+        Not reentrant. A thread must not call lock() twice without an
+        intervening unlock(); use the held state the caller already tracks, or
+        a *_unlocked-style helper, rather than re-acquiring.
+
+        Args:
+            timeout: Seconds to wait. None blocks until acquired.
+
+        Returns:
+            True if the lock was acquired, False only on timeout.
+
+        """
+        if timeout is None:
+            return self._manager_lock.acquire()
+        return self._manager_lock.acquire(timeout=timeout)
+
+    def unlock(self) -> None:
+        """Release a lock() acquired by the calling thread."""
+        self._manager_lock.release()
+
+    @contextmanager
+    def locked(self, timeout: float | None = None) -> Iterator[bool]:
+        """Scoped lock()/unlock() for callers that need no step granularity.
+
+        Yields whether the lock was acquired; the body still runs on timeout,
+        so a caller passing a timeout must check the value before touching the
+        manager.
+        """
+        acquired = self.lock(timeout)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self.unlock()
+
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """Checks whether a single block is offloaded and ready to be read.
@@ -381,6 +439,10 @@ class OffloadingManager(ABC):
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
+
+        This is the last manager call of a step: every lookup(), prepare_load(),
+        prepare_store() and on_request_finished() for the step has already been
+        issued.
 
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).

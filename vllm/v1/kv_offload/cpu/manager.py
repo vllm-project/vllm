@@ -63,6 +63,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
+        super().__init__()
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
         self._num_allocated_chunks: int = 0

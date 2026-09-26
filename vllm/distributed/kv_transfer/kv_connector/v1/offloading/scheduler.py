@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
@@ -633,6 +634,68 @@ class OffloadingConnectorScheduler:
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
 
+    # True while this thread holds the manager lock for the current schedule().
+    # Read and written only by the scheduler thread, so it needs no
+    # synchronization of its own. Declared on the class so an instance built
+    # without __init__ still reads False rather than raising.
+    _manager_held: bool = False
+
+    # ------------------------------------------------------------------
+    # Manager exclusion
+    #
+    # The manager is entered from the scheduler thread and, for managers that
+    # run one, from a control-plane thread. Manager methods never take their
+    # own lock, so the exclusion boundary lives here.
+    #
+    # schedule() holds one region for the whole step: opened by the first
+    # manager-touching hook and closed at the end of build_connector_meta.
+    # That span is required, not tidiness -- get_num_new_matched_tokens
+    # establishes lookup() HITs that update_state_after_alloc later pins with
+    # prepare_load(), and prepare_store() evicts after both. Releasing between
+    # them would let another thread evict a block the step already treated as
+    # present.
+    #
+    # Hooks outside schedule() use a short region instead, so the manager is
+    # free while the engine runs the model.
+    # ------------------------------------------------------------------
+
+    def _acquire_step(self) -> None:
+        """Open the step-scoped region. Idempotent within a step."""
+        if self._manager_held:
+            return
+        self.manager.lock()
+        self._manager_held = True
+
+    def _release_step(self) -> None:
+        """Close the step-scoped region, letting other threads in."""
+        if not self._manager_held:
+            return
+        self._manager_held = False
+        self.manager.unlock()
+
+    @contextmanager
+    def _manager_locked(self) -> Iterator[None]:
+        """Hold the manager for the duration of one hook outside schedule().
+
+        None of these hooks can legitimately run inside the step-scoped region:
+        on_new_request comes from add_request, has_pending_push_work from the
+        engine's liveness check before schedule(), the rest from output
+        processing or a client RPC. So finding the region open here means a
+        previous schedule() raised between _acquire_step() and the release in
+        build_connector_meta. Recover instead of deadlocking.
+        """
+        if self._manager_held:
+            logger.error(
+                "Offloading manager lock was left held by a previous "
+                "schedule(); releasing it before continuing."
+            )
+            self._release_step()
+        self.manager.lock()
+        try:
+            yield
+        finally:
+            self.manager.unlock()
+
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
     ) -> None:
@@ -1024,7 +1087,8 @@ class OffloadingConnectorScheduler:
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
         req_context = _create_req_context(request)
-        offloading_context = self.manager.on_new_request(req_context)
+        with self._manager_locked():
+            offloading_context = self.manager.on_new_request(req_context)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
@@ -1060,6 +1124,10 @@ class OffloadingConnectorScheduler:
                   (between scheduler steps).
 
         """
+        # First manager-touching hook of a step: opens the step-scoped region,
+        # closed at the end of build_connector_meta.
+        self._acquire_step()
+
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
@@ -1098,6 +1166,10 @@ class OffloadingConnectorScheduler:
     ):
         if num_external_tokens == 0:
             return
+
+        # prepare_load() below pins keys that get_num_new_matched_tokens()
+        # already saw as HIT, so both must sit inside the same region.
+        self._acquire_step()
 
         req_status = self._req_status[request.request_id]
 
@@ -1777,12 +1849,23 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # A step that scheduled nothing reaches build_connector_meta without
+        # any earlier manager touch, so open the region here too.
+        self._acquire_step()
+        try:
+            return self._build_connector_meta(scheduler_output)
+        finally:
+            # The step is over: hand the manager back.
+            self._release_step()
+
+    def _build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
         )
-        self.manager.on_schedule_end(schedule_end_context)
 
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
@@ -1828,6 +1911,12 @@ class OffloadingConnectorScheduler:
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
+
+        # Last manager call of the step, after every prepare_store and
+        # on_request_finished above. on_schedule_end is documented as running at
+        # the end of the step, and callers rely on that to bound the step's
+        # exclusive access to the manager.
+        self.manager.on_schedule_end(schedule_end_context)
         return meta
 
     def has_pending_push_work(self) -> bool:
@@ -1835,8 +1924,17 @@ class OffloadingConnectorScheduler:
 
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
+
+        Must use a short region, never the step-scoped one. The engine asks this
+        before schedule() and returns early when the answer is False, so a
+        step-scoped acquire here would never reach build_connector_meta's
+        release and would hold the manager for good -- which is precisely the
+        state an idle engine settles into.
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        if self._jobs:
+            return True
+        with self._manager_locked():
+            return self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1846,6 +1944,10 @@ class OffloadingConnectorScheduler:
                 connectors output.
 
         """
+        with self._manager_locked():
+            self._update_connector_output(connector_output)
+
+    def _update_connector_output(self, connector_output: KVConnectorOutput):
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
@@ -1924,7 +2026,8 @@ class OffloadingConnectorScheduler:
             stats = self._connector_stats
             self._connector_stats = OffloadingConnectorStats()
 
-        manager_stats = self.manager.get_stats()
+        with self._manager_locked():
+            manager_stats = self.manager.get_stats()
         if manager_stats is not None:
             if stats is None:
                 stats = manager_stats
@@ -1953,8 +2056,9 @@ class OffloadingConnectorScheduler:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
             req_context = _create_req_context(request)
-            self.manager.on_new_request(req_context)
-            self.manager.on_request_finished(req_context)
+            with self._manager_locked():
+                self.manager.on_new_request(req_context)
+                self.manager.on_request_finished(req_context)
             return False, None
 
         self._maybe_observe_lookup_async_delay(req_status)
@@ -1986,7 +2090,16 @@ class OffloadingConnectorScheduler:
             the underlying :class:`OffloadingEvent` stream.
 
         """
-        yield from self._events_tracker.take_events(self.manager.take_events())
+        # Drain the manager eagerly, inside the region. manager.take_events() is
+        # itself a generator whose backing list is cleared once exhausted, so
+        # iterating it lazily would both hold the manager for as long as the
+        # consumer takes and let a concurrent writer append events that the
+        # clear then discards unpublished.
+        with self._manager_locked():
+            manager_events = list(self.manager.take_events())
+        # Still a generator, so callers testing the result for truthiness keep
+        # seeing a non-empty object the way they do today.
+        yield from self._events_tracker.take_events(manager_events)
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
@@ -1995,6 +2108,13 @@ class OffloadingConnectorScheduler:
         assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 
+        # Held for the whole reset. manager.reset_cache() drains tiers by
+        # polling them itself, so a control-plane thread locked out here loses
+        # nothing; it simply skips rounds until the reset completes.
+        with self._manager_locked():
+            self._reset_cache()
+
+    def _reset_cache(self) -> None:
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 

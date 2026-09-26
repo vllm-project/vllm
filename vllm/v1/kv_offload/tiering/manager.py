@@ -19,6 +19,7 @@ Key Design Principles:
    protecting chunks from eviction until complete_read() is called
 """
 
+import threading
 import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -56,6 +57,25 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
 logger = init_logger(__name__)
+
+
+# Pause between control-plane rounds. A round is a non-blocking sweep, so this
+# sets how long a peer's request can sit unserved; 1 ms is three orders of
+# magnitude below the model step it hides, and matches the pause the p2p tier's
+# own drain loops and EngineCoreProc's GIL-yield sleep already use.
+_CONTROL_PLANE_INTERVAL_S = 0.001
+# How long a round waits for the manager lock before giving up and retrying.
+# Bounded so the thread stays responsive to shutdown even if a caller holds the
+# lock for a long time, or leaked it.
+_CONTROL_PLANE_LOCK_TIMEOUT_S = 1.0
+# Warn after this much continuous failure to acquire the lock. Above the 5 s
+# warning drain_jobs() emits, so a slow reset_cache() does not warn twice.
+_CONTROL_PLANE_STALL_WARN_S = 30.0
+# Give up after this many consecutive failed rounds. on_schedule_end() still
+# serves the tiers, so the fallback is per-step servicing rather than none.
+_CONTROL_PLANE_MAX_CONSECUTIVE_ERRORS = 100
+# How long shutdown() waits for the thread to finish its round.
+_CONTROL_PLANE_JOIN_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -191,6 +211,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        control_plane_interval_s: float = _CONTROL_PLANE_INTERVAL_S,
     ):
         """Initialize the TieringOffloadingManager.
 
@@ -198,8 +219,13 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+            control_plane_interval_s: Pause between control-plane rounds for
+                tiers that set needs_control_plane_thread. Zero or negative
+                disables the thread, leaving those tiers serviced once per
+                engine step as before.
 
         """
+        super().__init__()
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 
@@ -241,6 +267,118 @@ class TieringOffloadingManager(OffloadingManager):
         self._tier_index: dict[SecondaryTierManager, int] = {
             tier: i for i, tier in enumerate(self.secondary_tiers)
         }
+
+        # Tiers whose control plane must be serviced between engine steps.
+        self._control_plane_tiers: list[tuple[int, SecondaryTierManager]] = [
+            (i, tier)
+            for i, tier in enumerate(self.secondary_tiers)
+            if tier.needs_control_plane_thread
+        ]
+        self._control_plane_interval_s = control_plane_interval_s
+        self._control_plane_stop = threading.Event()
+        self._control_plane_thread: threading.Thread | None = None
+        self._start_control_plane()
+
+    # ------------------------------------------------------------------
+    # Control plane
+    # ------------------------------------------------------------------
+
+    def _start_control_plane(self) -> None:
+        """Start the control-plane thread, if any tier asked for one."""
+        if not self._control_plane_tiers or self._control_plane_interval_s <= 0:
+            return
+        self._control_plane_thread = threading.Thread(
+            target=self._control_plane_loop,
+            name="vllm_offload_control_plane",
+            daemon=True,
+        )
+        self._control_plane_thread.start()
+        logger.info(
+            "KV offload control-plane thread started for tier(s) %s, interval %.3fs",
+            [tier.tier_type for _, tier in self._control_plane_tiers],
+            self._control_plane_interval_s,
+        )
+
+    def _stop_control_plane(self) -> None:
+        """Stop and join the control-plane thread.
+
+        Must run before any tier teardown: the thread drives tier transports,
+        and closing one underneath it can crash the process rather than raise.
+        """
+        self._control_plane_stop.set()
+        thread = self._control_plane_thread
+        if thread is None:
+            return
+        thread.join(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            logger.error(
+                "KV offload control-plane thread did not exit within %.1fs",
+                _CONTROL_PLANE_JOIN_TIMEOUT_S,
+            )
+        else:
+            self._control_plane_thread = None
+
+    def _control_plane_loop(self) -> None:
+        stalled_since: float | None = None
+        errors = 0
+        while not self._control_plane_stop.is_set():
+            if not self.lock(timeout=_CONTROL_PLANE_LOCK_TIMEOUT_S):
+                now = time.monotonic()
+                if stalled_since is None:
+                    stalled_since = now
+                elif now - stalled_since > _CONTROL_PLANE_STALL_WARN_S:
+                    logger.warning(
+                        "KV offload control-plane thread has not acquired the "
+                        "manager lock for %.0fs; peer requests are only being "
+                        "served at engine-step boundaries.",
+                        now - stalled_since,
+                    )
+                    stalled_since = None
+                continue
+            stalled_since = None
+            try:
+                self.serve_control_plane()
+                errors = 0
+            except Exception:
+                # Never let a round kill the thread silently: on_schedule_end()
+                # still serves these tiers, so persistent failure degrades to
+                # per-step servicing instead of stopping the control plane.
+                errors += 1
+                logger.exception("KV offload control-plane round failed")
+            finally:
+                self.unlock()
+            if errors >= _CONTROL_PLANE_MAX_CONSECUTIVE_ERRORS:
+                logger.error(
+                    "KV offload control-plane thread stopping after %d "
+                    "consecutive failures; falling back to per-step servicing.",
+                    errors,
+                )
+                return
+            # Yield unconditionally, and only after unlock(). Python locks are
+            # not fair, so a release-then-reacquire loop could starve the
+            # scheduler thread; this pause is what bounds its wait to one round.
+            self._control_plane_stop.wait(self._control_plane_interval_s)
+
+    def serve_control_plane(self) -> None:
+        """Advance the control plane of tiers that cannot wait for a step.
+
+        Polls those tiers for finished jobs and lets them serve whatever their
+        counterpart has asked for -- the same two steps on_schedule_end() runs,
+        narrowed to the tiers that opted in.
+
+        Excludes _flush_pending_promotions() and _flush_pending_cascades() by
+        design: both are per-step batching points, and running them here would
+        fragment batches the scheduler thread accumulated during schedule(). A
+        promotion that a lookup() from this path initiates therefore waits for
+        the next on_schedule_end() to be submitted.
+
+        The caller must hold lock() for the whole call. serve_external_requests()
+        relies on that: it establishes lookup() HITs and then pins them, and the
+        two must not be separated by an eviction.
+        """
+        self._process_finished_jobs(self._control_plane_tiers)
+        for _, tier in self._control_plane_tiers:
+            tier.serve_external_requests(self._tier_parents[tier])
 
     @property
     def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
@@ -306,8 +444,11 @@ class TieringOffloadingManager(OffloadingManager):
                 False,
             )
 
-    def _process_finished_jobs(self):
-        """Unconditionally poll all secondary tiers for completed jobs.
+    def _process_finished_jobs(
+        self,
+        tiers: Sequence[tuple[int, SecondaryTierManager]] | None = None,
+    ):
+        """Unconditionally poll secondary tiers for completed jobs.
 
         This method:
         1. Calls get_finished_jobs() on each secondary tier
@@ -315,8 +456,15 @@ class TieringOffloadingManager(OffloadingManager):
            to decrement ref_cnt
         3. For completed loads (secondary→primary): calls primary.complete_write()
            to make chunks available
+
+        Args:
+            tiers: (index, tier) pairs to poll. Defaults to every secondary
+                tier. Pass a subset to poll only the tiers a caller is
+                responsible for, so a tier that expects to be polled on the
+                scheduler thread is not dragged elsewhere.
+
         """
-        for i, tier in enumerate(self.secondary_tiers):
+        for i, tier in tiers if tiers is not None else enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
                 job_metadata = self._pop_job(job_id)
@@ -594,9 +742,9 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> PrepareStoreOutput | None:
         """Prepare chunks to be stored from GPU to primary tier.
 
-        CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
-        that any completed async transfers have their ref_cnt decremented
-        before the primary tier makes eviction decisions.
+        CRITICAL: This method polls for finished jobs FIRST to ensure that any
+        completed async transfers have their ref_cnt decremented before the
+        primary tier makes eviction decisions.
 
         For request-level tiers, chunks already present in the primary tier
         are immediately cascaded via submit_store().
@@ -620,7 +768,12 @@ class TieringOffloadingManager(OffloadingManager):
         #    not-yet-ready chunk's ref_cnt from -1 to 0 via complete_write(),
         #    making it evictable for the first time.
         # Both must be accounted for before the eviction decision below.
-        self._maybe_process_finished_jobs()
+        # Unconditional, not _maybe_process_finished_jobs(): eviction must see
+        # the freshest completions, and on_schedule_end now runs at the very end
+        # of the step, so the once-per-step gate would otherwise still be set by
+        # this step's first lookup() and skip the poll.
+        self._processed_jobs_this_step = True
+        self._process_finished_jobs()
 
         # Step 2: Store to primary tier (new chunks only).
         # Cascading of these newly-stored chunks to ALL secondary tiers
@@ -855,8 +1008,8 @@ class TieringOffloadingManager(OffloadingManager):
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
-        Called once per scheduler step from
-        OffloadingConnectorScheduler.build_connector_meta().
+        Called once per scheduler step, as the last manager call of the step,
+        from OffloadingConnectorScheduler.build_connector_meta().
         """
         # Catch-all poll: guarantees jobs are processed even on steps where
         # lookup()/prepare_store() were never called (e.g. no requests
@@ -871,6 +1024,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
+        # Keys parked by this step's prepare_store cannot have completed yet, so
+        # they are simply re-parked here and retried on the next step. That is
+        # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
+        # non-empty, so nothing finalizes early and the list still drains.
         self._flush_pending_cascades()
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
@@ -983,9 +1140,32 @@ class TieringOffloadingManager(OffloadingManager):
     def shutdown(self) -> None:
         """Shut down secondary tiers before releasing primary resources.
 
+        Stops the control-plane thread first: it drives tier transports, and
+        tearing one down underneath it (closing a socket, destroying a ZMQ
+        context) can take the process down rather than raise. If the thread
+        will not exit, hold the manager lock across tier teardown so it cannot
+        be mid-round, and skip teardown entirely if even that is unavailable --
+        a lingering daemon thread in an exiting process beats a crash.
+
         Every secondary tier is given a shutdown attempt. If any shutdown
         fails, preserve the primary mmap because a failed tier may still use it.
         """
+        self._stop_control_plane()
+        if self._control_plane_thread is not None:
+            if not self.lock(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S):
+                logger.error(
+                    "KV offload control-plane thread is still running and the "
+                    "manager lock is unavailable; skipping tier shutdown."
+                )
+                return
+            try:
+                self._shutdown_tiers()
+            finally:
+                self.unlock()
+            return
+        self._shutdown_tiers()
+
+    def _shutdown_tiers(self) -> None:
         shutdown_error: Exception | None = None
         for tier_idx, tier in enumerate(self.secondary_tiers):
             try:

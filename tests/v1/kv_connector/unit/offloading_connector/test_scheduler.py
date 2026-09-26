@@ -734,6 +734,125 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
 
 
+def test_on_schedule_end_is_the_last_manager_call_of_a_step(request_runner):
+    """on_schedule_end must run after every other manager call of the step.
+
+    Callers bound a step's exclusive access to the manager by releasing at
+    on_schedule_end, so anything issued after it — notably prepare_store, which
+    evicts — would fall outside that window.
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=8,
+        async_scheduling=False,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    connector_scheduler = runner.connector_scheduler
+    build_meta = connector_scheduler.build_connector_meta
+    windows: list[list[str]] = []
+
+    def spy(scheduler_output):
+        first = len(runner.manager.mock_calls)
+        meta = build_meta(scheduler_output)
+        # lock()/unlock() bracket the step; only the state operations they guard
+        # are ordered relative to on_schedule_end.
+        windows.append(
+            [
+                name
+                for name, _, _ in runner.manager.mock_calls[first:]
+                if name not in ("lock", "unlock")
+            ]
+        )
+        return meta
+
+    connector_scheduler.build_connector_meta = spy
+
+    runner.new_request(token_ids=[0] * (block_size * 2))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    assert windows, "build_connector_meta was never called"
+    assert any("prepare_store" in w for w in windows), (
+        "step must exercise the calls that follow on_schedule_end today"
+    )
+    assert any("on_request_finished" in w for w in windows)
+    for names in windows:
+        assert names[-1] == "on_schedule_end", (
+            f"on_schedule_end must be the last manager call of a step, got {names}"
+        )
+
+
+def test_step_releases_the_manager_before_the_model_runs(request_runner):
+    """The step-scoped region must close when build_connector_meta returns.
+
+    Everything after it -- the model future above all -- runs with the manager
+    free, which is the only window another thread has to use it.
+    """
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.new_request(token_ids=[1] * 4)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    scheduler = runner.connector_scheduler
+    assert scheduler._manager_held is False
+    assert runner.manager.lock.call_count > 0
+    assert runner.manager.lock.call_count == runner.manager.unlock.call_count
+
+
+def test_has_pending_push_work_does_not_open_the_step_region(request_runner):
+    """It must take a short region, never the step-scoped one.
+
+    The engine asks this before schedule() and returns early when the answer is
+    False, so a step-scoped acquire here would never reach the release in
+    build_connector_meta and would hold the manager for good.
+    """
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    scheduler = runner.connector_scheduler
+    runner.manager.has_pending_work.return_value = False
+
+    assert scheduler.has_pending_push_work() is False
+    assert scheduler._manager_held is False
+    assert runner.manager.lock.call_count == runner.manager.unlock.call_count
+
+
+def test_take_events_drains_the_manager_inside_the_region(request_runner):
+    """take_events must not hold the manager across its own iteration.
+
+    manager.take_events() is a generator whose backing list is cleared once
+    exhausted, so draining it lazily would both pin the manager for as long as
+    the consumer takes and lose events appended in the meantime.
+    """
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    scheduler = runner.connector_scheduler
+    runner.manager.take_events.return_value = iter(())
+    runner.manager.reset_mock()
+
+    events = list(scheduler.take_events())
+
+    assert events == []
+    assert runner.manager.take_events.call_count == 1
+    assert scheduler._manager_held is False
+    assert runner.manager.lock.call_count == runner.manager.unlock.call_count
+
+
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
     """A deferred lookup reports its async delay once it resolves."""
     runner = request_runner(

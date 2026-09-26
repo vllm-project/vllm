@@ -138,9 +138,22 @@ class SecondaryTierManager(ABC):
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
+
+    Methods are called under the tiering manager's lock, so they are never
+    entered concurrently -- but not always from the same thread. A tier that
+    sets needs_control_plane_thread is also serviced from the manager's
+    control-plane thread, and any tier can be reached from there via
+    ParentManager fan-out. Keep per-thread assumptions out of tier state.
     """
 
     medium: ClassVar[Medium | None] = None
+
+    # Whether this tier's control plane must be serviced between engine steps
+    # and not only from on_schedule_end(). Set it on tiers that answer a
+    # counterpart the engine does not drive -- a remote peer, say -- whose
+    # requests would otherwise wait for a step boundary. The tiering manager
+    # runs a thread on behalf of such tiers; see serve_control_plane().
+    needs_control_plane_thread: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -312,8 +325,17 @@ class SecondaryTierManager(ABC):
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Process remotely-originated requests using the parent manager.
 
-        Called once per scheduler step, BEFORE _flush_pending_promotions().
-        The parent handle is valid only for the duration of this call.
+        Called once per scheduler step, BEFORE _flush_pending_promotions(), and
+        additionally once per control-plane round for tiers that set
+        needs_control_plane_thread. The _flush_pending_promotions() ordering
+        holds only for the per-step call: a promotion this method initiates from
+        a control-plane round is submitted at the next on_schedule_end().
+
+        The parent handle is valid only for the duration of this call, and the
+        caller holds the manager lock throughout it -- so a lookup() HIT taken
+        here stays valid until this call pins it. An implementation must not
+        release that lock partway through.
+
         Tiers that don't serve external requests leave this as a no-op.
         """
         return

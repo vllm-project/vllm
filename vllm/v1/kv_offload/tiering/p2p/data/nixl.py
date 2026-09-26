@@ -1,6 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL."""
+"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
+
+Threading: the agent is reached from the scheduler thread and, when the tiering
+manager runs one, from its control-plane thread. The manager's lock serializes
+them strictly -- one Python thread inside any agent call at a time, with a full
+memory barrier between.
+
+That lock is the only protection, not a belt over NIXL's own. nixl_agent picks
+NIXL_THREAD_SYNC_STRICT only when ``enable_listen`` is set, which this transport
+does not set, so the agent runs with NIXL_THREAD_SYNC_NONE -- under which NIXL's
+internal agent lock compiles down to no-ops, leaving every agent entry point
+unguarded. So the manager lock must cover all of them, and the lifetime of every
+handle passed between calls.
+
+Serialized use from a second thread is supported (checked against NIXL 1.4.1
+sources): NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
+creator-thread-affine mode. The weakest mode it ever requests is
+UCS_THREAD_MODE_SERIALIZED, documented as "multiple threads can access, but only
+one at a time", and because ``enable_prog_thread`` defaults on here it actually
+requests UCS_THREAD_MODE_MULTI and fails construction if the UCX build cannot
+provide it.
+
+Two caveats. NIXL binds a shared UCX worker per calling thread
+(``tlsSharedWorkerMap``), which is harmless only while there is exactly one
+shared worker -- true here, but it would stop being true if a ``num_workers``
+UCX backend param were ever set. And NIXL 1.4.1 does accept an explicit
+``sync_mode`` (including NIXL_THREAD_SYNC_RW), which would make its own locking
+real; that parameter does not exist before 1.x, so passing it would need a
+version gate, the way ``capture_telemetry`` does.
+"""
 
 from __future__ import annotations
 
