@@ -92,6 +92,8 @@ class ReqContext:
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
+    # Final processed prefix; None when the caller does not supply a boundary.
+    num_processed_tokens: int | None = None
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params and kv_hints once (in on_new_request) and read the
     # result back on later calls for the same request.
