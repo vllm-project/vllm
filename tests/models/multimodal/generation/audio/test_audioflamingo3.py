@@ -78,7 +78,7 @@ BATCHED_CONVERSATIONS = [
 
 def get_fixture_path(filename):
     return os.path.join(
-        os.path.dirname(__file__), "../../fixtures/audioflamingo3", filename
+        os.path.dirname(__file__), "../../../fixtures/audioflamingo3", filename
     )
 
 
