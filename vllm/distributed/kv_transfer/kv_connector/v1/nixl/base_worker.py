@@ -3516,7 +3516,7 @@ class NixlBaseConnectorWorker:
         """
         # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
         # of remote engines is registered all at once (adding a background cleanup
-        # thread wouldnt help either).
+        # thread wouldn't help either).
         # If that scenario is plausible, we can follow up with an LRU eviction policy.
         if self._engine_ttl <= 0:
             return

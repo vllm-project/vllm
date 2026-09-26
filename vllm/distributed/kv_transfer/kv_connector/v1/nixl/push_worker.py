@@ -469,7 +469,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 rd: dict[str, Any] = registration_data,
             ) -> None:
                 if (e := f.exception()) is not None:
-                    # The engine reclaims the blocks via the TTL so we dont free here
+                    # The engine reclaims the blocks via the TTL so we don't free here
                     self._log_failure(
                         failure_type="push_handshake_failed", req_id=rid, error=e
                     )
