@@ -184,6 +184,12 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    # Wait for in-flight offloads only when they would gain more than this
+    # many tokens; otherwise recompute them. 0 always waits.
+    max_recompute_pending_tokens: int = 0
+
+    def max_recompute_pending_chunks(self, tokens_per_chunk: int) -> int:
+        return self.max_recompute_pending_tokens // tokens_per_chunk
 
     @classmethod
     def from_spec(
@@ -342,6 +348,7 @@ class SchedulerOffloadConfig(NamedTuple):
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
             dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            max_recompute_pending_tokens=spec.max_recompute_pending_tokens,
         )
 
 
@@ -675,11 +682,19 @@ class OffloadingConnectorScheduler:
         req: Request,
         group_config: GroupOffloadConfig,
         start_chunk_idx: int,
+        max_recompute_pending_chunks: int = 0,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
-        or None if the backend deferred a lookup."""
+        or None if the backend deferred a lookup.
+
+        A HIT_PENDING chunk defers the lookup unless the run of chunks from the
+        first pending one to the end of the hit is at most
+        `max_recompute_pending_chunks` long, in which case the hit is cut
+        before it so the request recomputes that run instead of waiting.
+        """
         hit_count = 0
         defer_lookup = False
+        first_pending_idx: int | None = None
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
@@ -692,7 +707,8 @@ class OffloadingConnectorScheduler:
                     )
                     hit_count += 1
                 case LookupResult.HIT_PENDING:
-                    defer_lookup = True
+                    if first_pending_idx is None:
+                        first_pending_idx = local_idx
                     hit_count += 1
                 case LookupResult.RETRY:
                     # Don't break: keep scanning to let manager kick off
@@ -700,7 +716,18 @@ class OffloadingConnectorScheduler:
                     defer_lookup = True
                 case LookupResult.MISS:
                     break
-        return hit_count if not defer_lookup else None
+        if defer_lookup:
+            return None
+        if first_pending_idx is None:
+            return hit_count
+        if hit_count - first_pending_idx > max_recompute_pending_chunks:
+            return None
+        logger.debug(
+            "Request %s recomputing %d chunks pending offload",
+            req.request_id,
+            hit_count - first_pending_idx,
+        )
+        return first_pending_idx
 
     def _sliding_window_lookup(
         self,
@@ -851,6 +878,7 @@ class OffloadingConnectorScheduler:
                         req_status.req,
                         group_config,
                         start_chunk_idx,
+                        self.config.max_recompute_pending_chunks(tokens_per_chunk),
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
@@ -1017,7 +1045,12 @@ class OffloadingConnectorScheduler:
                 req_status.partial_tail_boundary = boundary
                 return boundary - local_tokens
 
-        if pending and complete_hit == 0:
+        if (
+            pending
+            and complete_hit == 0
+            and max_boundary - complete_boundary
+            > self.config.max_recompute_pending_tokens
+        ):
             return None
         return complete_hit
 

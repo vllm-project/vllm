@@ -608,6 +608,19 @@ class OffloadingSpec(ABC):
             self.extra_config.get("offload_prompt_only", True)
         )
 
+        # A lookup that hits chunks whose offload is still in flight waits for
+        # them only if waiting would gain more than this many tokens. Below
+        # that, the request loads the ready prefix and recomputes the rest.
+        # 0 (the default) always waits.
+        self.max_recompute_pending_tokens: int = int(
+            self.extra_config.get("max_recompute_pending_tokens", 0)
+        )
+        if self.max_recompute_pending_tokens < 0:
+            raise ValueError(
+                "max_recompute_pending_tokens must be non-negative, got "
+                f"{self.max_recompute_pending_tokens}"
+            )
+
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
         self.tokens_per_hash = config.cache.tokens_per_hash
         self.blocks_per_chunk = config.cache.blocks_per_chunk
