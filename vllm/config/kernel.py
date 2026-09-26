@@ -183,10 +183,17 @@ def validate_flashinfer_moe_ep_model(
     """Reject flashinfer moe_ep backends for models that lack the FI path."""
     if moe_backend not in FLASHINFER_MOE_EP_BACKENDS:
         return
-    if not any(arch in FLASHINFER_MOE_EP_ARCHITECTURES for arch in architectures):
+    supported = FLASHINFER_MOE_EP_ARCHITECTURES
+    if moe_backend == "flashinfer_moe_ep_mega_cutedsl":
+        supported = supported | {
+            "KimiK3ForConditionalGeneration",
+            "KimiK3MTPModel",
+            "KimiLinearForCausalLM",
+        }
+    if not any(arch in supported for arch in architectures):
         raise ValueError(
-            f"moe_backend={moe_backend!r} is only supported for DeepSeek-V4 "
-            f"models ({sorted(FLASHINFER_MOE_EP_ARCHITECTURES)}), but the "
+            f"moe_backend={moe_backend!r} is only supported for "
+            f"models {sorted(supported)}, but the "
             f"model is {list(architectures)}."
         )
 
@@ -261,7 +268,8 @@ class KernelConfig:
     - "flashinfer_moe_ep_mega_cutedsl": Same, with the CuteDSL megakernel
       (additionally requires NVSHMEM). The checkpoint selects the weight path:
       an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
-      requantized at load
+      requantized at load. Also supports Kimi K3 ModelOpt NVFP4 checkpoints
+      with FlashInfer SiTU support; shared experts retain checkpoint precision.
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels

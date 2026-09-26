@@ -134,6 +134,10 @@ logger = init_logger(__name__)
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
+_KIMI_MEGA_MOE_BACKENDS = frozenset(
+    {"deep_gemm_mega_moe", "flashinfer_moe_ep_mega_cutedsl"}
+)
+
 
 def shard_sequence_parallel_mlp(
     hidden_size: int,
@@ -513,12 +517,20 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
 
 def make_kimi_k3_mega_moe_expert_params_mapping(
     num_experts: int,
+    *,
+    nvfp4: bool = False,
 ) -> list[tuple[str, str, int, str]]:
     mapping = []
+    # Match metadata before the generic ModelOpt `.weight` suffix.
+    suffixes = (
+        ("weight_scale_2", "input_scale", "weight_scale", "weight")
+        if nvfp4
+        else ("weight_packed", "weight_scale")
+    )
     for expert_id in range(num_experts):
         for shard_id in ("w1", "w2", "w3"):
             param_prefix = "w13" if shard_id in ("w1", "w3") else "w2"
-            for suffix in ("weight_packed", "weight_scale"):
+            for suffix in suffixes:
                 param_suffix = "weight" if suffix == "weight_packed" else suffix
                 mapping.append(
                     (
@@ -568,9 +580,26 @@ class KimiMoE(nn.Module):
         self.moe_router_activation_func = config.moe_router_activation_func
         self.num_shared_experts = config.num_shared_experts
         self.layer_idx = layer_idx
-        self.use_mega_moe = (
-            vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        self.use_flashinfer_mega_moe = (
+            vllm_config.kernel_config.moe_backend == "flashinfer_moe_ep_mega_cutedsl"
         )
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in _KIMI_MEGA_MOE_BACKENDS
+        )
+        if self.use_flashinfer_mega_moe:
+            from vllm.utils.flashinfer_moe_ep import validate_fi_moe_ep_config
+
+            validate_fi_moe_ep_config(vllm_config)
+            resolve_quant_algo = getattr(quant_config, "_resolve_quant_algo", None)
+            quant_algo = (
+                resolve_quant_algo(f"{prefix}.experts")
+                if resolve_quant_algo is not None
+                else getattr(quant_config, "quant_method", None)
+            )
+            if quant_algo != "NVFP4":
+                raise ValueError(
+                    "Kimi K3 FlashInfer MegaMoE requires a ModelOpt NVFP4 checkpoint."
+                )
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "Kimi K3 MegaMoE requires expert parallel. Enable it with "
@@ -691,7 +720,12 @@ class KimiMoE(nn.Module):
                     f"EP size {ep_size}."
                 )
             num_local_experts = num_experts // ep_size
-            self.experts = KimiK3MegaMoEExperts(
+            experts_cls = KimiK3MegaMoEExperts
+            if self.use_flashinfer_mega_moe:
+                from .fi_moe import KimiK3FlashInferMegaMoEExperts
+
+                experts_cls = KimiK3FlashInferMegaMoEExperts
+            self.experts = experts_cls(
                 vllm_config,
                 num_experts=num_experts,
                 num_local_experts=num_local_experts,
@@ -871,7 +905,7 @@ class KimiDecoderLayer(nn.Module):
             and layer_idx % config.moe_layer_freq == 0
         )
 
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        use_mega_moe = vllm_config.kernel_config.moe_backend in _KIMI_MEGA_MOE_BACKENDS
         self.use_sequence_parallel = (
             parallel_config.pipeline_parallel_size == 1
             and parallel_config.enable_expert_parallel
@@ -1116,7 +1150,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
         parallel_config = vllm_config.parallel_config
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        use_mega_moe = vllm_config.kernel_config.moe_backend in _KIMI_MEGA_MOE_BACKENDS
         self.use_sequence_parallel = (
             parallel_config.pipeline_parallel_size == 1
             and parallel_config.enable_expert_parallel
@@ -1454,7 +1488,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         )
         if self.config.is_moe and use_mega_moe:
             expert_params_mapping = make_kimi_k3_mega_moe_expert_params_mapping(
-                self.config.num_experts
+                self.config.num_experts,
+                nvfp4=any(
+                    module.use_flashinfer_mega_moe
+                    for module in self.modules()
+                    if isinstance(module, KimiMoE)
+                ),
             )
         elif self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
