@@ -432,6 +432,16 @@ def flash_attn_varlen_func(
         if v.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
             q_descale = k_descale = v_descale = None
 
+        # CuTe requires unit stride in the descales' head dimension.
+        # contiguous() can be a no-op for scalar.expand(1, 1), whose
+        # strides are (0, 0), so explicitly clone incompatible layouts.
+        q_descale, k_descale, v_descale = (
+            t.clone(memory_format=torch.contiguous_format)
+            if t is not None and t.ndim == 2 and t.stride(1) != 1
+            else t
+            for t in (q_descale, k_descale, v_descale)
+        )
+
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
         # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
