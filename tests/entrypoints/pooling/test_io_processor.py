@@ -10,6 +10,7 @@ from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.typing import OfflineEncodeInputsContext
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
+from vllm.tasks import PoolingTask
 
 
 @pytest.fixture
@@ -74,6 +75,44 @@ def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
     )
     assert exc_info.value.parameter is None
     assert exc_info.value.value is None
+
+
+@pytest.mark.parametrize("as_sequence", [False, True], ids=["shared", "sequence"])
+def test_offline_pooling_params_can_be_reused_across_tasks(
+    processor: PoolingIOProcessor,
+    as_sequence: bool,
+):
+    processor.model_config = SimpleNamespace(is_encoder_decoder=False)
+    processor.renderer = SimpleNamespace(
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=None)
+    )
+    params = PoolingParams(use_activation=False)
+
+    def get_params_for(task: PoolingTask):
+        ctx = OfflineEncodeInputsContext(
+            pooling_task=task,
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            prompts=[[1], [2]],
+            pooling_params=[params, params] if as_sequence else params,
+        )
+        request_factory, _ = processor.get_request_factory_offline(ctx)
+        return [request["params"] for request in request_factory()]
+
+    embed_params = get_params_for("embed")
+    token_embed_params = get_params_for("token_embed")
+
+    assert params.task is None
+    assert [param.task for param in embed_params] == ["embed", "embed"]
+    assert [param.task for param in token_embed_params] == [
+        "token_embed",
+        "token_embed",
+    ]
+    assert len({id(param) for param in embed_params + token_embed_params}) == 4
+    assert all(
+        param.use_activation is False for param in embed_params + token_embed_params
+    )
 
 
 def test_qwen3_reranker_warns_without_chat_template(monkeypatch):
