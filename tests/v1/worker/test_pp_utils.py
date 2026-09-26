@@ -81,3 +81,37 @@ def test_decode_row_ahead_of_a_prefill_chunk():
 
     assert mask is not None
     assert mask.tolist() == [True, False]
+
+
+def test_deferred_state_restored_after_receive_before_postprocess():
+    from collections import deque
+    from unittest.mock import Mock
+
+    import torch
+
+    handler = pp_utils.PPHandler.__new__(pp_utils.PPHandler)
+    handler.main_stream = Mock()
+    handler.req_idx_gen_np = np.zeros(2, dtype=np.int32)
+    events = []
+    handler.main_stream.wait_event.side_effect = lambda event: events.append("wait")
+    slot = pp_utils.PendingRecv(
+        event=Mock(),
+        sampled_tokens=torch.zeros(2, 3, dtype=torch.int64),
+        num_sampled=torch.tensor([2, 3]),
+        num_rejected=torch.tensor([1, 0]),
+        idx_mapping=torch.tensor([0, 1]),
+        idx_mapping_np=np.array([0, 1]),
+        need_sampled_mask=np.array([True, True]),
+        gen_at_receive_np=np.zeros(2, dtype=np.int32),
+        restore_model_state=lambda: events.append("restore"),
+    )
+    handler.queue = deque([slot])
+    result = handler.get_prev_sampled_outputs()
+    assert events == ["wait", "restore"]
+    assert result is not None
+    torch.testing.assert_close(result["num_sampled"], slot.num_sampled)
+    # Aborted requests must discard the pending state without restoring it.
+    handler.queue = deque([slot])
+    handler.req_idx_gen_np[:] = 1
+    assert handler.get_prev_sampled_outputs() is None
+    assert events == ["wait", "restore"]
