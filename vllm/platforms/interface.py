@@ -875,15 +875,28 @@ class Platform:
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
-        elif cache_config.cache_dtype.startswith("turboquant_"):
-            # TQ has a packed K|V layout; the standard FullAttentionSpec
+        elif (
+            cache_config.cache_dtype.startswith("turboquant_")
+            or cache_config.cache_dtype == "ultraquant_4bit"
+        ):
+            # TurboQuant and UltraQuant have packed K|V layouts; the standard
+            # FullAttentionSpec
             # formula over-sizes it and trips unify_kv_cache_spec_page_size
             # when all attention layers are TQ. With mixed skip+TQ the skip
             # layers still use the standard layout — take max so mamba
-            # padding covers the largest actual page.
+            # padding covers the largest actual page. Each dtype packs via its
+            # own backend, so probe the packed page through the matching one.
             from vllm.v1.attention.backends.turboquant_attn import (
                 TurboQuantAttentionBackend,
             )
+
+            _pack_backend: type[TurboQuantAttentionBackend] = TurboQuantAttentionBackend
+            if cache_config.cache_dtype == "ultraquant_4bit":
+                from vllm.v1.attention.backends.ultraquant_attn import (
+                    UltraQuantAttentionBackend,
+                )
+
+                _pack_backend = UltraQuantAttentionBackend
 
             tq_spec = FullAttentionSpec(
                 block_size=1,
@@ -892,7 +905,7 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            tq_page = TurboQuantAttentionBackend.customize_spec(tq_spec).page_size_bytes
+            tq_page = _pack_backend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = FullAttentionSpec(
                     block_size=1,
