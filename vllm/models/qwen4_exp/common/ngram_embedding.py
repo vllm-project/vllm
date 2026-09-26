@@ -216,6 +216,12 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Let storage that is bound after loading (checkpoint-mapped) attach."""
+        bind = getattr(layer, "bind_storage_after_loading", None)
+        if bind is not None:
+            bind()
+
     @abstractmethod
     def dequantize(
         self,
@@ -305,6 +311,7 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
+        super().process_weights_after_loading(layer)
 
     def dequantize(
         self,
@@ -522,7 +529,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         output: torch.Tensor,
     ) -> None:
         """Join the side stream, reduce ETP shards, and select local rows."""
-        torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+        self._join_prefetch_stream()
         slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
         active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
         embeddings = self._reduce_etp_embeddings(active_output)
@@ -532,6 +539,9 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             slot_offset,
         )
         output.copy_(embeddings.flatten(-2))
+
+    def _join_prefetch_stream(self) -> None:
+        torch.cuda.current_stream().wait_stream(self._prefetch_stream)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Finish the pinned lookup into graph-owned output storage."""
