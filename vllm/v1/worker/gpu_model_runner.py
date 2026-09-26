@@ -3375,6 +3375,24 @@ class GPUModelRunner(
             {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
         )
 
+    @contextmanager
+    def _skip_eplb_recording(self) -> Iterator[None]:
+        """Keep a dummy forward out of the EPLB expert load stats."""
+        should_record = (
+            self.eplb_state.should_record_tensor
+            if self.eplb_state is not None
+            else None
+        )
+        if should_record is None:
+            yield
+            return
+        was_recording = should_record.clone()
+        should_record.fill_(False)
+        try:
+            yield
+        finally:
+            should_record.copy_(was_recording)
+
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         """Step for the EPLB (Expert Parallelism Load Balancing) state."""
         if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
@@ -5809,7 +5827,7 @@ class GPUModelRunner(
             force_attention: If True, always create attention metadata. Used to
                 warm up attention backend when mode is NONE.
             uniform_decode: If True, the batch is a uniform decode batch.
-            skip_eplb: If True, skip EPLB state update.
+            skip_eplb: If True, record no expert load and skip the EPLB step.
             is_profile: If True, this is a profile run.
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
@@ -6038,12 +6056,15 @@ class GPUModelRunner(
                     use_spec_decode=self.speculative_config is not None,
                 )
 
-        with self.maybe_dummy_run_with_lora(
-            self.lora_config,
-            num_scheduled_tokens,
-            num_sampled_tokens,
-            remove_lora,
-            num_active_loras,
+        with (
+            self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                num_scheduled_tokens,
+                num_sampled_tokens,
+                remove_lora,
+                num_active_loras,
+            ),
+            self._skip_eplb_recording() if skip_eplb else nullcontext(),
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
