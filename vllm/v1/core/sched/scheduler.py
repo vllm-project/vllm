@@ -1464,6 +1464,7 @@ class Scheduler(SchedulerInterface):
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
+            num_recomputed_tokens=0,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
@@ -1558,6 +1559,9 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
+        request.recompute_token_frontier = max(
+            request.recompute_token_frontier, request.num_computed_tokens
+        )
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
@@ -1594,6 +1598,14 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            scheduler_output.num_recomputed_tokens += max(
+                min(
+                    request.num_computed_tokens + num_scheduled_token,
+                    request.recompute_token_frontier,
+                )
+                - request.num_computed_tokens,
+                0,
+            )
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
             if self.defer_block_free:
@@ -2345,6 +2357,7 @@ class Scheduler(SchedulerInterface):
                 cudagraph_stats,
                 perf_stats,
                 ec_connector_stats=ec_connector_stats,
+                num_recomputed_tokens=scheduler_output.num_recomputed_tokens,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -2846,6 +2859,7 @@ class Scheduler(SchedulerInterface):
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
         ec_connector_stats: ECConnectorStats | None = None,
+        num_recomputed_tokens: int = 0,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2872,6 +2886,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_recomputed_tokens=num_recomputed_tokens,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,

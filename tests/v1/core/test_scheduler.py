@@ -1455,6 +1455,49 @@ def test_preemption_processes_stale_aux_output():
     scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
 
 
+def test_preemption_counts_exact_recomputed_token_executions():
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    request = create_requests(num_requests=1, num_tokens=8)[0]
+    scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    assert first.num_recomputed_tokens == 0
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Eight positions completed before preemption. The resumed step schedules
+    # those eight again plus one new position, so only eight are recomputation.
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens[request.request_id] == 9
+    assert resumed.num_recomputed_tokens == 8
+
+    outputs = scheduler.update_from_output(
+        resumed,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1001]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    stats = outputs[request.client_index].scheduler_stats
+    assert stats is not None
+    assert stats.num_recomputed_tokens == 8
+
+
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""
