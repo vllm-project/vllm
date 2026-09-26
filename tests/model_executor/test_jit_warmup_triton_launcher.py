@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 import torch
 
+from vllm import envs
 from vllm.model_executor.warmup import jit_warmup_triton_helper
 from vllm.model_executor.warmup.jit_warmup import (
+    JitWarmupRegistry,
     WarmupChoices,
     WarmupIntRange,
     kernel_launcher,
@@ -114,6 +117,105 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
 
     owner("runtime", 2, runtime_launcher)
     assert runtime_calls == [(owner.kernel, (2,), ("runtime", 2), {"CONST": 7})]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not hasattr(triton, "AsyncCompileMode"),
+    reason="Requires CUDA Triton async compilation",
+)
+def test_failed_parallel_warmup_does_not_leak_into_runtime(monkeypatch) -> None:
+    from triton.runtime._async_compile import active_mode
+
+    monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 2)
+    owner = _TestTritonKernel()
+    owner.kernel = _FakeTritonKernel()
+
+    def fail():
+        raise RuntimeError("warmup failed")
+
+    def warmup(**kwargs):
+        active_mode.get().submit(kwargs["second"], fail, lambda result: None)
+
+    monkeypatch.setattr(owner.kernel, "warmup", warmup)
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        owner.compile_many(owner.CompileKey(value=i) for i in range(2))
+
+    assert active_mode.get() is None
+    owner("runtime", 3, None)
+    assert len(owner.kernel.runtime_calls) == 1
+
+
+def test_autotuning_warmup_stays_serial(monkeypatch) -> None:
+    owner = _TestTritonKernel()
+    owner.kernel = _FakeTritonKernel()
+    owner._run_autotune = True
+    monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 4)
+
+    def unexpected_async(*args):
+        pytest.fail("Autotuning must not use asynchronous compilation")
+
+    monkeypatch.setattr(triton, "AsyncCompileMode", unexpected_async, raising=False)
+    owner.compile_many(owner.CompileKey(value=i) for i in range(2))
+    assert len(owner.kernel.runtime_calls) == 2
+
+
+@triton.jit
+def _warmup_store_kernel(out, VALUE: tl.constexpr):
+    tl.store(out, VALUE)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not hasattr(triton, "AsyncCompileMode"),
+    reason="Requires CUDA Triton async compilation",
+)
+def test_registered_warmup_parallelizes_compile_only_and_runtime_stays_serial(
+    monkeypatch,
+) -> None:
+    from triton.runtime._async_compile import active_mode
+
+    monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 2)
+
+    def warmup_inputs():
+        return dict(out=TritonWarmupTensor(torch.int32), value=WarmupChoices(1, 2))
+
+    @triton_kernel_dispatcher_with_warmup(
+        kernel=_warmup_store_kernel, warmup_inputs=warmup_inputs
+    )
+    def store(out, value):
+        return (1,), dict(VALUE=value)
+
+    store.get_warmup_keys()  # Initialize Triton's binder before wrapping its compiler.
+    caller = threading.get_ident()
+    barrier = threading.Barrier(2, timeout=10)
+    compiled_on = []
+    compile_kernel = _warmup_store_kernel.compile
+
+    def record_compile(*args, **kwargs):
+        if threading.get_ident() != caller:
+            barrier.wait()
+        result = compile_kernel(*args, **kwargs)
+        compiled_on.append(threading.get_ident())
+        return result
+
+    monkeypatch.setattr(_warmup_store_kernel, "compile", record_compile)
+    registry = JitWarmupRegistry(None)
+    with registry.activate():
+        store.register_warmup()
+    registry.warmup()
+
+    assert len(compiled_on) == 2
+    assert all(thread != caller for thread in compiled_on)
+    assert active_mode.get() is None
+    out = torch.empty(1, dtype=torch.int32, device=current_platform.device_type)
+    for value in (1, 2):
+        store(out, value)
+        assert out.item() == value
+    assert len(compiled_on) == 2
+
+    # A specialization first seen during inference uses the normal blocking JIT.
+    store(out, 3)
+    assert out.item() == 3
+    assert compiled_on[2:] == [caller]
 
 
 def test_triton_launcher_supports_cpu_function_wrappers() -> None:

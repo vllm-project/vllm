@@ -70,6 +70,9 @@ class BaseMambaAttentionMetadata:
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
+    # Number of block-aligned SSM states the prefill path writes, i.e.
+    # sum(block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p).
+    num_state_writes_p: int = 0
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -227,8 +230,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
-        """
-        This method builds the metadata for full cudagraph capture.
+        """This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         m = common_attn_metadata
@@ -276,8 +278,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> M:
-        """
-        Default build implementation for Mamba-like attention backends.
+        """Default build implementation for Mamba-like attention backends.
         Subclasses (e.g., Mamba2) can override to add additional metadata.
         """
         return self._compute_common_metadata(
@@ -294,8 +295,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_computed_tokens_p_cpu: torch.Tensor,
         query_start_loc_p_cpu: torch.Tensor,
     ) -> tuple[list[int], list[int], list[int]]:
-        """
-        Compute chunk-specific metadata for Mamba models.
+        """Compute chunk-specific metadata for Mamba models.
 
         The code below carefully constructs the chunks such that:
         1. Chunks contain tokens from a *single* sequence only.
@@ -351,8 +351,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def _prefill_cpu_metadata(
         self,
-        common: M,
         common_attn_metadata: CommonAttentionMetadata,
+        num_reqs: int,
+        num_prefills: int,
+        num_decode_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prefill context lengths and query offsets, from CPU data only.
 
@@ -364,11 +366,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        num_reqs = common.num_reqs
-        num_prefills = common.num_prefills
         query_start_loc_p_cpu = (
             common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-            - common.num_decode_tokens
+            - num_decode_tokens
         )
         prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
         num_computed_tokens_p_cpu = (
@@ -382,14 +382,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common: M,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Compute chunk metadata and return as device tensors.
+        """Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
         """
         num_prefills = common.num_prefills
 
         num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
-            common, common_attn_metadata
+            common_attn_metadata,
+            common.num_reqs,
+            num_prefills,
+            common.num_decode_tokens,
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
@@ -463,9 +465,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         prev_last_scheduled_idx: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """
-        Compute metadata common to both Mamba1 and Mamba2.
-        """
+        """Compute metadata common to both Mamba1 and Mamba2."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when
@@ -539,6 +539,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_idx_last_computed_token = None
         block_idx_last_scheduled_token = None
         block_idx_last_scheduled_token_prev_step = None
+        num_state_writes_p = 0
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
@@ -630,6 +631,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                     num_reqs - num_prefills : num_reqs
                 ]
+
+                # How many block-aligned states prefill will write: the same
+                # (block_idx_last - block_idx_first) as above, from CPU data so
+                # the mixer needs no D2H read. The -1 in both indices cancels.
+                block_size = self.kv_cache_spec.block_size
+                seq_lens_p_cpu = seq_lens_cpu[num_reqs - num_prefills : num_reqs]
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
+                    common_attn_metadata, num_reqs, num_prefills, num_decode_tokens
+                )
+                num_state_writes_p = int(
+                    (
+                        (seq_lens_p_cpu + block_size - 1) // block_size
+                        - (num_computed_tokens_p_cpu + block_size) // block_size
+                    )
+                    .clamp(min=0)
+                    .sum()
+                )
 
         if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
@@ -734,6 +752,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
+            num_state_writes_p=num_state_writes_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(
                 block_idx_last_scheduled_token_prev_step
@@ -752,8 +771,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self,
         metadata: M,
     ) -> M:
-        """
-        Update the metadata for cudagraph capture.
+        """Update the metadata for cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         state_indices_tensor_d = metadata.state_indices_tensor_d

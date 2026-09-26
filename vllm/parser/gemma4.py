@@ -83,6 +83,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             (e.g. partial boolean parsed as bare string).
 
     Returns a dict ready for ``json.dumps()``.
+
     """
     if not args_str or not args_str.strip():
         return {}
@@ -119,7 +120,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 result[key] = ""
             break
 
-        if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+        if args_str.startswith(STRING_DELIM, i):
             i += _DELIM_LEN
             val_start = i
             end_pos = args_str.find(STRING_DELIM, i)
@@ -138,7 +139,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if args_str.startswith(STRING_DELIM, i):
                     # Skip over string contents to avoid counting { inside strings
                     i += _DELIM_LEN
                     next_delim = args_str.find(STRING_DELIM, i)
@@ -161,7 +162,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             arr_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if args_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     next_delim = args_str.find(STRING_DELIM, i)
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
@@ -212,7 +213,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
         if i >= n:
             break
 
-        if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+        if arr_str.startswith(STRING_DELIM, i):
             i += _DELIM_LEN
             end_pos = arr_str.find(STRING_DELIM, i)
             if end_pos == -1:
@@ -226,7 +227,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if arr_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
@@ -246,7 +247,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if arr_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
@@ -293,16 +294,21 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 @functools.cache
-def gemma4_config() -> ParserEngineConfig:
+def gemma4_config(thinking: bool = False) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="gemma4",
         initial_state=ParserState.CONTENT,
+        # Decides a silent tail: the E-series HF templates write no marker
+        # with thinking off, and no template does after a tool response.
+        wait_for_reasoning=thinking,
+        turn_boundary_tokens=frozenset({"<|turn>", "<|tool_response>"}),
         terminals={
             "THINK_START": CHANNEL_START,
             "THINK_END": CHANNEL_END,
             "TOOL_START": TOOL_CALL_START,
             "TOOL_END": TOOL_CALL_END,
             "CALL_PREFIX": "call:",
+            "COLON": ":",
             "OPEN_BRACE": "{",
             "OPEN_PAREN": "(",
         },
@@ -345,6 +351,13 @@ def gemma4_config() -> ParserEngineConfig:
                 (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (),
+            ),
+            # Bare opener: some checkpoints emit "<|tool_call>:name{...}"
+            # without the "call" prefix.  Match the colon directly so the
+            # tool call is not silently dropped.
+            (ParserState.TOOL_PREAMBLE, "COLON"): Transition(
                 ParserState.TOOL_NAME,
                 (),
             ),
@@ -409,11 +422,11 @@ class Gemma4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._thinking_enabled = chat_kwargs.get("enable_thinking", False)
+        thinking = chat_kwargs.get("enable_thinking", False)
         super().__init__(
             tokenizer,
             tools,
-            parser_engine_config=gemma4_config(),
+            parser_engine_config=gemma4_config(thinking=thinking),
             **kwargs,
         )
         vocab = self.vocab
@@ -463,30 +476,6 @@ class Gemma4Parser(ParserEngine):
             delta_token_ids = [self._reasoning_start_token_id, *delta_token_ids]
 
         return delta_text, delta_token_ids
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        end_id = self._reasoning_end_token_id
-        start_id = self._reasoning_start_token_id
-        tool_call_id = self._tool_call_token_id
-        new_turn_id = self._new_turn_token_id
-        tool_response_id = self._tool_response_token_id
-
-        if end_id is not None and not input_ids:
-            return self.parser_engine_config.initial_state != ParserState.REASONING
-
-        for i in range(len(input_ids) - 1, -1, -1):
-            tid = input_ids[i]
-            if start_id is not None and tid == start_id:
-                return False
-            if tool_call_id is not None and tid == tool_call_id:
-                return True
-            if new_turn_id is not None and tid == new_turn_id:
-                return not self._thinking_enabled
-            if tool_response_id is not None and tid == tool_response_id:
-                return not self._thinking_enabled
-            if end_id is not None and tid == end_id:
-                return True
-        return True
 
     def _prompt_ends_in_open_reasoning(self, prompt_token_ids: Sequence[int]) -> bool:
         """Whether the prompt tail is inside an open ``<|channel>`` block.

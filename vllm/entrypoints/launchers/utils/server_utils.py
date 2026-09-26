@@ -29,8 +29,7 @@ def load_log_config(log_config_file: str | None) -> dict | None:
 
 
 def get_uvicorn_log_config(args: Namespace) -> dict | None:
-    """
-    Get the uvicorn log config based on the provided arguments.
+    """Get the uvicorn log config based on the provided arguments.
 
     Priority:
     1. If log_config_file is specified, use it
@@ -39,7 +38,13 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
     3. Otherwise, return None (use uvicorn defaults)
     """
     # First, try to load from file if specified
-    log_config = load_log_config(args.log_config_file)
+    logging_config = getattr(args, "logging_config", None)
+    log_config_file = (
+        logging_config.pylogging_config_file
+        if logging_config is not None
+        else getattr(args, "log_config_file", None)
+    )
+    log_config = load_log_config(log_config_file)
     if log_config is not None:
         return log_config
 

@@ -46,11 +46,11 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e .
 To rebuild only the Rust frontend binary:
 
 ```bash
-./build_rust.sh          # release build
-./build_rust.sh --debug  # faster build for development
+./tools/build_rust.sh          # release build
+./tools/build_rust.sh --debug  # faster build for development
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
+If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
 uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
@@ -88,6 +88,11 @@ pre-commit install
 ```
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
+
+When running ShellCheck or markdownlint directly, or configuring an editor
+integration, use the configuration files in `tools/pre_commit/`:
+`--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
+`--config tools/pre_commit/.markdownlint.yaml` for markdownlint-cli2.
 
 !!! tip "Tips"
     You can manually run the `pre-commit` hooks using:
@@ -315,6 +320,34 @@ review process:
   the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
+- Before creating a Buildkite build, `/ci run` and `/amd-ci run`, including
+  `all` and `nightly`, check the requested PR commit against its target branch
+  in the upstream repository. Your branch must contain every commit currently
+  on that branch: **zero commits behind**. This also applies to PRs targeting
+  release branches or another PR's branch.
+- If the PR is behind, the bot reports the count without creating a new build.
+  Merge or rebase onto the latest target branch, then rerun the command. If the
+  target branch advances in the meantime, update your branch and try again.
+- To run CI on an outdated branch at your own risk, append `--allow-stale` to
+  any run command, for example `/ci run --allow-stale` or
+  `/amd-ci run all --allow-stale`. The same authorization requirements apply.
+  The bot reports the lag and warns that outdated CI configuration may cause
+  failures. Before merging, merge or rebase onto the latest target branch and
+  rerun CI without `--allow-stale` on the latest PR commit.
+- Retrying or cancelling builds does not check branch freshness.
+- These commands do not modify your branch or enforce merge requirements.
+  Direct Buildkite launches are outside this workflow. No additional token is
+  needed.
+
+Maintainers must configure required Buildkite status checks on the latest PR
+commit and enable GitHub's
+[Require branches to be up to date before merging](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)
+protection on the relevant target branches to enforce the merge policy. Select
+statuses that confirm the required tests completed, using Buildkite as their
+expected source. An aggregate status that reports "passed and blocked" does not
+by itself guarantee those tests ran; verify the pipeline's required and optional
+blocked steps before choosing statuses or changing blocked-build reporting.
+The CI command workflow does not configure these repository or pipeline settings.
 
 ### Pull Request Limits and Escalation
 

@@ -8,11 +8,11 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
-import regex as re
 import torch
 import torch.nn as nn
 
@@ -61,9 +61,9 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
-    CudaProfilerWrapper,
-    ProtonProfilerWrapper,
-    TorchProfilerWrapper,
+    create_graph_capture_profiler,
+    create_worker_profiler,
+    validate_worker_profiler_config,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -97,6 +97,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
+from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -142,6 +143,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -206,6 +208,7 @@ class Worker(WorkerBase):
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
@@ -219,6 +222,7 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
+        validate_worker_profiler_config(self.profiler_config)
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -240,6 +244,30 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
+    def _save_sleep_parameters(self, model: nn.Module) -> None:
+        patterns = self.model_config.sleep_preserve_parameter_names
+        if not patterns:
+            self._sleep_saved_parameters = {}
+            return
+        parameters = dict(model.named_parameters())
+        names: set[str] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(parameters, pattern)
+            if not matches:
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            names.update(matches)
+        self._sleep_saved_parameters = {
+            name: param.detach().to("cpu")
+            for name, param in parameters.items()
+            if name in names and not param.is_cpu
+        }
+
+    @torch.no_grad()
+    def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        for name, value in self._sleep_saved_parameters.items():
+            model.get_parameter(name).copy_(value)
+        self._sleep_saved_parameters.clear()
+
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
@@ -247,6 +275,7 @@ class Worker(WorkerBase):
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
+            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
@@ -284,6 +313,8 @@ class Worker(WorkerBase):
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
+        if wake_weights and self._sleep_saved_parameters:
+            self._restore_sleep_parameters(self.model_runner.model)
         if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
@@ -300,6 +331,9 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -332,27 +366,32 @@ class Worker(WorkerBase):
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
-        """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
-        cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit."""
-        if not current_platform.is_cuda():
+        """Limit CUDA/ROCm allocator splitting, restoring settings on exit."""
+        if (
+            not current_platform.is_cuda_alike()
+            or torch.cuda.memory.get_allocator_backend() != "native"
+        ):
             yield
             return
 
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        match = re.search(r"max_split_size_mb:(\d+)", conf)
-        original_value = match.group(1) if match else None
+        get_settings = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+        if get_settings is not None:
+            original_settings = get_settings()
+        else:
+            original_settings = torch.cuda.memory._snapshot()["allocator_settings"][
+                "PYTORCH_CUDA_ALLOC_CONF"
+            ]
 
-        torch._C._accelerator_setAllocatorSettings(
-            f"max_split_size_mb:{max_split_size_mb}"
-        )
+        # The setter resets other allocator options unless they are included.
+        prefix = original_settings.strip().rstrip(",")
+        settings = f"max_split_size_mb:{max_split_size_mb}"
+        if prefix:
+            settings = f"{prefix},{settings}"
         try:
+            torch._C._accelerator_setAllocatorSettings(settings)
             yield
         finally:
-            # PyTorch defaults to SIZE_MAX (no limit).
-            _SIZE_MAX_MB = (2**64 - 1) // (1024 * 1024)
-            restore = original_value if original_value else str(_SIZE_MAX_MB)
-            torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
+            torch._C._accelerator_setAllocatorSettings(original_settings)
 
     @instrument(span_name="Init device")
     def init_device(self):
@@ -371,13 +410,14 @@ class Worker(WorkerBase):
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_index
 
-                tp_pp_world_size = (
+                tp_pcp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.prefill_context_parallel_size
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
+                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -515,6 +555,11 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+        # Preserve parallel weight loading, then use serving's thread count
+        # for profiling and compilation so Dynamo's global-state guards remain
+        # valid when requests arrive.
+        set_torch_threads_for_runtime()
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
@@ -534,6 +579,7 @@ class Worker(WorkerBase):
         Tip:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
+
         """
         maybe_apply_startup_plan(self)
 
@@ -563,10 +609,20 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            # Workspaces (e.g. the MoE workspace) grow in steps during this pass,
+            # freeing each smaller buffer. Without a split limit, a later small
+            # allocation can be carved out of a freed multi-GiB block and pin the
+            # whole segment past the empty_cache() in memory_profiling, so it is
+            # counted as consumed and taken from the KV cache. Blocks above the
+            # limit are never split, so they stay releasable. Exits before
+            # memory_profiling measures, restoring the original limit.
+            self._scoped_allocator_max_split(max_split_size_mb=20),
+        ):
             self.model_runner.profile_run()
 
         # Profile CUDA graph memory if graphs will be captured.
@@ -574,12 +630,10 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
-        # XPU stays excluded (see #39977).
         cudagraph_memory_estimate = 0
         if (
-            current_platform.is_cuda_alike()
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -692,7 +746,6 @@ class Worker(WorkerBase):
 
         Returned dict is keyed by `(pp_rank, tp_rank)`.
         """
-
         if not has_kv_transfer_group():
             return None
 
@@ -732,7 +785,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -756,9 +808,6 @@ class Worker(WorkerBase):
             ),
         )
 
-        if self.model_config.enable_return_routed_experts:
-            self.model_runner.init_routed_experts_capturer()
-
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -771,7 +820,10 @@ class Worker(WorkerBase):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and has_compiled_submodule(self.model_runner.get_model())
+        ):
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
@@ -804,13 +856,17 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.use_v2_model_runner:  # noqa: SIM102
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                # A workspace resize after capture frees what the graphs point at.
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._get_cudagraph_capture_context():
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -924,12 +980,7 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.utils.jit_monitor import activate as activate_jit_monitor
-
-        activate_jit_monitor(
-            mode=self.observability_config.jit_monitor_mode,
-            verbose=self.observability_config.jit_monitor_verbose,
-        )
+        self._maybe_activate_jit_monitor()
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
@@ -940,14 +991,39 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
-        # Startup is done; steady-state serving gets no benefit from torch
-        # intra-op parallelism.
-        set_torch_threads_for_runtime()
-
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
+
+    def _maybe_activate_jit_monitor(self) -> None:
+        # When JIT warmup is disabled (e.g. enforce_eager), runtime JIT
+        # compilation is expected, so monitoring would only produce noise
+        # (or spurious errors in "error" mode).
+        if not self.vllm_config.kernel_config.enable_jit_warmup:
+            return
+
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
+
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
+        )
+
+    def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
+        """Let the configured profiler observe CUDA graph capture."""
+        if not self.use_v2_model_runner:
+            return nullcontext()
+        if self.profiler is None:
+            model_runner = cast("GPUModelRunnerV2", self.model_runner)
+            if not model_runner.needs_cudagraph_capture():
+                return nullcontext()
+            self.profiler = create_graph_capture_profiler(
+                self.profiler_config, global_rank=self.rank
+            )
+            if self.profiler is None:
+                return nullcontext()
+        return self.profiler.capture_cuda_graphs()
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
@@ -1014,7 +1090,7 @@ class Worker(WorkerBase):
             return nullcontext()
 
         self.profiler.step()
-        if not self.profiler.is_running:
+        if not self.profiler.should_annotate:
             return nullcontext()
 
         iteration_details = compute_iteration_details(scheduler_output)
@@ -1220,6 +1296,8 @@ class Worker(WorkerBase):
         )
         self._pp_send_work = handles[1:]
 
+        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
+            return self.model_runner.pool()  # type: ignore
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1236,7 +1314,6 @@ class Worker(WorkerBase):
             )
 
         if is_start:
-            profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1248,33 +1325,16 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
+            if self.profiler_config.profiler == "proton" and self.profiler is not None:
+                self.profiler.set_output_name(trace_name)
+
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                if profiler_type == "torch":
-                    self.profiler = TorchProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
-                        local_rank=self.local_rank,
-                        activities=["CPU", "CUDA"],
-                    )
-                    logger.debug(
-                        "Starting torch profiler with trace name: %s", trace_name
-                    )
-                elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
-                elif profiler_type == "proton":
-                    self.profiler = ProtonProfilerWrapper(
-                        self.profiler_config, worker_name=trace_name
-                    )
-                    logger.debug(
-                        "Starting Proton profiler with trace name: %s", trace_name
-                    )
-                else:
-                    # Config validation should prevent this code being reached
-                    raise ValueError(
-                        f"Invalid profiler value of {self.profiler_config.profiler}"
-                    )
+                self.profiler = create_worker_profiler(
+                    self.profiler_config,
+                    worker_name=trace_name,
+                    local_rank=self.local_rank,
+                )
 
             self.profiler.start()
         else:
@@ -1284,7 +1344,9 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler == "proton":
+                if self.profiler_config.profiler == "proton" and not (
+                    self.profiler.has_cuda_graph_session
+                ):
                     # Proton output names are fixed when the wrapper is constructed.
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
@@ -1339,12 +1401,12 @@ class Worker(WorkerBase):
             )
 
     def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """
-        Initialize weight transfer mechanism.
+        """Initialize weight transfer mechanism.
         For NCCL backend, this creates a process group with the trainer.
 
         Args:
             init_info: Dictionary containing backend-specific initialization info
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1353,8 +1415,7 @@ class Worker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def start_weight_update(self) -> None:
-        """
-        Start a new weight update session.
+        """Start a new weight update session.
 
         Delegates engine-specific preparation (e.g. layerwise reload setup) to
         the configured weight transfer engine. The worker only tracks that a
@@ -1364,8 +1425,7 @@ class Worker(WorkerBase):
             self._start_weight_update()
 
     def start_draft_weight_update(self) -> None:
-        """
-        Like start_weight_update, but retargets the engine at the speculative
+        """Like start_weight_update, but retargets the engine at the speculative
         draft model for this session.
         """
         with set_current_vllm_config(self.vllm_config):
@@ -1398,8 +1458,7 @@ class Worker(WorkerBase):
         self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict | list[dict]) -> None:
-        """
-        Receive one weight update chunk from the trainer.
+        """Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
@@ -1409,6 +1468,7 @@ class Worker(WorkerBase):
         Args:
             update_info: Backend-specific update info, or a list indexed by
                 global worker rank across data parallel replicas.
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1423,7 +1483,7 @@ class Worker(WorkerBase):
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        parallel_config.data_parallel_index * parallel_config.world_size
                         + self.rank
                     ]
                 else:

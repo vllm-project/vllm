@@ -111,6 +111,8 @@ def _is_masked_mha_available(
     if model_dims not in (
         (128, 512, 128, 64, 128),
         (64, 512, 192, 64, 256),
+        # GLM-5.3-Flash: NoPE, qk_head_dim 256 == the (192, 64, 256) kernel.
+        (64, 512, 256, 0, 256),
     ):
         return False
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -289,17 +291,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self,
         common_attn_metadata: "CommonAttentionMetadata",
     ) -> torch.Tensor:
-        num_tokens = common_attn_metadata.num_actual_tokens
-        starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
-        )
-        return self.req_id_per_token_buffer[:num_tokens]
+        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
 
     def _build_chunked_context_fields(
         self,

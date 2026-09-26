@@ -7,16 +7,82 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import gemma
 from vllm.model_executor.models.gemma3n import (
     Gemma3nTextModel,
     _kv_sharing_weights_mapper,
 )
-from vllm.model_executor.models.gemma4 import Gemma4Model
+from vllm.model_executor.models.gemma4 import (
+    Gemma4ForCausalLM,
+    _gemma4_layer_weights_mapper,
+)
+from vllm.model_executor.models.gemma4_dspark import (
+    Gemma4DSparkForCausalLM,
+    Gemma4DSparkModel,
+)
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
+
+
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize(
+    "enabled,has_weights,with_markov",
+    [
+        pytest.param(True, True, False, id="hidden-only"),
+        pytest.param(True, True, True, id="with-markov"),
+        pytest.param(True, False, True, id="missing-weights"),
+        pytest.param(False, True, True, id="disabled-head"),
+    ],
+)
+def test_gemma4_dspark_loads_confidence_head(
+    monkeypatch, enabled, has_weights, with_markov
+) -> None:
+    """Use checkpoint confidence parameters, or disable an unavailable head."""
+    config = SimpleNamespace(
+        vocab_size=64,
+        hidden_size=8,
+        target_layer_ids=[0, 1],
+        num_hidden_layers=0,
+        rms_norm_eps=1e-6,
+        markov_rank=4,
+        enable_confidence_head=enabled,
+        confidence_head_with_markov=with_markov,
+    )
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=config),
+        ),
+    )
+    monkeypatch.setattr(Gemma4DSparkModel, "_build_fused_kv_buffers", lambda _: None)
+    model = Gemma4DSparkForCausalLM(vllm_config=cast(VllmConfig, vllm_config))
+    width = config.hidden_size + (config.markov_rank if with_markov else 0)
+    weight = torch.arange(width, dtype=torch.bfloat16).reshape(1, -1) / 16
+    bias = torch.tensor([-0.5], dtype=torch.bfloat16)
+    loaded = model.load_weights(
+        [("confidence_head.proj.weight", weight), ("confidence_head.proj.bias", bias)]
+        if has_weights
+        else []
+    )
+    if not (enabled and has_weights):
+        assert model.model.confidence_head is None
+        assert not loaded
+        return
+
+    assert loaded == {
+        "model.confidence_head.proj.weight",
+        "model.confidence_head.proj.bias",
+    }
+    assert model.model.confidence_head.proj.weight.dtype == torch.float32
+    hidden = torch.full((3, config.hidden_size), 0.25, dtype=torch.bfloat16)
+    markov = torch.full((3, config.markov_rank), -0.5, dtype=torch.bfloat16)
+    inputs = torch.cat([hidden, markov], dim=-1) if with_markov else hidden
+    expected = (inputs.float() @ weight.float().T + bias.float()).sigmoid().squeeze(-1)
+    torch.testing.assert_close(model.compute_confidence(hidden, markov), expected)
 
 
 @pytest.mark.cpu_test
@@ -57,36 +123,70 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 
 
 @pytest.mark.cpu_test
-def test_gemma4_kv_shared_layer_loads_plain_q_proj() -> None:
-    """KV-shared layers have q_proj instead of a packed qkv_proj; their
-    redundant K/V tensors in original checkpoints have no parameter and are
-    skipped rather than failing the load."""
-    model = torch.nn.Module()
-    model.config = SimpleNamespace(num_experts=0)
-    model.start_layer, model.end_layer = 0, 2
-    model.layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
-    for layer in model.layers:
-        layer.self_attn = torch.nn.Module()
-    model.layers[0].self_attn.qkv_proj = torch.nn.Linear(2, 6, bias=False)
-    model.layers[1].self_attn.q_proj = torch.nn.Linear(2, 2, bias=False)
-    shards: list[str] = []
-    model.layers[0].self_attn.qkv_proj.weight.weight_loader = (
-        lambda param, weight, shard_id: shards.append(shard_id)
+def test_gemma4_attention_mapper() -> None:
+    """Layers with a qkv_proj pack q/k/v; `attention_k_eq_v` full-attention
+    layers also load K as the V shard, and leave any v_proj such a checkpoint
+    ships unmapped so it fails the load rather than silently overwriting V;
+    KV-shared layers keep q_proj and drop the K/V tensors original checkpoints
+    still ship for them."""
+    config = SimpleNamespace(
+        num_hidden_layers=3,
+        num_kv_shared_layers=1,
+        attention_k_eq_v=True,
+        layer_types=["sliding_attention", "full_attention", "sliding_attention"],
     )
-
-    q_weight = torch.full((2, 2), 2.0)
     weights = [
-        (f"layers.{i}.self_attn.{tensor}.weight", q_weight)
-        for i in (0, 1)
-        for tensor in ("q_proj", "k_proj", "v_proj")
-    ] + [("layers.1.self_attn.k_norm.weight", torch.ones(2))]
-    loaded = Gemma4Model.load_weights(cast(Gemma4Model, model), weights)
+        (f"model.layers.{i}.self_attn.{tensor}.weight", torch.full((2, 2), i + 1.0))
+        for i in range(3)
+        for tensor in ("q_proj", "k_proj", "k_norm")
+    ] + [
+        ("model.layers.0.mlp.up_proj.weight", torch.empty(0)),
+        ("model.layers.1.self_attn.v_proj.weight", torch.empty(0)),
+    ]
 
-    assert shards == ["q", "k", "v"]
-    assert "layers.1.self_attn.q_proj.weight" in loaded
-    assert not any(name.startswith("layers.1.self_attn.k") for name in loaded)
-    assert not any(name.startswith("layers.1.self_attn.v") for name in loaded)
-    assert torch.equal(model.layers[1].self_attn.q_proj.weight, q_weight)
+    mapper = _gemma4_layer_weights_mapper(config)
+    mapped = list(mapper.apply(weights))
+
+    assert [(name, getattr(w, "shard_id", None)) for name, w in mapped] == [
+        ("model.layers.0.self_attn.qkv_proj.weight", "q"),
+        ("model.layers.0.self_attn.qkv_proj.weight", "k"),
+        ("model.layers.0.self_attn.k_norm.weight", None),
+        ("model.layers.1.self_attn.qkv_proj.weight", "q"),
+        ("model.layers.1.self_attn.qkv_proj.weight", "k"),
+        ("model.layers.1.self_attn.qkv_proj.weight", "v"),
+        ("model.layers.1.self_attn.k_norm.weight", None),
+        ("model.layers.2.self_attn.q_proj.weight", None),
+        ("model.layers.0.mlp.gate_up_proj.weight", 1),
+        ("model.layers.1.self_attn.v_proj.weight", None),
+    ]
+    k_weight, v_weight = weights[4][1], mapped[5][1]
+    assert torch.equal(v_weight, k_weight) and v_weight is not k_weight
+
+
+@pytest.mark.cpu_test
+def test_gemma4_expert_names_strip_language_model_prefix() -> None:
+    """The text-only path reuses the conditional wrapper's checkpoint naming,
+    so fused and per-expert tensors reach the experts under `model.*`."""
+    prefix = "model.language_model.layers.0."
+    weights = [
+        (prefix + name, torch.empty(0))
+        for name in (
+            "experts.gate_up_proj",
+            "experts.3.down_proj.weight_packed",
+            "router.per_expert_scale",
+        )
+    ]
+
+    mapped = [
+        (name, getattr(w, "shard_id", None))
+        for name, w in Gemma4ForCausalLM.hf_to_vllm_mapper.apply(weights)
+    ]
+
+    assert mapped == [
+        ("model.layers.0.experts.gate_up_proj", None),
+        ("model.layers.0.experts.3.down_proj.weight_packed", None),
+        ("model.layers.0.router.per_expert_scale", None),
+    ]
 
 
 @pytest.mark.cpu_test
@@ -127,7 +227,9 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
         ) as llm:
             if model == "google/gemma-3-4b-it":
                 normalizers = llm.llm.collective_rpc(
-                    lambda self: self.model_runner.model.language_model.model.normalizer.cpu().item()  # noqa: E501
+                    lambda self: (
+                        self.model_runner.model.language_model.model.normalizer.cpu().item()
+                    )  # noqa: E501
                 )
                 config = llm.llm.llm_engine.model_config.hf_config.text_config
             else:
