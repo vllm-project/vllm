@@ -28,6 +28,8 @@ from vllm.tool_parsers.qwen3_engine_tool_parser import (
     Qwen3EngineToolParser,
 )
 
+pytestmark = [pytest.mark.skip_global_cleanup]
+
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
 
@@ -1275,9 +1277,11 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
         "\n<function=get_current_weather>",
         "\n",  # triggers json_started -> sends "{"
         # This single delta delivers all three parameters at once
-        "<parameter=city>\nDallas\n</parameter>"
-        "\n<parameter=state>\nTX\n</parameter>"
-        "\n<parameter=unit>\nfahrenheit\n</parameter>",
+        (
+            "<parameter=city>\nDallas\n</parameter>"
+            "\n<parameter=state>\nTX\n</parameter>"
+            "\n<parameter=unit>\nfahrenheit\n</parameter>"
+        ),
         "\n</function>",
         "\n</tool_call>",
     ]
@@ -1537,3 +1541,221 @@ class TestParameterWhitespace:
                     streamed += tool_call.function.arguments
 
         assert json.loads(streamed)["content"] == EXPECTED_CONTENT
+
+
+def test_delegating_parser_tool_choice_required(qwen3_tokenizer):
+    """Test non-streaming parsing with tool_choice='required'."""
+
+    class TestParser(DelegatingParser):
+        def __init__(self, tokenizer, tools=None):
+            super().__init__(tokenizer)
+            self._tool_parser = Qwen3EngineToolParser(tokenizer, tools=tools)
+
+    request_tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get current weather",
+                "parameters": WEATHER_PARAMS,
+            },
+        )
+    ]
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="required",
+    )
+    delegating_parser = TestParser(qwen3_tokenizer, tools=request_tools)
+    model_output = (
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nTokyo\n</parameter>\n"
+        "<parameter=state>\nTokyo\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    reasoning, content, tool_calls = delegating_parser.parse(
+        model_output=model_output,
+        request=req,
+        enable_auto_tools=True,
+    )
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "get_current_weather"
+    assert json.loads(tool_calls[0].arguments) == {"city": "Tokyo", "state": "Tokyo"}
+
+
+def test_delegating_parser_named_tool_choice(qwen3_tokenizer):
+    """Test non-streaming parsing with specific named tool_choice."""
+
+    class TestParser(DelegatingParser):
+        def __init__(self, tokenizer, tools=None):
+            super().__init__(tokenizer)
+            self._tool_parser = Qwen3EngineToolParser(tokenizer, tools=tools)
+
+    request_tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get current weather",
+                "parameters": WEATHER_PARAMS,
+            },
+        )
+    ]
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice={"type": "function", "function": {"name": "get_current_weather"}},
+    )
+    delegating_parser = TestParser(qwen3_tokenizer, tools=request_tools)
+    model_output = (
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nTokyo\n</parameter>\n"
+        "<parameter=state>\nTokyo\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    reasoning, content, tool_calls = delegating_parser.parse(
+        model_output=model_output,
+        request=req,
+        enable_auto_tools=True,
+    )
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "get_current_weather"
+    assert json.loads(tool_calls[0].arguments) == {"city": "Tokyo", "state": "Tokyo"}
+
+
+def test_delegating_parser_streaming_tool_choice_required(qwen3_tokenizer):
+    """Test streaming parsing with tool_choice='required' and no reasoning parser."""
+
+    class TestParser(DelegatingParser):
+        def __init__(self, tokenizer, tools=None):
+            super().__init__(tokenizer)
+            self._tool_parser = Qwen3EngineToolParser(tokenizer, tools=tools)
+
+    request_tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get current weather",
+                "parameters": WEATHER_PARAMS,
+            },
+        )
+    ]
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="required",
+    )
+    delegating_parser = TestParser(qwen3_tokenizer, tools=request_tools)
+    model_output = (
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nTokyo\n</parameter>\n"
+        "<parameter=state>\nTokyo\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+
+    all_token_ids = qwen3_tokenizer.encode(model_output, add_special_tokens=False)
+    streamed_args = ""
+    streamed_func_name = ""
+
+    prefix_offset = 0
+    read_offset = 0
+    for i, delta_token in enumerate(all_token_ids):
+        current_token_ids = all_token_ids[: i + 1]
+        _, delta_text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=qwen3_tokenizer,
+            all_input_ids=current_token_ids,
+            prev_tokens=None,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=True,
+        )
+        delta_msg = delegating_parser.parse_delta(
+            delta_text=delta_text,
+            delta_token_ids=[delta_token],
+            request=req,
+            finished=(i == len(all_token_ids) - 1),
+        )
+        if delta_msg and delta_msg.tool_calls:
+            for tc in delta_msg.tool_calls:
+                if tc.function:
+                    if tc.function.name:
+                        streamed_func_name += tc.function.name
+                    if tc.function.arguments:
+                        streamed_args += tc.function.arguments
+
+    assert streamed_func_name == "get_current_weather"
+    assert json.loads(streamed_args) == {"city": "Tokyo", "state": "Tokyo"}
+
+
+def test_delegating_parser_streaming_named_tool_choice(qwen3_tokenizer):
+    """Test streaming parsing with specific named tool_choice."""
+
+    class TestParser(DelegatingParser):
+        def __init__(self, tokenizer, tools=None):
+            super().__init__(tokenizer)
+            self._tool_parser = Qwen3EngineToolParser(tokenizer, tools=tools)
+
+    request_tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get current weather",
+                "parameters": WEATHER_PARAMS,
+            },
+        )
+    ]
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice={"type": "function", "function": {"name": "get_current_weather"}},
+    )
+    delegating_parser = TestParser(qwen3_tokenizer, tools=request_tools)
+    model_output = (
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nTokyo\n</parameter>\n"
+        "<parameter=state>\nTokyo\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+
+    all_token_ids = qwen3_tokenizer.encode(model_output, add_special_tokens=False)
+    streamed_args = ""
+    streamed_func_name = ""
+
+    prefix_offset = 0
+    read_offset = 0
+    for i, delta_token in enumerate(all_token_ids):
+        current_token_ids = all_token_ids[: i + 1]
+        _, delta_text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=qwen3_tokenizer,
+            all_input_ids=current_token_ids,
+            prev_tokens=None,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=True,
+        )
+        delta_msg = delegating_parser.parse_delta(
+            delta_text=delta_text,
+            delta_token_ids=[delta_token],
+            request=req,
+            finished=(i == len(all_token_ids) - 1),
+        )
+        if delta_msg and delta_msg.tool_calls:
+            for tc in delta_msg.tool_calls:
+                if tc.function:
+                    if tc.function.name:
+                        streamed_func_name += tc.function.name
+                    if tc.function.arguments:
+                        streamed_args += tc.function.arguments
+
+    assert streamed_func_name == "get_current_weather"
+    assert json.loads(streamed_args) == {"city": "Tokyo", "state": "Tokyo"}
