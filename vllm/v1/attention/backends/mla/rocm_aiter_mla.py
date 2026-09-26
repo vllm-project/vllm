@@ -162,6 +162,25 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+def _asm_persistent_mla_heads16_qlen8_supported() -> bool:
+    """Whether persistent bf16 MLA decode serves (gqa>=16, qlen>4).
+
+    The persistent bf16 manifest stops at qSeqLen 4 for gqa 16; qlen 8 is only
+    reachable through the q-row fold onto the (gqa 32, qseqlen 4) kernel,
+    which gfx950 ships and gfx942 does not. On gfx942 the non-persistent
+    (gqa 16, qseqlen 8) manifest entry dispatches (mla_a16w16_qh16_m32x4,
+    or mla_dec_stage1_bf16_a16w16_subQ128_mqa128 on older aiter) but
+    computes wrong output for the verify shape, so gfx942 cannot serve
+    bf16 causal decode qlen > 4 at all (#55609).
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    return on_gfx950()
+
+
+@functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
 
@@ -1187,13 +1206,28 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # not have, and the schedule is the only thing carrying its mask.
             and (
                 not causal
-                or self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
                 or max_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
+                or (
+                    self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+                    and _asm_persistent_mla_heads16_qlen8_supported()
+                )
             )
             and max_qo_len >= 1
             and max_qo_len <= self._mtp_decode_qlen
         )
+        if not use_persistent_metadata and causal and max_qo_len > 4:
+            # gfx942: the bf16 manifest has no working entry past qlen 4 —
+            # the non-persistent (gqa 16, qseqlen 8) row dispatches but
+            # returns wrong verify output (both aiter 0.1.21.post1 and main;
+            # #55609). Fail loudly instead of emitting garbage logits.
+            raise ValueError(
+                "AITER MLA decode cannot serve bf16 causal queries longer "
+                "than 4 tokens on gfx942; the aiter non-persistent kernel "
+                "for that shape returns wrong output. Reduce the "
+                "speculative-token count or draft with TRITON_MLA for this "
+                "config."
+            )
         if (
             not causal
             and max_qo_len == 2
