@@ -637,7 +637,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator, "enable_adaptive_verification", False
             ),
             attn_groups=self.attn_groups,
-            attn_cg_support=attn_cg_support,
             req_states=self.req_states,
             query_start_loc=self.input_buffers.query_start_loc,
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
@@ -793,8 +792,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
             num_reqs = min(
-                num_reqs,
-                self.max_num_tokens // self.speculator.num_query_per_req,
+                num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
             )
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
@@ -1253,14 +1251,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks, max_query_len, batch_state.has_prefill
         )
 
-    def _prepare_padding_mask(
-        self, num_tokens: int, num_tokens_after_padding: int
-    ) -> torch.Tensor:
-        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
-        is_padding[:num_tokens].fill_(False)
-        is_padding[num_tokens:].fill_(True)
-        return is_padding
-
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -1273,9 +1263,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert num_tokens > 0
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
         if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding = self._prepare_padding_mask(
-                num_tokens, num_tokens_after_padding
-            )
+            is_padding[:num_tokens].fill_(False)
+            is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
@@ -1652,12 +1641,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
-        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        max_query_len: int | None = max(scheduler_output.num_scheduled_tokens.values())
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
+            if batch_req_state.has_prefill:
+                # Varlen decode graphs replay decodes only, and their bound
+                # alone would admit a short prefill.
+                max_query_len = None
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,
