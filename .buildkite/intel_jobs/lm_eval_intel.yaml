@@ -23,8 +23,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'uv pip install "gpt-oss[eval]==0.0.5" &&
-      cd tests &&
+      'cd tests &&
       pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'
 - label: LM Eval Large Models(2 GPUs)
   key: lm-eval-large-models-2-gpus
