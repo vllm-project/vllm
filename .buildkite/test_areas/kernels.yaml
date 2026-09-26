@@ -328,6 +328,7 @@ steps:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 6
@@ -353,6 +354,7 @@ steps:
       - tests/kernels/utils.py
       - vllm/_custom_ops.py
       - vllm/envs.py
+      - vllm/model_executor/layers/fused_moe/flashinfer.py
       depends_on:
       - image-build-amd
       commands:
@@ -469,7 +471,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
