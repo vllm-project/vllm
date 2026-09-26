@@ -85,3 +85,36 @@ def fused_add_rms_norm(
 
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
+
+
+rope_supported_args = lambda positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox: (  # noqa: E501
+    # The C++ kernel derives rotary_dim from the cos/sin cache's last dim.
+    rotary_dim == cos_sin_cache.shape[-1]
+    and query.dtype == key.dtype
+    and query.dtype == cos_sin_cache.dtype
+)
+"""vLLM C rotary kernel requires rotary_dim to equal the cos/sin cache width and
+query/key/cache to share a dtype."""
+
+
+@ir.ops.rotary_embedding.register_impl(
+    "vllm_c",
+    supports_args=rope_supported_args,
+    supported=CUDA_ALIKE,
+    inplace=True,
+)
+def rotary_embedding(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    from vllm import _custom_ops as ops
+
+    # ops.rotary_embedding() is in-place; the IR inplace machinery clones the
+    # activations for the functional (default) overload, so mutating here is safe.
+    ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache, is_neox)
+    return query, key

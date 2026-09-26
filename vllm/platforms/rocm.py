@@ -1232,11 +1232,26 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
+        rotary_embedding = (
+            ["aiter", "native"]
+            if (
+                envs.VLLM_ROCM_USE_AITER
+                and (
+                    cc.is_custom_op_enabled("rotary_embedding")
+                    or cc.pass_config.enable_qk_norm_rope_fusion
+                    or cc.pass_config.fuse_rope_kvcache
+                    or cc.pass_config.fuse_qk_norm_rope_kvcache
+                )
+            )
+            else list(default)
+        )
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["native"],
+            rotary_embedding=rotary_embedding,
         )
 
     @classmethod
