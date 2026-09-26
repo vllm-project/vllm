@@ -9,7 +9,6 @@ from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
 class AliceAIConfig(Qwen3NextConfig):
     model_type = "alice_ai"
-    attribute_map = {"num_nextn_predict_layers": "mtp_num_hidden_layers"}
 
     def __init__(
         self,
@@ -21,7 +20,6 @@ class AliceAIConfig(Qwen3NextConfig):
         router_score_function: str = "sigmoid",
         router_bias_correction: bool = True,
         kda_allow_negative_eigenvalues: bool = False,
-        mtp_num_hidden_layers: int = 1,
         number_of_conv_states: int = 3,
         **kwargs: Any,
     ) -> None:
@@ -34,7 +32,6 @@ class AliceAIConfig(Qwen3NextConfig):
             router_score_function=router_score_function,
             router_bias_correction=router_bias_correction,
             kda_allow_negative_eigenvalues=kda_allow_negative_eigenvalues,
-            mtp_num_hidden_layers=mtp_num_hidden_layers,
             number_of_conv_states=number_of_conv_states,
             **kwargs,
         )

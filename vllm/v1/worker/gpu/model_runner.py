@@ -872,13 +872,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
-            # Targets may allocate this override buffer only for MTP.
-            # If absent, keep the regular target hidden states.
             spec_hidden_states = hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                if pre_hc_hidden_states is not None:
-                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),
@@ -2120,15 +2117,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
-            # Targets may allocate this override buffer only for MTP.
-            # If absent, keep the regular target hidden states.
             spec_hidden_states = draft_hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                if pre_hc_hidden_states is not None:
-                    spec_hidden_states = pre_hc_hidden_states[
-                        : draft_hidden_states.size(0)
-                    ]
+                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),

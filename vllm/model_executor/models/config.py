@@ -29,9 +29,6 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         hf_config = model_config.hf_config
-        mtp_num_hidden_layers = getattr(hf_config, "mtp_num_hidden_layers", None)
-        if type(mtp_num_hidden_layers) is not int or mtp_num_hidden_layers != 1:
-            raise NotImplementedError("AliceAI only supports mtp_num_hidden_layers=1")
         if getattr(hf_config, "kda_allow_negative_eigenvalues", None) is not False:
             raise NotImplementedError(
                 "AliceAI requires kda_allow_negative_eigenvalues=false"
@@ -40,6 +37,14 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
             raise ValueError("AliceAI requires router_score_function='sigmoid'")
         if getattr(hf_config, "router_bias_correction", None) is not True:
             raise ValueError("AliceAI requires router_bias_correction=true")
+        mtp_layers = getattr(hf_config, "mtp_num_hidden_layers", 0)
+        if mtp_layers:
+            logger.warning(
+                "AliceAI checkpoint declares %s MTP layer(s), but this "
+                "implementation ignores the MTP configuration and weights; "
+                "MTP speculative decoding is unavailable.",
+                mtp_layers,
+            )
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:

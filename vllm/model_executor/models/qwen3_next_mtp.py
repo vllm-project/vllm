@@ -47,13 +47,7 @@ KVCache = tuple[torch.Tensor, torch.Tensor]
 class Qwen3NextMultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        decoder_layer_type: type[Qwen3NextDecoderLayer] = Qwen3NextDecoderLayer,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         model_config = vllm_config.model_config
@@ -93,7 +87,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         )
 
         self.layers = torch.nn.ModuleList(
-            decoder_layer_type(
+            Qwen3NextDecoderLayer(
                 vllm_config,
                 layer_type="full_attention",
                 prefix=f"{prefix}.layers.{idx}",
@@ -190,13 +184,7 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        model_cls: type[Qwen3NextMultiTokenPredictor] = Qwen3NextMultiTokenPredictor,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         cache_config = vllm_config.cache_config
@@ -210,7 +198,7 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
 
         super().__init__()
         self.config = config
-        self.model = model_cls(
+        self.model = Qwen3NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 

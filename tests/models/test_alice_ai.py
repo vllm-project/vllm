@@ -213,7 +213,7 @@ def _make_final_mixer() -> _AttentionResidualFinalMixer:
     return final
 
 
-def test_attn_res_block_grouping_and_pre_norm_mtp_hidden(
+def test_attn_res_block_grouping_and_final_norm(
     monkeypatch,
 ) -> None:
     calls: list[list[torch.Tensor]] = []
@@ -253,7 +253,6 @@ def test_attn_res_block_grouping_and_pre_norm_mtp_hidden(
     )
     model.config = SimpleNamespace(num_hidden_layers=len(raw_outputs))
     model.attnres_final = _make_final_mixer()
-    model._mtp_hidden_buffer = torch.empty(2, 1)
     model.norm = torch.nn.Linear(1, 1, bias=False)
     with torch.no_grad():
         model.norm.weight.fill_(2)
@@ -265,7 +264,6 @@ def test_attn_res_block_grouping_and_pre_norm_mtp_hidden(
         inputs_embeds=torch.full((2, 1), 10.0),
     )
 
-    torch.testing.assert_close(model._mtp_hidden_buffer, torch.full((2, 1), 65.0))
     torch.testing.assert_close(output, torch.full((2, 1), 130.0))
     torch.testing.assert_close(
         model.layers[0].linear_attn.inputs[0], torch.full((2, 1), 10.0)

@@ -1704,11 +1704,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
     ),
     # [MTP]
-    "AliceAIMTP": _HfExamplesInfo(
-        "yandex/AliceAI-Foundation-80B-A3B-Base",
-        speculative_model="yandex/AliceAI-Foundation-80B-A3B-Base",
-        speculative_method="mtp",
-    ),
     "BailingMoeV25MTPModel": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T",
         speculative_model="inclusionAI/Ring-2.5-1T",

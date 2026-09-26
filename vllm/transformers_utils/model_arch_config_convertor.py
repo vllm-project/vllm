@@ -679,11 +679,6 @@ class Qwen3NextMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
-class AliceAIMTPModelArchConfigConvertor(Qwen3NextMTPModelArchConfigConvertor):
-    def get_num_hidden_layers(self) -> int:
-        return getattr(self.hf_text_config, "mtp_num_hidden_layers", 0)
-
-
 class Qwen4ExpMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(
@@ -813,7 +808,6 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
-    "alice_ai_mtp": AliceAIMTPModelArchConfigConvertor,
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
