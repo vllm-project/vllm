@@ -697,6 +697,20 @@ class TestFixArgTypes:
         original = '{"name": "Alice"}'
         assert engine._fix_arg_types(original, "f") == original
 
+    def test_only_coerced_values_are_rewritten(self):
+        """Separators, whitespace and escapes outside coerced values survive."""
+        tool = _make_tool(
+            "f",
+            {
+                "s": {"type": "string"},
+                "n": {"type": "integer"},
+                "t": {"type": "string"},
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"s":"\\u00e9","n":"42",\n "t":"b"}', "f")
+        assert result == '{"s":"\\u00e9","n":42,\n "t":"b"}'
+
     @pytest.mark.parametrize(
         "properties, input_json, expected_substr",
         [
@@ -1725,8 +1739,8 @@ class TestJsonPrefixTerminator:
             ('{"a": "x\\', '\\"}'),
             ('{"a": [', "]}"),
             ('{"a": {"b": "x', '"}}'),
-            # A dangling separator is completed with null, the one value every
-            # schema type accepts.
+            # A dangling separator is completed with null so the prefix parses;
+            # null may still fail the tool's schema.
             ('{"count": ', "null}"),
             ('{"a": "x", "b": ', "null}"),
             ('{"a": {"b": ', "null}}"),

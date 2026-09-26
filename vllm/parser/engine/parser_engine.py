@@ -438,7 +438,8 @@ class ParserEngine(Parser):
         String values are coerced via :func:`coerce_to_schema_type`.
         Nested objects and arrays are recursed into when the schema
         defines ``properties`` or ``items``.  Without a schema, values
-        stay as strings.
+        stay as strings.  Only the coerced top-level values are
+        re-serialized; see :meth:`_replace_top_level_values`.
         """
         if not self._tools or not func_name:
             return args_json
@@ -453,11 +454,55 @@ class ParserEngine(Parser):
         if not properties:
             return args_json
 
-        _, changed = self._coerce_dict(args, properties)
+        coerced: dict[str, object] = {}
+        for key, value in args.items():
+            prop = properties.get(key)
+            if not isinstance(prop, dict):
+                continue
+            new_value, changed = self._coerce_value(value, prop)
+            if changed:
+                coerced[key] = new_value
 
-        if changed:
-            return json.dumps(args, ensure_ascii=False)
+        if coerced:
+            return self._replace_top_level_values(args_json, coerced)
         return args_json
+
+    @staticmethod
+    def _replace_top_level_values(args_json: str, values: dict[str, object]) -> str:
+        """Re-serialize the top-level members named in *values* in place.
+
+        Every other character of *args_json*, including its separators,
+        whitespace and string escapes, is kept. Converters that pass the
+        model's JSON through verbatim (inkling, granite) stream a prefix of
+        that text, and re-serializing the whole object would stop the flush
+        result from starting with it.
+        """
+        decoder = json.JSONDecoder()
+
+        def skip_ws(i: int) -> int:
+            while args_json[i] in " \t\n\r":
+                i += 1
+            return i
+
+        parts: list[str] = []
+        last = 0
+        pos = skip_ws(0) + 1
+        while True:
+            pos = skip_ws(pos)
+            if args_json[pos] == "}":
+                break
+            key, pos = decoder.raw_decode(args_json, pos)
+            start = skip_ws(skip_ws(pos) + 1)
+            _, end = decoder.raw_decode(args_json, start)
+            if key in values:
+                parts.append(args_json[last:start])
+                parts.append(json.dumps(values[key], ensure_ascii=False))
+                last = end
+            pos = skip_ws(end)
+            if args_json[pos] == ",":
+                pos += 1
+        parts.append(args_json[last:])
+        return "".join(parts)
 
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:

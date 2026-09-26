@@ -475,7 +475,8 @@ class TestTruncatedArgsFlush:
     The converter returns the args span verbatim, so the flush extends the
     streamed prefix with a span that was cut off mid-value. A span with no
     completion (a key, a comma, a partial literal or escape) is closed after its
-    last complete value, which the streamed prefix may not have reached.
+    last complete value, which the streamed prefix may not have reached. Schema
+    coercion at the flush must likewise leave the streamed prefix intact.
     """
 
     @pytest.mark.parametrize(
@@ -525,6 +526,34 @@ class TestTruncatedArgsFlush:
         )
         parser = InklingParser(mock_tokenizer, [tool])
         text = f'{TOOL_JSON}{{"name":"f","args":{args}{end}'
+        results = _stream(parser, mock_request, text, 1)
+        assert json.loads(collect_tool_arguments(results)) == expected
+
+    @pytest.mark.parametrize(
+        "args, expected",
+        [
+            ('{"n":"42","s":"a","t":"b"}', {"n": 42, "s": "a", "t": "b"}),
+            ('{"s":"a","n":"42","t":"b"}', {"s": "a", "n": 42, "t": "b"}),
+            ('{"s":"a","t":"b","n":"42"}', {"s": "a", "t": "b", "n": 42}),
+            ('{"s": "\\u00e9", "n": "42", "t": "b"}', {"s": "é", "n": 42, "t": "b"}),
+            ('{\n "s": "a",\n "n": "42",\n "t": "b"\n}', {"s": "a", "n": 42, "t": "b"}),
+        ],
+        ids=["compact_first", "compact_middle", "compact_last", "escape", "newlines"],
+    )
+    def test_coercion_keeps_the_streamed_prefix(
+        self, mock_tokenizer, mock_request, args, expected
+    ):
+        """The flush's coercion must not rewrite text that was already streamed."""
+        tool = _function_tool(
+            "f",
+            {
+                "s": {"type": "string"},
+                "n": {"type": "integer"},
+                "t": {"type": "string"},
+            },
+        )
+        parser = InklingParser(mock_tokenizer, [tool])
+        text = f'{TOOL_JSON}{{"name":"f","args":{args}}}{END_MESSAGE}'
         results = _stream(parser, mock_request, text, 1)
         assert json.loads(collect_tool_arguments(results)) == expected
 
