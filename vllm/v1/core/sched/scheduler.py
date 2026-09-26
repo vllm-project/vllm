@@ -2338,6 +2338,15 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
+        num_verified_draft_tokens = model_runner_output.num_verified_draft_tokens
+        if self.log_stats and num_verified_draft_tokens is not None:
+            if spec_decoding_stats is None and num_verified_draft_tokens > 0:
+                spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+            if spec_decoding_stats is not None:
+                spec_decoding_stats.num_verified_draft_tokens = (
+                    num_verified_draft_tokens
+                )
+
         if (
             stats := self.make_stats(
                 spec_decoding_stats,

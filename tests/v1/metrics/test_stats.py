@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
+from prometheus_client import CollectorRegistry, Counter
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
@@ -11,7 +15,35 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.spec_decode.metrics import SpecDecodingProm, SpecDecodingStats
 from vllm.v1.utils import compute_iteration_details
+
+
+def test_adaptive_verified_budget_counter_differs_from_proposals(monkeypatch):
+    registry = CollectorRegistry()
+    monkeypatch.setattr(
+        SpecDecodingProm,
+        "_counter_cls",
+        staticmethod(lambda **kwargs: Counter(registry=registry, **kwargs)),
+    )
+    config = SimpleNamespace(
+        enable_adaptive_verification=True,
+        num_speculative_tokens=5,
+    )
+    prom = SpecDecodingProm(config, ["engine"], {0: ["0"]})
+    stats = SpecDecodingStats.new(5)
+    stats.observe_draft(num_draft_tokens=5, num_accepted_tokens=2)
+    stats.num_verified_draft_tokens = 3
+    prom.observe(stats)
+
+    samples = {
+        sample.name: sample.value
+        for metric in registry.collect()
+        for sample in metric.samples
+    }
+    assert samples["vllm:spec_decode_num_draft_tokens_total"] == 5
+    assert samples["vllm:spec_decode_num_verified_draft_tokens_total"] == 3
+    assert samples["vllm:spec_decode_num_accepted_tokens_total"] == 2
 
 
 def test_iteration_stats_repr():

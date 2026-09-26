@@ -1845,6 +1845,37 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
+def test_adaptive_verification_stats_count_actual_budget():
+    scheduler = create_scheduler(num_speculative_tokens=5)
+    [request] = create_requests(num_requests=1, num_tokens=1)
+    scheduler.add_request(request)
+    req_id = request.request_id
+    req_id_to_index = {req_id: 0}
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=[[0]],
+        ),
+    )
+    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, 4, 5]]))
+    output = scheduler.schedule()
+    engine_outputs = scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=[[1, 2, 3]],
+            num_verified_draft_tokens=2,
+        ),
+    )
+
+    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_draft_tokens == 5
+    assert stats.num_verified_draft_tokens == 2
+
+
 def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
     """Drive prefill + one draft/verify step per round for a single request.
 

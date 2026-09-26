@@ -296,6 +296,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Actual draft tokens verified by adaptive verification, across the batch.
+    # None means the model runner did not report an adaptive verification budget.
+    num_verified_draft_tokens: int | None = None
+
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.
