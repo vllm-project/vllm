@@ -278,6 +278,84 @@ class TestToolResultContent:
         assert tool_msg[0]["content"] == "file contents here"
         assert tool_msg[0]["tool_call_id"] == "call_001"
 
+    def test_tool_result_is_error_prefixes_content(self):
+        """is_error=True should mark the tool result so the model can
+        tell failed tool calls from successful ones."""
+        request = _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_001",
+                            "name": "read_file",
+                            "input": {"path": "/tmp/missing.png"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_001",
+                            "content": "No such file or directory",
+                            "is_error": True,
+                        }
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 1
+        assert tool_msg[0]["content"] == "Error: No such file or directory"
+
+    def test_tool_result_is_error_with_empty_content(self):
+        """is_error=True with no content still marks the result as an
+        error rather than emitting an empty string."""
+        request = _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_001",
+                            "name": "read_file",
+                            "input": {"path": "/tmp/missing.png"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_001",
+                            "is_error": True,
+                        }
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 1
+        assert tool_msg[0]["content"] == "Error"
+
+    def test_tool_result_without_is_error_unchanged(self):
+        """Successful tool results (is_error absent/False) are
+        unaffected."""
+        request = self._make_tool_result_request("all good")
+        result = _convert(request)
+
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert tool_msg[0]["content"] == "all good"
+
     def test_tool_result_text_blocks(self):
         request = self._make_tool_result_request(
             [
