@@ -74,7 +74,13 @@ class ProfilerConfig:
     """Proton GPU backend. ``None`` lets Proton select CUPTI automatically."""
 
     proton_mode: str | None = None
-    """Optional backend-specific Proton mode string, such as ``pcsampling``."""
+    """Optional Proton mode, such as ``pcsampling`` or ``periodic_flushing``.
+    Periodic flushing is managed by vLLM and requires tree data."""
+
+    proton_flush_interval: int = Field(default=100, gt=0)
+    """Worker steps per output part in ``periodic_flushing`` mode.
+    Completed phases are exported asynchronously. Files may appear later than
+    the boundary while GPU activity buffers are still being collected."""
 
     proton_hook: ProtonHook | None = None
     """Optional Proton hook. Use ``triton`` to add Triton launch metadata."""
@@ -224,6 +230,7 @@ class ProfilerConfig:
                 ("proton_data", self.proton_data, "tree"),
                 ("proton_backend", self.proton_backend, None),
                 ("proton_mode", self.proton_mode, None),
+                ("proton_flush_interval", self.proton_flush_interval, 100),
                 ("proton_hook", self.proton_hook, None),
                 ("proton_output_format", self.proton_output_format, None),
                 ("proton_graph_attribution", self.proton_graph_attribution, False),
@@ -250,14 +257,38 @@ class ProfilerConfig:
             output_format = self.proton_output_format
             if self.proton_graph_attribution and self.proton_data != "tree":
                 raise ValueError("proton_graph_attribution requires proton_data='tree'")
-            if (
-                self.proton_graph_attribution
-                and self.proton_mode
+            periodic = (
+                self.proton_mode is not None
                 and self.proton_mode.split(":", 1)[0].lower() == "periodic_flushing"
-            ):
+            )
+            if periodic:
+                if self.proton_data != "tree":
+                    raise ValueError("periodic_flushing requires proton_data='tree'")
+                assert self.proton_mode is not None
+                mode_options = self.proton_mode.split(":")[1:]
+                if mode_options:
+                    if len(mode_options) != 1 or mode_options[0] not in (
+                        "format=hatchet",
+                        "format=hatchet_msgpack",
+                    ):
+                        raise ValueError(
+                            "periodic_flushing only supports format=hatchet or "
+                            "format=hatchet_msgpack"
+                        )
+                    mode_format: ProtonOutputFormat = (
+                        "hatchet"
+                        if mode_options[0] == "format=hatchet"
+                        else "hatchet_msgpack"
+                    )
+                    if output_format is not None and output_format != mode_format:
+                        raise ValueError(
+                            "periodic_flushing format conflicts with "
+                            "proton_output_format"
+                        )
+                    self.proton_output_format = output_format = mode_format
+            elif self.proton_flush_interval != 100:
                 raise ValueError(
-                    "proton_graph_attribution is incompatible with periodic_flushing: "
-                    "both manage Proton data phases."
+                    "proton_flush_interval requires periodic_flushing mode"
                 )
             if output_format == "chrome_trace" and self.proton_data != "trace":
                 raise ValueError("chrome_trace output requires proton_data='trace'")
