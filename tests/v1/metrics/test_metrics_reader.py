@@ -125,3 +125,30 @@ def test_vector_metric(test_registry, num_engines):
         assert m.labels["model"] == "llama"
         assert m.labels["engine_index"] in engine_labels
         engine_labels.remove(m.labels["engine_index"])
+
+
+def test_unknown_metric_type_skipped(test_registry, caplog):
+    """Unknown metric types must be skipped, not raise.
+
+    get_metrics_snapshot() is consumed by both the offline LLM.get_metrics()
+    library API and the ORCA endpoint-load-metrics HTTP response header path.
+    Raising on a future vllm:-prefixed metric of a type the reader doesn't
+    handle (e.g. Summary) would crash these live consumers; graceful skip
+    with a debug log keeps them available. See the parallel pattern in
+    vllm/distributed/kv_transfer/kv_connector/v1/offloading/metrics.py.
+    """
+    prometheus_client.Summary(
+        "vllm:test_summary",
+        "Summary metric the reader does not model",
+        labelnames=["model", "engine_index"],
+        registry=test_registry,
+    )
+
+    with caplog.at_level("DEBUG", logger="vllm.v1.metrics.reader"):
+        metrics = get_metrics_snapshot()
+
+    assert metrics == []
+    assert any(
+        "Skipping unknown metric type summary" in record.getMessage()
+        for record in caplog.records
+    )
