@@ -590,8 +590,9 @@ class OffloadingConnectorScheduler:
         sliding_window_groups.sort(key=_sliding_window_sort_key, reverse=True)
 
         # used by _lookup
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
-        self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
@@ -750,14 +751,24 @@ class OffloadingConnectorScheduler:
         self,
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
+        lookup_groups: tuple[int, ...] | None = None,
     ) -> int | None:
         """Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
         Iterates full-attention groups first (prefix lookup), then sliding-window
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
         can invalidate an earlier group's result, so the loop re-runs when that
-        happens until num_hit_tokens converges.
+        happens until num_hit_tokens converges. `lookup_groups` restricts the
+        lookup to a subset of the groups; by default every group must hit.
         """
+        if lookup_groups is None:
+            lookup_groups = self._lookup_groups
+        all_groups = lookup_groups
+        sliding_window_groups = tuple(
+            group_idx
+            for group_idx in self._sliding_window_groups
+            if group_idx in all_groups
+        )
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
         if max_num_new_tokens is not None:
@@ -769,7 +780,7 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens,
                 num_computed_tokens + req_status.max_load_tokens,
             )
-        if self._sliding_window_groups:
+        if sliding_window_groups:
             # the last prompt token has to be recomputed to get the logprobs
             # for sliding window attention, we must reduce by 1 to make sure
             # we still have a hit after reduction
@@ -782,7 +793,6 @@ class OffloadingConnectorScheduler:
 
         num_hit_tokens: int = 0
         defer_lookup = False
-        lookup_groups = self._lookup_groups
 
         # Tracks which eagle groups have already popped their volatile trailing chunk
         # in the current convergence iteration. Reset when a non-eagle group
@@ -897,11 +907,11 @@ class OffloadingConnectorScheduler:
                         # make another iteration on all groups to check
                         # if we still need to defer lookup
                         defer_lookup = False
-                        lookup_groups = self._lookup_groups
+                        lookup_groups = all_groups
                     elif looked_up_sliding_window and not lookup_groups:
                         # we need another iteration to confirm previously looked up
                         # sliding window works with the new_num_hit_tokens
-                        lookup_groups = self._sliding_window_groups
+                        lookup_groups = sliding_window_groups
 
                 looked_up_sliding_window |= sliding_window_size_in_chunks is not None
                 num_hit_tokens = new_num_hit_tokens
@@ -915,9 +925,9 @@ class OffloadingConnectorScheduler:
 
         # Possibly delay the request if any hit chunk is already being loaded.
         if self._chunks_being_loaded:
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
+            for group_idx in all_groups:
+                group_config = self.config.kv_group_configs[group_idx]
+                group_state = req_status.group_states[group_idx]
                 tokens_per_chunk = group_config.tokens_per_chunk
                 sliding_window_size_in_chunks = group_config.load_window_size_in_chunks(
                     num_computed_tokens + num_hit_tokens
@@ -970,10 +980,23 @@ class OffloadingConnectorScheduler:
         if complete_hit is None or not self.config.supports_partial_tail:
             return complete_hit
 
+        # A recurrent "align" group keeps one state per producer request, at
+        # that prompt's tail, so it rarely has a state at a full-attention chunk
+        # boundary; requiring one there (complete_hit) would hide every partial
+        # tail beyond the first recurrent block. Anchor the search on the
+        # full-attention prefix alone and check the recurrent groups only at
+        # the candidate boundary, where their state actually lives.
+        full_attention_hit = self._lookup_complete_chunks(
+            req_status, max_num_new_tokens, lookup_groups=self._full_attention_groups
+        )
+        if full_attention_hit is None:
+            return None if complete_hit == 0 else complete_hit
+        anchor_hit = max(complete_hit, full_attention_hit)
+
         local_tokens = req_status.num_locally_computed_tokens
-        complete_boundary = local_tokens + complete_hit
+        anchor_boundary = local_tokens + anchor_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_end = complete_boundary + self._partial_tail_block_size
+        block_end = anchor_boundary + self._partial_tail_block_size
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -983,11 +1006,11 @@ class OffloadingConnectorScheduler:
                 local_tokens + req_status.max_load_tokens,
             )
         max_boundary = round_down(max_boundary, tokens_per_hash)
-        if max_boundary <= complete_boundary:
+        if max_boundary <= anchor_boundary:
             return complete_hit
 
         pending = False
-        for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
+        for boundary in range(max_boundary, anchor_boundary, -tokens_per_hash):
             boundary_pending = False
             boundary_missed = False
             boundary_keys = []
