@@ -20,11 +20,11 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
     kda_prefill_checkpoint_alignment,
 )
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -674,7 +674,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
             None
         )
-        self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        self._checkpoint_exporter: MambaPrefillCheckpointExporter | None = None
         if self.kda_prefill_backend == "flashkda":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
@@ -688,7 +688,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
+            self._checkpoint_exporter = MambaPrefillCheckpointExporter()
         elif self.kda_prefill_backend == "flashinfer":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             H, D = self.local_num_heads, self.head_dim
@@ -1116,7 +1116,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         assert self._checkpoint_exporter is not None
                         self._checkpoint_exporter.export(
                             checkpoint,
-                            raw_qkv=mixed_qkv_ns,
+                            conv_input=mixed_qkv_ns,
                             conv_state=conv_state,
                             recurrent_checkpoint=checkpoint_state,
                             recurrent_state=recurrent_state,

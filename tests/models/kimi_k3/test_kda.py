@@ -14,9 +14,9 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+    MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
@@ -1548,9 +1548,11 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     checkpoint_state_indices = torch.tensor(
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
-    FlashKDAPrefillCheckpointExporter().export(
-        MambaPrefillCheckpointMetadata(checkpoint_offsets, checkpoint_state_indices),
-        raw_qkv=conv_input,
+    MambaPrefillCheckpointExporter().export(
+        MambaPrefillCheckpointMetadata(
+            checkpoint_offsets, checkpoint_state_indices, [16, 31]
+        ),
+        conv_input=conv_input,
         conv_state=conv_state,
         recurrent_checkpoint=checkpoint_state,
         recurrent_state=recurrent_state,

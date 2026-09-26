@@ -48,7 +48,7 @@ class Mamba1AttentionMetadataBuilder(
             common.num_prefills > 0
             and self.vllm_config.cache_config.mamba_cache_mode == "all"
         ):
-            cu_chunk_seqlen_p, _, last_chunk_indices_p = (
+            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p, _ = (
                 self._build_chunk_metadata_tensors(
                     self.kv_cache_spec.block_size,
                     common,

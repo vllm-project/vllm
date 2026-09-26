@@ -5,21 +5,23 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointExporter,
+from vllm.model_executor.layers.mamba.checkpoint.builder import (
     MambaPrefillCheckpointMetadata,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
-def kda_prefill_checkpoint_alignment(backend: str) -> int | None:
-    return 16 if backend == "flashkda" else None
-
-
 @dataclass(frozen=True)
-class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
-    """Store FlashKDA recurrent and convolution checkpoint states."""
+class MambaPrefillCheckpointExporter:
+    """Write a mid-prefill checkpoint into the paged conv and SSM states.
+
+    The conv half reads a raw pre-convolution window ending on the checkpoint.
+    The recurrent half copies one state row per request: backends whose scan
+    emits a dedicated buffer pass it directly, while those whose scan
+    materializes every chunk state, such as Mamba2, pass that array plus
+    ``recurrent_row_ids`` to select the checkpoint rows out of it.
+    """
 
     state_len: int | None = None
 
@@ -27,16 +29,30 @@ class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
         self,
         checkpoint: MambaPrefillCheckpointMetadata,
         *,
-        raw_qkv: torch.Tensor,
+        conv_input: torch.Tensor,
         conv_state: torch.Tensor,
         recurrent_checkpoint: torch.Tensor,
         recurrent_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        recurrent_row_ids: torch.Tensor | None = None,
     ) -> None:
+        """Store the checkpoint states.
+
+        Args:
+            checkpoint: Per-request offsets and destination blocks.
+            conv_input: Pre-convolution activations, ``(num_tokens, width)``.
+            conv_state: Paged conv state to write.
+            recurrent_checkpoint: Source recurrent states.
+            recurrent_state: Paged SSM state to write.
+            cu_seqlens: Query start locations for the exported requests.
+            recurrent_row_ids: Row of ``recurrent_checkpoint`` per request.
+                Defaults to one row per request, in order.
+
+        """
         state_len = (
             self.state_len if self.state_len is not None else conv_state.shape[-1]
         )
-        width = raw_qkv.shape[-1]
+        width = conv_input.shape[-1]
         recurrent_row_size = recurrent_checkpoint[0].numel()
         block_size = 256
         store_cache_checkpoints_kernel[
@@ -45,15 +61,16 @@ class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
                 triton.cdiv(max(width * state_len, recurrent_row_size), block_size),
             )
         ](
-            raw_qkv,
+            conv_input,
             conv_state,
             recurrent_checkpoint,
             recurrent_state,
             cu_seqlens,
             checkpoint.checkpoint_offsets,
             checkpoint.state_indices,
-            raw_qkv.stride(0),
-            raw_qkv.stride(1),
+            recurrent_row_ids,
+            conv_input.stride(0),
+            conv_input.stride(1),
             conv_state.stride(0),
             conv_state.stride(1),
             conv_state.stride(2),
@@ -68,6 +85,9 @@ class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
         )
 
 
+@triton.heuristics(
+    {"HAS_RECURRENT_ROW_IDS": lambda args: args["recurrent_row_ids_ptr"] is not None}
+)
 @triton.jit
 def store_cache_checkpoints_kernel(
     x_ptr,
@@ -77,6 +97,7 @@ def store_cache_checkpoints_kernel(
     query_start_loc_ptr,
     checkpoint_offsets_ptr,
     checkpoint_state_indices_ptr,
+    recurrent_row_ids_ptr,
     x_stride_0: tl.constexpr,
     x_stride_1: tl.constexpr,
     state_stride_0: tl.constexpr,
@@ -90,6 +111,7 @@ def store_cache_checkpoints_kernel(
     RECURRENT_ROW_SIZE: tl.constexpr,
     NULL_STATE_IDX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    HAS_RECURRENT_ROW_IDS: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -119,8 +141,15 @@ def store_cache_checkpoints_kernel(
     )
 
     valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
+    # The recurrent source is one row per program by default. Backends whose
+    # scan already materializes every state, such as Mamba2, index into that
+    # array instead, which makes the gather part of the load.
+    if HAS_RECURRENT_ROW_IDS:
+        recurrent_row = tl.load(recurrent_row_ids_ptr + seq_idx).to(tl.int64)
+    else:
+        recurrent_row = seq_idx
     recurrent = tl.load(
-        recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
+        recurrent_checkpoint_ptr + recurrent_row * checkpoint_stride_0 + cols,
         mask=valid_recurrent,
     )
     tl.store(

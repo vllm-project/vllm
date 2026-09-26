@@ -288,13 +288,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
 
+    @staticmethod
     def _compute_chunk_metadata(
-        self,
         chunk_size: int,
         num_prefills: int,
         num_computed_tokens_p_cpu: torch.Tensor,
         query_start_loc_p_cpu: torch.Tensor,
-    ) -> tuple[list[int], list[int], list[int]]:
+        checkpoint_offsets_p: list[int] | None = None,
+    ) -> tuple[list[int], list[int], list[int], list[int]]:
         """Compute chunk-specific metadata for Mamba models.
 
         The code below carefully constructs the chunks such that:
@@ -306,20 +307,34 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         of prefix caching for mamba (wip). We need to take care
         of the interaction with chunked prefill in order to
         satisfy constraint (2).
+
+        `checkpoint_offsets_p[i]` forces an extra chunk end that many tokens
+        into row i's query (0 = none), because the SSD scan only materializes
+        states at chunk ends. Returns its chunk index per row, or -1.
         """
         # TODO (tdoublep): This code could probably be optimized.
         cu_chunk_seqlen = []
         seq_idx = []
         last_chunk_indices = []
+        checkpoint_chunk_indices = []
         seqlen_pos = 0
 
+        # A checkpoint splits its request into two segments so that a chunk
+        # ends exactly on it; each segment then chunks by the rules below.
+        segments = []
         for req_idx in range(num_prefills):
-            this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
-            this_new_tokens = (
+            computed = num_computed_tokens_p_cpu[req_idx].item()
+            tokens = (
                 query_start_loc_p_cpu[req_idx + 1].item()
                 - query_start_loc_p_cpu[req_idx].item()
             )
+            ckpt = checkpoint_offsets_p[req_idx] if checkpoint_offsets_p else 0
+            if ckpt:
+                segments.append((req_idx, computed, ckpt, True))
+            segments.append((req_idx, computed + ckpt, tokens - ckpt, False))
+        checkpoint_chunk_indices = [-1] * num_prefills
 
+        for req_idx, this_num_computed, this_new_tokens, is_ckpt_end in segments:
             # if computed tokens are not chunk-aligned, use the first
             # chunk to finish it off
             if this_num_computed % chunk_size != 0:
@@ -343,11 +358,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 this_new_tokens -= chunk_len
 
             assert this_new_tokens == 0
-            last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
+            if is_ckpt_end:
+                checkpoint_chunk_indices[req_idx] = len(cu_chunk_seqlen) - 1
+            else:
+                last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
 
         cu_chunk_seqlen.append(seqlen_pos)
 
-        return cu_chunk_seqlen, seq_idx, last_chunk_indices
+        return cu_chunk_seqlen, seq_idx, last_chunk_indices, checkpoint_chunk_indices
 
     def _prefill_cpu_metadata(
         self,
@@ -381,9 +399,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         chunk_size: int,
         common: M,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        checkpoint_offsets_p: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute chunk metadata and return as device tensors.
-        Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
+        Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p,
+        checkpoint_chunk_idx_p). The last is None unless a row checkpoints;
+        it has one entry per prefill row, holding the logical chunk that ends
+        on the checkpoint, and 0 for rows that decline.
         """
         num_prefills = common.num_prefills
 
@@ -394,11 +416,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             common.num_decode_tokens,
         )
 
-        cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
-            chunk_size,
-            num_prefills,
-            num_computed_tokens_p_cpu,
-            query_start_loc_p_cpu,
+        cu_chunk_seqlen, seq_idx, last_chunk_indices, ckpt_idxs = (
+            self._compute_chunk_metadata(
+                chunk_size,
+                num_prefills,
+                num_computed_tokens_p_cpu,
+                query_start_loc_p_cpu,
+                checkpoint_offsets_p,
+            )
         )
 
         device = common_attn_metadata.query_start_loc.device
@@ -411,7 +436,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         last_chunk_indices_p = async_tensor_h2d(
             last_chunk_indices, dtype=torch.int32, device=device
         )
-        return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
+        ckpt_idx_p = (
+            async_tensor_h2d(
+                [max(idx, 0) for idx in ckpt_idxs], dtype=torch.int64, device=device
+            )
+            if any(idx >= 0 for idx in ckpt_idxs)
+            else None
+        )
+        return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p, ckpt_idx_p
 
     def _compute_prefix_caching_block_indices(
         self,

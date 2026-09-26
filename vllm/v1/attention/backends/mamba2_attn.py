@@ -7,6 +7,10 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -109,6 +113,11 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
+    # Internal prefill checkpoints, one entry per prefill row. The chunk
+    # index selects the varlen_states row holding the checkpoint state.
+    checkpoint_chunk_idx: torch.Tensor | None = None
+    checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -128,6 +137,9 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
 
     def build(
         self,
@@ -146,6 +158,8 @@ class Mamba2AttentionMetadataBuilder(
         seq_idx_p = None
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
+        checkpoint_chunk_idx = None
+        checkpoint_meta = None
         prep_initial_states = False
 
         # Compute seq_idx for prefill only
@@ -163,12 +177,29 @@ class Mamba2AttentionMetadataBuilder(
                 )
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
-            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
-                self._build_chunk_metadata_tensors(
-                    self.chunk_size,
-                    common,
+            checkpoint_offsets_p = None
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+                first = common.num_reqs - common.num_prefills
+                checkpoint = self.checkpoint_builder.build(
                     common_attn_metadata,
+                    list(range(first, common.num_reqs)),
                 )
+                if checkpoint is not None:
+                    # The host offsets place the chunk boundary below; the
+                    # tensors are handed to the exporter untouched.
+                    checkpoint_offsets_p = checkpoint.offsets
+                    checkpoint_meta = checkpoint
+
+            (
+                cu_chunk_seqlen_p,
+                seq_idx_p,
+                last_chunk_indices_p,
+                checkpoint_chunk_idx,
+            ) = self._build_chunk_metadata_tensors(
+                self.chunk_size,
+                common,
+                common_attn_metadata,
+                checkpoint_offsets_p,
             )
 
         return replace(
@@ -178,4 +209,6 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            checkpoint_chunk_idx=checkpoint_chunk_idx,
+            checkpoint_meta=checkpoint_meta,
         )
