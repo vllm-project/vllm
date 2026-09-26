@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-import functools
-import os
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -117,46 +115,9 @@ def _mm_prefix_wrapper_cls() -> type | None:
     return getattr(flashinfer, MM_PREFIX_WRAPPER_NAME, None)
 
 
-@functools.cache
-def _mm_prefix_jit_available(
-    dtype_q: torch.dtype, dtype_kv: torch.dtype, dtype_o: torch.dtype, head_dim: int
-) -> bool:
-    """Whether the mm-prefix wrapper can actually be built and loaded.
-
-    The wrapper builds its JIT module eagerly in its constructor, so
-    advertising the capability without this probe would turn a FlashInfer
-    without the wrapper, a missing compiler or a disabled JIT into a startup
-    crash after backend selection instead of a fallback before it. Compile
-    success cannot be guaranteed without trying; a successful build stays in
-    FlashInfer's process-level module cache and is reused when the wrapper is
-    constructed.
-    """
-    if os.environ.get("FLASHINFER_DISABLE_JIT"):
-        return False
-    try:
-        if _mm_prefix_wrapper_cls() is None:
-            # The installed FlashInfer predates the packaged mm-prefix
-            # wrapper; there is no supported way to express this mask here.
-            return False
-        from flashinfer.jit.attention import (
-            gen_batch_prefill_bidirectional_ranges_module,
-        )
-
-        gen_batch_prefill_bidirectional_ranges_module(
-            dtype_q, dtype_kv, dtype_o, torch.int32, head_dim, head_dim
-        ).build_and_load()
-    except Exception:
-        logger.warning(
-            "FlashInfer mm-prefix attention is unavailable "
-            "(dtype_q=%s, dtype_kv=%s, head_dim=%s); not advertising "
-            "mm-prefix support.",
-            dtype_q,
-            dtype_kv,
-            head_dim,
-            exc_info=True,
-        )
-        return False
-    return True
+# KV cache dtypes the mm-prefix variant reads. An NVFP4 cache is read through
+# the variant's scale-factor tensors (kv_cache_sf).
+_MM_PREFIX_KV_CACHE_DTYPES = (None, "auto", "float16", "bfloat16", "nvfp4")
 
 
 trtllm_workspace_buffer = None
@@ -537,92 +498,18 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        """mm-prefix runs through a JIT attention variant on the fa2 path.
+        """mm-prefix runs through FlashInfer's bidirectional-ranges prefill wrapper.
 
-        Advertised only when the variant can actually be built now: the
-        wrapper compiles it eagerly in its constructor, so a missing
-        toolchain or ``FLASHINFER_DISABLE_JIT`` must demote this backend
-        before selection instead of crashing startup after it.
+        Advertised when the installed FlashInfer provides the wrapper and the KV
+        cache dtype is one the variant reads. FlashInfer builds the JIT module
+        itself when the wrapper is constructed.
         """
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None or vllm_config.model_config is None:
             return False
-        model_config = vllm_config.model_config
-        cache_dtype = vllm_config.cache_config.cache_dtype
-        if cls._mm_prefix_kv_cache_reason(cache_dtype) is not None:
-            return False
-        head_dim = model_config.get_head_size()
-        dtype = model_config.dtype
-        kv_dtype = cls._mm_prefix_variant_kv_dtype(cache_dtype, dtype)
-        return _mm_prefix_jit_available(dtype, kv_dtype, dtype, head_dim)
-
-    @classmethod
-    def _mm_prefix_variant_kv_dtype(
-        cls, cache_dtype: "CacheDType | None", model_dtype: torch.dtype
-    ) -> torch.dtype:
-        """KV dtype the mm-prefix variant is compiled for.
-
-        An explicit unquantized cache dtype overrides the model dtype, so the
-        variant is built for the dtype the kernel will actually read.
-        """
-        if cache_dtype is None or cache_dtype == "auto":
-            return model_dtype
-        unquantized = {"float16": torch.float16, "bfloat16": torch.bfloat16}
-        if cache_dtype in unquantized:
-            return unquantized[cache_dtype]
-        return cls.get_dtype_for_flashinfer(cache_dtype)
-
-    @classmethod
-    def _mm_prefix_kv_cache_reason(
-        cls,
-        cache_dtype: "CacheDType | None",
-        device_capability: "DeviceCapability | None" = None,
-    ) -> str | None:
-        """Why this KV cache dtype cannot serve mm-prefix, or None.
-
-        The mask-owning variant runs on the fa2 prefill kernels, because those
-        are the only ones that evaluate a custom ``LogitsMask`` on every KV
-        tile. The variant itself handles a packed NVFP4 cache: it declares the
-        per-block scale factors as additional tensors and the forward path
-        hands them over as ``kv_cache_sf``, which a conditional GPU test
-        exercises directly.
-
-        What is not available is a selectable end-to-end NVFP4 configuration.
-        Upstream, the NVFP4 cache dtype validates only on SM100, where it is
-        served by the trtllm-gen kernels, and those cannot run a custom
-        attention variant. The combination of this variant with the upstream
-        SM100 KV update and cache layout has not been validated, so the gate
-        stays conservative and rejects it rather than advertising a path no
-        test covers. The store-time scale-search variants
-        (e.g. ``nvfp4_4over6``) are a separate matter: their scale search
-        exists only in the trtllm-gen store kernel.
-        """
-        if cache_dtype is None or cache_dtype in ("auto", "float16", "bfloat16"):
-            return None
-        if cache_dtype.startswith("nvfp4"):
-            if cache_dtype != "nvfp4":
-                return (
-                    f"mm_prefix is not supported with {cache_dtype}: the "
-                    "store-time scale search is implemented only in the "
-                    "trtllm-gen kernels, which cannot run the mm-prefix "
-                    "attention variant"
-                )
-            is_sm100 = (
-                device_capability.major == 10
-                if device_capability is not None
-                else current_platform.is_device_capability_family(100)
-            )
-            if is_sm100:
-                return (
-                    "mm_prefix is not supported with an NVFP4 KV cache on "
-                    "SM100: the validated upstream NVFP4 path uses the "
-                    "trtllm-gen kernels, which cannot run the mm-prefix "
-                    "attention variant"
-                )
-            return None
         return (
-            f"mm_prefix is not supported with a {cache_dtype} KV cache on the "
-            "fa2 attention-variant path"
+            _mm_prefix_wrapper_cls() is not None
+            and vllm_config.cache_config.cache_dtype in _MM_PREFIX_KV_CACHE_DTYPES
         )
 
     @classmethod
@@ -691,29 +578,19 @@ class FlashInferBackend(AttentionBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         if use_mm_prefix:
-            kv_reason = cls._mm_prefix_kv_cache_reason(
-                kv_cache_dtype, device_capability
-            )
-            if kv_reason is not None:
-                return kv_reason
+            if kv_cache_dtype not in _MM_PREFIX_KV_CACHE_DTYPES:
+                return f"mm_prefix is not supported with a {kv_cache_dtype} KV cache"
+            if kv_cache_dtype == "nvfp4" and device_capability.major == 10:
+                return (
+                    "mm_prefix is not supported with an NVFP4 KV cache on SM100, "
+                    "where trtllm-gen serves it and cannot run the mm-prefix variant"
+                )
             if has_sink:
                 return "mm_prefix is not supported with sinks"
             if block_size is not None and block_size >= 128:
                 return (
                     f"mm_prefix requires the fa2 prefill path, but kernel "
                     f"page size {block_size} only runs on trtllm-gen"
-                )
-            # Probe with this layer group's actual head size and dtypes:
-            # hybrid models select their backend per group, and a wrapper that
-            # only compiled for the global head size would first be built (and
-            # possibly fail) at runtime otherwise.
-            kv_torch_dtype = cls._mm_prefix_variant_kv_dtype(kv_cache_dtype, dtype)
-            if not _mm_prefix_jit_available(dtype, kv_torch_dtype, dtype, head_size):
-                return (
-                    "mm_prefix requires FlashInfer's mm-prefix attention, which "
-                    f"is unavailable for head_size={head_size}, dtype={dtype} "
-                    "(disabled JIT, missing toolchain, or a FlashInfer build "
-                    "without it)"
                 )
         return None
 
@@ -1181,19 +1058,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "path; it cannot run with explicitly forced trtllm-gen "
                     "attention."
                 )
-            if not _mm_prefix_jit_available(
-                self.q_data_type_prefill,
-                self.kv_cache_dtype,
-                self.model_config.dtype,
-                self.head_dim,
-            ):
-                raise RuntimeError(
-                    "FlashInfer mm-prefix attention cannot be built for "
-                    f"this KV-cache group (head_dim={self.head_dim}, "
-                    f"q_dtype={self.q_data_type_prefill}, "
-                    f"kv_dtype={self.kv_cache_dtype}). Failing at engine "
-                    "start instead of at the first multimodal batch."
-                )
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
         decode_backend = (
@@ -1512,18 +1376,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_mm_prefill_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
         """FlashInfer's prefill wrapper for the mm-prefix mask.
 
-        The capability probe already built the module for this exact
-        combination, so construction here reuses FlashInfer's process-level
-        JIT cache rather than compiling again.
+        FlashInfer builds the JIT module for this combination on construction.
         """
         if self._mm_prefill_wrapper is None:
             assert not self.use_dcp
             dtype = self.model_config.dtype
             wrapper_cls = _mm_prefix_wrapper_cls()
             assert wrapper_cls is not None, (
-                "mm-prefix was advertised without FlashInfer's "
-                f"{MM_PREFIX_WRAPPER_NAME}; the capability probe and this "
-                "construction disagree."
+                f"mm-prefix advertised without FlashInfer's {MM_PREFIX_WRAPPER_NAME}"
             )
             self._mm_prefill_wrapper = wrapper_cls(
                 self._get_workspace_buffer(),

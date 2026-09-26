@@ -655,41 +655,29 @@ and clamp-off window formulas produce different outputs on this batch."""
 
 
 @pytest.mark.parametrize(
-    ("capability", "head_size", "block_size", "kv_dtype", "sink", "jit", "reason"),
+    ("capability", "block_size", "kv_dtype", "sink", "reason"),
     [
-        # Plain NVFP4 on pre-SM100 runs on fa2 through the scale-factor tensors.
-        ((8, 0), 128, 16, "nvfp4", False, True, None),
-        # SM100 serves NVFP4 with trtllm-gen, which cannot run a custom variant.
-        ((10, 0), 128, 16, "nvfp4", False, True, "SM100"),
+        ((8, 0), 16, "nvfp4", False, None),
+        ((8, 0), 16, "float16", False, None),
+        # SM100 serves NVFP4 with trtllm-gen, which cannot run the variant.
+        ((10, 0), 16, "nvfp4", False, "SM100"),
         # The store-time scale search exists only in trtllm-gen.
-        ((8, 0), 128, 16, "nvfp4_4over6", False, True, "nvfp4_4over6"),
-        ((8, 0), 128, 16, "fp8", False, True, "fp8"),
-        ((8, 0), 128, 16, None, True, True, "sink"),
+        ((8, 0), 16, "nvfp4_4over6", False, "nvfp4_4over6"),
+        ((8, 0), 16, "fp8", False, "fp8"),
+        ((8, 0), 16, None, True, "sink"),
         # trtllm-only page sizes fail at selection, not at the first build().
-        ((8, 0), 128, 128, None, False, True, "page size 128"),
-        ((8, 0), 128, 64, None, False, True, None),
-        # Hybrid models select per group, so the probe sees the group's head size.
-        ((8, 0), 256, 16, "float16", False, True, None),
-        ((8, 0), 512, 16, "float16", False, True, None),
-        ((8, 0), 128, 16, None, False, False, "mm-prefix attention"),
+        ((8, 0), 128, None, False, "page size 128"),
+        ((8, 0), 64, None, False, None),
     ],
 )
 def test_flashinfer_mm_prefix_supports_combination(
-    monkeypatch, capability, head_size, block_size, kv_dtype, sink, jit, reason
+    capability, block_size, kv_dtype, sink, reason
 ):
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    probed: list[tuple] = []
-
-    def probe(*args) -> bool:
-        probed.append(args)
-        return jit
-
-    monkeypatch.setattr(fi, "_mm_prefix_jit_available", probe)
-
-    result = fi.FlashInferBackend.supports_combination(
-        head_size=head_size,
+    result = FlashInferBackend.supports_combination(
+        head_size=128,
         dtype=torch.bfloat16,
         kv_cache_dtype=kv_dtype,
         block_size=block_size,
@@ -700,13 +688,10 @@ def test_flashinfer_mm_prefix_supports_combination(
         device_capability=DeviceCapability(*capability),
     )
 
-    if reason is not None:
+    if reason is None:
+        assert result is None
+    else:
         assert reason in result
-        return
-    assert result is None
-    expected_kv = {"nvfp4": torch.uint8, "float16": torch.float16}.get(kv_dtype)
-    if expected_kv is not None:
-        assert probed[-1] == (torch.bfloat16, expected_kv, torch.bfloat16, head_size)
 
 
 @pytest.mark.parametrize(
@@ -831,13 +816,12 @@ def test_flashinfer_mm_prefix_text_only_and_decode_only_keep_causal():
     from vllm.config import set_current_vllm_config
     from vllm.v1.attention.backends.flashinfer import (
         FlashInferMetadataBuilder,
-        _mm_prefix_jit_available,
+        _mm_prefix_wrapper_cls,
     )
 
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
-    mc = vllm_config.model_config
-    if not _mm_prefix_jit_available(mc.dtype, mc.dtype, mc.dtype, HEAD_SIZE):
-        pytest.skip("FlashInfer mm-prefix attention unavailable here")
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
     layer_names = ["model.layers.0.self_attn.attn"]
     device = torch.device("cuda:0")
 
@@ -881,7 +865,7 @@ def test_flashinfer_mm_prefix_kv_cache_path():
     from vllm.v1.attention.backends.flashinfer import (
         FlashInferImpl,
         FlashInferMetadataBuilder,
-        _mm_prefix_jit_available,
+        _mm_prefix_wrapper_cls,
     )
     from vllm.v1.kv_cache_interface import KVCacheLayout
 
@@ -890,8 +874,8 @@ def test_flashinfer_mm_prefix_kv_cache_path():
     sliding_window = FLASHINFER_MM_SLIDING_WINDOW
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(sliding_window)
     mc = vllm_config.model_config
-    if not _mm_prefix_jit_available(mc.dtype, mc.dtype, mc.dtype, HEAD_SIZE):
-        pytest.skip("FlashInfer mm-prefix attention unavailable here")
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
 
     from types import MethodType
 
@@ -1013,14 +997,13 @@ def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
     from vllm.config import set_current_vllm_config
     from vllm.v1.attention.backends.flashinfer import (
         FlashInferMetadataBuilder,
-        _mm_prefix_jit_available,
+        _mm_prefix_wrapper_cls,
     )
 
     device = torch.device("cuda:0")
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
-    mc = vllm_config.model_config
-    if not _mm_prefix_jit_available(mc.dtype, mc.dtype, mc.dtype, HEAD_SIZE):
-        pytest.skip("FlashInfer mm-prefix attention unavailable here")
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
 
     # Reordered batches put decodes first. Request 0: a plain decode.
     # Request 1: query_len 1 but still prefilling (chunked tail at absolute

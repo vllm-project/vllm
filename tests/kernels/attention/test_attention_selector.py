@@ -808,8 +808,8 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
     ).create_engine_config()
     with (
         patch(
-            "vllm.v1.attention.backends.flashinfer._mm_prefix_jit_available",
-            return_value=native_mm_prefix,
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+            return_value=object if native_mm_prefix else None,
         ),
         set_current_vllm_config(config),
     ):
@@ -841,8 +841,8 @@ def test_mm_prefix_priority_without_changing_causal_default(
     ).create_engine_config()
     with (
         patch(
-            "vllm.v1.attention.backends.flashinfer._mm_prefix_jit_available",
-            return_value=native_mm_prefix,
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+            return_value=object if native_mm_prefix else None,
         ),
         set_current_vllm_config(config),
     ):
