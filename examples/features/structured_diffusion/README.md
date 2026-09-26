@@ -74,3 +74,21 @@ thought in its prompt, so the answer slots condition on it. The noise draws
 of a decision share one thought. `diagnostics.thought` returns the text, its
 length in tokens, whether the model closed the channel itself and the
 generation time.
+
+## Laya
+
+`--backend laya` serves the same `/v1/systemone` and `/v1/chat/completions`
+routes and schema from a [Laya](https://github.com/NandhaKishorM/laya)
+encoder, which vLLM runs as a `token_classify` model. Convert and serve the
+checkpoint as in [examples/pooling/token_classify/laya](../../pooling/token_classify/laya/README.md),
+then:
+
+```bash
+python examples/features/structured_diffusion/structured_server.py --backend laya \
+    --upstream http://127.0.0.1:8000 --model laya --tokenizer ./laya-vllm
+```
+
+Each question is one deterministic forward pass, so there is no canvas and
+`samples` has no effect. `depends_on`, `ask_if`, `ask` and `instructions`
+work; earlier answers are restated at the end of the state. `think`, images
+and `/v1/raw/chat/completions` need a generative model and are rejected.

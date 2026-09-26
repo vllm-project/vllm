@@ -717,6 +717,10 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
+    # Needs examples/pooling/token_classify/laya/convert_checkpoint.py first
+    "LayaForDecision": _HfExamplesInfo(
+        "convaiinnovations/laya", is_available_online=False
+    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),

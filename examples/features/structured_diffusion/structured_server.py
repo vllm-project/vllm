@@ -76,24 +76,37 @@ Serve the model with a canvas that holds the answer template, for example:
 then run this in front of it:
   python structured_server.py --upstream http://127.0.0.1:8000 \
       --tokenizer google/diffusiongemma-26B-A4B-it --canvas 64 --port 8011
+
+--backend laya serves the same routes from a Laya encoder served as a
+token_classify model (see examples/pooling/token_classify/laya). Each
+question is its own forward pass, so there is no canvas or chunking, and a
+read is deterministic, so "samples" has no effect. depends_on, ask_if, ask
+and instructions work, with earlier answers restated at the end of the
+state. think, images and /v1/raw/chat/completions are not available:
+  vllm serve ./laya-vllm --served-model-name laya
+  python structured_server.py --backend laya --upstream http://127.0.0.1:8000 \
+      --model laya --tokenizer ./laya-vllm --port 8011
 """
 
 import argparse
+import importlib
 import json
 import math
 import os
 import random
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pybase64 as base64
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 ARGS = None
 TOK = None
@@ -114,6 +127,9 @@ SCAFFOLD_TEXT = "<|channel>thought\n<channel|>"
 SCAFFOLD = None
 THOUGHT_OPEN = None
 THOUGHT_CLOSE = None
+# --backend laya: the checkpoint's laya_config and its prompt builder
+LAYA = None
+laya_prompts = None
 
 
 # ----------------------------------------------------------------------------
@@ -725,6 +741,16 @@ def answer_name(q, a):
     return a["label"] if q["type"] == "noul" else a.get("choice", a.get("level"))
 
 
+def skip_reason(q, by_id, answered):
+    """The first ask_if condition of ``q`` that the answers so far fail, or
+    None when ``q`` is asked."""
+    for dep, vals in q["ask_if"].items():
+        was = answer_name(by_id[dep], answered.get(dep))
+        if was not in vals:
+            return {"because": dep, "was": was, "wanted": vals}
+    return None
+
+
 def decide(schema, state_content, seed):
     """One decision. Questions run in stages by their dependencies. A stage
     is one joint read, chunked by the canvas, with a question marked alone
@@ -813,21 +839,9 @@ def decide(schema, state_content, seed):
     for level in levels:
         asked = []
         for q in level:
-            failed = next(
-                (
-                    (dep, vals)
-                    for dep, vals in q["ask_if"].items()
-                    if answer_name(by_id[dep], answered.get(dep)) not in vals
-                ),
-                None,
-            )
-            if failed:
+            if reason := skip_reason(q, by_id, answered):
                 answered[q["id"]] = None
-                skipped[q["id"]] = {
-                    "because": failed[0],
-                    "was": answer_name(by_id[failed[0]], answered.get(failed[0])),
-                    "wanted": failed[1],
-                }
+                skipped[q["id"]] = reason
                 continue
             asked.append(q)
         if not asked:
@@ -905,6 +919,25 @@ def decide(schema, state_content, seed):
     return {"answers": answers, "diagnostics": diagnostics}, sum(
         rows for _, rows in parts
     ) + extra_rows
+
+
+def answer_from(q, probs):
+    """An answer from label probabilities in the question's choice order."""
+    top = max(range(len(probs)), key=lambda i: probs[i])
+    a = {
+        "type": q["type"],
+        "label": q["labels"][top],
+        "confidence": probs[top],
+        "probabilities": {c[0]: m for c, m in zip(q["choices"], probs)},
+    }
+    if q["type"] == "noul":
+        a["noul"] = probs[0]
+    elif q["type"] == "choice":
+        a["choice"] = q["choices"][top][0]
+    else:
+        a["score"] = sum((i + 1) * m for i, m in enumerate(probs))
+        a["level"] = q["choices"][top][0]
+    return a
 
 
 def decide_group(schema, sys_text, state_content, seed, prefix=None, lead=""):
@@ -990,20 +1023,8 @@ def decide_group(schema, sys_text, state_content, seed, prefix=None, lead=""):
     for qi, q in enumerate(schema["questions"]):
         per = [r[qi]["probs"] for r in reads]
         mean = [sum(p[i] for p in per) / n for i in range(len(q["labels"]))]
-        top = max(range(len(mean)), key=lambda i: mean[i])
-        a = {
-            "type": q["type"],
-            "label": q["labels"][top],
-            "confidence": mean[top],
-            "probabilities": {c[0]: m for c, m in zip(q["choices"], mean)},
-        }
-        if q["type"] == "noul":
-            a["noul"] = mean[0]
-        elif q["type"] == "choice":
-            a["choice"] = q["choices"][top][0]
-        else:
-            a["score"] = sum((i + 1) * m for i, m in enumerate(mean))
-            a["level"] = q["choices"][top][0]
+        a = answer_from(q, mean)
+        top = q["labels"].index(a["label"])
         if n > 1:
             var = sum((p[top] - mean[top]) ** 2 for p in per) / (n - 1)
             a["stderr"] = (var / n) ** 0.5
@@ -1048,6 +1069,125 @@ def decide_group(schema, sys_text, state_content, seed, prefix=None, lead=""):
             "engine": "vllm",
         },
     }, len(template) + 1 + (thought["tokens"] if thought else 0)
+
+
+# ----------------------------------------------------------------------------
+# Laya backend
+# ----------------------------------------------------------------------------
+
+
+def upstream_pooling(body, timeout=600):
+    req = urllib.request.Request(
+        ARGS.upstream.rstrip("/") + "/pooling",
+        data=json.dumps(body).encode(),
+        headers={"content-type": "application/json"},
+    )
+    return json.load(urllib.request.urlopen(req, timeout=timeout))
+
+
+def laya_question(q):
+    if q["type"] == "noul":
+        crit = {"true": q["choices"][0][1], "false": q["choices"][1][1]}
+    elif q["type"] == "choice":
+        crit = dict(q["choices"])
+    else:
+        crit = [name for name, _ in q["choices"]]
+    return {"t": q["type"], "ins": q["instructions"], "crit": crit, "labels": None}
+
+
+def laya_state(state, instructions, earlier):
+    """The state with the schema's context ahead of it and the answers so far
+    after it. A conversation keeps its list shape, so that truncation still
+    drops its oldest turns first."""
+    if instructions:
+        state = (
+            [str(instructions)] + state
+            if isinstance(state, list)
+            else f"{instructions}\n\n{laya_prompts.serialize_state(state)}"
+        )
+    if earlier:
+        answers = "Answers so far:\n" + "\n".join(earlier)
+        state = (
+            state + [answers]
+            if isinstance(state, list)
+            else f"{laya_prompts.serialize_state(state)}\n\n{answers}"
+        )
+    return state
+
+
+def laya_read(qs, state):
+    """Every question of ``qs`` as its own Laya prompt, in one /pooling call.
+    -> (label probabilities per question in choice order, prompt tokens)"""
+    prompts = []
+    for q in qs:
+        try:
+            prompts.append(
+                laya_prompts.build_prompt(
+                    TOK, state, laya_question(q), LAYA["max_len"], LAYA["head_max_len"]
+                )
+            )
+        except ValueError as e:
+            raise SchemaError(f"question {q['id']!r}: {e}") from e
+    out = upstream_pooling(
+        {"model": ARGS.model, "task": "token_classify", "input": prompts}
+    )
+    probs = []
+    for q, d in zip(qs, sorted(out["data"], key=lambda d: d["index"])):
+        p = [row[0] for row in d["data"]]
+        # Laya lists noul options as false, true; the schema as yes, no.
+        probs.append(p[::-1] if q["type"] == "noul" else p)
+    return probs, sum(len(p) for p in prompts)
+
+
+def decide_laya(schema, state):
+    """One decision on a Laya encoder. Each question is one forward pass of
+    its own. A stage runs after the answers it depends on, which are restated
+    at the end of the state. Laya is deterministic, so every question is read
+    once whatever "samples" asks."""
+    started = time.time()
+    if schema["think"]:
+        raise SchemaError("think: Laya does not generate text")
+    qs = [
+        q
+        for q in schema["questions"]
+        if not schema.get("ask") or q["id"] in schema["ask"]
+    ]
+    by_id = {q["id"]: q for q in schema["questions"]}
+    answered, earlier, stages, skipped, diag_q = {}, [], [], {}, {}
+    prompt_tokens = 0
+    for level in schedule(qs):
+        asked = []
+        for q in level:
+            if reason := skip_reason(q, by_id, answered):
+                answered[q["id"]] = None
+                skipped[q["id"]] = reason
+            else:
+                asked.append(q)
+        if not asked:
+            continue
+        stages.append([q["id"] for q in asked])
+        probs, tokens = laya_read(
+            asked, laya_state(state, schema["instructions"], earlier)
+        )
+        prompt_tokens += tokens
+        for q, p in zip(asked, probs):
+            answered[q["id"]] = answer_from(q, p)
+            diag_q[q["id"]] = {"entropy": [-sum(x * math.log(x) for x in p if x > 0)]}
+        earlier.extend(f"{q['id']}: {answer_name(q, answered[q['id']])}" for q in asked)
+    diagnostics = {
+        "stages": stages,
+        "skipped": skipped,
+        "conditioning": "restated" if len(stages) > 1 else None,
+        "samples": {"n": 1},
+        "timing": {"total_ms": (time.time() - started) * 1e3, "reads": len(stages)},
+        "prompt_tokens": prompt_tokens,
+        "questions": diag_q,
+        "engine": "vllm-laya",
+    }
+    return {
+        "answers": {q["id"]: answered.get(q["id"]) for q in qs},
+        "diagnostics": diagnostics,
+    }, 0
 
 
 # ----------------------------------------------------------------------------
@@ -1261,6 +1401,10 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
         if self.path == "/v1/raw/chat/completions":
+            if LAYA is not None:
+                return self._json(
+                    404, {"error": {"message": "Laya does not generate text"}}
+                )
             return self._raw_chat()
         try:
             req, images = self._read_request()
@@ -1304,6 +1448,8 @@ class Handler(BaseHTTPRequestHandler):
     def _decide(self, schema, state, seed):
         """-> (status, body) with the error body already shaped."""
         try:
+            if LAYA is not None:
+                return 200, decide_laya(schema, state)
             return 200, decide(schema, state, seed)
         except SchemaError as e:
             return 422, {"error": {"message": str(e), "type": "validation_error"}}
@@ -1322,7 +1468,17 @@ class Handler(BaseHTTPRequestHandler):
     def _systemone(self, req, images):
         try:
             schema = jev_schema(req)
-            state = jev_state(req, images + jev_images(req.get("images")))
+            images = images + jev_images(req.get("images"))
+            if LAYA is not None:
+                if images:
+                    raise SchemaError("images: Laya reads text only")
+                if req.get("state") is None:
+                    raise SchemaError("state: required")
+                # Laya serializes the state itself, keeping non-ASCII text
+                # and truncating a conversation from its oldest turn.
+                state = req["state"]
+            else:
+                state = jev_state(req, images)
         except SchemaError as e:
             return self._json(
                 422, {"error": {"message": str(e), "type": "validation_error"}}
@@ -1392,11 +1548,15 @@ class Handler(BaseHTTPRequestHandler):
                 for p in content
             )
             if has_image:
+                if LAYA is not None:
+                    raise SchemaError("images: Laya reads text only")
                 # image parts pass through to vLLM unchanged, with text parts as context
                 state = content
             else:
                 state = message_text(msgs[1]).strip()
-                json.loads(state)
+                parsed = json.loads(state)
+                if LAYA is not None:
+                    state = parsed
         except SchemaError as e:
             return self._json(
                 400, {"error": {"message": str(e), "type": "invalid_request_error"}}
@@ -1494,8 +1654,16 @@ def serve_tls(host, port, cert_dir):
 
 
 def main():
-    global ARGS, CANVAS_LEN, CANVAS_STEP
+    global ARGS, CANVAS_LEN, CANVAS_STEP, TOK, LAYA, laya_prompts
     p = argparse.ArgumentParser()
+    p.add_argument(
+        "--backend",
+        choices=("diffusion", "laya"),
+        default="diffusion",
+        help="diffusion: DiffusionGemma canvas reads. laya: a Laya checkpoint "
+        "served as a token_classify model (--tokenizer is its converted "
+        "directory, see examples/pooling/token_classify/laya)",
+    )
     p.add_argument("--upstream", default="http://127.0.0.1:8010")
     p.add_argument("--model", default="dgemma")
     p.add_argument("--tokenizer", default="/models/dgemma", help="HF id or local path")
@@ -1525,7 +1693,15 @@ def main():
     ARGS = p.parse_args()
     CANVAS_LEN = ARGS.canvas
     CANVAS_STEP = ARGS.canvas_step
-    init_tokenizer(AutoTokenizer.from_pretrained(ARGS.tokenizer))
+    if ARGS.backend == "laya":
+        sys.path.insert(
+            0, str(Path(__file__).resolve().parents[2] / "pooling/token_classify/laya")
+        )
+        laya_prompts = importlib.import_module("laya_prompts")
+        TOK = AutoTokenizer.from_pretrained(ARGS.tokenizer)
+        LAYA = AutoConfig.from_pretrained(ARGS.tokenizer).laya_config
+    else:
+        init_tokenizer(AutoTokenizer.from_pretrained(ARGS.tokenizer))
     if ARGS.tls_port:
         serve_tls(ARGS.host, ARGS.tls_port, ARGS.cert_dir)
         print(
@@ -1534,7 +1710,7 @@ def main():
         )
     print(
         f"structured server on {ARGS.host}:{ARGS.port} -> {ARGS.upstream} "
-        f"(canvas {CANVAS_LEN})",
+        + ("(laya)" if LAYA is not None else f"(canvas {CANVAS_LEN})"),
         flush=True,
     )
     ThreadingHTTPServer((ARGS.host, ARGS.port), Handler).serve_forever()
