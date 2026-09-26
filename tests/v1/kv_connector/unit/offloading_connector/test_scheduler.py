@@ -69,6 +69,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -3443,6 +3444,189 @@ class TestEagle:
     # -------------------------------------------------------------------
     # Integration tests: store and load via request_runner
     # -------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("prompt_tokens", "expected_hit", "extra_keys", "eagle_window"),
+        [
+            (30208, 30144, 3, 2),
+            (30272, 30208, 0, 2),
+            (30336, 30208, 0, 2),
+            (30336, 30208, 0, None),
+        ],
+    )
+    def test_hybrid_swa_store_preserves_eagle_replay_boundary(
+        self, prompt_tokens, expected_hit, extra_keys, eagle_window
+    ):
+        """Chunked stores retain the SWA window reached after an EAGLE pop."""
+        groups = []
+        for idx, (chunk, window) in enumerate(
+            [(256, None), (64, eagle_window), (4, 2)]
+        ):
+            kwargs = dict(
+                block_size=chunk, num_kv_heads=1, head_size=1, dtype=torch.float32
+            )
+            kv_spec = (
+                FullAttentionSpec(**kwargs)
+                if window is None
+                else SlidingWindowSpec(**kwargs, sliding_window=window * chunk)
+            )
+            groups.append(
+                KVCacheGroupSpec([f"layer{idx}"], kv_spec, is_eagle_group=idx == 1)
+            )
+        manager = CPUOffloadingManager(num_chunks=10000)
+        spec = SimpleNamespace(
+            config=SimpleNamespace(
+                groups=tuple(
+                    SimpleNamespace(
+                        group_id=i, tokens_per_block=g.kv_cache_spec.block_size
+                    )
+                    for i, g in enumerate(groups)
+                )
+            ),
+            tokens_per_block=(256, 64, 4),
+            tokens_per_hash=4,
+            blocks_per_chunk=1,
+            offload_prompt_only=False,
+            kv_events_config=OffloadingKVEventsConfig(
+                enable_kv_cache_events=False, self_describing_kv_events=False
+            ),
+            get_manager=lambda: manager,
+        )
+        config = SimpleNamespace(
+            speculative_config=None,
+            cache_config=SimpleNamespace(
+                enable_prefix_caching=True, prefix_cache_retention_interval=None
+            ),
+            parallel_config=SimpleNamespace(
+                world_size=1, decode_context_parallel_size=1
+            ),
+        )
+        scheduler = OffloadingConnectorScheduler(
+            spec,
+            config,
+            KVCacheConfig(
+                num_blocks=10000, kv_cache_tensors=[], kv_cache_groups=groups
+            ),
+        )
+        request = SimpleNamespace(
+            request_id="store",
+            num_prompt_tokens=prompt_tokens,
+            num_tokens=prompt_tokens,
+            num_computed_tokens=0,
+            kv_transfer_params=None,
+            status=RequestStatus.RUNNING,
+            is_finished=lambda: False,
+        )
+        state = RequestOffloadState(
+            config=scheduler.config,
+            req=request,
+            req_context=ReqContext(req_id="store"),
+            offloading_context=RequestOffloadingContext(),
+        )
+        next_id = 1
+        for gc, gs in zip(scheduler.config.kv_group_configs, state.group_states):
+            count = prompt_tokens // gc.tokens_per_chunk
+            gs.offload_keys = [
+                make_offload_key(str(i).encode(), gc.group_idx) for i in range(count)
+            ]
+            gs.block_ids = list(range(next_id, next_id + count))
+            next_id += count
+        scheduler._req_status[request.request_id] = state
+        ordinary_keys: set[OffloadKey] = set()
+        stored_keys = set()
+        for scheduled in (prompt_tokens - 48, 48):
+            end = request.num_computed_tokens + scheduled
+            for gc, gs in zip(scheduler.config.kv_group_configs, state.group_states):
+                count = state.storable_chunks(gc, gs, end)
+                start = gs.next_stored_chunk_idx
+                mask = scheduler._reachable_store_block_mask(
+                    gc,
+                    start,
+                    count,
+                    None if gc.is_eagle_group else prompt_tokens // gc.tokens_per_chunk,
+                    (),
+                )
+                ordinary_keys.update(
+                    gs.offload_keys[i]
+                    for i in range(start, count)
+                    if mask is None or mask[i - start]
+                )
+            jobs = scheduler._build_store_jobs(
+                SimpleNamespace(
+                    num_scheduled_tokens={"store": scheduled}, finished_req_ids=None
+                )
+            )
+            for job_id in jobs:
+                stored_keys.update(scheduler._jobs[job_id].keys)
+                scheduler.update_connector_output(
+                    KVConnectorOutput(
+                        kv_connector_worker_meta=OffloadingWorkerMetadata(
+                            completed_jobs={job_id: 1}
+                        )
+                    )
+                )
+            request.num_computed_tokens = end
+            assert not state.transfer_jobs
+        replay = SimpleNamespace(
+            request_id="replay",
+            num_prompt_tokens=prompt_tokens,
+            num_tokens=prompt_tokens,
+            kv_transfer_params=None,
+        )
+        replay_state = RequestOffloadState(
+            config=scheduler.config,
+            req=replay,
+            req_context=ReqContext(req_id="replay"),
+            offloading_context=RequestOffloadingContext(),
+        )
+        for target, source in zip(replay_state.group_states, state.group_states):
+            target.offload_keys = list(source.offload_keys)
+        hit = scheduler._lookup(replay_state)
+        c4 = state.group_states[2].offload_keys
+        boundary = expected_hit // 4
+        resident = all(
+            manager.lookup(key, replay_state.req_context) is LookupResult.HIT
+            for key in c4[boundary - 2 : boundary]
+        )
+        supplemental = stored_keys - ordinary_keys
+        expected_supplemental = (
+            set(c4[boundary - 2 : boundary]) if extra_keys else set()
+        )
+        if extra_keys == 3:
+            expected_supplemental.add(
+                state.group_states[1].offload_keys[expected_hit // 64 - 2]
+            )
+        request.num_tokens = prompt_tokens + 64
+        decode_allowed = set()
+        for gc, gs in zip(scheduler.config.kv_group_configs, state.group_states):
+            old = len(gs.offload_keys)
+            count = request.num_tokens // gc.tokens_per_chunk
+            gs.offload_keys.extend(
+                make_offload_key(str(i).encode(), gc.group_idx)
+                for i in range(old, count)
+            )
+            gs.block_ids.extend(range(next_id, next_id + count - old))
+            next_id += count - old
+            decode_allowed.update(gs.offload_keys[gs.next_stored_chunk_idx :])
+        decode_jobs = scheduler._build_store_jobs(
+            SimpleNamespace(num_scheduled_tokens={"store": 64}, finished_req_ids=None)
+        )
+        decode_keys = set()
+        for job_id in decode_jobs:
+            decode_keys.update(scheduler._jobs[job_id].keys)
+            scheduler.update_connector_output(
+                KVConnectorOutput(
+                    kv_connector_worker_meta=OffloadingWorkerMetadata(
+                        completed_jobs={job_id: 1}
+                    )
+                )
+            )
+        assert hit == expected_hit
+        assert resident
+        assert supplemental == expected_supplemental
+        assert decode_keys <= decode_allowed
+        assert not state.transfer_jobs
+        assert state.eagle_replay_boundaries[-1] == expected_hit
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_excludes_trailing_decode_block(
