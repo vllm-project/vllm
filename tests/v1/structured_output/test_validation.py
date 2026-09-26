@@ -111,6 +111,9 @@ def test_regex_with_nul_byte_rejected(regex):
 
 
 INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
+STRUCTURAL_TAG = (
+    '{"type": "structural_tag", "format": {"type": "const_string", "value": "hi"}}'
+)
 
 
 @pytest.mark.parametrize(
@@ -125,6 +128,9 @@ INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}
         ("lm-format-enforcer", StructuredOutputsParams(grammar="not a grammar")),
         ("outlines", StructuredOutputsParams(regex="(")),
         ("guidance", StructuredOutputsParams(structural_tag='{"nope": 1}')),
+        ("outlines", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
+        ("lm-format-enforcer", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
+        ("outlines", StructuredOutputsParams(json_object=True)),
     ],
 )
 def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
