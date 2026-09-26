@@ -564,6 +564,114 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    head_dim = nope_dim + rope_dim
+    return dict(
+        q=torch.randn(3, 3, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
+        kv=torch.randn(5, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
+        indices=torch.tensor([0, 2, 1, 3, 4], dtype=torch.int32, device=device),
+        indptr=torch.tensor([0, 2, 5, 5], dtype=torch.int32, device=device),
+        scale=head_dim**-0.5,
+        attn_sink=torch.tensor([-0.25, 0.0, 0.25], dtype=torch.float32, device=device),
+        nope_head_dim=nope_dim,
+        rope_head_dim=rope_dim,
+    )
+
+
+# 448+64 is DeepSeek V4/V4.1, 512+64 is V3.2, and 256+0 stands in for the
+# NoPE-only layouts where the destination spans the whole head dim.
+SPARSE_PREFILL_DIMS = [(NOPE_HEAD_DIM, ROPE_HEAD_DIM), (512, 64), (256, 0)]
+
+
+@pytest.mark.parametrize(("nope_dim", "rope_dim"), SPARSE_PREFILL_DIMS)
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_matches_allocated(
+    nope_dim: int, rope_dim: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(nope_dim, rope_dim)
+    allocated = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)
+
+    q = kwargs["q"]
+    dest = torch.empty(q.shape[0], q.shape[1], nope_dim, dtype=q.dtype, device=q.device)
+    returned = _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    assert returned is dest
+    torch.testing.assert_close(dest, allocated[..., :nope_dim], atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize(("nope_dim", "rope_dim"), SPARSE_PREFILL_DIMS)
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_view_leaves_neighbors_untouched(
+    nope_dim: int, rope_dim: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(nope_dim, rope_dim)
+    q = kwargs["q"]
+    num_queries, num_heads = q.shape[0], q.shape[1]
+
+    buffer = torch.full(
+        (num_queries + 4, num_heads + 2, nope_dim),
+        -7.0,
+        dtype=q.dtype,
+        device=q.device,
+    )
+    dest = buffer[2 : 2 + num_queries, :num_heads]
+    assert not dest.is_contiguous()
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)[..., :nope_dim]
+    torch.testing.assert_close(dest, expected, atol=0.0, rtol=0.0)
+
+    untouched = torch.ones_like(buffer, dtype=torch.bool)
+    untouched[2 : 2 + num_queries, :num_heads] = False
+    assert torch.all(buffer[untouched] == -7.0)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16])
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_casts_to_dest_dtype(
+    out_dtype: torch.dtype,
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(512, 64)
+    q = kwargs["q"]
+    dest = torch.empty(q.shape[0], q.shape[1], 512, dtype=out_dtype, device=q.device)
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)[..., :512]
+    assert dest.dtype == out_dtype
+    torch.testing.assert_close(dest.float(), expected.float(), atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_sparse_attn_prefill_head_dim_wide_out_keeps_rope_rows() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(NOPE_HEAD_DIM, ROPE_HEAD_DIM)
+    q = kwargs["q"]
+    dest = torch.empty_like(q)
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _ref_sparse_prefill_ragged(
+        q, kwargs["kv"], [[0, 2], [1, 3, 4], []], kwargs["scale"], kwargs["attn_sink"]
+    )
+    torch.testing.assert_close(dest, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],
@@ -686,10 +794,11 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
     output = torch.empty_like(q)
     dense_fallback_calls = 0
 
-    def fake_dense_fallback(*args, **kwargs):
+    def fake_dense_fallback(*args, out, **kwargs):
         nonlocal dense_fallback_calls
         dense_fallback_calls += 1
-        return torch.zeros_like(q)
+        out.zero_()
+        return out
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
     monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
