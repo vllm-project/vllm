@@ -10,9 +10,19 @@ fail loudly if the validator semantics ever drift.
 import json
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    DerenderChatRequest,
+    DerenderChatStreamRequest,
     GenerateRequest,
+    GenerateResponse,
+    GenerateStreamResponse,
+    GenerateTextResponse,
+    GenerateTextStreamResponse,
+    GenerateTokensChoice,
+    GenerateTokensResponse,
+    GenerateTokensStreamResponse,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
@@ -110,3 +120,103 @@ def test_generate_request_rejects_placeholder_outside_prompt():
                 kwargs_data={"image": ["encoded"]},
             ),
         )
+
+
+def test_output_mode_defaults_to_tokens():
+    assert GenerateRequest.model_validate(_base_payload()).output_mode == "tokens"
+
+
+def test_output_mode_text_is_accepted():
+    payload = {**_base_payload(), "output_mode": "text"}
+    assert GenerateRequest.model_validate(payload).output_mode == "text"
+
+
+@pytest.mark.parametrize("output_mode", ["derender", "bogus", None])
+def test_output_mode_rejects_unsupported_levels(output_mode):
+    """Levels the server does not implement fail instead of falling back to
+    tokens which would answer 200 with the wrong response shape."""
+    payload = {**_base_payload(), "output_mode": output_mode}
+    with pytest.raises(ValidationError, match="output_mode"):
+        GenerateRequest.model_validate(payload)
+
+
+def test_text_mode_rejects_detokenize_false():
+    payload = {
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"detokenize": False},
+        "output_mode": "text",
+    }
+    with pytest.raises(ValidationError, match="detokenize"):
+        GenerateRequest.model_validate(payload)
+
+
+def test_tokens_mode_allows_detokenize_false():
+    payload = {
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"detokenize": False},
+        "output_mode": "tokens",
+    }
+    assert GenerateRequest.model_validate(payload).output_mode == "tokens"
+
+
+def test_response_without_output_mode_parses_as_tokens():
+    """Existing clients and older servers never send output_mode, and
+    /derender parses GenerateResponse as input."""
+    parsed = TypeAdapter(GenerateResponse).validate_python(
+        {"choices": [{"index": 0, "token_ids": [1]}]}
+    )
+    assert isinstance(parsed, GenerateTokensResponse)
+    assert parsed.output_mode == "tokens"
+
+
+def test_stream_chunk_without_output_mode_parses_as_tokens():
+    parsed = TypeAdapter(GenerateStreamResponse).validate_python(
+        {"choices": [{"index": 0, "token_ids": [1]}]}
+    )
+    assert isinstance(parsed, GenerateTokensStreamResponse)
+
+
+def test_text_response_and_chunk_dispatch_on_output_mode():
+    response = TypeAdapter(GenerateResponse).validate_python(
+        {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
+    )
+    chunk = TypeAdapter(GenerateStreamResponse).validate_python(
+        {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
+    )
+    assert isinstance(response, GenerateTextResponse)
+    assert isinstance(chunk, GenerateTextStreamResponse)
+
+
+def test_text_response_requires_text_on_every_choice():
+    with pytest.raises(ValidationError, match="text"):
+        TypeAdapter(GenerateResponse).validate_python(
+            {"output_mode": "text", "choices": [{"index": 0}]}
+        )
+
+
+@pytest.mark.parametrize("output_mode", ["derender", None, 5])
+def test_response_rejects_unknown_output_mode(output_mode):
+    with pytest.raises(ValidationError):
+        TypeAdapter(GenerateResponse).validate_python(
+            {"output_mode": output_mode, "choices": []}
+        )
+
+
+def test_derender_requests_accept_responses_without_output_mode():
+    DerenderChatRequest.model_validate(
+        {"generate_response": {"choices": [{"index": 0, "token_ids": [1]}]}}
+    )
+    DerenderChatStreamRequest.model_validate(
+        {
+            "stream": True,
+            "generate_chunk": {"choices": [{"index": 0, "token_ids": [1]}]},
+        }
+    )
+
+
+def test_tokens_response_echoes_output_mode_without_text():
+    dumped = GenerateTokensResponse(
+        choices=[GenerateTokensChoice(index=0, token_ids=[1])]
+    ).model_dump()
+    assert dumped["output_mode"] == "tokens"
+    assert "text" not in dumped["choices"][0]

@@ -22,6 +22,10 @@ The streaming cases do the same for `stream=true`. Each coupled chunk's
 `token_ids` becomes one `/inference/v1/generate` stream chunk, fed
 through the chunked derender path with `stream_state` threaded across calls
 the way a client would, so both parsers see the same chunk boundaries.
+
+The text level cases pin `/inference/v1/generate` with `output_mode="text"`
+against `/v1/completions/derender` on the same token IDs, batch and streaming,
+plus logprob resolution and stop string handling.
 """
 
 import json
@@ -440,3 +444,243 @@ async def test_stream_parity_reasoning_and_tool_call(client, chunking):
         assert any(len(ch["token_ids"]) > 1 for ch in coupled_choices)
     if not (coupled["reasoning"] and coupled["tool_calls"]):
         pytest.skip("Model did not emit both a <think> block and a tool call")
+
+
+# ---------------------------------------------------------------------------
+# Inline text level: generate(output_mode="text") == derender(generate(...))
+# ---------------------------------------------------------------------------
+
+TEXT_MESSAGES = [
+    {"role": "user", "content": "What is 2+2? Answer in one short sentence."}
+]
+
+
+async def _render_token_ids(
+    client: httpx.AsyncClient, messages: list[dict]
+) -> list[int]:
+    resp = await client.post(
+        "/v1/chat/completions/render", json={"model": MODEL, "messages": messages}
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["token_ids"]
+
+
+def _generate_payload(
+    token_ids: list[int], output_mode: str, stream: bool = False, **sampling
+) -> dict:
+    return {
+        "model": MODEL,
+        "token_ids": token_ids,
+        "sampling_params": {"temperature": 0, "max_tokens": 128, **sampling},
+        "output_mode": output_mode,
+        "stream": stream,
+    }
+
+
+async def _generate(
+    client: httpx.AsyncClient, token_ids: list[int], output_mode: str, **sampling
+) -> dict:
+    resp = await client.post(
+        "/inference/v1/generate",
+        json=_generate_payload(token_ids, output_mode, **sampling),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["output_mode"] == output_mode
+    return data
+
+
+async def _generate_text_stream(
+    client: httpx.AsyncClient, token_ids: list[int], **sampling
+) -> list[dict]:
+    """Stream generate at the text level and return the choice of every chunk
+    that has one."""
+    choices: list[dict] = []
+    async with client.stream(
+        "POST",
+        "/inference/v1/generate",
+        json=_generate_payload(token_ids, "text", stream=True, **sampling),
+    ) as resp:
+        assert resp.status_code == 200, await resp.aread()
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line[len("data: ") :])
+            assert "error" not in chunk, chunk
+            assert chunk["output_mode"] == "text"
+            choices.extend(chunk["choices"])
+    return choices
+
+
+async def _derender_completion_text(
+    client: httpx.AsyncClient, output_ids: list[int], finish_reason: str
+) -> str:
+    resp = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL,
+            "generate_responses": [
+                {
+                    "request_id": "text-parity",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "token_ids": output_ids,
+                            "finish_reason": finish_reason,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["choices"][0]["text"]
+
+
+async def _derender_completion_stream_text(
+    client: httpx.AsyncClient, choices: list[dict]
+) -> str:
+    """Replay each generate chunk's token IDs through the streaming
+    completions derender endpoint with the same chunk boundaries."""
+    state = None
+    text = ""
+    for choice in choices:
+        resp = await client.post(
+            "/v1/completions/derender",
+            json={
+                "stream": True,
+                "model": MODEL,
+                "generate_chunk": {
+                    "request_id": "text-parity-stream",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "token_ids": choice.get("token_ids") or [],
+                            "finish_reason": choice.get("finish_reason"),
+                        }
+                    ],
+                },
+                "stream_state": state,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        state = data["stream_state"]
+        text += "".join(ch["text"] for ch in data["chunk"]["choices"])
+    return text
+
+
+@pytest.mark.asyncio
+async def test_text_parity_batch(client):
+    """Inline text matches /v1/completions/derender on the same token IDs."""
+    token_ids = await _render_token_ids(client, TEXT_MESSAGES)
+    inline = (await _generate(client, token_ids, "text"))["choices"][0]
+
+    derendered = await _derender_completion_text(
+        client, inline["token_ids"], inline["finish_reason"]
+    )
+
+    assert inline["text"]
+    assert inline["text"] == derendered
+
+
+@pytest.mark.asyncio
+async def test_text_parity_stream(client):
+    """Streamed inline text matches the streaming derender replay of the same
+    chunks and the non-streaming inline text."""
+    token_ids = await _render_token_ids(client, TEXT_MESSAGES)
+    choices = await _generate_text_stream(client, token_ids)
+    inline = "".join(ch["text"] for ch in choices)
+
+    assert choices[-1]["finish_reason"] is not None
+    assert inline == await _derender_completion_stream_text(client, choices)
+    batch = (await _generate(client, token_ids, "text"))["choices"][0]
+    assert [t for ch in choices for t in ch.get("token_ids") or []] == (
+        batch["token_ids"]
+    )
+    assert inline == batch["text"]
+
+
+@pytest.mark.asyncio
+async def test_text_parity_logprobs(client):
+    """Inline logprob tokens and bytes match /derender resolving the
+    token_id:N placeholders of the tokens level."""
+    token_ids = await _render_token_ids(client, TEXT_MESSAGES)
+    sampling = {"logprobs": 3}
+    tokens_choice = (await _generate(client, token_ids, "tokens", **sampling))[
+        "choices"
+    ][0]
+    text_choice = (await _generate(client, token_ids, "text", **sampling))["choices"][0]
+    assert text_choice["token_ids"] == tokens_choice["token_ids"], (
+        "greedy (temperature=0) generation was expected to be deterministic "
+        "across the two generate calls"
+    )
+
+    disagg = await _disagg(
+        client,
+        tokens_choice["token_ids"],
+        len(token_ids),
+        tokens_choice["finish_reason"],
+        {"model": MODEL, "messages": TEXT_MESSAGES},
+        logprobs=tokens_choice["logprobs"],
+    )
+
+    inline_content = text_choice["logprobs"]["content"]
+    derender_content = disagg["choices"][0]["logprobs"]["content"]
+    assert len(inline_content) == len(derender_content)
+    for inline_entry, derender_entry in zip(inline_content, derender_content):
+        assert inline_entry["token"] == derender_entry["token"]
+        assert inline_entry["bytes"] == derender_entry["bytes"]
+        assert [
+            (top["token"], top["bytes"]) for top in inline_entry["top_logprobs"]
+        ] == [(top["token"], top["bytes"]) for top in derender_entry["top_logprobs"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_text_parity_stop_string(client, stream):
+    """Inline text follows the engine's stop handling, like /v1/completions.
+
+    token_ids keep every generated token, so /derender brings the matched
+    stop string back. Its text must start with the inline text and only
+    differ after it.
+    """
+    stop = "\n"
+    token_ids = await _render_token_ids(
+        client,
+        [{"role": "user", "content": "Write two short lines about the sea."}],
+    )
+
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "model": MODEL,
+            "prompt": token_ids,
+            "temperature": 0,
+            "max_tokens": 128,
+            "stop": [stop],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    coupled = resp.json()["choices"][0]
+
+    if stream:
+        choices = await _generate_text_stream(client, token_ids, stop=[stop])
+        inline_text = "".join(ch["text"] for ch in choices)
+        output_ids = [t for ch in choices for t in ch.get("token_ids") or []]
+        finish_reason = choices[-1]["finish_reason"]
+    else:
+        inline = (await _generate(client, token_ids, "text", stop=[stop]))["choices"][0]
+        inline_text = inline["text"]
+        output_ids = inline["token_ids"]
+        finish_reason = inline["finish_reason"]
+
+    assert inline_text == coupled["text"]
+    assert finish_reason == coupled["finish_reason"]
+    assert stop not in inline_text
+
+    derendered = await _derender_completion_text(client, output_ids, finish_reason)
+    assert derendered.startswith(inline_text)
+    if coupled["stop_reason"] != stop:
+        pytest.skip("Model did not emit the stop string")
+    assert derendered[len(inline_text) :].startswith(stop)

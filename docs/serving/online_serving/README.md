@@ -125,8 +125,9 @@ Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out`
 
 ### Tokens IN <> Tokens OUT APIs
 
-- `/inference/v1/generate` - Generate completions
-- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
+- [Generate API](token_in_token_out.md) (`/inference/v1/generate`)
+    - Generate completions from token IDs, optionally with detokenized text (`output_mode`)
+- `/abort_requests` - Abort in-flight requests (registered wherever `/inference/v1/generate` is)
 
 ### Renderer APIs
 
