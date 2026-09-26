@@ -821,3 +821,47 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     for i, layer in enumerate(model.model.decoder.layers):
         expected = "auto" if str(i) in ["0", "2"] else "fp8"
         assert layer.self_attn.attn.kv_cache_dtype == expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
+@pytest.mark.parametrize("scales_are_e8m0", [False, True])
+def test_deepgemm_ue8m0_requant_warns_only_when_it_runs(scales_are_e8m0, caplog):
+    """Warn exactly when the UE8M0 requantization actually runs.
+
+    float32 block scales are requantized in place -- a second rounding on top of
+    the one the checkpoint already baked in (#37804). Checkpoints that already
+    ship E8M0 scales take the other branch and are not requantized at all, so the
+    warning must be tied to the requantization, not to DeepGEMM being enabled.
+    """
+    from vllm import logger as vllm_logger
+    from vllm.model_executor.layers.quantization.utils import fp8_utils
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM not supported on this device")
+
+    # warning_once dedupes through an lru_cache; clear it so each case is independent.
+    vllm_logger._print_warning_once.cache_clear()
+    caplog.clear()
+
+    weight = torch.randn((256, 256), device="cuda").to(torch.float8_e4m3fn)
+    if scales_are_e8m0:
+        scales = torch.randint(
+            118, 136, (2, 2), device="cuda", dtype=torch.uint8
+        ).view(torch.float8_e8m0fnu)
+    else:
+        scales = torch.rand((2, 2), device="cuda", dtype=torch.float32) + 0.1
+
+    with caplog.at_level(logging.WARNING):
+        fp8_utils.deepgemm_post_process_fp8_weight_block(
+            weight,
+            scales,
+            quant_block_shape=(128, 128),
+            use_e8m0=True,
+        )
+
+    warned = "double quantization" in caplog.text
+    assert warned is (not scales_are_e8m0), (
+        f"scales_are_e8m0={scales_are_e8m0} should "
+        f"{'not ' if scales_are_e8m0 else ''}warn; captured: {caplog.text[:300]!r}"
+    )
