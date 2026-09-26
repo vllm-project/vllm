@@ -5,7 +5,7 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import pytest
 import torch
@@ -17,6 +17,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -155,9 +156,11 @@ def _build(
     builder: GDNAttentionMetadataBuilder,
     batch_spec: BatchSpec,
     num_decode_draft_tokens: list[int] | None = None,
+    common: CommonAttentionMetadata | None = None,
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
-    common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
+    if common is None:
+        common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
         kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
@@ -182,6 +185,55 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+
+
+@pytest.mark.parametrize(
+    "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
+)
+def test_cross_group_build(test_case: GDNBuildTestCase):
+    """A second KV cache group of the same pass shares the first group's
+    batch-level metadata and builds only its own state indices."""
+    batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
+    first, second, ref = (
+        _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph=True)
+        for _ in range(3)
+    )
+    cache: dict = {}
+    first_common, second_common = (
+        create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+            _cross_group_cache=cache
+        )
+        for _ in range(2)
+    )
+    draft_tokens = test_case.num_decode_draft_tokens
+    first_meta = _build(first, batch, draft_tokens, first_common)
+    meta = _build(second, batch, draft_tokens, second_common)
+    expected = _build(
+        ref, batch, draft_tokens, second_common.replace(_cross_group_cache=None)
+    )
+
+    state_fields = (
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+        "prefill_state_indices",
+    )
+    for field in fields(GDNAttentionMetadata):
+        actual = getattr(meta, field.name)
+        if field.name not in state_fields:
+            assert actual is getattr(first_meta, field.name)
+            continue
+        torch.testing.assert_close(actual, getattr(expected, field.name))
+        # FULL graph state indices land in this group's own buffers.
+        if meta.num_prefills == 0 and actual is not None:
+            assert actual.data_ptr() == getattr(second, field.name).data_ptr()
+
+
+def test_prefill_state_indices_skip_decodes():
+    builder = _create_gdn_builder()
+    builder.mamba_aligned_state_indices = torch.arange(3, dtype=torch.int32)[:, None]
+    meta = _build(builder, BatchSpec(seq_lens=[40, 30, 20], query_lens=[1, 1, 4]))
+    assert meta.num_decodes == 2
+    assert meta.prefill_state_indices.tolist() == [2]
 
 
 def test_has_initial_state_after_reclassification():

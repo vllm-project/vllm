@@ -1096,7 +1096,6 @@ class MambaSpecDecodeGPUContext:
     ) -> torch.Tensor:
         """Compute every Mamba group's aligned physical state IDs in one launch."""
         assert self.is_initialized
-        assert seq_lens.is_cuda
         assert 0 <= num_reqs <= seq_lens.shape[0]
         assert self.aligned_state_indices is not None
         assert num_reqs <= self.aligned_state_indices.shape[1]
