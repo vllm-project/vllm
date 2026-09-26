@@ -134,11 +134,16 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Download model if necessary."""
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        """Load weights into a model."""
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        model.load_weights(
-            self._get_weights_iterator(model_weights, model_config.revision)
-        )
+        yield from self._get_weights_iterator(model_weights, model_config.revision)
+
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        """Load weights into a model."""
+        model.load_weights(self.get_all_weights(model_config, model))

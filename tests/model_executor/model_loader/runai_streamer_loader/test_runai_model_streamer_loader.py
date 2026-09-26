@@ -122,3 +122,53 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         with pytest.raises(ValueError, match="memory_limit must be an integer >= -1"):
             _runai_loader({"concurrency": 16, "memory_limit": -5})
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
+
+
+def test_runai_get_all_weights_matches_load_weights_source():
+    # model_weights (e.g. an s3:// URI) takes precedence over model, and
+    # revision is passed through.
+    fake_self = types.SimpleNamespace(
+        _get_weights_iterator=lambda path, revision: iter(
+            [(f"{path}@{revision}", None)]
+        )
+    )
+    model_config = types.SimpleNamespace(
+        model="org/model", model_weights="s3://bucket/weights", revision="myrev"
+    )
+
+    weights = list(
+        rsl.RunaiModelStreamerLoader.get_all_weights(
+            fake_self, model_config, model=None
+        )
+    )
+
+    assert weights == [("s3://bucket/weights@myrev", None)]
+
+
+@pytest.mark.parametrize(
+    "base_model,mul_model,add_model",
+    [
+        (
+            "Qwen/Qwen3-0.6B",
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            "inference-optimization/Qwen3-0.6B-debug-add",
+        ),
+    ],
+)
+def test_runai_reload_weights(base_model, mul_model, add_model, vllm_runner):
+    with vllm_runner(
+        model_name=base_model,
+        load_format=load_format,
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert mul_perp < add_perp
+
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert add_perp < mul_perp
