@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.forward_context import (
@@ -22,10 +23,11 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -44,13 +46,74 @@ class UBatchState(NamedTuple):
 
     slices: UBatchSlices
     forward_contexts: list[ForwardContext]
+    staged_rows: torch.Tensor | None = None
+
+
+def stage_decode_tokens(
+    input_batch: InputBatch,
+    block_tables: tuple[torch.Tensor, ...],
+    slot_mappings: torch.Tensor,
+    ubatch_slices: UBatchSlices,
+) -> torch.Tensor:
+    """Place consecutive real rows at the start of each captured token region.
+
+    The DP graph selector guarantees single-token decode with at least one real
+    token per microbatch and a captured slice layout covering the padded batch.
+    """
+    n = input_batch.num_tokens
+    num_padded = input_batch.num_tokens_after_padding
+    k = len(ubatch_slices)
+    counts = [n // k + (i < n % k) for i in range(k)]
+    staged_rows = torch.cat(
+        [
+            torch.arange(
+                s.token_slice.start,
+                s.token_slice.start + count,
+                device=input_batch.input_ids.device,
+            )
+            for s, count in zip(ubatch_slices, counts)
+        ]
+    )
+    # A temporary keeps unread source rows intact when regions overlap.
+    for values in (input_batch.input_ids, input_batch.positions, *block_tables):
+        staged = torch.zeros_like(values[:num_padded])
+        staged[staged_rows] = values[:n]
+        values[:num_padded].copy_(staged)
+    staged_slots = torch.full_like(slot_mappings[:, :num_padded], -1)
+    staged_slots[:, staged_rows] = slot_mappings[:, :n]
+    slot_mappings[:, :num_padded].copy_(staged_slots)
+    input_batch.is_padding[:num_padded].fill_(True)
+    input_batch.is_padding[staged_rows] = False
+    return staged_rows
+
+
+def restore_staged_inputs(
+    input_batch: InputBatch,
+    block_tables: tuple[torch.Tensor, ...],
+    slot_mappings: torch.Tensor,
+    staged_rows: torch.Tensor,
+) -> None:
+    """Restore logical rows for post-forward consumers, including the sampler."""
+    n = staged_rows.numel()
+    for values in (input_batch.input_ids, input_batch.positions, *block_tables):
+        values[:n] = values[staged_rows]
+        values[n : input_batch.num_tokens_after_padding].zero_()
+    slot_mappings[:, :n] = slot_mappings[:, staged_rows]
+    slot_mappings[:, n : input_batch.num_tokens_after_padding].fill_(-1)
+    input_batch.is_padding[:n].fill_(False)
+    input_batch.is_padding[n : input_batch.num_tokens_after_padding].fill_(True)
+
+
+def compact_staged_rows(values: torch.Tensor, staged_rows: torch.Tensor) -> None:
+    """Restore staged output rows to their logical order in-place."""
+    values[: staged_rows.numel()] = values[staged_rows]
 
 
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
-    Splitting at the midpoint of the DP-padded token count leaves the trailing
-    microbatch anywhere from full to entirely inside the padding. Clamping its
+    Splitting the DP-padded token range can leave trailing microbatches
+    entirely inside the padding. Clamping each such microbatch's
     request slice onto the last request leaves it holding that request with
     zero query tokens -- the shape a straddling request already takes -- so it
     stays well-formed with no work to do, like a dummy run.
@@ -301,6 +364,7 @@ class UBatchRunner:
         self.model_state = model_state
         self.attn_groups = attn_groups
         self.kv_cache_config = kv_cache_config
+        self.stage_real_tokens = self._real_token_staging_unsupported_reason() is None
         # `query_start_loc` and `seq_lens` are rebased onto each microbatch's
         # own token range, so they cannot be views of the full batch's buffers.
         # Allocating up front keeps their addresses stable across replays.
@@ -326,6 +390,91 @@ class UBatchRunner:
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
 
+    def _real_token_staging_unsupported_reason(self) -> str | None:
+        config = self.vllm_config
+        parallel = self.parallel_config
+        if parallel.all2all_backend != "nixl_ep":
+            return (
+                f"all2all_backend={parallel.all2all_backend!r}: "
+                "staging is validated only with nixl_ep"
+            )
+        if type(self.model_state) is not DefaultModelState:
+            return (
+                f"model_state={type(self.model_state).__name__}: "
+                "requires DefaultModelState"
+            )
+        if self.model_state.supports_mm_inputs:
+            return "multimodal inputs: additional relocated inputs are not staged"
+        if self.model_state.rope_state is not None:
+            return "rope_state: position replacement after prepare is not supported"
+        if config.model_config.enable_prompt_embeds:
+            return "enable_prompt_embeds=True: prompt embeddings are not staged"
+        for name, value in (
+            ("tensor_parallel_size", parallel.tensor_parallel_size),
+            ("pipeline_parallel_size", parallel.pipeline_parallel_size),
+            ("prefill_context_parallel_size", parallel.prefill_context_parallel_size),
+            ("decode_context_parallel_size", self.dcp_size),
+        ):
+            if value != 1:
+                return (
+                    f"{name}={value}: staging requires 1; "
+                    "parallel layout is unvalidated"
+                )
+        for name, enabled in (
+            ("lora_config", config.lora_config is not None),
+            ("speculative_config", config.speculative_config is not None),
+            ("enable_eplb", parallel.enable_eplb),
+            ("kv_transfer_config", config.kv_transfer_config is not None),
+        ):
+            if enabled:
+                return (
+                    f"{name} enabled: auxiliary inputs or downstream row consumers "
+                    "are not validated"
+                )
+        groups = [group for groups in self.attn_groups for group in groups]
+        if not groups:
+            return "attention groups are empty: no staging-compatible metadata builder"
+        for group in groups:
+            name = group.backend.get_name()
+            if name == "FLASH_ATTN_MLA":
+                continue
+            if name != "FLASH_ATTN":
+                return f"attention_backend={name}: staging metadata is unvalidated"
+            if envs.VLLM_BATCH_INVARIANT:
+                return (
+                    "FLASH_ATTN staging requires AOT; VLLM_BATCH_INVARIANT disables it"
+                )
+            from vllm.v1.attention.backends.flash_attn import (
+                FlashAttentionMetadataBuilder,
+            )
+
+            spec = group.kv_cache_spec
+            if type(spec) is not FullAttentionSpec:
+                return (
+                    f"FLASH_ATTN staging requires FullAttentionSpec, got {type(spec)}"
+                )
+            if (
+                spec.dtype != torch.bfloat16
+                or config.model_config.dtype != torch.bfloat16
+                or config.model_config.quantization is not None
+            ):
+                return "FLASH_ATTN staging requires unquantized BF16 weights and KV"
+            if spec.sliding_window or spec.attention_chunk_size or spec.non_causal:
+                return (
+                    "FLASH_ATTN staging requires global causal attention; "
+                    f"sliding_window={spec.sliding_window}, "
+                    f"attention_chunk_size={spec.attention_chunk_size}, "
+                    f"non_causal={spec.non_causal}"
+                )
+            if len(group.metadata_builders) != self.num_ubatches or any(
+                not isinstance(builder, FlashAttentionMetadataBuilder)
+                or not builder.aot_schedule
+                or not builder.use_full_cuda_graph
+                for builder in group.metadata_builders
+            ):
+                return "FLASH_ATTN staging requires a FULL FA3 builder per microbatch"
+        return None
+
     def prepare(
         self,
         input_batch: InputBatch,
@@ -343,14 +492,42 @@ class UBatchRunner:
         block tables.
         """
         ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
+        staged_rows = None
+        counts = None
+        if (
+            cg_mode == CUDAGraphMode.FULL
+            and not for_capture
+            and input_batch.num_tokens <= ubatch_slices[-1].token_slice.start
+        ):
+            # DP sync established the capability and single-token contract.
+            # Capture/dummy runs bypass it and must never stage dummy rows.
+            staged_rows = stage_decode_tokens(
+                input_batch, block_tables, slot_mappings, ubatch_slices
+            )
+            n = input_batch.num_tokens
+            counts = [
+                n // self.num_ubatches + (i < n % self.num_ubatches)
+                for i in range(self.num_ubatches)
+            ]
+            # Single-token decode uses the captured token regions for request
+            # rows too; the original request slices refer to unstaged inputs.
+            ubatch_slices = [
+                UBatchSlice(s.token_slice, s.token_slice) for s in ubatch_slices
+            ]
 
         attn_metadata = []
         slot_mappings_by_layer = []
         is_padding = []
+        start = 0
         for i, ubatch_slice in enumerate(ubatch_slices):
+            source_slice = ubatch_slice
+            if counts is not None:
+                stop = start + counts[i]
+                source_slice = UBatchSlice(slice(start, stop), slice(start, stop))
+                start = stop
             ubatch = _slice_input_batch(
                 input_batch,
-                ubatch_slice,
+                source_slice,
                 self.ubatch_query_start_loc[i],
                 self.ubatch_seq_lens[i],
                 self.ubatch_dcp_local_seq_lens[i],
@@ -358,6 +535,26 @@ class UBatchRunner:
                 dcp_rank=self.dcp_rank,
                 cp_interleave=self.cp_interleave,
             )
+            if counts is not None:
+                count = counts[i]
+                capacity = ubatch_slice.num_tokens
+                self.ubatch_query_start_loc[i][count + 1 : capacity + 1].fill_(count)
+                self.ubatch_seq_lens[i][count:capacity].zero_()
+                query_cpu = np.minimum(np.arange(capacity + 1, dtype=np.int32), count)
+                seq_cpu = torch.zeros(capacity, dtype=torch.int32)
+                seq_cpu[:count] = ubatch.seq_lens_cpu_upper_bound
+                ubatch = replace(
+                    ubatch,
+                    num_reqs_after_padding=capacity,
+                    num_tokens_after_padding=capacity,
+                    query_start_loc=self.ubatch_query_start_loc[i][: capacity + 1],
+                    query_start_loc_np=query_cpu,
+                    seq_lens=self.ubatch_seq_lens[i][:capacity],
+                    seq_lens_cpu_upper_bound=seq_cpu,
+                    input_ids=input_batch.input_ids[ubatch_slice.token_slice],
+                    positions=input_batch.positions[ubatch_slice.token_slice],
+                    is_padding=input_batch.is_padding[ubatch_slice.token_slice],
+                )
             ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
             ubatch_block_tables = tuple(
                 block_table[ubatch_slice.request_slice] for block_table in block_tables
@@ -384,6 +581,7 @@ class UBatchRunner:
             forward_contexts=self._make_forward_contexts(
                 ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
             ),
+            staged_rows=staged_rows,
         )
 
     def _make_forward_contexts(
@@ -416,6 +614,9 @@ class UBatchRunner:
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
+                    additional_kwargs={
+                        "routed_experts_token_offset": ubatch_slice.token_slice.start
+                    },
                 )
             )
         return forward_contexts
