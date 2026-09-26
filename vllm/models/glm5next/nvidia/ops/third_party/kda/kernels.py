@@ -32,6 +32,16 @@ from .fused_recurrent import (
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
+_IS_SM90: bool | None = None
+
+
+def _is_sm90() -> bool:
+    global _IS_SM90
+    if _IS_SM90 is None:
+        _IS_SM90 = torch.cuda.is_available()
+        _IS_SM90 = _IS_SM90 and torch.cuda.get_device_capability() == (9, 0)
+    return _IS_SM90
+
 
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
@@ -61,6 +71,18 @@ def fused_recurrent_kda_fwd(
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
     num_warps = 1
+    # Shape-aware launch configuration, tuned on H20 (SM90) with K=V=128:
+    # a wider V tile (BV=16) amortizes the per-program q/k/gate loads, and
+    # stages=2 only pays off when the grid is small; large grids keep the
+    # default 3 so non-H20 SM90 parts see no untuned stage change. num_warps
+    # stays 1, so the reduction order is unchanged and results are
+    # bit-identical to the default configuration. Other platforms keep the
+    # default above.
+    if _is_sm90():
+        BV = min(next_power_of_2(V), 16)
+        NV = cdiv(V, BV)
+        if N * HV <= 32:
+            num_stages = 2
 
     if compute_gate:
         assert a_log is not None and g_bias is not None, (
