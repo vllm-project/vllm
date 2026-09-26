@@ -391,6 +391,7 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    allowed_domains=self.allowed_media_domains or None,
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
@@ -444,6 +445,7 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    allowed_domains=self.allowed_media_domains or None,
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
