@@ -172,9 +172,17 @@ When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 ### Cache Management APIs
 
-- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
+- `/reset_prefix_cache` - Reset the local prefix cache (can disrupt service)
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
 - `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
+
+`POST /reset_prefix_cache` preserves connector-managed cache tiers by default.
+Pass `reset_external=true` to request that the configured KV connector reset its
+cache as well, or `reset_running_requests=true` to preempt running requests
+before resetting. The response is `{"success": true}` when the requested resets
+complete without an explicit failure. A connector that does not implement cache
+reset may keep its cache intact; use a fresh `cache_salt` when a guaranteed cache
+miss is required for a benchmark.
 
 ### Weight Transfer APIs (RL Training)
 
