@@ -34,11 +34,13 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_mask.register_warmup()
 
 
-def _skip_aiter_sampler_on_gfx1250() -> bool:
+def _skip_aiter_sampler_on_unsupported_rocm_arch() -> bool:
     # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
-    from vllm.platforms.rocm import on_gfx1250
+    from vllm.platforms.rocm import on_gfx942, on_gfx1250
 
-    return on_gfx1250()
+    # AITER top-k/top-p sampling can segfault on gfx942. Keep the rest of
+    # AITER enabled while using vLLM's native sampler on affected devices.
+    return on_gfx942() or on_gfx1250()
 
 
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
@@ -246,7 +248,7 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
-            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
+            and not _skip_aiter_sampler_on_unsupported_rocm_arch()
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False
