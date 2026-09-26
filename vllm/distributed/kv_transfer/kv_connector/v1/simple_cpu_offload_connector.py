@@ -20,6 +20,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
     BoundaryStoreStats,
+    OffloadIOStats,
     SimpleCPUOffloadScheduler,
 )
 from vllm.v1.simple_kv_offload.metadata import (
@@ -305,6 +306,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         """Return cumulative boundary-handoff store diagnostics."""
         if self.scheduler_manager is not None:
             return self.scheduler_manager.get_boundary_store_stats()
+        return None
+
+    def get_offload_io_stats(self) -> OffloadIOStats | None:
+        """Return cumulative store and load IO statistics."""
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_offload_io_stats()
         return None
 
     def take_events(self) -> Iterable[KVCacheEvent]:

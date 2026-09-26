@@ -131,6 +131,14 @@ class BoundaryStoreStats:
     dropped_not_hashed: int = 0
 
 
+@dataclass
+class OffloadIOStats:
+    """Cumulative store and load metrics for offload health monitoring."""
+
+    total_stored_blocks: int = 0
+    total_loaded_tokens: int = 0
+
+
 class SimpleCPUOffloadScheduler:
     """Scheduler-side manager for CPU offloading."""
 
@@ -176,6 +184,25 @@ class SimpleCPUOffloadScheduler:
                 self.fa_gidx = g_idx
                 break
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
+
+        # Reject explicit block size on hybrid models (#58653):
+        # explicit block-size causes mamba-page misalignment that turns offload
+        # write-only (blocks stored but read path never hits).
+        has_mamba = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            for g in self.cpu_kv_cache_config.kv_cache_groups
+        )
+        if (
+            has_mamba
+            and vllm_config.cache_config is not None
+            and getattr(vllm_config.cache_config, "user_specified_block_size", False)
+        ):
+            raise ValueError(
+                "SimpleCPUOffloadScheduler does not support hybrid models "
+                "with an explicit user-specified block-size, as it breaks "
+                "mamba-page alignment and causes write-only offload (#58653). "
+                "Please omit --block-size to allow auto-aligned block sizing."
+            )
         logger.info(
             "SimpleCPUOffloadScheduler: Allocating %d offload blocks "
             "(%.2f GB, mode=%s, backend=%s)",
@@ -251,6 +278,7 @@ class SimpleCPUOffloadScheduler:
         self._load_event_counter: int = 0
         self._store_event_counter: int = 0
         self.boundary_store_stats = BoundaryStoreStats()
+        self.io_stats = OffloadIOStats()
 
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
@@ -363,6 +391,7 @@ class SimpleCPUOffloadScheduler:
         )
 
         if hit_length > 0:
+            self.io_stats.total_loaded_tokens += hit_length
             pin_blocks = [
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
             ]
@@ -955,6 +984,9 @@ class SimpleCPUOffloadScheduler:
     def get_boundary_store_stats(self) -> BoundaryStoreStats:
         return replace(self.boundary_store_stats)
 
+    def get_offload_io_stats(self) -> OffloadIOStats:
+        return replace(self.io_stats)
+
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
 
@@ -1023,6 +1055,7 @@ class SimpleCPUOffloadScheduler:
         assert len(cpu_block_ids) == len(gpu_block_ids)
         assert block_meta is None or len(block_meta) == len(gpu_block_ids)
 
+        self.io_stats.total_stored_blocks += len(cpu_block_ids)
         cpu_blocks = [self.cpu_block_pool.blocks[bid] for bid in cpu_block_ids]
 
         assert self._gpu_block_pool is not None

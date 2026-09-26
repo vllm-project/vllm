@@ -2248,6 +2248,7 @@ def _make_hybrid_attention_mamba_scheduler(
     lazy: bool = False,
     mamba_cache_mode: str = "align",
     enable_kv_cache_events: bool = False,
+    user_specified_block_size: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
     scheduler_block_size = scheduler_block_size or block_size
@@ -2285,6 +2286,7 @@ def _make_hybrid_attention_mamba_scheduler(
     vllm_config = _make_cp_vllm_config(dcp_world_size=dcp_world_size)
     vllm_config.cache_config.prefix_cache_retention_interval = 0
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.user_specified_block_size = user_specified_block_size
     if enable_kv_cache_events:
         vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     # _derive_cpu_config() scales the requested capacity against
@@ -3065,3 +3067,62 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
         without_ring, max_batched
     )
     assert target_with == target_without
+
+
+def test_hybrid_scheduler_rejects_user_specified_block_size() -> None:
+    """SimpleCPUOffloadScheduler must reject hybrid configs with explicit block size."""
+    block_size = 4 * BLOCK_SIZE
+    with pytest.raises(
+        ValueError,
+        match="does not support hybrid models with an explicit",
+    ):
+        _make_hybrid_attention_mamba_scheduler(
+            num_cpu_blocks=16,
+            num_gpu_blocks=24,
+            block_size=block_size,
+            user_specified_block_size=True,
+        )
+
+
+def test_offload_io_stats_tracks_stores_and_loads() -> None:
+    """SimpleCPUOffloadScheduler tracks cumulative stored blocks and loaded tokens."""
+    fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=32, num_groups=2, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    stats = sched.get_offload_io_stats()
+    assert stats.total_stored_blocks == 0
+    assert stats.total_loaded_tokens == 0
+
+    num_blocks = 4
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    swa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=1)
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, swa_blocks))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    block_ids = kv_blocks.get_block_ids()
+    sched.request_finished_all_groups(req, block_ids)
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert meta.store_event >= 0
+    simulate_store_completion(sched, meta.store_event)
+
+    stats = sched.get_offload_io_stats()
+    assert stats.total_stored_blocks > 0
+    stored_blocks = stats.total_stored_blocks
+
+    req2 = Request(
+        request_id="req-stats-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens > 0
+
+    stats = sched.get_offload_io_stats()
+    assert stats.total_stored_blocks == stored_blocks
+    assert stats.total_loaded_tokens == hit_tokens
