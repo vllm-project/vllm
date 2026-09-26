@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3_5 MTP model."""
 
+import json
 from collections.abc import Iterable
 
+import huggingface_hub
 import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -34,6 +36,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
+from vllm.transformers_utils.repo_utils import try_get_local_file
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -51,6 +54,64 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+# Parameter suffixes a quantized MTP head would carry in the checkpoint.
+_MTP_QUANT_ARTIFACT_SUFFIXES = (
+    "weight_packed",
+    "weight_scale",
+    "weight_zero_point",
+    "input_scale",
+    "input_zero_point",
+)
+
+
+def _mtp_weight_names(model_config: ModelConfig) -> list[str] | None:
+    """Return the checkpoint's mtp.* tensor names, or None when unknown.
+
+    Reads the safetensors index from the local cache or the Hub, the same way
+    config-time helpers read recipe.yaml. A single-file checkpoint has no
+    index, so its layout stays unknown (callers keep the default behavior).
+    """
+    file_path = try_get_local_file(
+        model=model_config.model,
+        file_name="model.safetensors.index.json",
+        revision=model_config.revision,
+    )
+    if file_path is None:
+        try:
+            file_path = huggingface_hub.hf_hub_download(
+                model_config.model,
+                "model.safetensors.index.json",
+                revision=model_config.revision,
+            )
+        except Exception:
+            return None
+    try:
+        with open(file_path) as f:
+            weight_map = json.load(f).get("weight_map", {})
+    except (OSError, ValueError):
+        return None
+    return [name for name in weight_map if name.startswith("mtp.")]
+
+
+def _checkpoint_ships_dense_mtp(model_config: ModelConfig) -> bool:
+    """Whether the checkpoint ships the MTP head as dense weights.
+
+    Quantizers sometimes leave the MTP head unquantized without declaring it
+    in the quant config's ignore list; the tensors then arrive as plain
+    `mtp.*.weight` with no packed or scale companions (#58807). Detection is
+    name-based, so a properly quantized MTP head (any artifact suffix on any
+    mtp.* tensor) keeps the target's quantization.
+    """
+    names = _mtp_weight_names(model_config)
+    if not names:
+        return False
+    mtp_names = [name for name in names if name.startswith("mtp.")]
+    if not mtp_names:
+        return False
+    return not any(
+        name.rsplit(".", 1)[-1] in _MTP_QUANT_ARTIFACT_SUFFIXES for name in mtp_names
+    )
 
 
 @support_torch_compile(
@@ -91,9 +152,19 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
         # Ref: https://github.com/vllm-project/vllm/pull/38650
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        # compressed-tensors pack-quantized checkpoints may likewise ship the
+        # whole MTP head dense without declaring it in the ignore list (#58807).
+        mtp_dense = (
+            quant_config is not None
+            and quant_config.get_name() == "compressed-tensors"
+            and _checkpoint_ships_dense_mtp(model_config)
+        )
         fc_quant = (
             None
-            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            if (
+                quant_config
+                and (quant_config.get_name() == "modelopt_fp4" or mtp_dense)
+            )
             else quant_config
         )
         self.fc = ColumnParallelLinear(
@@ -109,13 +180,18 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # GPTQ: quantized checkpoints may exclude MTP from quantization via
         # quantization_config.dynamic with "-:pattern" entries. When detected,
         # disable quantization for MTP layers so they use unquantized params.
+        # The dense-MTP detection above covers the same need for
+        # compressed-tensors checkpoints that declare nothing at all.
         original_quant = vllm_config.quant_config
         if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
             hf_qc = getattr(model_config.hf_config, "quantization_config", None)
-            if isinstance(hf_qc, dict):
-                dynamic = hf_qc.get("dynamic", {})
-                if any(k.startswith("-:") and "mtp" in k for k in dynamic):
-                    vllm_config.quant_config = None
+            if mtp_dense or (
+                isinstance(hf_qc, dict)
+                and any(
+                    k.startswith("-:") and "mtp" in k for k in hf_qc.get("dynamic", {})
+                )
+            ):
+                vllm_config.quant_config = None
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
                 vllm_config,
