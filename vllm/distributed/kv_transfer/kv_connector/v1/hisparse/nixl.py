@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.v1.hisparse.layout import HISPARSE_RESIDENT_SUFFIX
-from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+from vllm.v1.kv_cache_interface import HiSparseResidentSpec, KVCacheGroupRole
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -270,3 +271,25 @@ def make_hisparse_nixl_destination(
     ):
         return None
     return HiSparseNixlDestination(kv_cache_config, vllm_config)
+
+
+def hisparse_nixl_transfer_view(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Transfer resident pages instead of the host source group.
+
+    HiSparse marks its host source group transferable for hash-addressed
+    stores. NIXL instead reads into resident GPU pages and redirects host
+    landings through `HiSparseNixlDestination`.
+    """
+    if kv_cache_config.hisparse_host_num_blocks is None:
+        return kv_cache_config
+    groups = [
+        replace(
+            group,
+            enable_kv_transfer=isinstance(group.kv_cache_spec, HiSparseResidentSpec),
+        )
+        if group.role is KVCacheGroupRole.HISPARSE_SOURCE
+        or isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        else group
+        for group in kv_cache_config.kv_cache_groups
+    ]
+    return replace(kv_cache_config, kv_cache_groups=groups)

@@ -556,6 +556,23 @@ def make_nixl_hisparse_scheduler(manager: KVCacheManager):
     return connector
 
 
+def test_nixl_hisparse_transfer_view_keeps_store_groups():
+    """NIXL lands in resident pages; stores keep transferring the host source."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
+        hisparse_nixl_transfer_view,
+    )
+
+    config = make_hisparse_kv_cache_config(8, 8)
+    source, _, resident, hot = range(4)
+    view = hisparse_nixl_transfer_view(config)
+
+    assert source in config.prefix_cacheable_group_ids
+    assert resident not in config.transfer_group_ids
+    assert source not in view.transfer_group_ids
+    assert resident in view.transfer_group_ids
+    assert hot not in view.transfer_group_ids
+
+
 def test_nixl_hisparse_gpu_landing_only_for_nixl_loads():
     """Loads served by other connectors keep importing to host."""
     manager = make_hisparse_kv_cache_manager(32, 16, transfer_device_cache=True)
