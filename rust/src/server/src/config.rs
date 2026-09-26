@@ -49,10 +49,14 @@ pub enum CoordinatorMode {
 }
 
 /// HTTP/API-server behavior switches that affect route-layer responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// Log generated chat content at INFO level.
+    pub enable_log_outputs: bool,
+    /// Also log streaming chat deltas when output logging is enabled.
+    pub enable_log_deltas: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
@@ -62,6 +66,19 @@ pub struct ApiServerOptions {
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
+}
+
+impl Default for ApiServerOptions {
+    fn default() -> Self {
+        Self {
+            enable_log_requests: false,
+            enable_log_outputs: false,
+            enable_log_deltas: true,
+            enable_prompt_tokens_details: false,
+            enable_request_id_headers: false,
+            enable_scale_out: false,
+        }
+    }
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
@@ -288,6 +305,11 @@ impl Config {
     /// startup.
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        if self.api_server_options.enable_log_outputs
+            && !self.api_server_options.enable_log_requests
+        {
+            bail!("--enable-log-outputs requires --enable-log-requests");
+        }
         self.cors.validate()?;
         if let Some(tls) = &self.tls {
             tls.validate()?;
