@@ -81,7 +81,7 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
         )
         self._dummy = get_current_vllm_config().load_config.load_format == "dummy"
         shape = (max_total_tokens, num_ngram_heads, embedding_dim)
-        dtype, pin = self.weight.dtype, self.weight.is_cuda
+        dtype, pin = self.weight.dtype, self.weight.device.type != "cpu"
         self._staging = torch.zeros(shape, dtype=dtype, device=self.weight.device)
         self._host_ids = torch.empty(
             shape[:2], dtype=torch.int64, device="cpu", pin_memory=pin
@@ -620,7 +620,7 @@ def stage_checkpoint_rows(
     for module in modules:
         ids = module.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         module.ngram_embedding._host_ids[:num_tokens].copy_(ids, non_blocking=True)
-    if input_ids.is_cuda:
+    if input_ids.device.type != "cpu":
         torch.accelerator.current_stream().synchronize()
     for module in modules:
         module.ngram_embedding.stage_rows(num_tokens)
