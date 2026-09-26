@@ -287,6 +287,7 @@ class BatchDCPPrefillWrapper:
         kv_layout: str,
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
+        lse_buffer: torch.Tensor | None = None,
     ):
         if dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
@@ -294,6 +295,8 @@ class BatchDCPPrefillWrapper:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         self._context = BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
+        self._lse_buffer = lse_buffer
+        self._lse: torch.Tensor | None = None
 
     def plan(
         self,
@@ -348,6 +351,11 @@ class BatchDCPPrefillWrapper:
             logits_soft_cap=logits_soft_cap,
             q_data_type=q_data_type,
         )
+        if self._lse_buffer is not None:
+            num_tokens = int(qo_indptr_cpu[-1])
+            if num_tokens > self._lse_buffer.shape[0]:
+                raise ValueError("DCP prefill exceeds the LSE buffer capacity")
+            self._lse = self._lse_buffer[:num_tokens]
 
     def run(
         self,
@@ -376,6 +384,16 @@ class BatchDCPPrefillWrapper:
         )
         lse_context = log2_lse_to_ln(lse_context).transpose(0, 1)
 
+        # The merge loads each suffix element before overwriting it. Keep the
+        # allocating path for padded outputs or differing attention dtypes.
+        suffix_out = (
+            out
+            if out.dtype in (torch.float16, torch.bfloat16)
+            and out.dtype == prefill_query.dtype
+            and out.is_contiguous()
+            and out.stride(1) == output_context.stride(1)
+            else None
+        )
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
             key,
@@ -383,6 +401,8 @@ class BatchDCPPrefillWrapper:
             return_lse=True,
             lse_base="ln",
             lse_layout="NH",
+            out=suffix_out,
+            lse=self._lse,
         )
         # The merge accepts strided HN views, so no transpose copy is needed.
         lse_query = lse_query.transpose(0, 1)
@@ -1170,6 +1190,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                     workspace_buffer=self._get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
+                    # One stable allocation per builder/ubatch, shared by its
+                    # sequential layers. plan() only selects an active view.
+                    lse_buffer=torch.empty(
+                        (self.max_num_batched_tokens, self.num_qo_heads),
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
                 )
             else:
                 if self.has_sinks and (

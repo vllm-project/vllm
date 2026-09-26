@@ -58,21 +58,52 @@ def test_dcp_prefill_lse_merge_and_replay(
         assert not context_log2.is_contiguous()
     group = SimpleNamespace(all_gather=lambda tensor, dim: tensor)
     monkeypatch.setattr(fi_backend, "get_dcp_group", lambda: group)
-    wrapper = object.__new__(fi_backend.BatchDCPPrefillWrapper)
+    workspace = torch.empty(128 * 1024 * 1024, device=q.device, dtype=torch.uint8)
+    lse_buffer = torch.full((tokens + 3, heads), torch.nan, device=q.device)
+    wrapper = fi_backend.BatchDCPPrefillWrapper("NHD", workspace, lse_buffer=lse_buffer)
     wrapper._context = SimpleNamespace(
-        run=lambda *args, **kwargs: (context_out, context_log2)
+        plan=lambda **kwargs: None,
+        run=lambda *args, **kwargs: (context_out, context_log2),
     )
     wrapper._dcp_combine = lambda o, lse, *args, **kwargs: (o, lse)
-    workspace = torch.empty(128 * 1024 * 1024, device=q.device, dtype=torch.uint8)
     wrapper._new_tokens = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
         workspace, backend=backend
     )
-    indptr = torch.tensor([0, tokens], dtype=torch.int32, device="cpu")
-    wrapper._new_tokens.plan(
-        indptr, indptr, heads, kv_heads, dim, causal=True, q_data_type=q.dtype
-    )
+
+    def plan():
+        indptr = torch.tensor([0, tokens], dtype=torch.int32, device="cpu")
+        wrapper.plan(
+            qo_indptr_cpu=indptr,
+            paged_kv_indptr_cpu=indptr,
+            paged_kv_indices=indptr,
+            paged_kv_last_page_len_cpu=indptr,
+            kv_lens_cpu=indptr,
+            page_size=16,
+            num_qo_heads=heads,
+            dcp_world_size=1,
+            num_kv_heads=kv_heads,
+            head_dim=dim,
+            sm_scale=dim**-0.5,
+            window_left=-1,
+            logits_soft_cap=None,
+            q_data_type=q.dtype,
+            kv_cache_dtype=q.dtype,
+            prefill_fixed_split_size=0,
+            disable_split_kv=False,
+        )
+
+    plan()
     layer = SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0)
-    out = torch.empty_like(q)
+    # A mixed batch's prefill output follows decode tokens. Padded head storage
+    # exercises the allocating fallback; compact storage supports in-place merge.
+    out_storage = torch.empty(
+        tokens + 2,
+        heads,
+        dim + (8 if strided_context else 0),
+        device=q.device,
+        dtype=q.dtype,
+    )
+    out = out_storage[2:, :, :dim]
 
     def check_output():
         keys = k.float().repeat_interleave(heads // kv_heads, dim=1)
@@ -90,12 +121,34 @@ def test_dcp_prefill_lse_merge_and_replay(
 
     assert wrapper.run(layer, q, (k, v), k, v, out) is out
     check_output()
+    assert torch.isfinite(lse_buffer[:tokens]).all()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         wrapper.run(layer, q, (k, v), k, v, out)
     q.mul_(0.5).add_(0.4)
     context_lse.add_(0.7)
     context_log2.copy_(context_lse.T / math.log(2))
+    out.fill_(torch.nan)
+    graph.replay()
+    check_output()
+
+    # Replanning selects a shorter view of the same owned LSE allocation.
+    del graph
+    tokens = 3
+    q, k, v, out = q[:tokens], k[:tokens], v[:tokens], out[:tokens]
+    context_out = context_out[:tokens]
+    context_lse = context_lse[:, :tokens]
+    context_log2 = context_log2[:tokens]
+    plan()
+    lse_buffer.fill_(torch.nan)
+    wrapper.run(layer, q, (k, v), k, v, out)
+    check_output()
+    assert torch.isfinite(lse_buffer[:tokens]).all()
+    assert torch.isnan(lse_buffer[tokens:]).all()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        wrapper.run(layer, q, (k, v), k, v, out)
+    q.add_(0.2)
     out.fill_(torch.nan)
     graph.replay()
     check_output()
