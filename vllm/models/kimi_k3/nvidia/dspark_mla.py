@@ -376,7 +376,12 @@ class K3DSparkModel(nn.Module):
         self,
         cache_layers: list[MultiHeadLatentAttention],
     ) -> bool:
-        if not hasattr(self, "_layers_share_kv_block_layout"):
+        key = tuple(cl.kv_cache.data_ptr() for cl in cache_layers)
+        if getattr(self, "_kv_cache_ptrs_key", None) != key:
+            assert not torch.cuda.is_current_stream_capturing()
+            self._kv_cache_ptrs_key = key
+            if hasattr(self, "_context_cache_ptrs"):
+                del self._context_cache_ptrs
             ref_cache = cache_layers[0].kv_cache
             self._layers_share_kv_block_layout = all(
                 cl.kv_cache.size(1) == ref_cache.size(1)
