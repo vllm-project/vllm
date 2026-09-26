@@ -1008,7 +1008,7 @@ def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
 
     llm = LLM(
         model="ibm-granite/granite-3.1-1b-a400m-instruct",
-        quantization="fp8",
+        quantization="fp8_per_tensor",
         enforce_eager=True,
         max_num_seqs=8,
         max_model_len=2048,
