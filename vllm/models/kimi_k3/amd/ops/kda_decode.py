@@ -1,20 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm entry points for the fused Kimi-K3 KDA decode kernel.
+"""ROCm entry points for the fused Kimi-K3 KDA decode kernels.
 
 The kernel in ``csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu``
 replaces, for a pure non-speculative decode batch, the three Triton launches
 and two copies the AMD KDA layer otherwise runs per layer: the packed causal
 conv1d update, the recurrent delta-rule step, and the gated output RMSNorm.
 
+Speculative decode batches take AITER's Triton ``fused_kda_decode`` instead,
+when ``is_aiter_spec_kda_decode_supported`` holds. Both paths share the weights
+staged below.
+
 The kernel wants a width-major conv weight and an fp32 norm weight, so both are
 staged once at load time by the weight loaders below.
 """
 
+import functools
+import inspect
 from collections.abc import Callable
 
 import torch
 
+from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -24,6 +32,27 @@ logger = init_logger(__name__)
 # Head counts the kernel is instantiated for (Kimi-K3 has 96 KDA heads, so this
 # covers TP1/2/4/8).
 SUPPORTED_NUM_HEADS = (12, 24, 48, 96)
+
+
+@functools.cache
+def is_aiter_spec_kda_decode_supported() -> bool:
+    """Whether AITER's fused KDA kernel can serve speculative decode batches.
+
+    Needs the interface that takes accepted-token counts, separate conv-state
+    indices and an output buffer. Older AITER builds keep the three-op path.
+    """
+    if not (envs.VLLM_ROCM_AITER_KDA_SPEC_DECODE and rocm_aiter_ops.is_enabled()):
+        return False
+    try:
+        from aiter.ops.triton.gated_delta_net.fused_kda_decode import (
+            fused_kda_decode,
+        )
+    except ImportError:
+        return False
+    params = inspect.signature(fused_kda_decode).parameters
+    return all(
+        name in params for name in ("num_accepted_tokens", "conv_state_indices", "out")
+    )
 
 
 def is_fused_kda_decode_supported(
@@ -41,12 +70,15 @@ def is_fused_kda_decode_supported(
         num_heads not in SUPPORTED_NUM_HEADS
         or head_dim != 128
         or conv_width != 4
-        or num_spec != 0
+        or num_spec < 0
         or input_dtype != torch.bfloat16
         or conv_state_dtype != torch.bfloat16
         or is_conv_state_dim_first()
-        or not hasattr(torch.ops._C, "fused_kda_decode")
     ):
+        return False
+    if num_spec == 0 and not hasattr(torch.ops._C, "fused_kda_decode"):
+        return False
+    if num_spec > 0 and not is_aiter_spec_kda_decode_supported():
         return False
     # gfx950 (MI355X) and gfx942 (MI325X): both CDNA, sharing the wave64 / DPP /
     # bf16 primitives the kernel relies on.
