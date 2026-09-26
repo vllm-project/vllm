@@ -106,6 +106,12 @@ class ParserEngineConfig:
     # .strip() content text when tool calls are present.
     strip_content_whitespace_with_tools: bool = True
 
+    # Text the chat template emits between visible content and a tool-call
+    # block (e.g. "\n\n" for DeepSeek DSML). When a tool call follows, exactly
+    # one trailing occurrence is removed from the content so that the turn
+    # re-renders byte-identically when the client echoes it back as history.
+    content_tool_separator: str | None = None
+
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
