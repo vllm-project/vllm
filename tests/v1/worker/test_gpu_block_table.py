@@ -312,3 +312,97 @@ def test_dummy_request_slot_mapping_is_pad():
         num_tokens_padded=3,
     )
     assert dummy[0].tolist() == [PAD_SLOT_ID] * 3
+
+
+def _make_v1_block_table(max_num_reqs=4, max_num_blocks_per_req=8):
+    from vllm.v1.worker.block_table import BlockTable
+
+    return BlockTable(
+        block_size=16,
+        max_num_reqs=max_num_reqs,
+        max_num_blocks_per_req=max_num_blocks_per_req,
+        max_num_batched_tokens=64,
+        pin_memory=False,
+        device=torch.device("cuda"),
+        kernel_block_size=16,
+        cp_kv_cache_interleave_size=1,
+    )
+
+
+def test_v1_commit_block_table_skips_clean_copy():
+    """A commit that follows no row mutation must not re-issue the H2D copy:
+    at steady-state decode no row changes and the GPU table is already
+    current."""
+    block_table = _make_v1_block_table()
+    block_table.add_row([1, 2], row_idx=0)
+    block_table.commit_block_table(1)
+    torch.accelerator.synchronize()
+    assert block_table.block_table.gpu[0, :2].tolist() == [1, 2]
+
+    copies = []
+    block_table.block_table.copy_to_gpu = lambda n=None: copies.append(n)
+    block_table.commit_block_table(1)
+    assert copies == []
+
+
+def test_v1_first_commit_copies_even_without_row_writes():
+    """Warmup dummy runs commit before any request writes a row; that first
+    commit must still copy, so the first real request does not pay for the
+    first H2D transfer."""
+    block_table = _make_v1_block_table()
+    copies = []
+    block_table.block_table.copy_to_gpu = lambda n=None: copies.append(n)
+    block_table.commit_block_table(2)
+    assert copies == [2]
+
+
+def test_v1_commit_block_table_keeps_rows_beyond_num_reqs_dirty():
+    """commit_block_table(num_reqs) only transfers the first num_reqs rows,
+    so a row dirtied past that prefix must stay dirty until a commit wide
+    enough to cover it, rather than being dropped."""
+    block_table = _make_v1_block_table()
+    # Dirty a row inside the prefix too, so the narrow commit really copies.
+    block_table.add_row([5], row_idx=0)
+    block_table.add_row([7, 8], row_idx=3)
+
+    block_table.commit_block_table(2)
+    torch.accelerator.synchronize()
+    assert block_table.block_table.gpu[0, 0].item() == 5
+    assert (block_table.block_table.gpu[3] == 0).all()
+
+    block_table.commit_block_table(4)
+    torch.accelerator.synchronize()
+    assert block_table.block_table.gpu[3, :2].tolist() == [7, 8]
+
+
+def test_v1_commit_block_table_uploads_vacated_move_row_source():
+    """Condensing moves the last row into a hole and shrinks num_reqs past the
+    vacated source. move_row zeroes that source on the host, and a later wider
+    commit (e.g. a padded dummy run) must upload the zeroed row rather than
+    leave stale block IDs on the device."""
+    block_table = _make_v1_block_table()
+    for row in range(4):
+        block_table.add_row([10 * row + 1, 10 * row + 2], row_idx=row)
+    block_table.commit_block_table(4)
+
+    block_table.clear_row(1)
+    block_table.move_row(3, 1)
+    block_table.commit_block_table(3)
+    block_table.commit_block_table(4)
+    torch.accelerator.synchronize()
+    assert block_table.block_table.gpu[1, :2].tolist() == [31, 32]
+    assert (block_table.block_table.gpu[3] == 0).all()
+
+
+def test_v1_mark_dirty_forces_copy_after_external_write():
+    """Callers that write the host buffer directly must be able to force the
+    next commit to copy."""
+    block_table = _make_v1_block_table()
+    block_table.add_row([1], row_idx=0)
+    block_table.commit_block_table(1)
+
+    block_table.block_table.np[0, 0] = 42
+    block_table.mark_dirty()
+    block_table.commit_block_table(1)
+    torch.accelerator.synchronize()
+    assert block_table.block_table.gpu[0, 0].item() == 42
