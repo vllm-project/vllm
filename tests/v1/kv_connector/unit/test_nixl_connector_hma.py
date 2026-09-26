@@ -1416,9 +1416,11 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
-def test_post_process_zeroes_untransferred_tail():
-    """The untransferred sub-blocks of the last local block are zeroed on
-    receive; mamba state caches are untouched by the attention permute."""
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+def test_post_process_zeroes_untransferred_tail(num_kv_heads):
+    """Received remote sub-blocks are regrouped per head and the untransferred
+    sub-blocks of the last local block are zeroed on receive; mamba state
+    caches are untouched by the attention permute."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
@@ -1434,7 +1436,18 @@ def test_post_process_zeroes_untransferred_tail():
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
     worker.enable_permute_local_kv = False
-    attn_cache = torch.ones(6, block_tokens, 2, 4)
+    # Attention caches are [B, H, N, C]; distinct values per head and token.
+    expected = torch.arange(6 * num_kv_heads * block_tokens * 4).view(
+        6, num_kv_heads, block_tokens, 4
+    )
+    # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
+    attn_cache = expected.clone()
+    attn_cache[2:4] = (
+        expected[2:4]
+        .unflatten(2, (ratio, -1))
+        .transpose(1, 2)
+        .reshape(2, num_kv_heads, block_tokens, 4)
+    )
     mamba_cache = torch.ones(6, 16)
     worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
@@ -1450,11 +1463,11 @@ def test_post_process_zeroes_untransferred_tail():
     worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
-    assert torch.all(attn_cache[2] == 1)
-    assert torch.all(attn_cache[3, :4] == 1)
-    assert torch.all(attn_cache[3, 4:] == 0)
+    assert torch.equal(attn_cache[2], expected[2])
+    assert torch.equal(attn_cache[3, :, :4], expected[3, :, :4])
+    assert torch.all(attn_cache[3, :, 4:] == 0)
     # Untouched blocks and the mamba cache keep their content.
-    assert torch.all(attn_cache[4] == 1)
+    assert torch.equal(attn_cache[4], expected[4])
     assert torch.all(mamba_cache == 1)
 
 

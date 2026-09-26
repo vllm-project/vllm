@@ -246,8 +246,6 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
 
     """
     blocks_to_update = cache.index_select(0, indices)
-    # use physical order
-    blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
     n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -257,7 +255,6 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
         .permute(0, 2, 1, 3, 4)
         .flatten(2, 3)
     )
-    permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
     cache.index_copy_(0, indices, permuted_blocks)
 
 
