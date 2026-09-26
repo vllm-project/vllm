@@ -96,10 +96,9 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def _get_model(self) -> nn.Module:
         from vllm.compilation.backends import set_model_tag
 
-        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("draft_model"):
             model = get_model(
-                vllm_config=draft_vllm_config,
+                vllm_config=self.draft_vllm_config,
                 prefix="draft_model",
             )
         return model
