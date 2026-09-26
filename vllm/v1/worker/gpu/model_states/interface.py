@@ -234,6 +234,10 @@ class ModelState(ABC):
         """
         return None
 
+    needs_prefill_logits: bool = False
+    """Compute the last prompt logit even when no new tokens are emitted.
+    Used by diffusion speculators to seed their first draft block."""
+
     num_new_sampled_tokens_per_step: int = 1
     """New tokens sampled on each decode step 
     (excluding accepted draft tokens, a.k.a num bonus tokens)."""

@@ -130,6 +130,7 @@ class InputProcessor:
                 self.speculative_config,
                 self.structured_outputs_config,
                 self.tokenizer,
+                diffusion_config=self.vllm_config.diffusion_config,
             )
 
             self.validate_logits_processors_params(params)

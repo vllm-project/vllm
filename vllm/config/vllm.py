@@ -1431,6 +1431,13 @@ class VllmConfig:
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
+        if (
+            self.diffusion_config is not None
+            and self.diffusion_config.algorithm == "linear_spec"
+            and self.model_config is not None
+            and "NemotronLabsDiffusionModel" not in self.model_config.architectures
+        ):
+            raise ValueError("linear_spec requires NemotronLabsDiffusionModel.")
         self.try_verify_and_update_config()
         self._resolve_and_verify_engram_config()
 
