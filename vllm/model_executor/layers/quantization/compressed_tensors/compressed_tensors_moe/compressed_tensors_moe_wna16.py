@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_ZP_SUPPORTED_TYPES_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_moe_marlin_supports_config,
+    explain_moe_marlin_unsupported,
     get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -118,9 +118,14 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
 
         if self.is_marlin:
-            assert check_moe_marlin_supports_config(
+            unsupported = explain_moe_marlin_unsupported(
                 self.moe, self.group_size, allow_tile_padding=True
             )
+            if unsupported is not None:
+                raise ValueError(
+                    f"CompressedTensors WNA16 MoE cannot use the Marlin "
+                    f"kernel: {unsupported}"
+                )
             self.input_dtype = get_marlin_input_dtype(layer_name)
         else:
             # channelwise is not supported by this kernel
