@@ -182,6 +182,34 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
     )
 
 
+def test_fused_decode_falls_back_without_kernel_image() -> None:
+    """The fused path must fall back when its cubin lacks the active device."""
+    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+        pytest.skip("fused GDN decode MTP op is not built")
+
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.dtype = torch.bfloat16
+    layer = types.SimpleNamespace(
+        gqa_interleaved_layout=False,
+        head_k_dim=K,
+        head_v_dim=V,
+        A_log=torch.empty(1, dtype=torch.float32, device="cuda"),
+        norm=types.SimpleNamespace(activation="silu"),
+        get_state_dtype=lambda: (torch.bfloat16, torch.float32),
+    )
+    with patch.object(
+        qwen_gdn_linear_attn.ops,
+        "fused_gdn_decode_kernel_available",
+        return_value=False,
+    ) as kernel_available:
+        reason = QwenGatedDeltaNetAttention._fused_gdn_decode_unsupported_reason(
+            cast(QwenGatedDeltaNetAttention, layer), vllm_config
+        )
+
+    kernel_available.assert_called_once_with(layer.A_log)
+    assert reason == "fused GDN decode kernel has no image for the current device"
+
+
 @torch.inference_mode()
 def test_fused_forward_uses_packed_entrypoint() -> None:
     """Fused mode keeps projected QKVZ and BA packed through the model op."""
