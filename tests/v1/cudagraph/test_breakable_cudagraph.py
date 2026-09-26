@@ -432,6 +432,58 @@ def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
 
 
 # ---------------------------------------------------------------------------
+# Side-stream work queued by an eager break must be joined before capture
+# ---------------------------------------------------------------------------
+
+
+def test_eager_break_side_stream_work_is_joined_before_next_capture(
+    cuda_capture_stream,
+):
+    """An eager-break fn that queues async work on a side stream *without*
+    joining it back (e.g. the pinned-host PLE UVA prefetch launched by
+    ``start_prefetch``) can leave that work in flight when a later segment
+    calls ``capture_end``, invalidating the capture with
+    cudaErrorNotPermitted (#57759).
+
+    ``_begin_segment`` must therefore join all outstanding device work
+    before ``capture_begin``. With enough side-stream work queued, an
+    unfixed capture fails at ``capture_end``; with the fix it succeeds
+    and replays correctly.
+    """
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    side_stream = torch.cuda.Stream()
+    x = torch.zeros(4, device="cuda")
+    # Large enough (and iterated enough) that the side-stream work is
+    # still in flight when the following segment ends its capture.
+    y = torch.zeros(1 << 22, device="cuda")
+
+    def prefetch_like():
+        # Mimic start_prefetch: fork the side stream off the current
+        # stream, queue async work, and return WITHOUT joining back.
+        side_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side_stream):
+            for _ in range(256):
+                y.add_(1.0)
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        x.add_(1.0)
+        cap.add_eager(prefetch_like)
+        x.add_(1.0)
+
+    assert cap.num_graphs == 2
+    assert cap.num_eager_breaks == 1
+
+    for _ in range(3):
+        y.zero_()
+        cap.replay()
+        cuda_capture_stream.synchronize()
+        side_stream.synchronize()
+        torch.testing.assert_close(y, torch.full_like(y, 256.0))
+
+
+# ---------------------------------------------------------------------------
 # Replay ordering
 # ---------------------------------------------------------------------------
 

@@ -177,6 +177,14 @@ class BreakableCUDAGraphCapture:
 
     def _begin_segment(self) -> None:
         assert not self._capturing
+        # Join all outstanding device work (e.g. side-stream kernels queued
+        # by a preceding eager break, such as the pinned-host PLE UVA
+        # prefetch) before starting a new capture. cudaDeviceSynchronize is
+        # only illegal *inside* an active capture; here, between segments,
+        # it is legal. Leaving side-stream work in flight across
+        # capture_begin/capture_end can invalidate the capture with
+        # cudaErrorNotPermitted under host load (see #57759).
+        torch.accelerator.synchronize()
         g = torch.cuda.CUDAGraph()
         if self.pool is not None:
             g.capture_begin(pool=self.pool)
