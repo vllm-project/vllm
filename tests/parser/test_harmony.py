@@ -174,6 +174,7 @@ def assert_parser_is_reset(harmony_parser: HarmonyParser):
     assert harmony_parser._parser is None
     assert harmony_parser._num_processed_messages == 0
     assert harmony_parser._current_message_tokens == []
+    assert harmony_parser._parser_failed is False
 
 
 class TestFlush:
@@ -244,6 +245,22 @@ class TestParse:
         assert reasoning is None
         assert content == "This is a test"
         assert tool_calls is None
+
+    def test_parser_error_after_completed_message(
+        self, harmony_parser, chat_request
+    ):
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                "<|channel|>final<|message|>Answer<|end|><|return|>"
+            ),
+        )
+
+        assert reasoning is None
+        assert content == "Answer"
+        assert tool_calls is None
+        assert_parser_is_reset(harmony_parser)
 
     def test_reasoning_and_content(self, harmony_parser, chat_request):
         response = [
@@ -532,6 +549,31 @@ class TestParseDelta:
         assert second_delta is not None
         assert second_delta.content == "Answer"
         assert second_delta.reasoning is None
+        assert_parser_is_reset(parser)
+
+    def test_parser_error_stops_future_chunks(
+        self, gpt_oss_tokenizer, chat_request
+    ):
+        parser = HarmonyParser(gpt_oss_tokenizer)
+
+        first_delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output(
+                "<|channel|>final<|message|>Answer<|end|><|return|>"
+            ),
+            request=chat_request,
+            finished=False,
+        )
+        second_delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output("<|return|>"),
+            request=chat_request,
+            finished=True,
+        )
+
+        assert first_delta is not None
+        assert first_delta.content == "Answer"
+        assert second_delta is None
         assert_parser_is_reset(parser)
 
     def test_multi_token(self, gpt_oss_tokenizer, chat_request):
