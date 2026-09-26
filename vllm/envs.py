@@ -263,7 +263,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
-    VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_ENABLE_COHERE_API: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
@@ -1872,18 +1871,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # TODO(lucas): Remove this flag once latency regression is resolved.
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE": lambda: bool(
         int(os.getenv("VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "1"))
-    ),
-    # Enables support for the "store" option in the OpenAI Responses API.
-    # When set to 1, vLLM's OpenAI server will retain the input and output
-    # messages for those requests in memory. By default, this is disabled (0),
-    # and the "store" option is ignored.
-    # NOTE/WARNING:
-    # 1. Messages are kept in memory only (not persisted to disk) and will be
-    #    lost when the vLLM server shuts down.
-    # 2. Enabling this option will cause a memory leak, as stored messages are
-    #    never removed from memory until the server terminates.
-    "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
-        int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
     ),
     # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``
     # and its render endpoint at ``POST /cohere/v2/chat/render``.

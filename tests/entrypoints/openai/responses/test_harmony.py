@@ -107,14 +107,15 @@ def server():
     ]
     env_dict = {
         **BASE_TEST_ENV,
-        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
         "PYTHON_EXECUTION_BACKEND": "dangerously_use_uv",
         "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS": (
             "code_interpreter,container,web_search_preview"
         ),
         "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": "1",
     }
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, [*args, "--enable-responses-store"], env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 

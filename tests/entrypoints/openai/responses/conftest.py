@@ -392,11 +392,8 @@ def default_server_args():
 def server_with_store(default_server_args):
     with RemoteOpenAIServer(
         "Qwen/Qwen3-1.7B",
-        default_server_args,
-        env_dict={
-            "VLLM_ENABLE_RESPONSES_API_STORE": "1",
-            "VLLM_SERVER_DEV_MODE": "1",
-        },
+        [*default_server_args, "--enable-responses-store"],
+        env_dict={"VLLM_SERVER_DEV_MODE": "1"},
     ) as remote_server:
         yield remote_server
 
