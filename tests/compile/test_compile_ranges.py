@@ -254,3 +254,45 @@ def test_inductor_cache_compile_ranges(disable_vllm_compile_cache):
         # Check that cache is used, so the number of calls
         # should be 0
         assert post_grad_range_checker.num_calls == 0
+
+
+def test_create_concrete_args_preserves_tensor_metadata():
+    """create_concrete_args rebuilds example inputs with torch.empty; tensor
+    metadata stamped on the traced example values (conj/neg bits here, backend
+    metadata for out-of-tree devices) must survive the rebuild, while inputs
+    without metadata must come back with none."""
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import (
+        DimDynamic,
+        ShapeEnv,
+        StatelessSymbolicContext,
+    )
+
+    from vllm.compilation.piecewise_backend import create_concrete_args
+
+    class Model(nn.Module):
+        def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            return x + y.sum()
+
+    graph = fx.symbolic_trace(Model())
+    fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+
+    def dynamic_batch() -> StatelessSymbolicContext:
+        return StatelessSymbolicContext(
+            dynamic_sizes=[DimDynamic.DYNAMIC, DimDynamic.STATIC]
+        )
+
+    tagged = fake_mode.from_tensor(
+        torch.empty(4, 8, dtype=torch.complex64), symbolic_context=dynamic_batch()
+    ).conj()
+    plain = fake_mode.from_tensor(torch.empty(4, 8), symbolic_context=dynamic_batch())
+    assert torch._utils.get_tensor_metadata(tagged) == {"conj": True}
+    placeholders = [n for n in graph.graph.nodes if n.op == "placeholder"]
+    placeholders[0].meta["example_value"] = tagged
+    placeholders[1].meta["example_value"] = plain
+
+    tagged_rebuilt, plain_rebuilt = create_concrete_args(graph, 16)
+    assert tuple(tagged_rebuilt.shape) == (16, 8)
+    assert tagged_rebuilt.is_conj()
+    assert tuple(plain_rebuilt.shape) == (16, 8)
+    assert torch._utils.get_tensor_metadata(plain_rebuilt) == {}
