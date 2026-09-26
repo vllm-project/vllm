@@ -466,14 +466,29 @@ class Glm5NextDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
+            # Base layers carry SP shards; MTP carries the full token sequence.
+            if self.is_sequence_parallel and not self.is_mtp_layer:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+
             attn_output = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
             )
+            if self.is_sequence_parallel and not self.is_mtp_layer:
+                attn_output = sp_reduce_scatter(attn_output)
+
             hidden_states, residual = self.post_attention_layernorm(
                 attn_output, residual=residual
             )
-            hidden_states = self.mlp(hidden_states)
+            if self._mlp_is_moe:
+                hidden_states = self.mlp(
+                    hidden_states,
+                    already_sequence_parallel=(
+                        self.is_sequence_parallel and not self.is_mtp_layer
+                    ),
+                )
+            else:
+                hidden_states = self.mlp(hidden_states)
             if self.is_mtp_layer:
                 # Return the unsummed pair: the MTP caller feeds it straight
                 # into shared_head's fused_add_rms_norm (one kernel instead of
