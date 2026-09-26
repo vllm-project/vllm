@@ -170,6 +170,29 @@ def test_request_level_format_overrides(tokenizer, tool_format, call, expected):
     assert json.loads(result.tool_calls[0].function.arguments) == expected
 
 
+@pytest.mark.parametrize("tool_format", ["json", "xml"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_number_schema_preserves_large_integer(tokenizer, tool_format, streaming):
+    request = _request(tool_format).model_copy(deep=True)
+    request.tools[0].function.parameters["properties"]["limit"] = {"type": "number"}
+    parser = K2HorizonToolParser(tokenizer, request.tools)
+    value = 2**63 - 1
+    output = _group(
+        _json_call("lookup", {"limit": value})
+        if tool_format == "json"
+        else _xml_call("lookup", [("limit", str(value))])
+    )
+
+    if streaming:
+        content, calls = _collect_stream(parser, request, output)
+        assert content == ""
+        assert calls == [("lookup", {"limit": value})]
+    else:
+        result = parser.extract_tool_calls(output, request)
+        assert result.tools_called
+        assert json.loads(result.tool_calls[0].function.arguments) == {"limit": value}
+
+
 @pytest.mark.parametrize(
     "tool_format",
     ["yaml", "python", "xml_untyped", "", None, 1],
