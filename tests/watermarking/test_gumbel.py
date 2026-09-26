@@ -99,7 +99,7 @@ def test_dual_key_detector_rejects_invalid_alpha():
 
 
 def test_dual_key_detector_default_alpha():
-    assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.2
+    assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.1
 
 
 @pytest.mark.skipif(
