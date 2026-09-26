@@ -3,9 +3,12 @@
 
 
 from http import HTTPStatus
+from itertools import chain
+from math import isfinite
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
@@ -26,6 +29,46 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
+
+
+def _can_render_directly(response: CompletionResponse) -> bool:
+    # JSON-mode serialization differs for arbitrary values and non-finite floats.
+    if (
+        response.kv_transfer_params is not None
+        or response.ec_transfer_params is not None
+        or response.metrics is not None
+    ):
+        return False
+    models: list[BaseModel | None] = [
+        response,
+        response.usage,
+        response.usage.prompt_tokens_details,
+        response.usage.completion_tokens_details,
+    ]
+    for choice in response.choices:
+        models.extend((choice, choice.logprobs))
+        if choice.prompt_logprobs is not None:
+            return False
+        if (logprobs := choice.logprobs) is not None:
+            if not all(map(isfinite, filter(None, logprobs.token_logprobs))):
+                return False
+            values = chain.from_iterable(
+                map(dict.values, filter(None, logprobs.top_logprobs))
+            )
+            if not all(map(isfinite, values)):
+                return False
+    return not any(model.model_extra for model in models if model is not None)
+
+
+class _CompletionJSONResponse(JSONResponse):
+    def render(self, content: CompletionResponse) -> bytes:
+        try:
+            if _can_render_directly(content):
+                return content.model_dump_json(warnings="error").encode("utf-8")
+        except Exception:
+            # Preserve legacy handling of invalid Unicode and mutated models.
+            pass
+        return super().render(content.model_dump())
 
 
 def completion(request: Request) -> OpenAIServingCompletion | None:
@@ -59,8 +102,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, CompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
+        return _CompletionJSONResponse(
+            content=generator,
             headers=metrics_header(metrics_header_format),
         )
 
