@@ -910,6 +910,42 @@ class Worker(WorkerBase):
                 - non_kv_cache_memory
                 - redundancy_buffer_memory
             )
+            # The init snapshot predates memory that other processes allocate
+            # while this worker loads and profiles (another tenant, or a
+            # helper the engine itself spawns later, such as a CPU-offload
+            # worker holding its own CUDA context). Advising from the stale
+            # snapshot promises that memory to the KV cache, and pinning the
+            # advised value then OOMs during warmup. Clamp by what is
+            # attainable now: current free memory plus the pool this run
+            # already holds, minus the activation headroom a future run needs.
+            # A device-level free-memory query does not see the caching
+            # allocator's free blocks, and at this point those hold the
+            # profiling run's activation memory. Counting them as taken by
+            # another process would clamp the suggestion by that much on a
+            # device with no other tenant at all, so add them back.
+            device_free_memory, _ = torch.accelerator.get_memory_info(
+                self.init_snapshot.device_
+            )
+            reclaimable_cache = torch.accelerator.memory_reserved(
+                self.init_snapshot.device_
+            ) - torch.accelerator.memory_allocated(self.init_snapshot.device_)
+            current_free_memory = device_free_memory + reclaimable_cache
+            attainable_gpu_limit = (
+                current_free_memory
+                + self.available_kv_cache_memory_bytes
+                - self.peak_activation_memory
+                - redundancy_buffer_memory
+            )
+            if attainable_gpu_limit < kv_cache_memory_bytes_to_gpu_limit:
+                logger.info(
+                    "Other processes allocated %s GiB on this device since "
+                    "startup; lowering the fully-utilize suggestion "
+                    "accordingly.",
+                    format_gib(
+                        kv_cache_memory_bytes_to_gpu_limit - attainable_gpu_limit
+                    ),
+                )
+                kv_cache_memory_bytes_to_gpu_limit = attainable_gpu_limit
             kv_cache_memory_bytes_to_requested_limit = (
                 int(self.requested_memory)
                 - non_kv_cache_memory
