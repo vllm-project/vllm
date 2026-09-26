@@ -570,7 +570,14 @@ class Scheduler(SchedulerInterface):
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
+        scheduled_decode_req_ids: set[str] = set()
         preempted_reqs: list[Request] = []
+
+        # Async PP assigns each request to a decode cadence group based on the
+        # step where its prefill completes. Limiting each step to an equal share
+        # of the runner capacity keeps those groups balanced. Prefills remain
+        # uncapped because mixed batches need token-aware balancing instead.
+        max_num_scheduled_decodes = self._get_max_num_scheduled_decodes()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -737,6 +744,11 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            is_decode = request.num_computed_tokens >= request.num_prompt_tokens
+            if is_decode and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes:
+                req_index += 1
+                continue
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -780,6 +792,7 @@ class Scheduler(SchedulerInterface):
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
                             restored = num_scheduled_tokens.pop(preempted_req_id)
+                            scheduled_decode_req_ids.discard(preempted_req_id)
                             token_budget += restored
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
@@ -818,6 +831,8 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if is_decode:
+                scheduled_decode_req_ids.add(request_id)
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
@@ -1176,6 +1191,18 @@ class Scheduler(SchedulerInterface):
                         # The request cannot be scheduled.
                         break
 
+                is_decode = (
+                    not load_kv_async
+                    and num_computed_tokens >= request.num_prompt_tokens
+                )
+                if (
+                    is_decode
+                    and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes
+                ):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1314,6 +1341,8 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if is_decode:
+                    scheduled_decode_req_ids.add(request_id)
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1357,6 +1386,7 @@ class Scheduler(SchedulerInterface):
 
         assert token_budget >= 0
         assert input_budget >= 0
+        assert len(scheduled_decode_req_ids) <= max_num_scheduled_decodes
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
@@ -1516,6 +1546,9 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def _get_max_num_scheduled_decodes(self) -> int:
+        return self.max_num_running_reqs
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
