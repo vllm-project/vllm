@@ -43,8 +43,10 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_kv_expired_reqs": [],
         }
 
-    def record_transfer(self, res: "nixlXferTelemetry"):
+    def record_transfer(self, res: "nixlXferTelemetry | None"):
         # Keep metrics units consistent with rest of the code: time us->s
+        if res is None:
+            return
         self.data["transfer_duration"].append(res.xferDuration / 1e6)
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
