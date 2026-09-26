@@ -235,6 +235,17 @@ class HiSparseCoordinator:
     # GPU copies of published host pages
     # ------------------------------------------------------------------
 
+    def get_num_copy_blocks_to_pin(self, host_blocks: Sequence[KVCacheBlock]) -> int:
+        """Count free GPU copies that adopting a host prefix will pin."""
+        blocks_to_pin: set[int] = set()
+        for host_block in host_blocks:
+            if host_block.is_null or host_block.block_hash is None:
+                continue
+            for block in self.copies.get(host_block.block_hash, ()):
+                if block.ref_cnt == 0 and not block.is_null:
+                    blocks_to_pin.add(block.block_id)
+        return len(blocks_to_pin)
+
     def _adopt_copies(
         self,
         request_id: str,
