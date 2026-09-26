@@ -63,6 +63,7 @@ def _make_profiling_runner(
         needs_capture, num_full_descs, piecewise_only
     )
     runner.vllm_config = SimpleNamespace()
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
 
     events: list[str] = []
     runner.events = events
@@ -118,7 +119,8 @@ def _patch_module(monkeypatch) -> None:
 
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
     _patch_module(monkeypatch)
-    runner = _make_profiling_runner(CUDAGraphMode.NONE)
+    runner = _make_profiling_runner(CUDAGraphMode.NONE, needs_capture=False)
+    runner.cudagraph_manager = None
 
     result = cgu.profile_cudagraph_memory(runner)
 
@@ -139,6 +141,34 @@ def test_profile_cudagraph_memory_no_graphs_tears_down(monkeypatch):
     assert runner.cudagraph_manager.pool == GLOBAL_POOL
 
 
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_profile_cudagraph_memory_accounts_for_encoder_without_decoder(
+    monkeypatch, mode
+):
+    """Encoder memory is budgeted even if the decoder has no graphs to capture."""
+    _patch_module(monkeypatch)
+    captured_bytes = 256 << 20
+    runner = _make_profiling_runner(
+        mode, needs_capture=False, captured_bytes=captured_bytes
+    )
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=True,
+        encoder_runner=SimpleNamespace(has_cudagraph=lambda: True),
+    )
+    manager = runner.cudagraph_manager
+    runner.cudagraph_manager = None
+
+    def init(r):
+        r.events.append("init")
+        r.cudagraph_manager = manager
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", init)
+
+    assert cgu.profile_cudagraph_memory(runner) == captured_bytes
+    assert runner.events == ["init", "capture", "teardown"]
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
+
+
 def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
     _patch_module(monkeypatch)
     gib = 1 << 30
@@ -150,6 +180,14 @@ def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
         captured_bytes=1000 * gib,
         mem_samples=[100 * gib, 20 * gib],
     )
+    manager = runner.cudagraph_manager
+    runner.cudagraph_manager = None
+
+    def init(r):
+        r.events.append("init")
+        r.cudagraph_manager = manager
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", init)
 
     result = cgu.profile_cudagraph_memory(runner)
 
@@ -180,9 +218,20 @@ def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
     assert result == captured_bytes
 
 
-def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
+@pytest.mark.parametrize("encoder_only", [False, True])
+def test_profile_cudagraph_memory_tears_down_on_capture_error(
+    monkeypatch, encoder_only
+):
     _patch_module(monkeypatch)
-    runner = _make_profiling_runner(CUDAGraphMode.FULL)
+    runner = _make_profiling_runner(
+        CUDAGraphMode.NONE if encoder_only else CUDAGraphMode.FULL,
+        needs_capture=not encoder_only,
+    )
+    if encoder_only:
+        runner.model_state = SimpleNamespace(
+            supports_mm_inputs=True,
+            encoder_runner=SimpleNamespace(has_cudagraph=lambda: True),
+        )
 
     def _boom(*, profile_only: bool = False) -> int:
         runner.events.append("capture")
@@ -199,6 +248,7 @@ def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
 
     # Teardown still runs even if capture raises.
     assert runner.events == ["init", "capture", "teardown"]
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
 
 
 def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):

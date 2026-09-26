@@ -631,9 +631,15 @@ class Worker(WorkerBase):
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        compilation_config = self.vllm_config.compilation_config
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.use_v2_model_runner
+                and compilation_config.cudagraph_mm_encoder
+                and not self.model_config.enforce_eager
+            )
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
