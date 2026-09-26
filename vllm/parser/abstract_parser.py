@@ -796,7 +796,23 @@ class DelegatingParser(Parser):
             and not self._in_reasoning_phase(state)
             and not self._in_tool_call_phase(state)
         ):
-            delta_message = DeltaMessage(content=delta_text)
+            # Some envelope parsers (e.g. Hunyuan A13B) end reasoning when the
+            # answer section starts, but still must see later deltas to strip
+            # a closing marker. Opt in via post_reasoning_stream_filter.
+            reasoning_parser = self._reasoning_parser
+            if reasoning_parser is not None and getattr(
+                reasoning_parser, "post_reasoning_stream_filter", False
+            ):
+                delta_message = self.extract_reasoning_streaming(
+                    previous_text=state.previous_text,
+                    current_text=current_text,
+                    delta_text=delta_text,
+                    previous_token_ids=state.previous_token_ids,
+                    current_token_ids=current_token_ids,
+                    delta_token_ids=delta_token_ids,
+                )
+            else:
+                delta_message = DeltaMessage(content=delta_text)
 
         state.commit(current_text, current_token_ids)
 
