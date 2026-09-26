@@ -1,25 +1,90 @@
 group: Basic Correctness
-depends_on: 
+depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) Basic Correctness"
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness Models %N"
   key: basic-correctness
   timeout_in_minutes: 68
   device: h200_18gb
-  source_file_dependencies:
+  parallelism: 2
+  source_file_dependencies: &basic-correctness-deps
   - vllm/
   - "!vllm/distributed/kv_transfer/"
-  - tests/basic_correctness/test_basic_correctness
-  - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_mem.py
+  - tests/basic_correctness/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/test_mem.py
-  - pytest -v -s basic_correctness/test_basic_correctness.py
-  - pytest -v -s basic_correctness/test_cpu_offload.py
+  - pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Basic Correctness"
+      label: ":amd: (MI355 DPX) Basic Correctness Models %N"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness CuMem"
+  key: basic-correctness-cumem
+  timeout_in_minutes: 68
+  device: h200_18gb
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/memory/cumem
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Basic Correctness CuMem"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode"
+  key: basic-correctness-sleep-mode
+  timeout_in_minutes: 68
+  device: h200_18gb
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/memory/sleep_mode
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Basic Correctness Sleep Mode"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness CPU Offload"
+  key: basic-correctness-cpu-offload
+  timeout_in_minutes: 68
+  device: h200_18gb
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/cpu_offload
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Basic Correctness CPU Offload"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness Prefetch Offload"
+  key: basic-correctness-prefetch-offload
+  timeout_in_minutes: 68
+  device: h200_18gb
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/prefetch_offload
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Basic Correctness Prefetch Offload"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
