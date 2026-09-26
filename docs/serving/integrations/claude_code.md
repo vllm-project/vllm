@@ -78,3 +78,5 @@ If the model responds correctly, your setup is working. You can now use Claude C
 **Tool calls not working**: Verify that your model supports tool calling and that you've enabled it with the correct `--tool-call-parser` flag. See [Tool Calling](../../features/tool_calling.md).
 
 **Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.
+
+**Inline system messages**: Claude Code sends `role: "system"` messages inside `messages` on most turns. By default (`--anthropic-inline-system auto`), vLLM checks once, on the first request, whether the model's chat template renders them as separate system turns. If it does, vLLM keeps them in place. If it doesn't, vLLM appends their text to the preceding tool result or user message. Either way, earlier turns render unchanged, so prefix caching keeps working. The log line `Anthropic inline system messages will be ...` shows which mode was chosen and why. Use `preserve` or `fold` to override it.

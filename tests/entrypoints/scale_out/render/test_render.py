@@ -11,7 +11,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import VLLM_PATH, RemoteLaunchRenderServer
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
@@ -647,46 +647,62 @@ async def test_messages_render_system_and_multi_turn(client):
     assert data["token_ids"][0] == 1  # BOS
 
 
-@pytest.mark.asyncio
-async def test_messages_render_merges_inline_system(client):
-    """Inline system messages merge into the leading system block.
+_SYSTEM = "You are a helpful assistant."
+_INLINE_SYSTEM_MESSAGES = [
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi! How can I help?"},
+    {"role": "system", "content": "Be brief."},
+    {"role": "user", "content": "What is 2 + 2?"},
+]
 
-    Without a --chat-template arg the /v1/messages server path detects
-    merge_inline_system=True, so render must produce the same tokens as
-    the manually pre-merged request.
-    """
+
+async def _assert_messages_render_matches_chat(client, expected_messages):
     inline = await client.post(
         "/v1/messages/render",
         json={
             "model": MODEL_NAME,
             "max_tokens": 16,
-            "system": "You are a helpful assistant.",
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi! How can I help?"},
-                {"role": "system", "content": "Be brief."},
-                {"role": "user", "content": "What is 2 + 2?"},
-            ],
+            "system": _SYSTEM,
+            "messages": _INLINE_SYSTEM_MESSAGES,
         },
     )
-    assert inline.status_code == 200
-
-    merged = await client.post(
-        "/v1/messages/render",
+    expected = await client.post(
+        "/v1/chat/completions/render",
         json={
             "model": MODEL_NAME,
-            "max_tokens": 16,
-            "system": "You are a helpful assistant.Be brief.",
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi! How can I help?"},
-                {"role": "user", "content": "What is 2 + 2?"},
-            ],
+            "messages": [{"role": "system", "content": _SYSTEM}, *expected_messages],
         },
     )
-    assert merged.status_code == 200
+    assert inline.status_code == 200, inline.text
+    assert expected.status_code == 200, expected.text
+    assert inline.json()["token_ids"] == expected.json()["token_ids"]
 
-    assert inline.json()["token_ids"] == merged.json()["token_ids"]
+
+@pytest.mark.asyncio
+async def test_messages_render_folds_inline_system_by_default(client):
+    """This model's template rejects inline system messages, so ``auto``
+    folds them into the next user message."""
+    await _assert_messages_render_matches_chat(
+        client,
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi! How can I help?"},
+            {"role": "user", "content": "Be brief.\n\nWhat is 2 + 2?"},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_messages_render_preserves_inline_system():
+    args = [
+        "--anthropic-inline-system",
+        "preserve",
+        "--chat-template",
+        str(VLLM_PATH / "examples/template_chatml.jinja"),
+    ]
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as server:
+        async with httpx.AsyncClient(base_url=server.url_for(""), timeout=30.0) as c:
+            await _assert_messages_render_matches_chat(c, _INLINE_SYSTEM_MESSAGES)
 
 
 @pytest.mark.asyncio
