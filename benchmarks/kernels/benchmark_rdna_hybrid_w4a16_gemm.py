@@ -3,9 +3,9 @@
 """Benchmark the RDNAHybridW4A16LinearKernel across decode and prefill shapes.
 
 Usage:
-    python benchmark_int4_gemm.py
-    python benchmark_int4_gemm.py --models Qwen/Qwen3-4B
-    python benchmark_int4_gemm.py --group-size 128
+    python benchmark_rdna_hybrid_w4a16_gemm.py
+    python benchmark_rdna_hybrid_w4a16_gemm.py --models Qwen/Qwen3-4B
+    python benchmark_rdna_hybrid_w4a16_gemm.py --group-size 128
 """
 
 import argparse
@@ -66,9 +66,11 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
     w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
     w_s_skinny = torch.randn(N, num_groups, dtype=torch.float16, device=device) * 0.01
 
-    # Raw per-group zero-points for asymmetric benchmarks
-    w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
-        torch.float16
+    # Per-group zero-points, packed 8 nibbles per word along N the way the
+    # checkpoint ships them.
+    assert N % 8 == 0, f"N must be divisible by 8 for packed zero-points, got {N}"
+    w_zp = torch.randint(
+        -(2**31), 2**31, (N // 8, num_groups), dtype=torch.int32, device=device
     )
 
     # FP16 baseline for F.linear
