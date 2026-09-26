@@ -636,9 +636,21 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
             # Otherwise, reconstruct from serialized dict
             # Get the connector class to reconstruct its stats
-            connector_cls = KVConnectorFactory.get_connector_class_by_name(
-                connector_name
-            )
+            try:
+                connector_cls = KVConnectorFactory.get_connector_class_by_name(
+                    connector_name
+                )
+            except ValueError:
+                # `connector_name` is the producer's `__class__.__name__`, which
+                # can differ from the name a connector was registered under
+                # (e.g. a plugin overriding an upstream connector). Skip that
+                # connector's stats rather than taking down the engine.
+                logger.warning_once(
+                    "Skipping stats for connector '%s': not registered under "
+                    "that name.",
+                    connector_name,
+                )
+                continue
 
             # Use the connector's build_kv_connector_stats to reconstruct
             if reconstructed_stats := connector_cls.build_kv_connector_stats(
