@@ -227,7 +227,8 @@ class DeepseekSparseSWAMetadata:
 
     # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
     # per present DeepseekV4 layer type, shared across all ~60 layers of that type
-    # within a decode step. The first forward call of a given type triggers
+    # within a decode step (across KV cache groups too, when the runner passes
+    # a cross-group cache). The first forward call of a given type triggers
     # the in-kernel planner (which also allocates tile_scheduler_metadata and
     # num_splits via PyTorch's graph-aware allocator); subsequent same-type
     # calls skip planning and reuse the plan. Fresh instance per build(), so
@@ -736,8 +737,21 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
         # per present DeepseekV4 layer type; the first flash_mla_with_kvcache call of
         # each type triggers the planner and all same-type layers reuse the
-        # resulting plan for the rest of the step.
+        # resulting plan for the rest of the step. KV cache groups of one build
+        # pass share them too: FlashMLA checks only shapes, but the groups' decode
+        # lengths come from the same batch, window, valid-token mask and replay_start.
         tile_sched = self.build_tile_scheduler(num_decode_tokens)
+        cross_group_cache = common_attn_metadata._cross_group_cache
+        if cross_group_cache is not None:
+            tile_sched = cross_group_cache.setdefault(
+                (
+                    "deepseek_v4_tile_sched",
+                    self.block_size,
+                    non_causal,
+                    decode_swa_width,
+                ),
+                tile_sched,
+            )
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
