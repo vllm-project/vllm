@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -44,6 +45,16 @@ MoRIIOMode = moriio_connector.MoRIIOMode
 moriio_common = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
 )
+get_role = moriio_common.get_role
+set_role = moriio_common.set_role
+
+
+@pytest.fixture
+def restore_moriio_role():
+    """Undo the process-global role a full scheduler construction leaves behind."""
+    role = get_role()
+    yield
+    set_role(role)
 
 
 class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore[name-defined]
@@ -53,6 +64,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     def __init__(self, **attrs):
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
+        self._num_ssm_scratch_blocks = 0
         self._ssm_state_slots_are_positional = False
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
@@ -110,22 +122,48 @@ def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
     )
 
 
-def _mamba_spec(num_states: int = 2):
+def _mamba_spec(num_states: int = 2, *, num_speculative_blocks: int = 0):
     shapes = tuple((1, 1) for _ in range(num_states))
     return moriio_connector.MambaSpec(
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
         mamba_cache_mode="all",
+        num_speculative_blocks=num_speculative_blocks,
     )
 
 
-def _gate_vllm_config(*, read_mode: bool = True, speculative_config=None):
+def _gate_vllm_config(
+    *,
+    read_mode: bool = True,
+    speculative_config=None,
+    block_size: int = 16,
+    num_lookahead_tokens: int = 0,
+    mamba_cache_mode: str = "align",
+):
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
-            kv_connector_extra_config={"read_mode": read_mode}
+            kv_connector_extra_config={
+                "read_mode": read_mode,
+                "host_ip": "127.0.0.1",
+                "handshake_port": 6001,
+                "notify_port": 6002,
+            },
+            kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
+        cache_config=SimpleNamespace(
+            block_size=block_size,
+            mamba_cache_mode=mamba_cache_mode,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        num_lookahead_tokens=num_lookahead_tokens,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_rank=0,
+            data_parallel_size_local=1,
+            data_parallel_size=1,
+        ),
     )
 
 
@@ -196,6 +234,7 @@ def test_exchange_blocks_ignore_transfer_disabled_group():
 
 
 def test_scheduler_rejects_multiple_attention_groups_with_mamba():
+    """A drafter owning its own transfer group is refused, with a hint."""
     config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
@@ -205,7 +244,7 @@ def test_scheduler_rejects_multiple_attention_groups_with_mamba():
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
 
-    with pytest.raises(moriio_common.MoRIIOError, match="exactly one transferable"):
+    with pytest.raises(moriio_common.MoRIIOError, match="separate attention group"):
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
@@ -251,7 +290,7 @@ def test_scheduler_rejects_mamba_group_without_two_states():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def test_scheduler_rejects_speculative_hybrid_read():
+def test_scheduler_rejects_non_dspark_speculative_hybrid_read():
     config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
@@ -262,7 +301,76 @@ def test_scheduler_rejects_speculative_hybrid_read():
 
     with pytest.raises(moriio_common.MoRIIOError, match="speculative decoding"):
         moriio_connector.MoRIIOConnectorScheduler(
-            _gate_vllm_config(speculative_config=object()), "engine", config
+            _gate_vllm_config(
+                speculative_config=SimpleNamespace(
+                    method="ngram", use_dspark=lambda: False
+                )
+            ),
+            "engine",
+            config,
+        )
+
+
+def _dspark_wrapped_attention_config():
+    """Mamba first, so a wrapped full-attention group at index 1 has to be found.
+
+    A bare ``isinstance(FullAttentionSpec)`` misses the wrapper and leaves
+    ``_full_attn_group_idx`` at its initial 0, which is the Mamba group.
+    """
+    full = FullAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                enable_kv_transfer=True,
+                kv_cache_spec=_mamba_spec(num_speculative_blocks=2),
+            ),
+            SimpleNamespace(
+                enable_kv_transfer=True,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=4, kv_cache_specs={"target": full, "draft": full}
+                ),
+            ),
+        ],
+    )
+    config.transfer_groups = tuple(config.kv_cache_groups)
+    return config
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_scheduler_accepts_dspark_with_wrapped_full_attention():
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(
+            speculative_config=SimpleNamespace(
+                method="dspark", use_dspark=lambda: True
+            ),
+            block_size=4,
+            num_lookahead_tokens=7,
+        ),
+        "engine",
+        _dspark_wrapped_attention_config(),
+    )
+
+    assert scheduler._full_attn_group_idx == 1
+    assert scheduler._num_ssm_scratch_blocks == 2
+    assert scheduler._max_decode_tail_blocks == 2
+
+
+def test_scheduler_rejects_dspark_with_positional_mamba_cache():
+    """Positional mode counts lookahead in the Mamba allocation, so the
+    one-block recurrent-state tail bound no longer holds."""
+    with pytest.raises(moriio_common.MoRIIOError, match="mamba_cache_mode"):
+        moriio_connector.MoRIIOConnectorScheduler(
+            _gate_vllm_config(
+                speculative_config=SimpleNamespace(
+                    method="dspark", use_dspark=lambda: True
+                ),
+                block_size=4,
+                mamba_cache_mode="all",
+            ),
+            "engine",
+            _dspark_wrapped_attention_config(),
         )
 
 
@@ -314,6 +422,29 @@ def test_split_block_groups_keeps_only_running_state_outside_all_mode():
         _mamba_group_ids=[1],
     )
     assert sched.split_block_groups(([1], [40, 41])) == ([1], [[41]])
+
+
+@pytest.mark.parametrize(
+    "positional,blocks,expected",
+    [
+        # Trailing scratch slots go in either cache mode.
+        (True, [40, 41, 42], [40]),
+        # Outside "all" the running state is picked only after they are gone.
+        (False, [40, 41, 42, 43], [41]),
+        # Never empty: a list shorter than the scratch count keeps one state.
+        (True, [40], [40]),
+    ],
+)
+def test_split_block_groups_strips_dspark_scratch_slots(positional, blocks, expected):
+    sched = _FakeScheduler(
+        _has_mamba=True,
+        _attn_group_ids=[0],
+        _mamba_group_ids=[1],
+        _num_ssm_scratch_blocks=2,
+        _ssm_state_slots_are_positional=positional,
+    )
+
+    assert sched.split_block_groups(([1], blocks)) == ([1], [expected])
 
 
 # --------------------------------------------------------------------------
@@ -432,6 +563,23 @@ def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
 
     assert sched._reqs_need_recv["req"][1] == [[102], [202]]
     assert sched._req_kv_params["req"]["remote_block_ids"] == [[12], [92]]
+
+
+def test_update_state_pairs_trimmed_mamba_state_with_remote_state():
+    """The DSpark shape end to end: scratch slots are stripped, the running
+    state is then selected, and the attention list loses its lookahead tail."""
+    sched = _make_read_scheduler()
+    sched._ssm_state_slots_are_positional = False
+    sched._num_ssm_scratch_blocks = 2
+    sched._max_decode_tail_blocks = 2
+    request = _make_read_request([[10, 11], [90]])
+    # Mamba group: [null, running state, scratch, scratch].
+    blocks = _FakeBlocks(all_groups=([100, 101, 102, 103], [200, 201, 202, 203]))
+
+    sched.update_state_after_alloc(request, blocks, num_external_tokens=256)
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [201]]
+    assert sched._req_kv_params["req"]["remote_block_ids"] == [[10, 11], [90]]
 
 
 def test_update_state_full_attention_hit_still_carries_mamba_state():

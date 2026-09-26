@@ -88,10 +88,10 @@ from vllm.utils.network_utils import (
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     SlidingWindowSpec,
+    is_full_attention_spec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -108,7 +108,7 @@ logger = init_logger(__name__)
 # wait only needs to be long enough for it to make progress.
 _SQ_FULL_BACKOFF_INITIAL_S = 0.001
 _SQ_FULL_BACKOFF_MAX_S = 0.05
-_MAX_LOCAL_DECODE_TAIL_BLOCKS = 1
+_MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
 
 
 try:
@@ -436,6 +436,29 @@ def _split_kv_cache_group_kinds(
     return attn, mamba
 
 
+def _validate_hybrid_speculation(vllm_config: VllmConfig) -> None:
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return
+    # DSpark is allowlisted because it is the only hybrid speculative method
+    # validated end to end with MoRIIO READ.
+    if not speculative_config.use_dspark():
+        raise MoRIIOError(
+            "MoRIIO hybrid READ supports DSpark speculative decoding only, got "
+            f"method={speculative_config.method!r}"
+        )
+    if vllm_config.cache_config.mamba_cache_mode == "all":
+        # "all" is the only mode whose Mamba allocation counts lookahead
+        # tokens, so the decode-local tail can span more than the single
+        # running-state block _MAX_LOCAL_MAMBA_TAIL_BLOCKS allows. The mode is
+        # deprecated and was never validated here, so fail closed at startup
+        # rather than at the first transfer.
+        raise MoRIIOError(
+            "MoRIIO hybrid READ does not support DSpark with "
+            "mamba_cache_mode='all'; use 'align'"
+        )
+
+
 def _validate_mamba_specs(specs: Collection[MambaSpec]) -> MambaSpec | None:
     """Validate the common packed-state contract and return its representative."""
     specs = tuple(specs)
@@ -477,22 +500,22 @@ class MoRIIOConnectorScheduler:
             kv_cache_config
         )
         self._has_mamba = bool(self._mamba_group_ids)
+        mamba_spec = None
         if self._has_mamba:
             if len(self._attn_group_ids) != 1:
                 raise MoRIIOError(
                     "MoRIIO hybrid READ requires exactly one transferable "
                     "attention group, got "
-                    f"{len(self._attn_group_ids)} attention groups"
+                    f"{len(self._attn_group_ids)}; a drafter that owns a "
+                    "separate attention group is not supported, give it the "
+                    "target's group or disable KV transfer for it"
                 )
             mamba_specs = [
                 cast(MambaSpec, kv_cache_config.transfer_groups[group_id].kv_cache_spec)
                 for group_id in self._mamba_group_ids
             ]
-            _validate_mamba_specs(mamba_specs)
-            if vllm_config.speculative_config is not None:
-                raise MoRIIOError(
-                    "MoRIIO hybrid READ does not support speculative decoding"
-                )
+            mamba_spec = _validate_mamba_specs(mamba_specs)
+            _validate_hybrid_speculation(vllm_config)
             if self.mode != MoRIIOMode.READ:
                 raise MoRIIOError(
                     "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
@@ -503,18 +526,19 @@ class MoRIIOConnectorScheduler:
         self._ssm_state_slots_are_positional = (
             vllm_config.cache_config.mamba_cache_mode == "all"
         )
+        self._num_ssm_scratch_blocks = (
+            mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
+        )
         self.block_size = vllm_config.cache_config.block_size
-        self._max_decode_tail_blocks = (
-            _MAX_LOCAL_DECODE_TAIL_BLOCKS
-            if self._has_mamba
-            else math.ceil((vllm_config.num_lookahead_tokens + 1) / self.block_size)
+        self._max_decode_tail_blocks = math.ceil(
+            (vllm_config.num_lookahead_tokens + 1) / self.block_size
         )
         self.engine_id: EngineId = engine_id
 
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not is_full_attention_spec(g.kv_cache_spec)
                 for g in kv_cache_config.transfer_groups
             )
         )
@@ -524,9 +548,9 @@ class MoRIIOConnectorScheduler:
             unsupported = [
                 type(g.kv_cache_spec).__name__
                 for g in kv_cache_config.transfer_groups
-                if not isinstance(
-                    g.kv_cache_spec,
-                    (FullAttentionSpec, SlidingWindowSpec, MambaSpec),
+                if not (
+                    is_full_attention_spec(g.kv_cache_spec)
+                    or isinstance(g.kv_cache_spec, (SlidingWindowSpec, MambaSpec))
                 )
             ]
             if unsupported:
@@ -565,7 +589,7 @@ class MoRIIOConnectorScheduler:
         self._full_attn_group_idx = 0
         self._full_attn_block_size = self.block_size
         for gi, group in enumerate(kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, FullAttentionSpec):
+            if is_full_attention_spec(group.kv_cache_spec):
                 self._full_attn_group_idx = gi
                 self._full_attn_block_size = getattr(
                     group.kv_cache_spec, "block_size", self.block_size
@@ -953,6 +977,9 @@ class MoRIIOConnectorScheduler:
                                 )
                                 aligned_local_mamba: list[list[int]] = []
                                 aligned_remote_mamba: list[list[int]] = []
+                                # Scratch slots were removed by
+                                # split_block_groups, so only one local running
+                                # state tail can remain.
                                 for local_group, remote_group in zip(
                                     mamba_block_groups,
                                     remote_mamba_groups,
@@ -960,7 +987,9 @@ class MoRIIOConnectorScheduler:
                                 ):
                                     aligned_local, aligned_remote = (
                                         self._align_read_blocks(
-                                            local_group, remote_group, 1
+                                            local_group,
+                                            remote_group,
+                                            _MAX_LOCAL_MAMBA_TAIL_BLOCKS,
                                         )
                                     )
                                     aligned_local_mamba.append(aligned_local)
@@ -1266,6 +1295,11 @@ class MoRIIOConnectorScheduler:
         """Keep only the state-bearing slots of one mamba kv cache group."""
         if not blocks:
             return blocks
+        # Keep at least the running-state slot. This mirrors the SSM clipping
+        # contract used by the NIXL scheduler.
+        num_scratch_blocks = min(self._num_ssm_scratch_blocks, len(blocks) - 1)
+        if num_scratch_blocks:
+            blocks = blocks[:-num_scratch_blocks]
         if not self._ssm_state_slots_are_positional:
             # Single running state: everything before it is a null placeholder
             # or the previous step's superseded state.
