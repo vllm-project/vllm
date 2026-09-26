@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::OpaqueValue;
+
 /// Stores cache hit statistics.
 ///
 /// Original Python definition:
@@ -303,4 +305,7 @@ pub struct SchedulerStats {
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+    /// Namespaced snapshots collected by external metrics providers in the engine core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_metrics: Option<BTreeMap<String, BTreeMap<String, OpaqueValue>>>,
 }

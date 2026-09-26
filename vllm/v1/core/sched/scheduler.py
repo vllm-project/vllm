@@ -60,6 +60,10 @@ from vllm.v1.kv_cache_interface import (
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.metrics.external import (
+    collect_external_metrics,
+    has_external_metrics_providers,
+)
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
@@ -97,6 +101,8 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
+        self.has_external_metrics_providers = has_external_metrics_providers()
+        self._external_metrics_need_idle_refresh = False
         self.observability_config = vllm_config.observability_config
         self.spec_decode_metrics_level = (
             self.observability_config.per_request_spec_decode_metrics
@@ -2534,6 +2540,8 @@ class Scheduler(SchedulerInterface):
         return self.kv_cache_manager.usage
 
     def add_request(self, request: Request) -> None:
+        if self.has_external_metrics_providers:
+            self._external_metrics_need_idle_refresh = True
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -2867,6 +2875,14 @@ class Scheduler(SchedulerInterface):
         ec_connector_stats_payload = (
             ec_connector_stats.data if ec_connector_stats else None
         )
+        external_metrics = None
+        if self.has_external_metrics_providers:
+            refresh_idle = (
+                self._external_metrics_need_idle_refresh and not self.has_requests()
+            )
+            external_metrics = collect_external_metrics(force=refresh_idle)
+            if refresh_idle:
+                self._external_metrics_need_idle_refresh = False
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -2880,6 +2896,7 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            external_metrics=external_metrics,
         )
 
     def make_spec_decoding_stats(
