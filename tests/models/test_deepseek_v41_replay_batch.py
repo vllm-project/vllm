@@ -191,11 +191,13 @@ def test_replay_batch_keeps_adaptive_verification_query_bound(state):
     assert replay is not None and build.batch.max_query_len == 200
 
 
-def test_piecewise_batch_replays_its_real_rows(state):
-    """Under a piecewise graph the batch is padded; the replay rows are the
-    real ones, and the replay's own metadata is built eagerly."""
+def test_only_eager_steps_trim(state):
+    """A CUDA graph keeps the layers on its whole batch; an eager step trims a
+    padded batch to its real rows."""
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING, num_tokens_after_padding=512)
-    replay, build = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+    for cg_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
+        assert _prepare(state, batch, cg_mode) == (None, None)
+    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
     assert replay is not None
     assert replay.rows.tolist() == REPLAY_ROWS
     assert build.cg_mode == CUDAGraphMode.NONE
@@ -207,11 +209,12 @@ def test_whole_batch_forwards_get_no_replay_batch(state):
     for cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
         assert _prepare(state, short, cg_mode) == (None, None)
     assert len(state.builds) == 3  # the batch's own metadata only
-    # Dummy (capture) batches are not prefills and keep their rows.
+    # Dummy batches, captures included (prepared as eager), are not prefills and
+    # keep their rows.
     dummy = _input_batch(
         QUERY_LENS, SEQ_LENS, [False] * 3, num_tokens_after_padding=512
     )
-    assert _prepare(state, dummy, CUDAGraphMode.PIECEWISE) == (None, None)
+    assert _prepare(state, dummy, CUDAGraphMode.NONE) == (None, None)
 
 
 @pytest.fixture
@@ -250,7 +253,7 @@ def test_dp_ranks_replay_together(dp_state):
 def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     dummy = _input_batch([512], [512], [False])
     dp_state.other = (True, 129)
-    replay, _ = _prepare(dp_state, dummy, CUDAGraphMode.PIECEWISE)
+    replay, _ = _prepare(dp_state, dummy, CUDAGraphMode.NONE)
     assert replay is not None and replay.rows.shape[0] == WINDOW
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [WINDOW, 129]

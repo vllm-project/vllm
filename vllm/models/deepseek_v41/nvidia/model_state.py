@@ -175,8 +175,8 @@ class DeepseekV41ModelState(DefaultModelState):
     starts to the sliding-window metadata builders, whose kernels read no
     window KV below them. With the decoder side on
     (``model.decoder_replay_layers``) it also prepares the replay layers'
-    batch: each prefill's last ``window`` rows as a sub-batch with metadata
-    and a forward context of its own, like a microbatch.
+    batch in eager steps: each prefill's last ``window`` rows as a sub-batch
+    with metadata and a forward context of its own, like a microbatch.
     """
 
     def __init__(
@@ -365,12 +365,13 @@ class DeepseekV41ModelState(DefaultModelState):
         replay_start: torch.Tensor,
     ) -> None:
         """Set the replay layers' batch for this forward, or none when nothing
-        trims: FULL graphs run uniform decodes, and under data parallelism every
-        rank replays if any does."""
+        trims. Only eager steps trim: a CUDA graph keeps the layers on the whole
+        batch, and ranks share the graph mode. Under data parallelism every rank
+        replays if any does."""
         layers = self.decoder_replay_layers
         assert layers is not None
         layers.rows = layers.forward_context = None
-        if cudagraph_mode == CUDAGraphMode.FULL:
+        if cudagraph_mode != CUDAGraphMode.NONE:
             return
 
         num_reqs = input_batch.num_reqs

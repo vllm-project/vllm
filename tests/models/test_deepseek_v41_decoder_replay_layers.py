@@ -5,11 +5,6 @@
 import pytest
 import torch
 
-from vllm.compilation.breakable_cudagraph import (
-    BreakableCUDAGraphCapture,
-    eager_break_during_capture,
-)
-from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
@@ -21,20 +16,18 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 
 DEVICE = torch.device("cuda")
 NUM_TOKENS = 401
-GRAPH_SIZE = 512
 HC, HIDDEN = 2, 3
 # decode (1 token), trimmed prefill (300 of 300), untrimmed prefill (100 of 300)
 WINDOW = 128
 REPLAY_ROWS = [0, *range(301 - WINDOW, 301), *range(301, 401)]
 
 
-def _context(metadata, cudagraph_mode=CUDAGraphMode.NONE):
+def _context(metadata):
     return ForwardContext(
         no_compile_layers={},
         attn_metadata=metadata,
         slot_mapping={},
-        is_padding=torch.zeros(GRAPH_SIZE, dtype=torch.bool, device=DEVICE),
-        cudagraph_runtime_mode=cudagraph_mode,
+        is_padding=torch.zeros(NUM_TOKENS, dtype=torch.bool, device=DEVICE),
     )
 
 
@@ -45,15 +38,11 @@ def _set_replay_batch(layers, rows, metadata):
     )
 
 
-def _states(num_tokens: int, seed: int | None = None):
+def _states(num_tokens: int):
     """(hidden_states, positions, input_ids, pre_mix, post_mix, res_mix, residual),
     shaped as the model's: hidden states [T, H], mixes [T, HC], residual [T, HC, H]."""
-    if seed is None:
-        hidden = torch.arange(num_tokens, device=DEVICE, dtype=torch.float32)
-        hidden = hidden[:, None].expand(num_tokens, HIDDEN).contiguous()
-    else:
-        g = torch.Generator(device=DEVICE).manual_seed(seed)
-        hidden = torch.randn(num_tokens, HIDDEN, device=DEVICE, generator=g)
+    hidden = torch.arange(num_tokens, device=DEVICE, dtype=torch.float32)
+    hidden = hidden[:, None].expand(num_tokens, HIDDEN).contiguous()
     mix = hidden[:, :HC].contiguous()
     residual = hidden[:, None, :].expand(num_tokens, HC, HIDDEN).contiguous()
     return (
@@ -65,11 +54,6 @@ def _states(num_tokens: int, seed: int | None = None):
         mix + 3,
         residual,
     )
-
-
-def _new_outputs(hidden, positions, input_ids, pre_mix, post_mix, res_mix, residual):
-    """The model's outputs: collapsed hidden states like the residual, pre_mix."""
-    return torch.zeros_like(residual), torch.zeros_like(pre_mix)
 
 
 def test_run_gathers_states_and_realigns_shared_indexer_buffers():
@@ -85,7 +69,7 @@ def test_run_gathers_states_and_realigns_shared_indexer_buffers():
         seen["is_padding"] = replay_context.is_padding
         return residual, pre_mix
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, _new_outputs, [topk, candidates])
+    layers = DecoderReplayLayers(WINDOW, run_layers, [topk, candidates])
     states = _states(NUM_TOKENS)
     hidden, residual = states[0], states[-1]
     full, sub = object(), object()
@@ -112,97 +96,9 @@ def test_no_replay_batch_runs_the_whole_batch():
         seen["attn_metadata"] = get_forward_context().attn_metadata
         return (hidden_states,)
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, _new_outputs, [])
+    layers = DecoderReplayLayers(WINDOW, run_layers, [])
     states = _states(NUM_TOKENS)
     full = object()
     with override_forward_context(_context(full)):
         (output,) = layers(*states)
     assert output is states[0] and seen["attn_metadata"] is full
-
-
-class _Metadata:
-    """Persistent buffers the fake kernels read, refilled per step."""
-
-    def __init__(self):
-        self.slot_mapping = torch.zeros(GRAPH_SIZE, dtype=torch.int64, device=DEVICE)
-        self.token_to_req_indices = torch.zeros(
-            GRAPH_SIZE, dtype=torch.int32, device=DEVICE
-        )
-        self.num_tokens = 0
-
-    def fill(self, rows: list[int]) -> "_Metadata":
-        rows_t = torch.tensor(rows, device=DEVICE)
-        self.slot_mapping[: len(rows)] = rows_t * 7
-        self.token_to_req_indices[: len(rows)] = (rows_t // 100).int()
-        self.num_tokens = len(rows)
-        return self
-
-
-def _fake_attention(x: torch.Tensor, out: torch.Tensor) -> None:
-    """Reads the current metadata, like the real attention kernels."""
-    md = get_forward_context().attn_metadata
-    n = md.num_tokens
-    out[:n] = x[:n] + md.token_to_req_indices[:n].to(x.dtype)[:, None, None]
-
-
-def _fake_layers(attention):
-    def run_layers(hidden, positions, _, pre_mix, post_mix, res_mix, residual):
-        # Like the window KV insert, this op reads the metadata's slot mapping.
-        slots = get_forward_context().attn_metadata.slot_mapping
-        x = residual * hidden[:, None, :] + slots[: hidden.shape[0], None, None].to(
-            hidden.dtype
-        )
-        out = torch.empty_like(x)
-        attention(x, out)
-        return (out + positions[:, None, None].to(out.dtype), pre_mix + post_mix)
-
-    return run_layers
-
-
-def test_piecewise_graph_replays_eagerly_into_its_outputs(monkeypatch):
-    """Captured as an eager break of a piecewise graph on a dummy batch, the
-    replay runs on every replay of that graph with the step's replay batch, into
-    the outputs the graph allocated."""
-    from vllm.platforms import current_platform
-    from vllm.utils.torch_utils import _current_stream_tls
-
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-    # The attention kernels are eager breaks of their own; inside the replay's
-    # break they simply run.
-    run_layers = _fake_layers(eager_break_during_capture(_fake_attention))
-    graphed = DecoderReplayLayers(WINDOW, run_layers, _new_outputs, [])
-    eager = DecoderReplayLayers(WINDOW, run_layers, _new_outputs, [])
-    metadata = _Metadata()
-    states = _states(GRAPH_SIZE, seed=0)
-    all_rows = list(range(GRAPH_SIZE))
-
-    prev_stream = getattr(_current_stream_tls, "value", None)
-    stream = torch.cuda.Stream()
-    try:
-        with torch.cuda.stream(stream):
-            with override_forward_context(
-                _context(metadata.fill(all_rows), CUDAGraphMode.PIECEWISE)
-            ):
-                capture = BreakableCUDAGraphCapture(
-                    current_platform.get_global_graph_pool()
-                )
-                with capture:
-                    hidden_out, pre_mix_out = graphed(*states)
-            assert capture._num_eager_breaks == 1
-            # A later step: new inputs in the graph's buffers, a trimming batch.
-            for dst, src in zip(states, _states(GRAPH_SIZE, seed=1)):
-                if dst is not None:
-                    dst.copy_(src)
-            _set_replay_batch(graphed, REPLAY_ROWS, metadata.fill(REPLAY_ROWS))
-            with override_forward_context(_context(None, CUDAGraphMode.PIECEWISE)):
-                capture.replay()
-            _set_replay_batch(eager, REPLAY_ROWS, metadata.fill(REPLAY_ROWS))
-            with override_forward_context(_context(None)):
-                expected = eager(*states)
-            torch.accelerator.synchronize()
-    finally:
-        torch.cuda.current_stream().wait_stream(stream)
-        _current_stream_tls.value = prev_stream
-    assert torch.equal(hidden_out, expected[0])
-    assert torch.equal(pre_mix_out, expected[1])
-    assert hidden_out[1:173].abs().sum() == 0
