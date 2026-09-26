@@ -8,23 +8,20 @@ import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    BaseRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_padding_mask as _get_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
-
-
-def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
-    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-        is_padding = get_forward_context().is_padding
-        return is_padding[:num_tokens] if is_padding is not None else None
-    return None
 
 
 def vllm_topk_softmax(

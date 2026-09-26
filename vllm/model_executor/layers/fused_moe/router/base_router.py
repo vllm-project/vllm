@@ -5,7 +5,9 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -154,6 +156,19 @@ else:
         num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
+
+
+def _skip_padding_enabled() -> bool:
+    return (
+        envs.VLLM_MOE_SKIP_PADDING and current_platform.supports_moe_padding_sentinel()
+    )
+
+
+def get_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    if _skip_padding_enabled() and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        return is_padding[:num_tokens] if is_padding is not None else None
+    return None
 
 
 class BaseRouter(FusedMoERouter):
