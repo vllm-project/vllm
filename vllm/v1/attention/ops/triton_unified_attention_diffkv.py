@@ -28,6 +28,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
@@ -45,6 +46,54 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 logger = init_logger(__name__)
 
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
+
+# Below this, 3D costs more in fp32 partials and the reduce kernel than the
+# split buys back. gfx950 crossover; untested elsewhere, hence the arch gate.
+MIN_KV_TOKENS_PER_SOFTMAX_SEGMENT = 256
+
+# 8 workgroups/CU is 2 waves/SIMD at num_warps=1, the minimum for one wave's
+# latency to be covered by another. Below it, keep Triton's default launch.
+MIN_WORKGROUPS_PER_CU_FOR_SINGLE_WAVE_2D = 8
+
+
+def _is_tuned_arch() -> bool:
+    """True on gfx950, the only arch these launch configs were measured on."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+def _select_launch_config(
+    BLOCK_M: int, device, grid: tuple, use_3d: bool
+) -> dict[str, int]:
+    """Explicit Triton launch metadata, or ``{}`` to keep the defaults.
+
+    At BLOCK_M=16 the default 4 warps give each wave ~4 Q rows and push every
+    softmax reduction through LDS; one wave per workgroup keeps it in registers
+    (LDS 24576 -> 16384 B). That costs thread-level parallelism, so it only
+    pays on a full grid -- 2D prefill and 2D decode compile to the same kernel
+    yet single-wave wins 1.48x on one and loses on the other, separated only by
+    occupancy. The 3D path needs no gate; ``num_stages=3`` pipelines within the
+    wave. Launch metadata cannot change numerics.
+    """
+    if BLOCK_M > 16 or not _is_tuned_arch():
+        return {}
+
+    if use_3d:
+        return {"num_warps": 1, "num_stages": 3, "waves_per_eu": 2}
+
+    device_id = device.index if device.index is not None else 0
+    cus = current_platform.num_compute_units(device_id)
+    if cus <= 0:
+        return {}
+    num_workgroups = 1
+    for dim in grid:
+        num_workgroups *= int(dim)
+    if num_workgroups < MIN_WORKGROUPS_PER_CU_FOR_SINGLE_WAVE_2D * cus:
+        return {}
+    return {"num_warps": 1, "num_stages": 1}
 
 
 @triton.jit
@@ -442,6 +491,22 @@ def unified_attention_diffkv(
         or is_batch_invariant
     )
 
+    # ``seq_threshold_3D`` asks whether the 2D grid fills the GPU, not whether
+    # there is KV to split. ``compute_tile_loop_bounds`` already prunes the
+    # loop to the visible window, so a small window leaves most segments empty
+    # while still paying for their partials and the reduce kernel. The window
+    # is a host-side bound independent of ``num_seqs``, so this only disables
+    # 3D and leaves the cudagraph capture-size snapping intact.
+    if (
+        use_3d
+        and num_par_softmax_segments is not None
+        and sliding_window_val > 0
+        and _is_tuned_arch()
+    ):
+        use_3d = sliding_window_val >= (
+            num_par_softmax_segments * MIN_KV_TOKENS_PER_SOFTMAX_SEGMENT
+        )
+
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
     # smaller tiles to expose more parallelism along the KV dim.
     tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
@@ -461,6 +526,8 @@ def unified_attention_diffkv(
         segm_max_ptr = out
         segm_expsum_ptr = out
         num_segments = 1
+
+    launch_cfg = _select_launch_config(BLOCK_M, q.device, grid, use_3d)
 
     kernel_unified_attention_diffkv[grid](
         output_ptr=out,
@@ -508,6 +575,7 @@ def unified_attention_diffkv(
         BLOCK_M=BLOCK_M,
         NUM_SEGMENTS_PER_SEQ=num_segments,
         IS_3D=use_3d,
+        **launch_cfg,
     )
 
     if use_3d:
