@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.v1.kv_connector.unit.test_multi_connector import MockHMAConnector
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
@@ -371,6 +372,36 @@ def test_async_progressive_load_failure(
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         assert scheduler.failed_recving_kv_req_ids == {request.request_id}
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
+
+
+def test_failure_after_partial_finished_recving_crashes():
+    vllm_config = create_vllm_config(kv_load_failure_policy="fail")
+    scheduler = create_scheduler(
+        vllm_config,
+        kv_cache_config=make_kv_cache_config(block_size=16, swa_enabled=True),
+    )
+    assert len(scheduler.kv_cache_config.kv_cache_groups) == 2
+
+    request = create_request(num_tokens=3 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduler.connector = MockHMAConnector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [
+        (2 * scheduler.block_size, True),
+    ]
+    scheduler.connector.request_finished_all_groups.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    step1 = create_model_runner_output([], finished_recving={request.request_id})
+    scheduler.update_from_output(scheduler_output, step1)
+    assert request.request_id in scheduler.finished_recving_kv_req_ids
+    assert request.request_id in scheduler.requests
+
+    step2 = create_model_runner_output([], finished_recving={request.request_id})
+    step2.kv_connector_output.failed_recving = {request.request_id}
+    scheduler.update_from_output(scheduler_output, step2)
 
 
 @pytest.mark.cpu_test
