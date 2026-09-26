@@ -27,6 +27,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -89,6 +90,17 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # P-side: newly finished blocks to ship to P workers on next step.
         self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
 
+        # Layer-wise overlapped WRITE-push (opt-in). P-side: producer
+        # requests whose per-layer KV should be pushed during the forward.
+        # ``_lw_need_save`` is seeded at alloc; multi-chunk prefills
+        # accumulate their block ids in ``_lw_pending_save`` until the last
+        # chunk, at which point the full block list is emitted into
+        # ``reqs_to_save`` for the worker's ``save_kv_layer`` hook.
+        self._layerwise = envs.VLLM_NIXL_LAYERWISE_PUSH
+        self._lw_need_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._lw_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._lw_emitted: set[ReqId] = set()
+
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
         # decoder KV blocks TTL so behaviour matches the lease.
@@ -146,6 +158,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # matches what the worker expects on the next step.
         if params.get("do_remote_decode"):
             self._reqs_in_batch.add(request.request_id)
+            # Layer-wise push (P side): seed the producer request so its
+            # per-layer KV can be pushed during the forward. Block ids are
+            # finalized (across chunked prefill) in build_connector_meta.
+            if self._layerwise:
+                self._lw_need_save[request.request_id] = (
+                    request,
+                    blocks.get_block_ids(),
+                )
 
         # P side with host-buffer offload: defer save to the worker.
         if self.use_host_buffer and params.get("do_remote_decode"):
@@ -158,8 +178,18 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             return
 
         if num_external_tokens <= 0:
-            # Nothing to receive: full prefix-cache hit on D, no
-            # registration to stage.
+            # Nothing to receive: full prefix-cache hit on D (or the scheduler
+            # allocated no external tokens this pass), so there is no
+            # registration to stage. Flip ``do_remote_prefill`` off so the
+            # terminal ``request_finished`` does NOT take the abort branch and
+            # enqueue an unseeded recv (which used to KeyError the engine).
+            logger.debug(
+                "NixlPushConnector D alloc: req %s num_external_tokens=%d "
+                "<=0 (no remote recv staged; prefix-hit/defer)",
+                request.request_id,
+                num_external_tokens,
+            )
+            params["do_remote_prefill"] = False
             return
 
         # First-pass D path: stash registration data the worker will
@@ -198,7 +228,23 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids, (), False)
+        # main uses a 4-tuple (request, block_ids, cached, awaiting_kvs);
+        # push mode never awaits a pull (P drives the WRITE), so awaiting_kvs
+        # is False, matching base_scheduler's ``add_new_req_to_recv`` unpack.
+        self._reqs_need_recv[request.request_id] = (
+            request,
+            local_block_ids,
+            (),
+            False,
+        )
+        logger.debug(
+            "NixlPushConnector D alloc: req %s staged recv "
+            "num_external_tokens=%d local_blocks=%d remote_eng=%s",
+            request.request_id,
+            num_external_tokens,
+            sum(len(g) for g in local_block_ids) if local_block_ids else 0,
+            params.get("remote_engine_id"),
+        )
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -274,9 +320,18 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             remote_num_tokens = request.num_computed_tokens
 
             # Store finished blocks for worker-level matching with D
-            # registrations (via NIXL notifications).
+            # registrations (via NIXL notifications). Keep the request in
+            # ``_finished_request_blocks`` so ``has_pending_push_work`` holds
+            # the engine loop open until the WRITE completes.
             self._finished_request_blocks[request.request_id] = block_ids
-            self._newly_finished_push_blocks[request.request_id] = block_ids
+            # In layer-wise mode the per-layer WRITEs were already issued from
+            # the forward hook; do NOT trigger the monolithic worker WRITE.
+            if not self._layerwise:
+                self._newly_finished_push_blocks[request.request_id] = block_ids
+            else:
+                self._lw_need_save.pop(request.request_id, None)
+                self._lw_pending_save.pop(request.request_id, None)
+                self._lw_emitted.discard(request.request_id)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -297,8 +352,46 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
+        # Defensive seed: the base scheduler turns every ``_reqs_need_recv``
+        # entry into a recv ReqMeta via ``add_new_req_to_recv``, which hard
+        # indexes ``remote_block_ids`` and the other ``remote_*`` keys
+        # (metadata.py). In push mode D legitimately has no ``remote_block_ids``
+        # (P assigns physical blocks at WRITE time) and, critically, the
+        # abort/rejection path (``request_finished`` with ``do_remote_prefill``
+        # still set, e.g. a request that got an ErrorResponse at the D serving
+        # layer and never ran ``update_state_after_alloc``) enqueues a recv
+        # WITHOUT seeding these keys -> ``KeyError: 'remote_block_ids'`` kills
+        # the whole EngineCore. Seed safe defaults so a stale/aborted recv is
+        # reaped later by the registration watchdog + KV lease instead of
+        # crashing the engine. Normal registrations already carry every key
+        # (setdefault is a no-op for them).
+        for req_id, (req, _, _, _) in self._reqs_need_recv.items():
+            params = req.kv_transfer_params
+            if params is None:
+                continue
+            if "remote_block_ids" not in params:
+                logger.debug(
+                    "NixlPushConnector: seeding missing remote_* for recv "
+                    "req %s (abort/reject path; do_remote_prefill=%s)",
+                    req_id,
+                    params.get("do_remote_prefill"),
+                )
+            params.setdefault("remote_block_ids", ())
+            params.setdefault("remote_engine_id", "")
+            params.setdefault("remote_request_id", req_id)
+            params.setdefault("remote_host", "")
+            params.setdefault("remote_port", 0)
+
         meta = super().build_connector_meta(scheduler_output)
         assert isinstance(meta, NixlConnectorMetadata)
+
+        # Layer-wise push (P side): identify producer requests whose prefill
+        # completes this step and emit their FULL block list into
+        # ``reqs_to_save`` so the worker's ``save_kv_layer`` hook can push
+        # each layer's KV during this final forward. Chunked prefills
+        # accumulate ``new_block_ids`` across steps until the last chunk.
+        if self._layerwise:
+            self._lw_build_reqs_to_save(scheduler_output, meta)
 
         # Watchdog: any D-side registration whose deadline has passed without
         # a corresponding push completion is treated as failed and cleaned up.
@@ -339,12 +432,75 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         return meta
 
+    def _lw_tokens(self, grouped: BlockIds) -> int:
+        if not grouped:
+            return 0
+        return max((len(g) for g in grouped), default=0) * self.block_size
+
+    @staticmethod
+    def _lw_concat(a: BlockIds, b: BlockIds) -> BlockIds:
+        """Concatenate two grouped block-id lists group-by-group."""
+        if not a:
+            return tuple(list(g) for g in b)
+        return tuple(
+            (list(a[i]) if i < len(a) else []) + (list(b[i]) if i < len(b) else [])
+            for i in range(max(len(a), len(b)))
+        )
+
+    def _lw_emit(
+        self, req_id: ReqId, req: Request, blocks: BlockIds, meta: NixlConnectorMetadata
+    ) -> None:
+        clipped = self.get_exchange_clipped_blocks(tuple(list(g) for g in blocks))
+        meta.add_new_req_to_save(req_id, clipped, req.kv_transfer_params or {})
+        self._lw_emitted.add(req_id)
+        logger.debug(
+            "NIXL lw[P-sched] emit reqs_to_save req=%s blocks=%d",
+            req_id,
+            self._lw_tokens(clipped) // max(self.block_size, 1),
+        )
+
+    def _lw_build_reqs_to_save(
+        self, scheduler_output: SchedulerOutput, meta: NixlConnectorMetadata
+    ) -> None:
+        # 1. Seeded producers: emit immediately if prefill fits in one chunk,
+        # otherwise start accumulating across chunks.
+        for req_id, (req, blocks) in list(self._lw_need_save.items()):
+            del self._lw_need_save[req_id]
+            if req_id in self._lw_emitted:
+                continue
+            if self._lw_tokens(blocks) >= req.num_prompt_tokens:
+                self._lw_emit(req_id, req, blocks, meta)
+            else:
+                self._lw_pending_save[req_id] = (req, blocks)
+
+        # 2. Chunked continuations: accumulate new block ids until the last
+        # chunk, then emit the full block list.
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for req_id, new_blocks in zip(
+            cached_reqs.req_ids, cached_reqs.new_block_ids, strict=True
+        ):
+            if req_id not in self._lw_pending_save:
+                continue
+            req, acc = self._lw_pending_save[req_id]
+            if new_blocks is not None:
+                acc = self._lw_concat(acc, new_blocks)
+                self._lw_pending_save[req_id] = (req, acc)
+            if self._lw_tokens(acc) >= req.num_prompt_tokens:
+                self._lw_emit(req_id, req, acc, meta)
+                del self._lw_pending_save[req_id]
+
     def has_pending_push_work(self) -> bool:
         # Keep the engine main loop alive while we have:
         # - finished P blocks awaiting WRITE completion, or
         # - pending D registrations the worker has not yet shipped, or
-        # - newly finished blocks not yet shipped to P workers.
-        return bool(self._finished_request_blocks or self._push_pending_registrations)
+        # - newly finished blocks not yet shipped to P workers, or
+        # - layer-wise producer requests mid-prefill awaiting their push.
+        return bool(
+            self._finished_request_blocks
+            or self._push_pending_registrations
+            or self._lw_need_save
+            or self._lw_pending_save
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Clean up finished request blocks after push completes."""

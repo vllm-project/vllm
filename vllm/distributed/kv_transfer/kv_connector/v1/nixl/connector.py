@@ -403,6 +403,32 @@ class NixlPushConnector(NixlBaseConnector):
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        **kwargs,
+    ) -> None:
+        """Per-layer producer hook. No-op unless layer-wise push is enabled
+        (``VLLM_NIXL_LAYERWISE_PUSH=1``), in which case each layer's KV is
+        pushed to D as it becomes ready, overlapped with the tail of prefill."""
+        if self.connector_worker is None:
+            return
+        if not isinstance(self._connector_metadata, NixlConnectorMetadata):
+            return
+        self.connector_worker.save_kv_layer_push(
+            self._connector_metadata, layer_name, kv_layer, attn_metadata
+        )
+
+    def wait_for_save(self):
+        """After the forward: run the base host-buffer save (if any), then
+        seal the per-layer WRITE counts so completion can be detected."""
+        super().wait_for_save()
+        assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.seal_layer_writes_push(self._connector_metadata)
+
 
 # Backward compatibility: NixlConnector is the pull-based connector.
 NixlConnector = NixlPullConnector

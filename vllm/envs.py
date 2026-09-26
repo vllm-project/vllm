@@ -229,6 +229,8 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_NIXL_LAYERWISE_PUSH: bool = False
+    VLLM_NIXL_LAYERWISE_DEFER_TIMEOUT: float = 60.0
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
@@ -1697,6 +1699,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
+    ),
+    # Opt-in per-layer overlapped WRITE-push for the NIXL push connector. The
+    # producer posts one WRITE per layer as its KV becomes ready, overlapping
+    # the transfer with the tail of prefill, instead of a single monolithic
+    # WRITE once the request finishes. Off by default.
+    "VLLM_NIXL_LAYERWISE_PUSH": lambda: bool(
+        int(os.getenv("VLLM_NIXL_LAYERWISE_PUSH", "0"))
+    ),
+    # Seconds a per-layer WRITE may wait for the consumer registration and
+    # handshake before the request is failed and its blocks freed by the lease.
+    "VLLM_NIXL_LAYERWISE_DEFER_TIMEOUT": lambda: float(
+        os.getenv("VLLM_NIXL_LAYERWISE_DEFER_TIMEOUT", "60")
     ),
     # Address the P2P KV-offload control socket binds to. Defaults to
     # ``localhost`` (loopback only); must be set to the node IP for
