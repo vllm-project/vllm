@@ -3,12 +3,21 @@
 
 from pathlib import Path
 
-from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
+import pytest
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.repo_utils import hf_api
 
-from .conftest import RunaiDummyExecutor
+from .conftest import (
+    RUNAI_PLATFORM_SKIP_REASON,
+    RUNAI_PLATFORM_SUPPORTED,
+    RunaiDummyExecutor,
+)
+
+if RUNAI_PLATFORM_SUPPORTED:
+    from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
+else:
+    pytest.skip(RUNAI_PLATFORM_SKIP_REASON, allow_module_level=True)
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
