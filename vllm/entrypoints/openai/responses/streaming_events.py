@@ -565,6 +565,8 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    *,
+    allow_empty_delta: bool = False,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -572,7 +574,7 @@ def emit_content_delta_events(
     latest append segment and delegates to shared leaf helpers.
     """
     delta = segment.delta
-    if not delta:
+    if not delta and not allow_empty_delta:
         return []
 
     channel = segment.channel
@@ -609,32 +611,42 @@ def emit_previous_item_done_events(
     This is a Harmony-specific dispatcher that extracts values from the
     Harmony parser's message object and delegates to shared leaf helpers.
     """
-    if not state.sent_output_item_added and not state.is_first_function_call_delta:
-        # Suppress done events for items had no delta and thus had no
-        # added/in-progress lifecycle events. This is a bug.
-        # TODO: Ensure added/in-progress events are emitted for zero-delta items.
-        return []
-
     text = previous_item.content[0].text
+    events: list[StreamingResponsesResponse] = []
+    if not state.sent_output_item_added and not state.is_first_function_call_delta:
+        events = emit_content_delta_events(
+            Segment(
+                channel=previous_item.channel,
+                recipient=previous_item.recipient,
+                delta=text,
+            ),
+            state,
+            function_tool_names,
+            allow_empty_delta=True,
+        )
     if previous_item.recipient is not None:
         # Deal with tool call
         if is_function_recipient(previous_item.recipient, function_tool_names):
             function_name = extract_function_from_recipient(previous_item.recipient)
-            return emit_function_call_done_events(function_name, text, state)
+            return events + emit_function_call_done_events(function_name, text, state)
         elif previous_item.recipient == "python":
-            return emit_code_interpreter_completion_events(previous_item, state)
+            return events + emit_code_interpreter_completion_events(
+                previous_item, state
+            )
         elif (
             is_mcp_tool_by_namespace(previous_item.recipient, function_tool_names)
             and state.current_item_id is not None
             and state.current_item_id.startswith("mcp_")
         ):
-            return emit_mcp_completion_events(previous_item.recipient, text, state)
+            return events + emit_mcp_completion_events(
+                previous_item.recipient, text, state
+            )
     elif previous_item.channel == "analysis":
-        return emit_reasoning_done_events(text, state)
+        return events + emit_reasoning_done_events(text, state)
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_output_done_events(text, state)
+        return events + emit_text_output_done_events(text, state)
     return []
 
 
@@ -1221,12 +1233,26 @@ class SimpleStreamingEventProcessor:
             and self.state.tool_call_index != tool_call.index
         )
 
-    def close_current(self) -> list[StreamingResponsesResponse]:
+    def close_current(
+        self, incomplete: bool = False
+    ) -> list[StreamingResponsesResponse]:
         """Close the current state and emit its 'done' event sequence."""
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
-        return handlers.done_fn(self.state)
+        events = handlers.done_fn(self.state)
+        if incomplete:
+            for event in events:
+                if isinstance(event, ResponseOutputItemDoneEvent) and isinstance(
+                    event.item,
+                    (
+                        ResponseOutputMessage,
+                        ResponseReasoningItem,
+                        ResponseFunctionToolCall,
+                    ),
+                ):
+                    event.item.status = "incomplete"
+        return events
 
     def open(
         self, target_state: _StateType, tool_call: Any = None
