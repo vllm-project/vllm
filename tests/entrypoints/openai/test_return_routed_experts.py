@@ -31,7 +31,7 @@ def decode_routed_experts(encoded: str | None) -> np.ndarray:
     return routed_experts
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def server():
     args = [
         "--max-model-len",
