@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.parser.engine.streaming_helpers import simulate_reasoning_streaming
 from vllm.entrypoints.chat_utils import parse_chat_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
@@ -21,6 +24,9 @@ class FakeHfTokenizer:
 
     def get_added_vocab(self) -> dict[str, int]:
         return {"</think>": 100}
+
+    def get_vocab(self) -> dict[str, int]:
+        return self.get_added_vocab()
 
     def encode(
         self,
@@ -85,7 +91,18 @@ def test_deepseek_v4_defaults_to_thinking_with_high_effort():
     assert prompt.endswith("<｜Assistant｜><think>")
 
 
-@pytest.mark.parametrize("kwargs", [{"thinking": True}, {"enable_thinking": True}])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"thinking": True},
+        {"enable_thinking": True},
+        {"thinking": False, "enable_thinking": True},
+        {"thinking": True, "enable_thinking": None},
+        {"thinking": None},
+        {"enable_thinking": None},
+        {"thinking": None, "enable_thinking": None},
+    ],
+)
 def test_deepseek_v4_enables_thinking_with_compatible_kwargs(kwargs):
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
@@ -99,7 +116,15 @@ def test_deepseek_v4_enables_thinking_with_compatible_kwargs(kwargs):
     assert prompt.endswith("<｜Assistant｜><think>")
 
 
-@pytest.mark.parametrize("kwargs", [{"thinking": False}, {"enable_thinking": False}])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"thinking": False},
+        {"enable_thinking": False},
+        {"thinking": True, "enable_thinking": False},
+        {"thinking": False, "enable_thinking": None},
+    ],
+)
 def test_deepseek_v4_explicitly_disables_thinking(kwargs):
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
@@ -108,6 +133,33 @@ def test_deepseek_v4_explicitly_disables_thinking(kwargs):
     )
 
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"thinking": True, "enable_thinking": False},
+        {"thinking": False, "enable_thinking": True, "reasoning_effort": "none"},
+    ],
+)
+def test_deepseek_v4_disabled_thinking_renders_and_parses_content(kwargs):
+    tokenizer = _tokenizer()
+    request = ChatCompletionRequest(
+        model="test", messages=[{"role": "user", "content": "Hello"}]
+    )
+    prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, **kwargs)
+    assert prompt.endswith("<｜Assistant｜></think>")
+
+    parser = DeepSeekV4Parser(tokenizer, chat_template_kwargs=kwargs)
+    assert parser.extract_reasoning("The answer is 42.", request) == (
+        None,
+        "The answer is 42.",
+    )
+    parser = DeepSeekV4Parser(tokenizer, chat_template_kwargs=kwargs)
+    assert simulate_reasoning_streaming(parser, ["The answer ", "is 42."]) == (
+        "",
+        "The answer is 42.",
+    )
 
 
 @pytest.mark.parametrize(

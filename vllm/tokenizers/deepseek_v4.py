@@ -25,11 +25,11 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             tools: list[dict[str, Any]] | None = None,
             **kwargs,
         ) -> str | list[int]:
-            thinking = kwargs.get("thinking")
-            enable_thinking = kwargs.get("enable_thinking")
-            thinking_enabled = bool(thinking) or bool(enable_thinking)
-            if "thinking" not in kwargs and "enable_thinking" not in kwargs:
-                thinking_enabled = True
+            # The canonical flag takes precedence over the legacy alias.
+            thinking = kwargs.get("enable_thinking")
+            if thinking is None:
+                thinking = kwargs.get("thinking")
+            thinking_enabled = True if thinking is None else bool(thinking)
             thinking_mode = "thinking" if thinking_enabled else "chat"
 
             conversation = kwargs.get("conversation", messages)
