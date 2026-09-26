@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     VLLM_MODEL_REDIRECT_PATH: str | None = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
+    VLLM_CLI_HELP_CONFIG: str | None = None
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_DO_NOT_TRACK: bool = False
@@ -680,6 +681,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BUILD_PIPELINE": lambda: os.environ.get("VLLM_BUILD_PIPELINE", "local"),
     "VLLM_BUILD_URL": lambda: os.environ.get("VLLM_BUILD_URL", ""),
     "VLLM_IMAGE_TAG": lambda: os.environ.get("VLLM_IMAGE_TAG", ""),
+    # Optional JSON overrides for CLI help display. Does not change parsing.
+    "VLLM_CLI_HELP_CONFIG": lambda: os.getenv("VLLM_CLI_HELP_CONFIG"),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -2291,6 +2294,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        "VLLM_CLI_HELP_CONFIG",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
         # Location-only derived paths: where a cache/config directory lives
