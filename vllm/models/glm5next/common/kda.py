@@ -51,6 +51,26 @@ else:
     )
 
 
+def _invalidate_merged_conv_weight_cache(
+    kda_layer: "Glm5NextLinearAttention", conv: nn.Module
+) -> None:
+    """Wrap ``conv.weight.weight_loader`` so any weight write clears the
+    layer's merged q|k|v conv weight cache (rebuilt lazily on the next
+    forward). Weight loading dispatches on the param's stamped loader, not
+    the module attribute."""
+    original_loader = conv.weight.weight_loader
+
+    def weight_loader(param, *args, **kwargs):
+        original_loader(param, *args, **kwargs)
+        kda_layer._merged_conv_weight = None
+
+    set_weight_attrs(conv.weight, {"kda_owner_layer": kda_layer})
+    # set_weight_attrs refuses to overwrite an existing attr; delete the
+    # stamped loader and re-stamp the wrapper.
+    delattr(conv.weight, "weight_loader")
+    set_weight_attrs(conv.weight, {"weight_loader": weight_loader})
+
+
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
@@ -273,8 +293,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
         # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
+        # weights are loaded). See _forward. Any write through a conv weight
+        # loader invalidates the cache, so a weight refit (online-RL reload)
+        # never serves the stale pre-refit merge (#55087).
         self._merged_conv_weight: torch.Tensor | None = None
+        for conv in (self.q_conv1d, self.k_conv1d, self.v_conv1d):
+            _invalidate_merged_conv_weight_cache(self, conv)
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -500,8 +524,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
         # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
+        # cached until any conv weight is reloaded (see __init__: weight
+        # loaders invalidate the cache). conv_state is already stored as the
+        # merged q|k|v state, so it is used directly.
         if self._merged_conv_weight is None:
 
             def _w(m):
