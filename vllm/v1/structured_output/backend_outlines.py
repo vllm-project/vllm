@@ -236,6 +236,11 @@ def validate_structured_output_request_outlines(params: SamplingParams):
             "Outlines structured outputs backend "
             "does not support grammar specifications"
         )
+    elif so_params.structural_tag:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support structural_tag specifications"
+        )
 
 
 def _prefix_needs_context(parsed) -> bool:
