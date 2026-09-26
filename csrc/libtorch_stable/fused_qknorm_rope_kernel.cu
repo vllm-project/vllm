@@ -243,6 +243,15 @@ __global__ void fusedQKNormRopeKernel(
     T_cache const* cos_ptr = cache_ptr;
     T_cache const* sin_ptr = cache_ptr + embed_dim;
     int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
+    if constexpr (!interleave) {
+      // Exchange with the whole warp: rotary_lanes < 32 when rotary_dim <
+      // head_dim, so shuffling inside the lane guard below would be UB.
+      int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+#pragma unroll
+      for (int i = 0; i < numElemsPerThread; i++) {
+        elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+      }
+    }
     if (laneId < rotary_lanes) {
       if constexpr (interleave) {
         // Perform interleaving. Use pre-computed cos/sin values.
@@ -266,15 +275,10 @@ __global__ void fusedQKNormRopeKernel(
           elements[idx1] = val0 * sin_val + val1 * cos_val;
         }
       } else {
-        // Before data exchange with in warp, we need to sync.
-        __syncwarp();
-        int pairOffset = (rotary_dim / 2) / numElemsPerThread;
-        // Get the data from the other half of the warp. Use pre-computed
-        // cos/sin values.
+        int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+        // Use pre-computed cos/sin values.
 #pragma unroll
         for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
-
           if (laneId < pairOffset) {
             elements2[i] = -elements2[i];
           }
@@ -287,8 +291,6 @@ __global__ void fusedQKNormRopeKernel(
 
           elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
         }
-        // __shfl_xor_sync does not provide memfence. Need to sync again.
-        __syncwarp();
       }
     }
     // Store.
@@ -502,6 +504,14 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       if (k == 0) cp_async_wait_group<0>();
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
+      if constexpr (!interleave) {
+        // Whole-warp exchange, see the single-head kernel above.
+        int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+#pragma unroll
+        for (int i = 0; i < numElemsPerThread; i++) {
+          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+        }
+      }
       if (laneId < rotary_lanes) {
         if constexpr (interleave) {
 #pragma unroll
@@ -518,11 +528,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             elements[idx1] = val0 * sin_val + val1 * cos_val;
           }
         } else {
-          __syncwarp();
           int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
           for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
             if (laneId < pairOffset) elements2[i] = -elements2[i];
             int dim_idx = laneId * numElemsPerThread + i;
             dim_idx = (dim_idx * 2) % rotary_dim;
@@ -531,7 +539,6 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
             elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
           }
-          __syncwarp();
         }
       }
 
