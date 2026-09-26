@@ -131,7 +131,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     # Prefix-cache matching must not mutate the request after its local lookup.
     with patch.object(
         scheduler,
-        "_truncate_mamba_request_for_prefill",
+        "_truncate_request_for_prefill",
         side_effect=AssertionError("late Mamba truncation"),
     ):
         num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
@@ -140,6 +140,52 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
 
     assert num_new_tokens == 0
     assert is_async is False
+
+
+@pytest.mark.cpu_test
+def test_multi_module_mtp_remote_prefill_recomputes_lookahead_window():
+    """Mooncake P/D must match the multi-module MTP prefill backoff."""
+    scheduler = object.__new__(MooncakeConnectorScheduler)
+    scheduler._has_mamba = False
+    scheduler.is_kv_producer = False
+    scheduler.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=3)
+
+    request = create_request(num_tokens=10, do_remote_prefill=True)
+    num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+    assert num_new_tokens == 8
+    assert is_async is True
+
+    request = create_request(num_tokens=10, do_remote_decode=True)
+    original_tokens = list(request.prompt_token_ids)
+    scheduler.on_new_request(request)
+
+    assert request.prompt_token_ids == original_tokens[:-2]
+    assert request._all_token_ids == original_tokens[:-2]
+    assert request.num_prompt_tokens == 8
+    assert request.max_tokens == 1
+    assert request.kv_transfer_params["_p_side_truncated"] is True
+    scheduler.on_new_request(request)
+    assert request.prompt_token_ids == original_tokens[:-2]
+    assert request.num_prompt_tokens == 8
+
+
+@pytest.mark.cpu_test
+def test_dense_remote_prefill_keeps_full_prompt_without_mtp():
+    """The generalized backoff must preserve ordinary dense Mooncake P/D."""
+    scheduler = object.__new__(MooncakeConnectorScheduler)
+    scheduler._has_mamba = False
+    scheduler.is_kv_producer = False
+    scheduler.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
+
+    request = create_request(num_tokens=10, do_remote_prefill=True)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (10, True)
+
+    request = create_request(num_tokens=10, do_remote_decode=True)
+    scheduler.on_new_request(request)
+    assert request.num_prompt_tokens == 10
+    assert "_p_side_truncated" not in request.kv_transfer_params
 
 
 def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):

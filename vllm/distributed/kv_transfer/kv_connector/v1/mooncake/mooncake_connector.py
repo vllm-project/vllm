@@ -717,41 +717,53 @@ class MooncakeConnectorScheduler:
         ]
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
+        """D-side only. Exclude prompt tokens recomputed by the decoder."""
+        backoff = self._prefill_backoff()
+        if backoff and num_prompt_tokens > backoff:
+            return num_prompt_tokens - backoff
         return num_prompt_tokens
 
-    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the last prompt token so the prefiller computes
-        h(N-1) instead of h(N). The decoder recomputes the last token to
-        derive h(N) correctly.
+    def _prefill_backoff(self) -> int:
+        """Number of prompt tokens the decoder recomputes locally.
+
+        Mamba needs the last prompt token to derive its final state. Multi-module
+        MTP needs the trailing lookahead window to avoid transferring
+        unverified draft KV from the prefiller.
+        """
+        return max(
+            1 if self._has_mamba else 0,
+            self.vllm_config.num_prefill_lookahead_tokens - 1,
+        )
+
+    def _truncate_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop tokens the decoder recomputes locally.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
+        backoff = self._prefill_backoff()
         if (
-            params is not None
+            backoff
+            and params is not None
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
+            and request.num_prompt_tokens > backoff
         ):
             if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
+                del request.prompt_token_ids[-backoff:]
             elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
+                request.prompt_embeds = request.prompt_embeds[:-backoff]
             else:
                 return
 
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
+            del request._all_token_ids[-backoff:]
+            request.num_prompt_tokens -= backoff
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
         params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
+        if params is not None and params.get("do_remote_decode"):
+            self._truncate_request_for_prefill(request)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
