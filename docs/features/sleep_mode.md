@@ -156,3 +156,104 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ## Limitation
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
+
+## Experimental CUDA process checkpoint executor
+
+An opt-in executor checkpoints each CUDA worker after ordinary level-1 sleep,
+then restores all workers before waking allocator-managed memory. This preserves
+the remaining CUDA state, including captured graph executable objects, without
+recapturing graphs. Ordinary level-1 semantics still apply: KV cache contents are
+discarded. This is not a durable application checkpoint or model switching API.
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "Qwen/Qwen3-0.6B",
+    enable_sleep_mode=True,
+    distributed_executor_backend=(
+        "vllm.v1.executor.process_checkpoint_executor.ProcessCheckpointExecutor"
+    ),
+)
+llm.sleep(level=1)
+llm.wake_up()
+```
+
+This experimental implementation requires Linux, NVIDIA driver checkpoint APIs,
+and dedicated worker processes. It uses an external helper to call
+`cuCheckpointProcessLock`, `cuCheckpointProcessCheckpoint`,
+`cuCheckpointProcessRestore`, and `cuCheckpointProcessUnlock`. CPU threads remain
+alive, but worker CUDA calls cannot execute while checkpointed. The helper uses
+the same process namespace and user as the executor. Driver permission and
+resource restrictions still apply; see the
+[CUDA checkpoint API documentation](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-driver-api/group__CUDA__CHECKPOINT.html).
+
+The experimental configuration was tested on NVIDIA H20 with driver
+580.126.09, NCCL 2.29.7, and FlashInfer 0.6.18.post1. This does not establish
+compatibility with other GPU, driver, or communication-library combinations.
+
+Only a single node with tensor parallel size 1, 2, or 4 is accepted. Pipeline,
+data, and context parallelism, external cache transfer, and sleep level 2
+are not supported by this executor. Level 0 remains
+a scheduler pause and does not perform a CUDA checkpoint.
+
+For tensor parallel size 2 or 4, use NCCL 2.29.7 or later with memory
+suspension support, set `enable_nccl_comm_suspend=True`, and pass
+`disable_custom_all_reduce=True`. The following explicit configuration retains
+NCCL GPU peer-to-peer communication. Before driver checkpoint, ordinary worker
+sleep suspends NCCL mappings; worker wake restores them at their reserved
+addresses. The executor checks each rank's actual suspension state.
+
+```bash
+export NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=1 NCCL_IB_DISABLE=1
+export NCCL_CUMEM_ENABLE=1 NCCL_CUMEM_HOST_ENABLE=0 NCCL_NVLS_ENABLE=0
+export VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_USE_NCCL_SYMM_MEM=0
+export VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=0
+export VLLM_ALLREDUCE_USE_FLASHINFER=1
+export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+```
+
+FlashInfer must provide stable-address workspace `checkpoint_prepare` and
+`checkpoint_restore` methods. The executor calls existing worker hooks around
+the driver checkpoint. Disabling standalone FlashInfer all-reduce with
+`VLLM_ALLREDUCE_USE_FLASHINFER=0` does not disable the compiler
+`fuse_allreduce_rms` pass, which can allocate FlashInfer workspaces independently.
+When that pass is enabled, the same backend restriction and workspace hooks
+apply. A configuration using only NCCL must also disable that compiler pass.
+The FlashInfer `mnnvl` backend is not accepted:
+its multicast reconstruction failed after driver restoration in driver 580
+tests. NCCL NVLS is also disabled because its persistent shared allocations
+prevented driver checkpoint in those tests. Performance costs of these
+restrictions must be measured against the workload's default communication
+configuration; retaining GPU peer-to-peer communication alone does not establish
+unchanged inference performance.
+
+A more restrictive Socket-only configuration is also accepted without
+`enable_nccl_comm_suspend`: set `NCCL_P2P_DISABLE=1`, `NCCL_CUMEM_ENABLE=0`, and
+`VLLM_ALLREDUCE_USE_FLASHINFER=0`, retaining the other communication restrictions
+above. This configuration is primarily useful for compatibility comparisons.
+Do not create additional CUDA IPC resources or fall back to an independently
+created PyTorch NCCL process group while using the checkpoint executor.
+
+Provide host memory for both the ordinary weight backup and the driver's
+remaining CUDA state backup. Restore needs sufficient free GPU memory; release
+any temporary GPU workload before waking. Checkpoint and restore add latency to
+ordinary sleep/wake. The helper itself can retain a small driver allocation, so
+worker offload does not imply a zero device-wide memory reading.
+
+All ranks are locked before any is checkpointed. All ranks are restored before
+any is unlocked. A driver operation has a 30-second response deadline (lock also
+has a 10-second driver timeout). Worker sleep/wake and FlashInfer workspace
+hooks have a 120-second response deadline. Failure terminates the workers rather than
+serving with a partially restored rank set; restart the engine after failure.
+
+Repeated level-1 sleep is idempotent. A first partial wake, such as
+`wake_up(tags=["weights"])`, restores the **whole CUDA process** before restoring
+the selected allocator tags. It cannot selectively restore graph or driver
+state. Ordinary worker RPCs are rejected while checkpointed. A checkpointed
+worker cannot execute another model until restored.
+
+As with the ordinary executor, `sleep()` is a no-op while weights remain asleep.
+For example, after `wake_up(tags=["kv_cache"])`, another `sleep()` does not
+checkpoint the process again. Wake the remaining weights before starting a new
+full sleep/checkpoint cycle.
