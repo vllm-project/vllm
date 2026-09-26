@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -80,6 +80,23 @@ ResponsesPreviousMessages: TypeAlias = (
 class ResponsesRenderResult:
     messages: ResponsesPreviousMessages
     engine_input: EngineInput
+
+
+def _first_droppable_message_index(
+    messages: list[ChatCompletionMessageParam],
+) -> int | None:
+    """Index of the oldest message item-level truncation may drop, if any.
+
+    The Responses API contract for ``truncation: "auto"`` is to drop whole
+    items from the beginning of the conversation. The leading system message
+    (rendered from ``instructions``) and the final message (the one the model
+    responds to) must survive, so ``None`` means nothing can be dropped and
+    the length error must be surfaced to the client instead.
+    """
+    first = 1 if messages and messages[0].get("role") == "system" else 0
+    if first >= len(messages) - 1:
+        return None
+    return first
 
 
 def _extract_allowed_tools_from_mcp_requests(
@@ -335,17 +352,79 @@ class OnlineRenderer:
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
         )
-        _, engine_inputs = await self.preprocess_chat(
+        messages, engine_inputs = await self._preprocess_responses_chat(
             request,
             messages,
-            default_template=self.chat_template,
-            default_template_content_format=self.chat_template_content_format,
-            default_template_kwargs=chat_template_kwargs,
+            chat_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            parser=self.parser,
             skip_mm_cache=skip_mm_cache,
         )
         return self._responses_render_result(messages, engine_inputs)
+
+    async def _preprocess_responses_chat(
+        self,
+        request: ResponsesRequest,
+        messages: list[ChatCompletionMessageParam],
+        *,
+        chat_template_kwargs: dict[str, Any],
+        tool_dicts: list[dict[str, Any]] | None,
+        skip_mm_cache: bool,
+    ) -> tuple[list[ChatCompletionMessageParam], list[EngineInput]]:
+        """Preprocess Responses chat messages, honoring ``truncation: "auto"``.
+
+        Unlike plain chat requests, the Responses API contract for
+        ``truncation: "auto"`` is to drop whole items from the beginning of
+        the conversation rather than cut the rendered prompt at the token
+        level, which can discard ``instructions`` or split an item
+        mid-message. Token-level truncation (which
+        ``ResponsesRequest.build_tok_params`` derives from the same flag)
+        is therefore disabled, and the oldest droppable message is removed
+        one at a time until the prompt fits. Once nothing can be dropped,
+        the length validation error propagates and surfaces as a 400 to
+        the client, matching the single-item-that-cannot-fit case.
+
+        Returns:
+            The surviving messages and the rendered engine inputs.
+
+        """
+        tok_params: TokenizeParams | None = None
+        if request.truncation != "disabled":
+            tok_params = replace(
+                request.build_tok_params(self.model_config),
+                truncate_prompt_tokens=None,
+            )
+            messages = list(messages)
+
+        while True:
+            try:
+                _, engine_inputs = await self.preprocess_chat(
+                    request,
+                    messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                    parser=self.parser,
+                    skip_mm_cache=skip_mm_cache,
+                    tok_params=tok_params,
+                )
+                return messages, engine_inputs
+            except VLLMValidationError as exc:
+                if tok_params is None or exc.parameter not in (
+                    "input_text",
+                    "input_tokens",
+                ):
+                    raise
+                drop_index = _first_droppable_message_index(messages)
+                if drop_index is None:
+                    raise
+                dropped = messages.pop(drop_index)
+                logger.info(
+                    "Responses truncation=auto: dropped the oldest "
+                    "conversation item (role=%s); %d message(s) remain.",
+                    dropped.get("role"),
+                    len(messages),
+                )
 
     def _render_responses_with_harmony(
         self,
@@ -715,6 +794,7 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -736,7 +816,7 @@ class OnlineRenderer:
             ),
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = tok_params or request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
         ).with_defaults(
