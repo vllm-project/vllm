@@ -69,6 +69,76 @@ vllm serve <model> \
   }'
 ```
 
+## Sharing SimpleCPUOffloadConnector across local DP ranks
+
+`SimpleCPUOffloadConnector` can optionally share CPU KV contents between MoE data
+parallel replicas in the same IPC namespace and distributed DP group. A request
+routed to another local DP replica can reuse a completed CPU prefix without the
+router knowing which replica originally computed it.
+
+For example, for eight local GPUs with TP1 and expert parallelism:
+
+```bash
+vllm serve <model> \
+  --data-parallel-size 8 \
+  --tensor-parallel-size 1 \
+  --enable-expert-parallel \
+  --enable-prefix-caching \
+  --prefix-caching-hash-algo sha256 \
+  --kv-transfer-config '{
+    "kv_connector": "SimpleCPUOffloadConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "cpu_offload_shared": true,
+      "cpu_bytes_to_use_per_rank": 8589934592,
+      "lazy_offload": false
+    }
+  }'
+```
+
+`cpu_offload_shared` defaults to `false`. Shared mode currently uses eager
+offloading only. Each local rank retains its configured write capacity
+and owns a fixed partition of slots; it can read completed blocks from every
+local partition. The example allocates approximately 64 GiB of CPU KV memory
+per node, plus index metadata. Size `/dev/shm` accordingly. One slot per partition
+is reserved as a null block. Capacity cannot be borrowed from another writer's
+partition, and simultaneous stores of the same prefix can occupy multiple slots.
+
+The workers use `SharedOffloadRegion` for the pinned KV allocation and verify
+shared-memory visibility at startup. Schedulers keep the existing `BlockPool`
+hash indexes and LRU queues. A second shared region stores slot hashes,
+publication revisions and offloading's `ChunkStatus` references. File locking
+makes lookup and pinning atomic across processes. A slot is published only after
+its store completes and cannot be reused while another engine is loading it.
+No collective operations run on the per-request offload path.
+
+The shared implementation supports tensor parallelism: each TP rank shares its
+own KV shard with the corresponding TP rank in local DP replicas. Pipeline and
+context parallelism are currently unsupported (`PP=DCP=PCP=1`) because their
+KV ownership and block-coordinate semantics require a separate design. There
+are no LoRA adapter support guarantees. The backend must be `cpu`. All replicas
+must agree on the model, KV layout, capacity, prefix hash algorithm, and hash
+seed. SHA-256 variants work with the default seed; xxHash variants require the
+same numeric `PYTHONHASHSEED` on every replica. Incompatible configurations fail
+at startup. Cache salts continue to isolate request prefixes.
+
+Sharing is **node-local**. A two-node DP2/TP1/EP deployment with one GPU per node
+creates two independent pools and cannot reuse one node's CPU KV on the other.
+That topology validates distributed serving and isolation; testing local DP
+reuse additionally requires multiple engine processes in one IPC namespace.
+Cross-node KV movement requires a network-capable connector or tier.
+Independent non-MoE replicas and separately launched deployments with their own
+distributed groups do not join this pool.
+
+A successful prefix-cache reset clears all local partitions. Reset returns
+`false` while shared transfer references remain. Each launch creates a fresh
+namespace; cached data is not reused after restart. The KV and index files are
+unlinked after their workers or schedulers attach. Their open file descriptors
+retain the mappings and metadata lock until process termination. A crash before
+attachment finishes can leave a named mmap for cleanup after the deployment
+stops. A live peer retains a crashed engine's transfer references because its
+worker may still be using the slots.
+
 ## Multi-Tier Setup
 
 Set `spec_name` to `"TieringOffloadingSpec"` and supply a `secondary_tiers` list. Each entry is a dict with a required `type` key plus tier-specific fields (and an optional `module_path` for out-of-tree tiers). The list is ordered: tier 0 is consulted before tier 1, and so on. See [Secondary Tiers](#secondary-tiers) for tier-specific keys.
