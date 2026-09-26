@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
@@ -771,6 +772,29 @@ def test_logprobs_minus_one_allowed():
         logprobs=-1,
     )
     assert request.logprobs == -1
+
+
+def test_logprobs_minus_one_returns_all_top_logprobs():
+    serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+    logprobs = serving._create_completion_logprobs(
+        token_ids=[10],
+        top_logprobs=[
+            {
+                10: Logprob(logprob=-0.1),
+                20: Logprob(logprob=-0.2),
+            }
+        ],
+        num_output_top_logprobs=-1,
+        tokenizer=None,
+        return_as_token_id=True,
+    )
+
+    assert logprobs.top_logprobs == [
+        {
+            "token_id:10": -0.1,
+            "token_id:20": -0.2,
+        }
+    ]
 
 
 def test_logprobs_below_minus_one_rejected():
