@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -84,3 +85,17 @@ def test_no_retie_without_checkpoint_override():
     maybe_retie_word_embeddings(model, make_model_config())
 
     assert model.lm_head.weight is not model.embed_tokens.weight
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_excluded_lm_head_is_retied():
+    """A head excluded from quantization (e.g. via ModelOpt exclude_modules)
+    carries UnquantizedLinearMethod; its weight is plain, so it must be
+    eligible for re-tying like an UnquantizedEmbeddingMethod head."""
+    model = UntiedModel()
+    model.lm_head.quant_method = UnquantizedLinearMethod()
+
+    maybe_retie_word_embeddings(model, make_model_config(untied_by_checkpoint=True))
+
+    assert model.lm_head.weight is model.embed_tokens.weight
