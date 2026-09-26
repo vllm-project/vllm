@@ -483,6 +483,31 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
         ), desc
 
 
+def test_dynamic_spec_decode_skips_single_token_draft_graphs(monkeypatch):
+    """Draft decode graphs must keep their fixed one-token query length.
+
+    The autoregressive speculator constructs its decode manager with
+    ``decode_query_len=1``.  Dynamic speculative decoding applies to the
+    target model's decode graphs, but it must not be used to derive query
+    lengths for this manager: subtracting the configured maximum K produces
+    non-positive lengths and can make ``round_up`` divide by zero.
+    """
+    manager = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=1,
+        capture_sizes=[1, 2, 4, 8],
+        num_speculative_tokens=4,
+        dynamic_spec_schedule=[
+            (1, 4, 4),
+            (5, 8, 3),
+        ],
+    )
+
+    full_descs = manager._capture_descs[CUDAGraphMode.FULL]
+    assert full_descs
+    assert {desc.uniform_token_count for desc in full_descs} == {1}
+
+
 @pytest.mark.parametrize(
     "decode_query_len,capture_sizes",
     [(1, [1, 2, 4, 8]), (2, [2, 4, 8, 16]), (8, [8, 16, 32, 64])],
