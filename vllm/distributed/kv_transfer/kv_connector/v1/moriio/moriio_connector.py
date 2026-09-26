@@ -720,6 +720,9 @@ class MoRIIOConnectorScheduler:
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
         if self.mode == MoRIIOMode.WRITE:
+            params = request.kv_transfer_params or {}
+            if not params.get("do_remote_prefill"):
+                return 0, False
             # MoriiO in write mode, no remote prefill. Hybrid models never get
             # here: register_kv_caches refuses WRITE mode for them, so there is
             # no recurrent-state accounting to do.
