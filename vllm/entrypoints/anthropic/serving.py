@@ -308,7 +308,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                     system_parts.append(text)
 
         if system_parts:
-            openai_messages.append({"role": "system", "content": "".join(system_parts)})
+            openai_messages.append(
+                {"role": "system", "content": "\n\n".join(system_parts)}
+            )
 
     @classmethod
     def _extract_system_text(cls, msg) -> str | None:
