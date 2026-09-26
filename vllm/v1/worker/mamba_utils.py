@@ -182,11 +182,6 @@ def _memcpy_u64_tiled(
             tl.store(dst_u8 + i + offsets, data, mask=mask)
 
 
-def _reinterpret_u64_as_i64(value: int) -> int:
-    """Preserve a uint64 pointer bit pattern in a torch.int64 tensor."""
-    return value if value < (1 << 63) else value - (1 << 64)
-
-
 @triton.jit
 def _copy_mamba_state_block(
     state_idx,
@@ -373,7 +368,7 @@ def postprocess_mamba_fused_kernel(
     num_scheduled_tokens_ptr,
     num_computed_tokens_ptr,
     num_draft_tokens_ptr,
-    # Per-group block table base addresses: int64[num_groups]. Each entry is
+    # Per-group block table base addresses: uint64[num_groups]. Each entry is
     # the data_ptr of that group's persistent [max_reqs, max_blocks] int32
     # block table.
     block_table_ptrs_ptr,
@@ -785,7 +780,7 @@ class MambaSpecDecodeGPUContext:
     # different numbers of state types (for example, GDN has two while PLE
     # short-conv has one).
     # These are populated from forward_context during the first forward pass
-    state_base_addrs: torch.Tensor  # int64: base address of each state tensor
+    state_base_addrs: torch.Tensor  # uint64: base address of each state tensor
     state_block_strides: torch.Tensor  # int64: bytes per block
     state_elem_sizes: torch.Tensor  # int32: element size in bytes
     state_inner_sizes: torch.Tensor  # int64: elements in inner dimensions
@@ -804,7 +799,7 @@ class MambaSpecDecodeGPUContext:
     # Output buffer for num_accepted_tokens updates
     num_accepted_tokens_out: torch.Tensor
 
-    # Per-group block-table base addresses: int64[num_groups]. Populated in
+    # Per-group block-table base addresses: uint64[num_groups]. Populated in
     # initialize_from_forward_context from the persistent per-group block
     # table tensors (whose data_ptr is stable across steps).
     block_table_ptrs: torch.Tensor
@@ -867,7 +862,7 @@ class MambaSpecDecodeGPUContext:
 
         return cls(
             state_base_addrs=torch.zeros(
-                total_states, dtype=torch.int64, device=device
+                total_states, dtype=torch.uint64, device=device
             ),
             state_block_strides=torch.zeros(
                 total_states, dtype=torch.int64, device=device
@@ -898,7 +893,7 @@ class MambaSpecDecodeGPUContext:
                 max_num_reqs, dtype=torch.int32, device=device
             ),
             block_table_ptrs=torch.zeros(
-                len(mamba_group_ids), dtype=torch.int64, device=device
+                len(mamba_group_ids), dtype=torch.uint64, device=device
             ),
             aligned_state_indices=torch.empty(
                 (
@@ -994,10 +989,7 @@ class MambaSpecDecodeGPUContext:
                 for state_type_idx, copy_func in enumerate(state_copy_funcs):
                     state = kv_caches[state_type_idx]
                     # Base address
-                    self.state_base_addrs[idx] = _reinterpret_u64_as_i64(
-                        state.data_ptr()
-                    )
-
+                    self.state_base_addrs[idx] = state.data_ptr()
                     # Block stride (bytes between consecutive blocks)
                     # state shape: [num_blocks, ...], stride(0) = elements per block
                     if state.dim() > 1:
@@ -1085,7 +1077,7 @@ class MambaSpecDecodeGPUContext:
         )
         self.block_table_stride_req = int(next(iter(strides)))
         for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
+            self.block_table_ptrs[i] = bt.data_ptr()
 
         self.is_initialized = True
 
