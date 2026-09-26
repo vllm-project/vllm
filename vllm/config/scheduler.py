@@ -206,6 +206,29 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
+    cache_aware_admission_window: int = Field(default=0, ge=0)
+    """Look-ahead window for cache-aware admission. Within the first N waiting
+    requests, those whose prefix is already in the KV cache are admitted ahead
+    of requests that would have to compute theirs, so a cold request does not
+    evict blocks a resident one still needs. 0 (the default) admits strictly in
+    arrival order.
+
+    Reordering is confined to the window and to requests that are merely
+    waiting. Blocked or partially computed requests keep their positions;
+    eligible requests may swap across those positions. Requires prefix caching and the
+    "fcfs" policy; it is ignored otherwise. Costs one prefix-cache lookup per
+    request in the window per step, so prefer the smallest window that spans
+    the usual queue depth."""
+
+    cache_aware_admission_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """KV cache usage below which `cache_aware_admission_window` is not applied.
+
+    Defaults to 0.5, so the window engages only once the cache is at least half
+    used. Below that there is room for both prompts and reordering would change
+    admission order without an eviction to avoid, which is a fairness cost for
+    no benefit. It also means the per-request cache probe is skipped entirely
+    while the cache is roomy. Set to 0.0 to reorder on every step."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
