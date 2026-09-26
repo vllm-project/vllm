@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.functiongemma_tool_parser import FunctionGemmaToolParser
 
@@ -91,6 +92,78 @@ class TestExtractToolCalls:
         assert len(result.tool_calls) == 2
         assert result.tool_calls[0].function.name == "get_weather"
         assert result.tool_calls[1].function.name == "get_time"
+
+    def test_text_after_tool_call(self, parser, mock_request):
+        model_output = (
+            "<start_function_call>call:get_weather{location:<escape>Paris<escape>}"
+            "<end_function_call>"
+            "Let me check that for you."
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.content == "Let me check that for you."
+
+    def test_text_around_multiple_tool_calls(self, parser, mock_request):
+        model_output = (
+            "Sure. "
+            "<start_function_call>call:get_weather{location:<escape>London<escape>}"
+            "<end_function_call>"
+            " Now the time. "
+            "<start_function_call>call:get_time{timezone:<escape>UTC<escape>}"
+            "<end_function_call>"
+            " Done."
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "get_weather",
+            "get_time",
+        ]
+        assert result.content == "Sure.  Now the time.  Done."
+
+
+class TestStreamingParity:
+    """Non-streaming must return the same content the streaming path emits."""
+
+    @pytest.mark.parametrize(
+        "model_output",
+        [
+            "<start_function_call>call:get_weather{location:<escape>Paris<escape>}"
+            "<end_function_call>Let me check that for you.",
+            "Sure. "
+            "<start_function_call>call:get_weather{location:<escape>London<escape>}"
+            "<end_function_call> Now the time. "
+            "<start_function_call>call:get_time{timezone:<escape>UTC<escape>}"
+            "<end_function_call> Done.",
+        ],
+    )
+    def test_content_matches_streaming(self, default_tokenizer, model_output):
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        content, tool_calls = run_tool_extraction(
+            FunctionGemmaToolParser(default_tokenizer),
+            model_output,
+            request,
+            streaming=False,
+        )
+        streamed_content, streamed_tool_calls = run_tool_extraction(
+            FunctionGemmaToolParser(default_tokenizer),
+            model_output,
+            request,
+            streaming=True,
+        )
+
+        assert [tc.function.name for tc in tool_calls] == [
+            tc.function.name for tc in streamed_tool_calls
+        ]
+        assert [tc.function.arguments for tc in tool_calls] == [
+            tc.function.arguments for tc in streamed_tool_calls
+        ]
+        assert content == streamed_content.strip()
 
 
 class TestParseArguments:
