@@ -69,7 +69,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
+    # uniform_token_count unset, so this is what keeps a prefill batch out of one:
+    # the runner passes None for any batch with a prefill.
     max_query_len: int | None = None
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
@@ -704,7 +705,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                max_query_len=desc.max_query_len,
+                max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
             )
 
@@ -775,6 +776,10 @@ def prepare_inputs_to_capture(
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
+    if full_cudagraph and max_query_len is None:
+        # Mixed graphs can replay a single prefill spanning the entire batch,
+        # even when the dummy batch distributes one token to each request.
+        max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )

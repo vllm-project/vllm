@@ -2019,6 +2019,7 @@ class rocm_aiter_ops:
         cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":

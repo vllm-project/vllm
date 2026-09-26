@@ -50,10 +50,19 @@ class EngramConfig:
     the other settings allow it, falling back to per-replica tables when DP
     replicas are not co-located on one node or /dev/shm cannot hold them."""
 
+    use_thp: bool = False
+    """Back private CPU-offloaded tables with transparent huge pages (best
+    effort, falls back to ordinary pinned pages). Prefaulting the tables at
+    startup takes longer. Requires cpu_offload without dp_shared_memory."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
+        if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
+            raise ValueError(
+                "use_thp requires cpu_offload=True and dp_shared_memory=False"
+            )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
@@ -73,7 +82,8 @@ class EngramConfig:
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and CUDA."
+                "embeddings, non-empty n-gram layer ids, and a CUDA-alike "
+                "device (CUDA or ROCm)."
             )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:

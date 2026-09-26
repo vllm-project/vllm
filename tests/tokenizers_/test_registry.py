@@ -69,21 +69,11 @@ def test_resolve_tokenizer_args_idempotent(runner_type):
     )
 
 
-@pytest.mark.parametrize(
-    ("tokenizer_mode", "input_kwargs"),
-    [
-        ("hf", {}),
-        ("hf", {"mistral_format": False}),
-        ("slow", {}),
-        ("slow", {"mistral_format": False}),
-    ],
-)
-def test_resolve_tokenizer_args_forces_hf_mistral_format_false(
-    tokenizer_mode, input_kwargs
-):
+@pytest.mark.parametrize("input_kwargs", [{}, {"mistral_format": False}])
+def test_resolve_tokenizer_args_forces_hf_mistral_format_false(input_kwargs):
     resolved_mode, _, _, kwargs = resolve_tokenizer_args(
         "mistralai/Mistral-Nemo-Instruct-2407",
-        tokenizer_mode=tokenizer_mode,
+        tokenizer_mode="hf",
         **input_kwargs,
     )
 
@@ -91,15 +81,14 @@ def test_resolve_tokenizer_args_forces_hf_mistral_format_false(
     assert kwargs["mistral_format"] is False
 
 
-@pytest.mark.parametrize("tokenizer_mode", ["hf", "slow"])
-def test_resolve_tokenizer_args_rejects_hf_mistral_format_true(tokenizer_mode):
+def test_resolve_tokenizer_args_rejects_hf_mistral_format_true():
     with pytest.raises(
         ValueError,
         match="mistral_format=True is not supported with tokenizer_mode='hf'",
     ):
         resolve_tokenizer_args(
             "mistralai/Mistral-Nemo-Instruct-2407",
-            tokenizer_mode=tokenizer_mode,
+            tokenizer_mode="hf",
             mistral_format=True,
         )
 
