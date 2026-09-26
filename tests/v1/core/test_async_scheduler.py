@@ -32,6 +32,33 @@ def _make_model_runner_output(
     )
 
 
+def test_token_stats_use_scheduling_snapshot():
+    scheduler = create_scheduler(async_scheduling=True, max_num_seqs=2)
+    scheduler.vllm_config.observability_config.token_level_profiling = True
+    req0, req1, req2 = create_requests(num_requests=3)
+
+    scheduler.add_request(req0)
+    first_output = scheduler.schedule()
+
+    scheduler.add_request(req1)
+    scheduler.add_request(req2)
+    scheduler.schedule()
+
+    assert first_output.iter_batch_size == 1
+    assert first_output.iter_waiting_size == 0
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
+
+    outputs = scheduler.update_from_output(
+        first_output, _make_model_runner_output(first_output)
+    )
+    iter_stats = outputs[0].outputs[0].iter_stats
+    assert iter_stats is not None
+    assert iter_stats.iter_batch_size == first_output.iter_batch_size
+    assert iter_stats.iter_waiting_size == first_output.iter_waiting_size
+    assert iter_stats.iter_total_tokens_count == first_output.iter_total_tokens_count
+
+
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
 def test_stop_by_max_tokens(max_tokens: int):
     scheduler = create_scheduler(async_scheduling=True)

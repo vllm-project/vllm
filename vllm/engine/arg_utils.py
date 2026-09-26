@@ -712,6 +712,7 @@ class EngineArgs:
         ObservabilityConfig.show_hidden_metrics_for_version
     )
     otlp_traces_endpoint: str | None = ObservabilityConfig.otlp_traces_endpoint
+    token_level_profiling: bool = ObservabilityConfig.token_level_profiling
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
@@ -1614,6 +1615,9 @@ class EngineArgs:
             "--otlp-traces-endpoint", **observability_kwargs["otlp_traces_endpoint"]
         )
         observability_group.add_argument(
+            "--token-level-profiling", **observability_kwargs["token_level_profiling"]
+        )
+        observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
         )
@@ -2117,6 +2121,7 @@ class EngineArgs:
         return ObservabilityConfig(
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
+            token_level_profiling=self.token_level_profiling,
             collect_detailed_traces=self.collect_detailed_traces,
             per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
