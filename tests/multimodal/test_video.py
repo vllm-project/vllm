@@ -16,6 +16,7 @@ from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
+from vllm.exceptions import VLLMValidationError
 from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -722,6 +723,70 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
 
     assert backend == "qwen3_vl"
     assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
+
+
+@pytest.mark.parametrize(
+    "total_frames, sampling_kwargs, aligned_limit",
+    [
+        (0, {}, 0),
+        (1, {}, 0),
+        (3, {"temporal_patch_size": 4}, 0),
+        (8, {"max_frames": 1}, 0),
+        (8, {"min_frames": 1}, 8),
+    ],
+)
+def test_qwen2vl_rejects_empty_aligned_sample(
+    total_frames, sampling_kwargs, aligned_limit
+):
+    """Empty aligned samples must identify the sampler and relevant settings."""
+    source = VideoSourceMetadata(total_frames, 30, total_frames / 30)
+    target = VideoTargetMetadata(-1, 2, 300)
+    with pytest.raises(
+        VLLMValidationError, match="qwen2_vl video sampler produced no frames"
+    ) as exc_info:
+        Qwen2VLVideoBackend.compute_frames_index_to_sample(
+            source, target, **sampling_kwargs
+        )
+    message = str(exc_info.value)
+    assert f"Source frames: {total_frames}" in message
+    assert (
+        f"temporal patch size: {sampling_kwargs.get('temporal_patch_size', 2)}"
+        in message
+    )
+    assert f"aligned frame limit: {aligned_limit}" in message
+    assert exc_info.value.parameter == "video"
+
+
+@pytest.mark.parametrize(
+    "total_frames, sampling_kwargs, expected",
+    [
+        (2, {}, [0, 1]),
+        (3, {}, [0, 1]),
+        (4, {}, [0, 1, 2, 3]),
+        (8, {"temporal_patch_size": 4}, [0, 2, 4, 6]),
+    ],
+)
+def test_qwen2vl_aligned_sample_is_unchanged(total_frames, sampling_kwargs, expected):
+    source = VideoSourceMetadata(total_frames, 30, total_frames / 30)
+    target = VideoTargetMetadata(-1, 2, 300)
+    assert (
+        Qwen2VLVideoBackend.compute_frames_index_to_sample(
+            source, target, **sampling_kwargs
+        )
+        == expected
+    )
+
+
+def test_qwen2vl_single_frame_video_rejected_before_valid_video():
+    """Exercise real encoded clips and keep the two-frame control decodable."""
+    one_frame = create_long_gop_video(num_frames=1, width=32, height=32)
+    with pytest.raises(VLLMValidationError, match="no frames after temporal alignment"):
+        Qwen2VLVideoBackend.load_bytes(one_frame)
+
+    two_frames = create_long_gop_video(num_frames=2, width=32, height=32)
+    frames, metadata = Qwen2VLVideoBackend.load_bytes(two_frames)
+    assert frames.shape == (2, 32, 32, 3)
+    assert metadata["frames_indices"] == [0, 1]
 
 
 @pytest.mark.parametrize(
