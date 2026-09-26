@@ -13,6 +13,12 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.states import RequestState
 
+from .ngram_embedding import (
+    Qwen4ExpNGramEmbedding,
+    Qwen4ExpPLEPageableHostEmbedding,
+)
+from .ple_pageable import PagePrefetcher, PrefetchSource
+
 
 class Qwen4ExpModelState(MambaHybridModelState):
     """Add rollback-safe PLE n-gram context to the model inputs."""
@@ -58,6 +64,13 @@ class Qwen4ExpModelState(MambaHybridModelState):
             dtype=torch.int64,
             device=self.device,
         )
+        engram_config = vllm_config.engram_config
+        # Only checkpoint-mapped PLE tables are prefetched on the host.
+        self._checkpoint_mapped = bool(
+            engram_config is not None and engram_config.checkpoint_mapped
+        )
+        self._page_prefetcher: PagePrefetcher | None = None
+        self._page_prefetcher_resolved = False
         self.ple_query_start_loc = torch.zeros(
             self.max_num_reqs + 1,
             dtype=torch.int32,
@@ -106,11 +119,58 @@ class Qwen4ExpModelState(MambaHybridModelState):
         query_start_loc[: num_reqs_padded + 1].copy_(input_batch.query_start_loc)
         # Represent unused capacity as trailing zero-length requests.
         query_start_loc[num_reqs_padded + 1 :].copy_(input_batch.query_start_loc[-1])
+        ngram_context = self._prepare_ngram_context(input_batch, req_states)
         model_inputs.update(
             query_start_loc=query_start_loc,
-            ngram_context=self._prepare_ngram_context(input_batch, req_states),
+            ngram_context=ngram_context,
         )
+        prefetcher = self._get_page_prefetcher()
+        if prefetcher is not None:
+            prefetcher.prepare(
+                input_batch.input_ids,
+                query_start_loc,
+                ngram_context,
+                num_reqs_padded,
+                input_batch.input_ids.shape[0],
+            )
         return model_inputs
+
+    def _get_page_prefetcher(self) -> PagePrefetcher | None:
+        """Fault in checkpoint-mapped PLE rows before the step reads them."""
+        if not getattr(self, "_checkpoint_mapped", False):
+            return None
+        if self._page_prefetcher_resolved:
+            return self._page_prefetcher
+        sources = []
+        for module in self.model.modules():
+            if not isinstance(module, Qwen4ExpNGramEmbedding):
+                continue
+            embedding = module.ngram_embedding
+            if not isinstance(embedding, Qwen4ExpPLEPageableHostEmbedding):
+                continue
+            sources.append(
+                PrefetchSource(
+                    embedding.current_table,
+                    (
+                        embedding.shard_indices.org_vocab_start_index,
+                        embedding.shard_indices.org_vocab_end_index,
+                    ),
+                    module.cpu_ngram_ids_fn,
+                )
+            )
+        self._page_prefetcher_resolved = True
+        self._page_prefetcher = (
+            PagePrefetcher(
+                sources,
+                self.device,
+                self.max_num_tokens,
+                self.max_num_reqs,
+                self.ngram_context_len,
+            )
+            if sources
+            else None
+        )
+        return self._page_prefetcher
 
     def prepare_dummy_inputs(
         self,
