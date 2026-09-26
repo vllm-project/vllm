@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from openai.types.responses import ResponseFunctionWebSearch
+from openai.types.responses import (
+    CustomTool,
+    ResponseCustomToolCall,
+    ResponseFunctionWebSearch,
+)
 from openai_harmony import Message, Role
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -16,6 +20,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_browser_tool_events,
     split_delta,
 )
+from vllm.entrypoints.openai.responses.utils import decode_custom_tool_input
 
 
 def test_browser_find_uses_responses_action_type():
@@ -151,3 +156,111 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestSimpleToolCallShapes:
+    def test_arguments_done_emitted_without_deltas(self):
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(
+            processor, DeltaMessage(tool_calls=[_make_tool_call(0, name="noop")])
+        )
+        events += processor.close_current()
+        assert [e.type for e in events] == [
+            "response.output_item.added",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        ]
+
+
+class TestCustomToolStreaming:
+    def test_custom_tool_input_events(self):
+        processor = SimpleStreamingEventProcessor(
+            tools=[CustomTool(type="custom", name="emit_command")]
+        )
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[
+                    _make_tool_call(0, name="emit_command", arguments='{"input": "ls ')
+                ]
+            ),
+        )
+        events += _run_through_processor(
+            processor,
+            DeltaMessage(tool_calls=[_make_tool_call(0, arguments='-la \\"x\\""}')]),
+        )
+        events += processor.close_current()
+
+        assert [e.type for e in events] == [
+            "response.output_item.added",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+            "response.output_item.done",
+        ]
+        done = events[-1].item
+        assert isinstance(done, ResponseCustomToolCall)
+        assert done.input == 'ls -la "x"'
+        assert "".join(e.delta for e in events[1:3]) == done.input
+        assert events[3].input == done.input
+        assert events[0].item.type == "custom_tool_call"
+        assert events[0].item.id == done.id
+        assert done.id.startswith("ctc_")
+        assert done.call_id.startswith("call_")
+
+    def test_unrelated_keys_are_not_streamed_as_payload(self):
+        """Review repro: chunks of an object whose input key arrives last must
+        not leak fragments of other keys into the payload."""
+        processor = SimpleStreamingEventProcessor(
+            tools=[CustomTool(type="custom", name="emit_command")]
+        )
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[
+                    _make_tool_call(0, name="emit_command", arguments='{"a": "xy"')
+                ]
+            ),
+        )
+        events += _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[_make_tool_call(0, arguments=', "input": "hello"}')]
+            ),
+        )
+        events += processor.close_current()
+
+        deltas = [
+            e for e in events if e.type == "response.custom_tool_call_input.delta"
+        ]
+        done_input = next(
+            e for e in events if e.type == "response.custom_tool_call_input.done"
+        ).input
+        item = events[-1].item
+        assert "".join(e.delta for e in deltas) == "hello"  # "xy" never leaks
+        assert done_input == "hello"
+        assert item.input == "hello"
+        assert decode_custom_tool_input('{"a": "xy", "input": "hello"}') == "hello"
+
+    def test_done_reported_authoritative_payload_on_mismatch(self):
+        """If the final decode is not an extension of what was streamed, the
+        done event and item carry the authoritative value and a correcting
+        delta is emitted rather than dropping the divergence."""
+        processor = SimpleStreamingEventProcessor(
+            tools=[CustomTool(type="custom", name="emit_command")]
+        )
+        processor.state.current_state = _StateType.TOOL_CALL
+        processor.state.tool_call_is_custom = True
+        processor.state.tool_call_payload = "xy"  # stale fragment already streamed
+        processor.state.accumulated_text = '{"a": "xy", "input": "hello"}'
+
+        events = processor.close_current()
+        delta = next(
+            e for e in events if e.type == "response.custom_tool_call_input.delta"
+        )
+        done_input = next(
+            e for e in events if e.type == "response.custom_tool_call_input.done"
+        ).input
+        assert delta.delta == "hello"  # full authoritative resend, not a dropped suffix
+        assert done_input == "hello"
+        assert events[-1].item.input == "hello"

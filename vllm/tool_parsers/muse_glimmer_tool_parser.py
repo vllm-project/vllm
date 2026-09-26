@@ -38,7 +38,7 @@ import json
 from collections.abc import Iterator, Sequence
 
 import regex as re
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -228,7 +228,12 @@ class MuseGlimmerToolParser(ToolParser):
         if request.tools and (
             tool_choice == "required"
             or isinstance(
-                tool_choice, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
+                tool_choice,
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                ),
             )
         ):
             return request

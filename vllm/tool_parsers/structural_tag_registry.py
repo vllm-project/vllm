@@ -4,7 +4,7 @@
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import CustomTool, FunctionTool, ToolChoiceCustom
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import custom_tool_parameters
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -209,6 +210,11 @@ def _dump_tool_for_xgrammar(
         if tool.strict is not None:
             function["strict"] = tool.strict
         return {"type": "function", "function": function}
+    if isinstance(tool, CustomTool):
+        function = {"name": tool.name, "parameters": custom_tool_parameters()}
+        if tool.description is not None:
+            function["description"] = tool.description
+        return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
         return dumped_tool
@@ -228,7 +234,7 @@ def _dump_tool_choice_for_xgrammar(
     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
-    if isinstance(tool_choice, ToolChoiceFunction):
+    if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
         return {
             "type": "function",
             "function": {"name": tool_choice.name},
