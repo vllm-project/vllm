@@ -51,10 +51,9 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         )
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
-        # NOTE(woosuk): self.max_position_embeddings is the original
-        # maximum length before applying the rope scaling.
-        # Thus, the maximum length after applying the rope scaling is
-        # self.max_position_embeddings * self.scaling_factor.
+        # max_trained_positions is the length the model was trained on;
+        # max_position_embeddings is the length being served, which some callers
+        # have already scaled. The cache must cover whichever is longer.
         base = self.base * (
             (
                 self.scaling_factor
@@ -64,7 +63,11 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
             - (self.scaling_factor - 1)
         ) ** (self.rotary_dim / (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
-        t = torch.arange(self.max_position_embeddings, dtype=torch.float)
+        max_len = max(
+            self.max_position_embeddings,
+            int(self.max_trained_positions * self.scaling_factor),
+        )
+        t = torch.arange(max_len, dtype=torch.float)
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
