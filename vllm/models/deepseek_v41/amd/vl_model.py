@@ -23,6 +23,7 @@ import torch
 from torch import nn
 
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -35,7 +36,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.model_executor.models.vision import FusedInputNorm, is_vit_use_data_parallel
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
@@ -187,7 +188,7 @@ class DeepseekV41ForCausalLM(
             self.vision.to(dtype=model_config.dtype)
             self.aligner.to(dtype=model_config.dtype)
             if self.multimodal_config.mm_device_do_normalize:
-                self.vision.patch_embed.input_norm = FusedInputNorm(
+                self.vision.patch_embed.input_norm = FusedMMInputNorm(
                     image_mean=[0.5, 0.5, 0.5],
                     image_std=[0.5, 0.5, 0.5],
                     rescale_factor=1 / 255,

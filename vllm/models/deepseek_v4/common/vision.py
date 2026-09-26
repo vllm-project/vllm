@@ -27,6 +27,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -35,7 +36,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.models.vision import (
-    FusedInputNorm,
     get_load_balance_assignment,
     is_vit_use_data_parallel,
 )
@@ -89,7 +89,7 @@ class DeepseekV4PatchEmbed(nn.Module):
             bias=True,
             quant_config=None,
         )
-        self.input_norm = FusedInputNorm.identity()
+        self.input_norm = IdentityInputNorm()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_norm(x.flatten(1), self.proj.weight.dtype)
