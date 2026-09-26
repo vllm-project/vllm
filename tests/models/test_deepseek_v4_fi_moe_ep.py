@@ -56,6 +56,17 @@ class _FakeNvfp4CutedslMegaMoeConfig:
 
 
 @dataclass
+class _FakeSm90PullFp8CutedslMegaMoeConfig:
+    intermediate_size: int
+    top_k: int
+    kind: str
+    fp8_scale_mode: str
+    fp8_accum_mode: str
+    gate_up_clamp: float | None
+    fast_math: bool
+
+
+@dataclass
 class _FakeMegaConfig:
     megakernel: Any
     preprocess_weights: bool
@@ -74,6 +85,9 @@ def fake_flashinfer(monkeypatch):
             "BootstrapConfig": _FakeBootstrapConfig,
             "DeepGemmMegaMoeConfig": _FakeDeepGemmMegaMoeConfig,
             "Nvfp4CutedslMegaMoeConfig": _FakeNvfp4CutedslMegaMoeConfig,
+            "Sm90_Fp8_Fp8_Bf16_PullCutedsl_MegaMoeConfig": (
+                _FakeSm90PullFp8CutedslMegaMoeConfig
+            ),
             "MegaConfig": _FakeMegaConfig,
             "core": core,
         },
@@ -155,6 +169,12 @@ def test_fi_moe_ep_backend_spec_kernel_and_nvshmem_contract():
     cd = fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_cutedsl")
     assert cd.megakernel == "nvfp4_cutedsl"
     assert cd.needs_nvshmem
+    assert cd.supported_capabilities == frozenset({(10, 0), (10, 3)})
+
+    sm90 = fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_sm90_fp8")
+    assert sm90.megakernel == "sm90_fp8_pull"
+    assert sm90.needs_nvshmem
+    assert sm90.supported_capabilities == frozenset({(9, 0)})
 
     with pytest.raises(ValueError, match="not a flashinfer moe_ep backend"):
         fi_moe_ep_backend_spec("deep_gemm_mega_moe")
@@ -217,6 +237,19 @@ def test_build_fi_mega_config_selects_kernel_config(fake_flashinfer):
     )
     assert isinstance(cd.megakernel, _FakeNvfp4CutedslMegaMoeConfig)
 
+    sm90 = build_fi_mega_config(
+        intermediate_size=2048,
+        top_k=8,
+        activation_clamp=10.0,
+        megakernel="sm90_fp8_pull",
+    )
+    assert isinstance(sm90.megakernel, _FakeSm90PullFp8CutedslMegaMoeConfig)
+    assert sm90.megakernel.intermediate_size == 2048
+    assert sm90.megakernel.kind == "fp8_e4m3"
+    assert sm90.megakernel.fp8_scale_mode == "blockwise"
+    assert sm90.megakernel.gate_up_clamp == 10.0
+    assert sm90.preprocess_weights and sm90.quantize_input
+
     with pytest.raises(ValueError, match="Unsupported fi_moe_ep megakernel"):
         build_fi_mega_config(
             intermediate_size=2048,
@@ -257,3 +290,47 @@ def test_dequant_fp4_ue8m0_gran32_decodes_lut_and_scales():
             expected[row, 2 * col + 1] = _E2M1_LUT[byte >> 4]
         expected[row] *= 2.0**row
     assert torch.equal(out, expected.to(torch.bfloat16))
+
+
+def test_dequant_nvfp4_expert_weights_to_bf16_applies_block_and_global_scales():
+    """NVFP4: e2m1 nibbles * per-16 e4m3 block scale * per-tensor scale_2.
+
+    w13 carries two scale_2 columns (gate rows / up rows); w2 carries one.
+    """
+    from vllm.utils.flashinfer_moe_ep import (
+        _dequant_nvfp4_expert_weights_to_bf16,
+    )
+
+    # E=1, N=4, K=32 -> K//2=16 packed bytes, K//16=2 block scales.
+    packed = torch.arange(4 * 16, dtype=torch.uint8).reshape(1, 4, 16)
+    block_scale = torch.ones(1, 4, 2, dtype=torch.float32).to(torch.float8_e4m3fn)
+    block_scale[0, :, 1] = 2.0
+
+    # w2-style: one scalar per expert.
+    out = _dequant_nvfp4_expert_weights_to_bf16(
+        packed, block_scale, torch.tensor([3.0])
+    )
+    expected = torch.empty(1, 4, 32)
+    for row in range(4):
+        for col in range(16):
+            byte = int(packed[0, row, col])
+            group = 1.0 if col < 8 else 2.0
+            expected[0, row, 2 * col] = _E2M1_LUT[byte & 0x0F] * group * 3.0
+            expected[0, row, 2 * col + 1] = _E2M1_LUT[byte >> 4] * group * 3.0
+    assert torch.equal(out, expected.to(torch.bfloat16))
+
+    # w13-style: gate rows use column 0, up rows use column 1.
+    out13 = _dequant_nvfp4_expert_weights_to_bf16(
+        packed,
+        torch.ones(1, 4, 2, dtype=torch.float32).to(torch.float8_e4m3fn),
+        torch.tensor([[5.0, 7.0]]),
+        gate_rows=2,
+    )
+    expected13 = torch.empty(1, 4, 32)
+    for row in range(4):
+        s2 = 5.0 if row < 2 else 7.0
+        for col in range(16):
+            byte = int(packed[0, row, col])
+            expected13[0, row, 2 * col] = _E2M1_LUT[byte & 0x0F] * s2
+            expected13[0, row, 2 * col + 1] = _E2M1_LUT[byte >> 4] * s2
+    assert torch.equal(out13, expected13.to(torch.bfloat16))

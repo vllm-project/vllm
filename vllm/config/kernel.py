@@ -129,6 +129,7 @@ MoEBackend = Literal[
     "b12x",
     "flashinfer_moe_ep_mega_deep_gemm",
     "flashinfer_moe_ep_mega_cutedsl",
+    "flashinfer_moe_ep_mega_sm90_fp8",
     "marlin",
     "humming",
     "triton_unfused",
@@ -147,6 +148,7 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
     {
         "flashinfer_moe_ep_mega_deep_gemm",
         "flashinfer_moe_ep_mega_cutedsl",
+        "flashinfer_moe_ep_mega_sm90_fp8",
     }
 )
 
@@ -262,6 +264,10 @@ class KernelConfig:
       (additionally requires NVSHMEM). The checkpoint selects the weight path:
       an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
       requantized at load
+    - "flashinfer_moe_ep_mega_sm90_fp8": Hopper (SM90) FP8 pull-style CuteDSL
+      megakernel (requires NVSHMEM). Expert weights are dequantized to bf16 at
+      load and requantized to blockwise FP8 by the backend; requires expert
+      parallel and hidden/intermediate sizes divisible by 128
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels

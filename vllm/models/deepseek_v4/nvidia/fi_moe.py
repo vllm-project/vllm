@@ -143,18 +143,39 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         self._fast_ctx: tuple[Any, Any, Any, int, bool] | None = None
         self._epilogue_alphas: tuple[torch.Tensor, torch.Tensor] | None = None
         self._nvfp4_prequant = ckpt_uses_nvfp4_experts(vllm_config)
+        self._megakernel = fi_moe_ep_backend_spec(
+            vllm_config.kernel_config.moe_backend
+        ).megakernel
         if self._nvfp4_prequant:
-            megakernel = fi_moe_ep_backend_spec(
-                vllm_config.kernel_config.moe_backend
-            ).megakernel
-            if megakernel != "nvfp4_cutedsl":
+            # nvfp4_cutedsl consumes the packed checkpoint prequantized;
+            # sm90_fp8_pull dequantizes it to bf16 and requantizes to FP8.
+            if self._megakernel not in ("nvfp4_cutedsl", "sm90_fp8_pull"):
                 raise ValueError(
-                    "NVFP4-quantized expert checkpoint requires "
-                    "moe_backend=flashinfer_moe_ep_mega_cutedsl, got a "
-                    f"backend using megakernel {megakernel!r} "
+                    "NVFP4-quantized expert checkpoint requires a backend that "
+                    "can consume it (flashinfer_moe_ep_mega_cutedsl or "
+                    "flashinfer_moe_ep_mega_sm90_fp8), got a backend using "
+                    f"megakernel {self._megakernel!r} "
                     "(deep_gemm consumes the MXFP4 checkpoint instead)."
                 )
             self._realloc_nvfp4_params()
+
+    def _check_runtime_supported(self) -> None:
+        """Arch/geometry gate for the FI mega path.
+
+        The native DeepGEMM mega path is SM100-only; the flashinfer moe_ep
+        backends validate their own arch inside the kernel backend, which the
+        config-time ``validate_fi_moe_ep_config`` already front-runs with a
+        friendlier error.
+        """
+        if self._megakernel == "sm90_fp8_pull":
+            if self.hidden_size % 128 != 0 or self.intermediate_size % 128 != 0:
+                raise ValueError(
+                    "SM90 FP8 MegaMoE (blockwise scales) requires hidden and "
+                    "intermediate sizes to be multiples of 128; got "
+                    f"hidden={self.hidden_size}, inter={self.intermediate_size}."
+                )
+            return
+        super()._check_runtime_supported()
 
     def _realloc_nvfp4_params(self) -> None:
         """Swap the mx-recipe scale params for the NVFP4 checkpoint's:
@@ -232,7 +253,7 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         self._check_runtime_supported()
         ensure_fi_moe_ep_runtime(self._vllm_config)
 
-        if self._nvfp4_prequant:
+        if self._nvfp4_prequant and self._megakernel == "nvfp4_cutedsl":
             # NVFP4 checkpoint: hand the packed weights + both scale
             # planes straight to the backend (no dequant->requant);
             # per-expert globals become fc1/fc2 epilogue alphas staged
@@ -248,15 +269,23 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             )
             self._epilogue_alphas = (fc1_alpha, fc2_alpha)
         else:
+            # cutedsl (MXFP4 -> bf16) and sm90_fp8_pull (MXFP4 or NVFP4 ->
+            # bf16 -> blockwise FP8 requant by the backend).
             weights = mega_moe_weight_pack_from_params(
                 self.w13_weight,
                 self.w13_weight_scale,
                 self.w2_weight,
                 self.w2_weight_scale,
-                megakernel=fi_moe_ep_backend_spec(
-                    self._vllm_config.kernel_config.moe_backend
-                ).megakernel,
+                megakernel=self._megakernel,
+                w13_weight_scale_2=getattr(self, "w13_weight_scale_2", None),
+                w2_weight_scale_2=getattr(self, "w2_weight_scale_2", None),
             )
+        # Drop the source checkpoint tensors before the backend's
+        # dequant->requant pass so its bf16/FP8 transient never has to
+        # coexist with the packed fp4 copy it was derived from. The pack (and
+        # therefore the tensors it still needs) keeps its own references.
+        self._release_source_expert_params()
+        torch.accelerator.empty_cache()
         self._mega_layer = build_fi_mega_layer(
             make_fi_moe_ep_bootstrap(),
             vllm_config=self._vllm_config,
@@ -272,6 +301,9 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         # Allocate (or attach to) the pooled workspace before first
         # forward so warmup/capture never hits the lazy path.
         self._mega_layer._ensure_workspace()
+
+    def _release_source_expert_params(self) -> None:
+        """Free the checkpoint-layout expert tensors held on this module."""
         self.w13_weight = None
         self.w13_weight_scale = None
         self.w2_weight = None
