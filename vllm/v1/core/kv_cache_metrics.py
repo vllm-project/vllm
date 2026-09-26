@@ -8,6 +8,7 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
@@ -52,7 +53,8 @@ class KVCacheMetricsCollector:
         )
         self.sample_rate = sample_rate
 
-        self.block_metrics: dict[int, BlockMetricsState] = {}
+        # Block IDs are unique only within their owning pool.
+        self.block_metrics: dict[tuple[BlockPool | None, int], BlockMetricsState] = {}
 
         self._eviction_events: list[KVCacheEvictionEvent] = []
 
@@ -61,15 +63,15 @@ class KVCacheMetricsCollector:
 
     def on_block_allocated(self, block: "KVCacheBlock") -> None:
         if self.should_sample_block():
-            self.block_metrics[block.block_id] = BlockMetricsState()
+            self.block_metrics[block.pool, block.block_id] = BlockMetricsState()
 
     def on_block_accessed(self, block: "KVCacheBlock") -> None:
-        metrics = self.block_metrics.get(block.block_id)
+        metrics = self.block_metrics.get((block.pool, block.block_id))
         if metrics:
             metrics.record_access()
 
     def on_block_evicted(self, block: "KVCacheBlock") -> None:
-        metrics = self.block_metrics.pop(block.block_id, None)
+        metrics = self.block_metrics.pop((block.pool, block.block_id), None)
         if not metrics:
             return
 
