@@ -268,6 +268,98 @@ class Worker(WorkerBase):
             model.get_parameter(name).copy_(value)
         self._sleep_saved_parameters.clear()
 
+    def trimtab_release_kv(self) -> dict:
+        """Trimtab warm reinit, worker side. Free the KV pool and drop the
+        captured CUDA graphs. Weights stay on the GPU.
+
+        The KV cache is allocated inside CuMemAllocator.use_memory_pool(
+        tag="kv_cache"). Dropping the tensor references marks the blocks free,
+        but emptying the cache errors on a pluggable allocator
+        (pytorch/pytorch#145168), so the pages are not returned. vLLM's own
+        use_memory_pool exit works around this by snapshotting the pool and
+        releasing every allocated_size==0 block by hand. We run the same
+        release here, which returns the physical pages cleanly (single unmap,
+        popped from pointer_to_data) with no double-unmap. discard() is the
+        wrong primitive: it marks blocks asleep and later double-unmaps.
+        """
+        import gc
+
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        mr = self.model_runner
+        torch.accelerator.synchronize()
+        free0 = torch.accelerator.get_memory_info()[0]
+
+        try:
+            from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+        except Exception:
+            pass
+        CUDAGraphWrapper.clear_all_graphs()
+        for key_set in mr.cudagraph_dispatcher.cudagraph_keys.values():
+            key_set.clear()
+        mr.cudagraph_dispatcher.keys_initialized = False
+
+        # Drop every KV reference (attention KV and hybrid mamba state both live
+        # in mr.kv_caches and layer.kv_cache, which this clears).
+        mr._cleanup_profiling_kv_cache()
+        gc.collect()
+
+        # Tear down the kv_cache MemPool itself, two-phase, the way vLLM's own
+        # release_pools does. The MemPool destructor releases its blocks through
+        # the pluggable free callback (single clean unmap each). Dropping the
+        # MemPool while the allocator is still strongly held avoids the
+        # finalize-order crash (pytorch/pytorch#145168). Manual per-block frees
+        # instead race the destructor and double-free (MMU fault).
+        # The KV cache only lives in a CuMem pool when the allocator is enabled, which
+        # is the sleep-mode path.
+        # With it disabled the tensors are ordinary caching-allocator memory, so there
+        # is no pool to pop and the
+        # pages come back through empty_cache() instead. Asserting here would turn a
+        # supported configuration into
+        # a crash.
+        pooled = not isinstance(
+            self._maybe_get_memory_pool_context("kv_cache"), nullcontext
+        )
+        allocator = CuMemAllocator.get_instance() if pooled else None
+        data = (
+            allocator.allocator_and_pools.pop("kv_cache", None)
+            if allocator is not None
+            else None
+        )
+        released = 0
+        if data is None:
+            torch.accelerator.empty_cache()
+        if data is not None:
+            mem_pool, pool_alloc = data
+            for allocation in mem_pool.snapshot():
+                if allocation["allocated_size"] == 0:
+                    released += allocation.get("total_size", 0)
+            del data
+            del mem_pool  # phase 1: ~MemPool runs, allocator still alive
+            gc.collect()
+            del pool_alloc  # phase 2: drop the pluggable allocator
+            gc.collect()
+        torch.accelerator.synchronize()
+
+        # vLLM caps the process at gpu_memory_utilization through
+        # set_per_process_memory_fraction. Lift it, the profiler sizes the new
+        # pool against device free memory, not this guard.
+        torch.cuda.set_per_process_memory_fraction(1.0)  # no accelerator equivalent yet
+
+        # init_snapshot stays as captured at boot (before weights loaded). The
+        # profiler measures non_kv_cache_memory as consumption relative to it,
+        # which must include the weights. Refreshing it post-weights would drop
+        # the weights from that accounting and oversize the new pool.
+        return {
+            "released_gib": round(released / 2**30, 2),
+            "free_gib": round(
+                (torch.accelerator.get_memory_info()[0] - free0) / 2**30, 2
+            ),
+        }
+
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
