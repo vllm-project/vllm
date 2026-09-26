@@ -959,6 +959,11 @@ class DeepseekV4DecoderLayer(nn.Module):
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        if vllm_config.attention_config.indexer_kv_dtype == "mxfp4":
+            raise NotImplementedError(
+                "indexer_kv_dtype='mxfp4' on ROCm is implemented for DeepSeek "
+                "V4.1 only."
+            )
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
