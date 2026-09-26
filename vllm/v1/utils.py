@@ -520,12 +520,17 @@ def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
+
+        configure_logging(logging_config)
+
     from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
