@@ -605,17 +605,26 @@ def mean_kernel(
     M,  # size before reduction dim
     N,  # size of reduction dim
     K,  # size after reduction dim
+    K_TILES,  # number of k-tiles folded into axis 0
+    K_PER_TILE,  # k elements covered by axis 1
     BLOCK_SIZE: tl.constexpr,
 ):
     """Kernel for computing mean along a single dimension.
     Input is viewed as (M, N, K) where N is the dimension being reduced.
+
+    Grid is 2-D: axis 1 covers a tile of K (capped well below the 65535
+    gridDim.y hardware limit), and any overflowing k-tiles fold into axis 0.
+    A flat 1-D grid of M*K programs — used previously — is rejected by the
+    AMD Triton backend once the program count grows into the tens of
+    millions (e.g. M=16384, K=4096 -> 67M programs -> HIP error 1).
     """
-    # Program ID gives us which output element we're computing
-    pid = tl.program_id(0)
+    # Program IDs give us which output element we're computing
+    pid0 = tl.program_id(0)
+    pid1 = tl.program_id(1)
 
     # Compute output indices
-    m_idx = pid // K
-    k_idx = pid % K
+    m_idx = pid0 // K_TILES
+    k_idx = (pid0 % K_TILES) * K_PER_TILE + pid1
 
     # Bounds check
     if m_idx >= M or k_idx >= K:
@@ -711,8 +720,15 @@ def mean_dim(
     # Reshape output for kernel
     output_2d = output.reshape(M, 1, K).squeeze(1) if keepdim else output.reshape(M, K)
 
-    # Launch kernel
-    grid = (M * K,)
+    # Launch kernel. Axis 1 carries at most K_PER_TILE k-indices (kept well
+    # under the 65535 gridDim.y limit), with overflowing k-tiles folded into
+    # axis 0. This keeps the axis-0 program count at the previous M*K scale
+    # only when K is huge, and never lets either axis exceed its hardware
+    # limit — the flat (M*K,) grid was rejected by the AMD Triton backend
+    # for tens of millions of programs (HIP error 1).
+    k_per_tile = min(K, 32768)
+    k_tiles = (K + k_per_tile - 1) // k_per_tile
+    grid = (M * k_tiles, k_per_tile)
     BLOCK_SIZE = 1024
 
     mean_kernel[grid](
@@ -726,6 +742,8 @@ def mean_dim(
         M,
         N,
         K,
+        k_tiles,
+        k_per_tile,
         BLOCK_SIZE,
     )
 
