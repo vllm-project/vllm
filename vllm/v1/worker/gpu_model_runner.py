@@ -4521,10 +4521,19 @@ class GPUModelRunner(
         num_drafter_query_tokens = self.num_spec_tokens + (
             1 if self.speculative_config.use_dflash() else 0
         )
-        return (
+        input_fits = (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
             <= self.effective_drafter_max_model_len
         )
+        if not input_fits:
+            logger.warning_once(
+                "Skipping draft generation for the entire batch because its "
+                "maximum sequence length plus draft query tokens exceeds the "
+                "draft model's max_model_len (%d). Consider increasing "
+                "speculative_config.max_model_len if the draft model supports it.",
+                self.effective_drafter_max_model_len,
+            )
+        return input_fits
 
     @torch.inference_mode
     def sample_tokens(
