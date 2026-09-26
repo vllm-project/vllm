@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     _backend_incompatibility_reason,
     _convert_moe_wna16_humming_tensors,
+    _xpu_uva_transform,
     convert_to_wna16_moe_kernel_format,
     map_wna16_backend,
 )
@@ -179,6 +180,41 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
     assert torch.equal(converted[1], w2.transpose(1, 2).contiguous().view(torch.uint8))
     assert torch.equal(converted[2], w13_scale.transpose(1, 2).contiguous())
     assert torch.equal(converted[3], w2_scale.transpose(1, 2).contiguous())
+
+
+def test_xpu_uva_transform_keeps_layout_conversion_on_cpu(monkeypatch):
+    tensor = torch.arange(24, dtype=torch.int32).reshape(1, 3, 8)
+    tensor._vllm_is_uva_offloaded = True
+
+    observed = {}
+
+    def fake_get_accelerator_view(cpu_tensor):
+        observed["device"] = cpu_tensor.device
+        observed["is_contiguous"] = cpu_tensor.is_contiguous()
+        observed["values"] = cpu_tensor.clone()
+
+        uva_tensor = cpu_tensor
+        uva_tensor._vllm_is_uva_offloaded = True
+        return uva_tensor
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.int_wna16."
+        "get_accelerator_view_from_cpu_tensor",
+        fake_get_accelerator_view,
+    )
+
+    converted = _xpu_uva_transform(
+        tensor,
+        lambda x: x.transpose(1, 2).contiguous(),
+    )
+
+    expected = tensor.transpose(1, 2).contiguous()
+
+    assert observed["device"].type == "cpu"
+    assert observed["is_contiguous"]
+    assert torch.equal(observed["values"], expected)
+    assert torch.equal(converted, expected)
+    assert converted._vllm_is_uva_offloaded
 
 
 def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
