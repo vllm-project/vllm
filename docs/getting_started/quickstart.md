@@ -13,6 +13,8 @@ This guide will help you quickly get started with vLLM to perform:
 !!! note
     vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
+    **Important**: vLLM-Metal uses MLX instead of PyTorch as the compute backend and requires **MLX-optimized models** from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face. Standard models like `facebook/opt-125m` are not compatible with the MLX backend and will fail with `FileNotFoundError`. Refer to the [MLX model compatibility](#model-compatibility-on-apple-silicon) note below when using the examples on Apple Silicon.
+
 ## Installation
 
 === "NVIDIA CUDA"
@@ -140,6 +142,9 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
 The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
+
+!!! note "Model Compatibility on Apple Silicon"
+    **If you are running on Apple Silicon with vLLM-Metal**, the standard `facebook/opt-125m` model may not be available in the required format. Instead, use an MLX-optimized model from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face. For example, use `mlx-community/Qwen2.5-0.5B` instead of `facebook/opt-125m`.
 
 ```python
 llm = LLM(model="facebook/opt-125m")
