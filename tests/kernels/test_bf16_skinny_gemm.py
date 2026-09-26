@@ -906,6 +906,84 @@ def test_qwen4_exp_sm90_selected_shapes(
     assert cosine > 0.999
 
 
+@pytest.mark.parametrize("backend", ["auto", "cutlass", "flashinfer_cutedsl"])
+def test_qwen4_exp_router_respects_linear_backend(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """Model-specific plans must preserve an explicitly selected GEMM backend."""
+
+    class FakeLinear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = qwen4_exp_gemm.UnquantizedLinearMethod()
+            self.weight = torch.empty(512, 2560)
+
+    router = FakeLinear()
+    original_method = router.quant_method
+    monkeypatch.setattr(qwen4_exp_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(qwen4_exp_gemm, "_is_sm103", lambda: True)
+    monkeypatch.setattr(
+        qwen4_exp_gemm,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(kernel_config=SimpleNamespace(linear_backend=backend)),
+    )
+    monkeypatch.setattr(
+        qwen4_exp_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
+    )
+    monkeypatch.setattr(
+        qwen4_exp_gemm.shape_dynamic_skinny_gemm,
+        "request_warmup_configs",
+        lambda *_: None,
+    )
+
+    qwen4_exp_gemm.enable_qwen4_exp_low_latency_gemm(router, torch.bfloat16)
+
+    if backend == "auto":
+        assert isinstance(
+            router.quant_method, qwen4_exp_gemm.Qwen4ExpLowLatencyLinearMethod
+        )
+    else:
+        assert router.quant_method is original_method
+
+
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16])
+def test_qwen4_exp_router_cuda_graph_replay(num_tokens: int) -> None:
+    """Router logits must follow new inputs when replaying a decode graph."""
+    _require_sm103_and_cute()
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, 2560, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(512, 2560, dtype=torch.bfloat16, device="cuda") * 0.02
+    qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    x.normal_()
+    graph.replay()
+    reference = torch.nn.functional.linear(x, weight)
+    torch.testing.assert_close(output, reference, rtol=0.016, atol=0.008)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_qwen4_exp_prefill_fallback_dynamic_batch(compiled: bool) -> None:
+    """Unlisted batch sizes retain linear behavior with dynamic compilation."""
+    _require_sm103_and_cute()
+    layer = nn.Linear(2560, 512, bias=False, dtype=torch.bfloat16, device="cuda")
+    method = qwen4_exp_gemm.Qwen4ExpLowLatencyLinearMethod()
+
+    def apply(x: torch.Tensor) -> torch.Tensor:
+        return method.apply(layer, x)
+
+    run = (
+        torch.compile(apply, backend="eager", fullgraph=True, dynamic=True)
+        if compiled
+        else apply
+    )
+    for num_tokens in (32, 65):
+        x = torch.randn(num_tokens, 2560, dtype=torch.bfloat16, device="cuda")
+        torch.testing.assert_close(run(x), layer(x))
+
+
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     _require_sm103_and_cute()
     spec = glm52_gemm.GLM52_Q_B_PROJECTION
