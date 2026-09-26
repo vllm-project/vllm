@@ -1663,20 +1663,29 @@ def _mhc_pre_inputs(
     return residual, fn, hc_scale, hc_base
 
 
+def _forward(op, path, monkeypatch, *args, **kwargs):
+    """forward_native, or forward_hip on ROCm without AITER or TileLang."""
+    if path == "native":
+        return op.forward_native(*args, **kwargs)
+    monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_FUSED", False)
+    monkeypatch.setattr(mhc_layers, "_aiter_mhc_supported", lambda *a, **k: False)
+    return op.forward_hip(*args, **kwargs)
+
+
+@pytest.mark.parametrize("path", ["native", "hip_fallback"])
 @pytest.mark.parametrize("num_tokens", [1, 8])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("hc_mult", [4])
-def test_mhc_pre_native_applies_norm(
-    num_tokens, hidden_size, hc_mult, default_vllm_config
+def test_mhc_pre_unfused_applies_norm_once(
+    path, num_tokens, hidden_size, hc_mult, default_vllm_config, monkeypatch
 ):
-    """forward_native must return a normalized layer_input.
+    """The unfused paths must return layer_input normalized exactly once.
 
-    forward_cuda gets the norm from the fused kernel and forward_hip applies it
-    explicitly; forward_native has to do the same, because CustomOp.forward_oot
-    and forward_cpu both fall back to it. Without this, every out-of-tree
-    backend (and vLLM's own CPU backend) feeds an un-normalized residual mix
-    into attention and MLP/MoE, which is silent -- no NaN, no exception, just
-    wrong numbers.
+    forward_oot falls back to forward_native, and so does forward_hip without
+    AITER or TileLang. Missing the norm is silent -- no NaN, no exception, just
+    an un-normalized residual mix fed into attention and MLP/MoE -- and applying
+    it twice is just as silent.
     """
     set_random_seed(0)
     residual, fn, hc_scale, hc_base = _mhc_pre_inputs(num_tokens, hidden_size, hc_mult)
@@ -1684,36 +1693,20 @@ def test_mhc_pre_native_applies_norm(
     norm_eps = 1e-6
 
     op = MHCPreOp()
-    _, _, layer_input = op.forward_native(
-        residual,
-        fn,
-        hc_scale,
-        hc_base,
+    args = (residual, fn, hc_scale, hc_base)
+    kwargs = dict(
         rms_eps=1e-6,
         hc_pre_eps=1e-6,
         hc_sinkhorn_eps=1e-6,
         hc_post_mult_value=1.0,
         sinkhorn_repeat=20,
         n_splits=1,
-        norm_weight=norm_weight,
         norm_eps=norm_eps,
     )
-
-    # Same call without a norm gives the raw mix; normalizing it here is what
-    # the contract says layer_input should be.
-    _, _, raw_mix = op.forward_native(
-        residual,
-        fn,
-        hc_scale,
-        hc_base,
-        rms_eps=1e-6,
-        hc_pre_eps=1e-6,
-        hc_sinkhorn_eps=1e-6,
-        hc_post_mult_value=1.0,
-        sinkhorn_repeat=20,
-        n_splits=1,
-        norm_weight=None,
-        norm_eps=norm_eps,
+    # Without a norm weight the raw mix comes back untouched.
+    _, _, raw_mix = op.forward_native(*args, norm_weight=None, **kwargs)
+    _, _, layer_input = _forward(
+        op, path, monkeypatch, *args, norm_weight=norm_weight, **kwargs
     )
     expected = _apply_mhc_norm(raw_mix, norm_weight, norm_eps)
 
@@ -1724,13 +1717,14 @@ def test_mhc_pre_native_applies_norm(
     )
 
 
+@pytest.mark.parametrize("path", ["native", "hip_fallback"])
 @pytest.mark.parametrize("num_tokens", [1, 8])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("hc_mult", [4])
-def test_mhc_fused_post_pre_native_applies_norm(
-    num_tokens, hidden_size, hc_mult, default_vllm_config
+def test_mhc_fused_post_pre_unfused_applies_norm_once(
+    path, num_tokens, hidden_size, hc_mult, default_vllm_config, monkeypatch
 ):
-    """Same contract for the fused post+pre op's forward_native."""
+    """Same contract for the fused post+pre op."""
     set_random_seed(0)
     residual, fn, hc_scale, hc_base = _mhc_pre_inputs(num_tokens, hidden_size, hc_mult)
     x = (torch.randn(num_tokens, hidden_size) * 0.02).to(torch.bfloat16)
@@ -1741,10 +1735,8 @@ def test_mhc_fused_post_pre_native_applies_norm(
     norm_eps = 1e-6
 
     op = MHCFusedPostPreOp()
+    args = (x, residual, post_layer_mix, comb_res_mix, fn, hc_scale, hc_base)
     kwargs = dict(
-        fn=fn,
-        hc_scale=hc_scale,
-        hc_base=hc_base,
         rms_eps=1e-6,
         hc_pre_eps=1e-6,
         hc_sinkhorn_eps=1e-6,
@@ -1752,24 +1744,11 @@ def test_mhc_fused_post_pre_native_applies_norm(
         sinkhorn_repeat=20,
         n_splits=1,
         tile_n=1,
-    )
-    *_, layer_input = op.forward_native(
-        x,
-        residual,
-        post_layer_mix,
-        comb_res_mix,
-        norm_weight=norm_weight,
         norm_eps=norm_eps,
-        **kwargs,
     )
-    *_, raw_mix = op.forward_native(
-        x,
-        residual,
-        post_layer_mix,
-        comb_res_mix,
-        norm_weight=None,
-        norm_eps=norm_eps,
-        **kwargs,
+    *_, raw_mix = op.forward_native(*args, norm_weight=None, **kwargs)
+    *_, layer_input = _forward(
+        op, path, monkeypatch, *args, norm_weight=norm_weight, **kwargs
     )
     expected = _apply_mhc_norm(raw_mix, norm_weight, norm_eps)
 
