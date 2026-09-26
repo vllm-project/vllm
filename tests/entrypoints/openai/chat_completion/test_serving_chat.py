@@ -624,6 +624,74 @@ def _build_serving_chat(
     return serving_chat
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV4ForCausalLM",
+        "DeepseekV4ForConditionalGeneration",
+        "DeepseekV41ForCausalLM",
+        "Qwen3ForCausalLM",
+    ],
+)
+@pytest.mark.parametrize(
+    "defaults, overrides, thinking",
+    [
+        ({}, {}, True),
+        ({}, {"enable_thinking": True}, True),
+        ({}, {"thinking": True}, True),
+        ({}, {"enable_thinking": False}, False),
+        ({}, {"thinking": False}, False),
+        ({}, {"reasoning_effort": "none"}, False),
+        ({"enable_thinking": True}, {"enable_thinking": False}, False),
+        ({"enable_thinking": False}, {"enable_thinking": True}, True),
+        ({"enable_thinking": True}, {"reasoning_effort": "none"}, False),
+        ({}, {"thinking": False, "enable_thinking": True}, True),
+    ],
+)
+@pytest.mark.parametrize("sampling_defaults", [{}, {"temperature": 0.7}])
+def test_deepseek_v4_thinking_sampling_overrides(
+    architecture, defaults, overrides, thinking, sampling_defaults
+):
+    """Only V4 thinking requests ignore overrides, without mutating inputs."""
+    serving = OpenAIServingChat.__new__(OpenAIServingChat)
+    serving.model_config = MagicMock(architecture=architecture)
+    serving.default_sampling_params = sampling_defaults.copy()
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    serving.default_chat_template_kwargs = defaults.copy()
+    request = ChatCompletionRequest(
+        model="custom-served-alias",
+        messages=[{"role": "user", "content": "Hello"}],
+        temperature=0.0,
+        presence_penalty=0.8,
+        frequency_penalty=0.9,
+        top_p=0.95,
+        top_k=20,
+        chat_template_kwargs=overrides,
+    )
+    original = request.model_dump()
+    params = serving._build_sampling_params(
+        request, 32, serving._effective_chat_template_kwargs(request)
+    )
+    if (
+        architecture
+        in (
+            "DeepseekV4ForCausalLM",
+            "DeepseekV4ForConditionalGeneration",
+        )
+        and thinking
+    ):
+        assert params.temperature == sampling_defaults.get("temperature", 1.0)
+        assert params.presence_penalty == params.frequency_penalty == 0.0
+        assert params.top_p == 0.95
+        assert params.top_k == 20
+    else:
+        assert params == request.to_sampling_params(32, sampling_defaults)
+    assert request.model_dump() == original
+    assert serving.default_sampling_params == sampling_defaults
+    assert serving.default_chat_template_kwargs == defaults
+
+
 def _build_minimal_metrics_serving_chat(
     enable_per_request_metrics: bool,
     enable_force_include_usage: bool = False,

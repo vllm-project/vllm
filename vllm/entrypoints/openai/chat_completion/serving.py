@@ -218,6 +218,37 @@ class OpenAIServingChat(GenerateBaseServing):
         """
         return chat_template_kwargs
 
+    def _build_sampling_params(
+        self,
+        request: ChatCompletionRequest,
+        max_tokens: int,
+        chat_template_kwargs: dict[str, Any],
+    ) -> SamplingParams:
+        if self.model_config.architecture in (
+            "DeepseekV4ForCausalLM",
+            "DeepseekV4ForConditionalGeneration",
+        ):
+            thinking = bool(
+                chat_template_kwargs.get("thinking")
+                or chat_template_kwargs.get("enable_thinking")
+            )
+            if (
+                "thinking" not in chat_template_kwargs
+                and "enable_thinking" not in chat_template_kwargs
+            ):
+                thinking = True
+            if thinking and chat_template_kwargs.get("reasoning_effort") != "none":
+                # Ignore request overrides before constructing SamplingParams:
+                # temperature=0 would otherwise reset top_p/top_k for greedy mode.
+                request = request.model_copy(
+                    update={
+                        "temperature": None,
+                        "presence_penalty": 0.0,
+                        "frequency_penalty": 0.0,
+                    }
+                )
+        return request.to_sampling_params(max_tokens, self.default_sampling_params)
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -325,9 +356,10 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens, self.default_sampling_params
                 )
             else:
-                sampling_params = request.to_sampling_params(
+                sampling_params = self._build_sampling_params(
+                    request,
                     max_tokens,
-                    self.default_sampling_params,
+                    chat_template_kwargs,
                 )
 
             self._log_inputs(
