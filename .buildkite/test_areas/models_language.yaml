@@ -93,6 +93,21 @@ steps:
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
+- label: ":nvidia: (H200 MIG 35GB) GLM-5.3-Flash Pruned E2E"
+  key: glm5next-pruned-e2e
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+  - vllm/models/glm5next/
+  - vllm/transformers_utils/configs/glm5_next.py
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/attention/backends/mla/
+  - tests/models/glm5next/test_pruned_e2e.py
+  commands:
+  # Layer-pruned real checkpoint (4 layers + MTP, full widths): hybrid KDA +
+  # DSA-MLA kpool layout, fp8 MoE, mHC, MTP. Needs SM90+ for the indexer.
+  - pytest -v -s models/glm5next/test_pruned_e2e.py
+
 # Granite 4 hybrid generation is sensitive to hardware-specific Triton SSD
 # autotuning (https://github.com/vllm-project/vllm/issues/25194). Keep this one
 # correctness test on L4 until its H200 output matches the Transformers reference.

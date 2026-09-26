@@ -30,6 +30,23 @@ steps:
         - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
         - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: ":nvidia: (H100) GLM-5.3-Flash Pruned NixlConnector PD"
+  key: glm5next-pruned-nixlconnector-pd-2-gpus
+  timeout_in_minutes: 40
+  working_dir: "/vllm-workspace/tests"
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/models/glm5next/
+    - vllm/v1/core/kv_cache_utils.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    # Hybrid KDA + DSA-MLA (kpool indexer/tail) 1P1D; needs SM90+ so it cannot
+    # join the L4 sweeps above.
+    - bash v1/kv_connector/nixl_integration/run_glm5next_pd_test.sh
+
 - label: ":nvidia: (L4) Distributed FlashInfer NixlConnector PD accuracy"
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 55

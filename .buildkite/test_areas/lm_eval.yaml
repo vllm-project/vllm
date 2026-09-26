@@ -956,6 +956,21 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
 
+- label: ":nvidia: (H200 MIG 35GB) KV-Offload GLM-5.3-Flash Pruned"
+  key: kv-offload-glm5next-pruned
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - vllm/v1/core/kv_cache_utils.py
+  - tests/v1/kv_offload/test_glm5next_pruned_e2e.py
+  commands:
+  # kpool-tail scratch group (block 4, non prefix-cacheable) round trip.
+  - pytest -s -v v1/kv_offload/test_glm5next_pruned_e2e.py
+
 - label: ":nvidia: (H100) LM Eval KV-Offload Medium"
   key: kv-offload-medium
   timeout_in_minutes: 45
