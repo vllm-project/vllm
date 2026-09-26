@@ -344,6 +344,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         (
             prefill_query_start_loc,
+            prefill_query_start_loc_cpu,
             prefill_max_query_len,
             prefill_query_lens_cpu,
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
@@ -396,6 +397,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill = SparseMLAPrefillMetadata(
                 block_table=block_table,
                 query_start_loc=prefill_query_start_loc,
+                query_start_loc_cpu=prefill_query_start_loc_cpu,
                 max_query_len=prefill_max_query_len,
                 query_lens_cpu=prefill_query_lens_cpu,
                 chunked_context=chunked_context,
@@ -442,11 +444,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         num_prefills: int,
     ) -> tuple[
         torch.Tensor | None,  # prefill_query_start_loc
+        torch.Tensor | None,  # prefill_query_start_loc_cpu
         int,  # prefill_max_query_len
         torch.Tensor | None,  # prefill_query_lens_cpu
     ]:
         if num_prefills == 0:
-            return None, 0, None
+            return None, None, 0, None
 
         offset = common_attn_metadata.query_start_loc[num_decodes]
         prefill_query_start_loc = (
@@ -460,6 +463,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
         return (
             prefill_query_start_loc,
+            prefill_qsl_cpu,
             prefill_max_query_len,
             prefill_query_lens,
         )

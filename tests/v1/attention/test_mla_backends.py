@@ -357,7 +357,9 @@ if current_platform.is_cuda():
         ]
     )
 elif current_platform.is_rocm():
-    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [MLAPrefillBackendEnum.ROCM_AITER_FA, MLAPrefillBackendEnum.ROCM_AITER_ASM]
+    )
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),
@@ -370,7 +372,12 @@ def _prefill_backend_dimension_params():
     params = []
     for prefill_backend in PREFILL_BACKENDS_TO_TEST:
         for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-            if device_capability is None:
+            # ROCM_AITER_ASM validity depends on the runtime kv_cache_dtype (it
+            # requires an FP8 KV cache), which isn't known at collection time.
+            # Defer its skip decision to _run_backend_correctness.
+            if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_ASM:
+                invalid_reasons = []
+            elif device_capability is None:
                 invalid_reasons = ["device capability unavailable"]
             else:
                 try:
@@ -1469,6 +1476,40 @@ def _run_backend_correctness(
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
+
+    # ROCM_AITER_ASM validity depends on the runtime kv_cache_dtype (it requires an
+    # FP8 KV cache), which is not known at collection time, so its skip decision
+    # is deferred here rather than baked into the parametrization marks.
+    if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_ASM:
+        try:
+            prefill_invalid_reasons = (
+                prefill_backend.get_class().validate_configuration(
+                    current_platform.get_device_capability(),
+                    MLAPrefillSelectorConfig(
+                        dtype=torch.bfloat16,
+                        mla_dimensions=MLADimensions(
+                            qk_nope_head_dim=qk_nope_head_dim,
+                            qk_rope_head_dim=64,
+                            v_head_dim=v_head_dim,
+                        ),
+                        cache_dtype=kv_cache_dtype,
+                    ),
+                )
+            )
+        except ImportError:
+            prefill_invalid_reasons = ["ImportError"]
+        if prefill_invalid_reasons:
+            pytest.skip(
+                f"Prefill backend {prefill_backend.name} unavailable: "
+                f"{prefill_invalid_reasons}"
+            )
+
+        # ROCM_AITER_ASM MLA prefill backend currently hardcodes q/k/v dequant
+        # scales to 1.0.
+        if q_scale != 1.0 or k_scale != 1.0:
+            pytest.skip(
+                "ROCM_AITER_ASM MLA prefill backend only supports q_scale==k_scale==1.0"
+            )
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")

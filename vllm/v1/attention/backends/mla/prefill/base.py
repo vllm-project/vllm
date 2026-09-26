@@ -42,6 +42,10 @@ class MLAPrefillBackend(ABC):
         torch.bfloat16,
     ]
     supported_mla_dimensions: ClassVar[list[MLADimensions]] = []
+    # If True, the parent forces the prefill Q/K/V cast to the platform FP8
+    # dtype regardless of the user-facing use_prefill_query_quantization
+    # flag. Set by backends whose kernels accept only FP8 inputs.
+    requires_fp8_query_quantization: ClassVar[bool] = False
 
     @staticmethod
     @abstractmethod
