@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import (
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
     SequenceFeatureExtractor,
     SiglipVisionConfig,
@@ -123,7 +123,7 @@ class Phi4MMImageEncoder(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
         model_dir: str = "",

@@ -1928,7 +1928,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
     The child inherits the parent's stdout/stderr so its output (engine
     cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
-    traceback is serialized to ``tb_file`` for structured re-raising. A
+    traceback or skip reason is serialized to ``tb_file`` for propagation. A
     native crash leaves ``tb_file`` empty — the diagnostic is then only in
     the inherited subprocess output.
     """
@@ -1953,7 +1953,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             )
 
             child_script = (
-                "import sys, importlib, cloudpickle, traceback\n"
+                "import sys, importlib, cloudpickle, traceback, json\n"
                 "try:\n"
                 "    from _pytest.outcomes import Skipped\n"
                 "except ImportError:\n"
@@ -1965,7 +1965,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 "    target = getattr(target, name)\n"
                 "try:\n"
                 "    target(*data['args'], **data['kwargs'])\n"
-                "except Skipped:\n"
+                "except Skipped as exc:\n"
+                "    with open(data['tb_file'], 'w') as fp:\n"
+                "        json.dump(str(exc), fp)\n"
                 "    sys.exit(0)\n"
                 "except BaseException:\n"
                 "    with open(data['tb_file'], 'w') as fp:\n"
@@ -1984,18 +1986,20 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 env=env,
             )
 
+            try:
+                with open(tb_file) as fp:
+                    tb = fp.read()
+            except OSError:
+                tb = ""
             if result.returncode != 0:
-                try:
-                    with open(tb_file) as fp:
-                        tb = fp.read()
-                except OSError:
-                    tb = ""
                 if not tb:
                     tb = "<no Python traceback; see subprocess output above>"
                 raise RuntimeError(
                     f"Test subprocess '{f.__name__}' failed "
                     f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
                 )
+            if tb:
+                pytest.skip(json.loads(tb))
         finally:
             with contextlib.suppress(OSError):
                 os.remove(tb_file)

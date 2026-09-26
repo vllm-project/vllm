@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
     DecodeBenchConnectorMetadata,
 )
 from vllm.forward_context import ForwardContext
+from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
@@ -34,6 +35,8 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVQuantMode,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -50,7 +53,12 @@ from .utils import (
 class DecodeBenchTestRunner:
     """Test runner for DecodeBenchConnector."""
 
-    def __init__(self, block_size: int, num_gpu_blocks: int):
+    def __init__(
+        self,
+        block_size: int,
+        num_gpu_blocks: int,
+        kv_connector_extra_config: dict | None = None,
+    ):
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
 
@@ -61,6 +69,7 @@ class DecodeBenchTestRunner:
             block_size=block_size,
             max_num_batched_tokens=1000,
             kv_connector="DecodeBenchConnector",
+            kv_connector_extra_config=kv_connector_extra_config,
         )
 
         self.vllm_config = vllm_config
@@ -778,6 +787,321 @@ def test_decode_bench_connector_concurrent_requests():
     # Run second step - should NOT fill again (already filled)
     _, metadata2 = runner.run_single_step()
     assert len(metadata2.reqs_to_fill) == 0
+
+
+def _fill_single_block(cache_dtype, spec_dtype, kv_quant_mode, cache, fill_std=0.0):
+    """Fill block 1 of a one-layer cache through the worker connector."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"fill_std": fill_std},
+        cache_dtype=cache_dtype,
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=spec_dtype,
+        kv_quant_mode=kv_quant_mode,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        KVCacheConfig(
+            num_blocks=cache.shape[0],
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        ),
+    )
+    connector.register_kv_caches({"layer": cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([1],), 16)})
+    )
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,spec_dtype,kv_quant_mode,fp8_dtype",
+    [
+        (
+            "fp8",
+            torch.uint8,
+            KVQuantMode.FP8_PER_TENSOR,
+            current_platform.fp8_dtype(),
+        ),
+        ("fp8_e5m2", torch.uint8, KVQuantMode.FP8_PER_TENSOR, torch.float8_e5m2),
+        ("auto", torch.float8_e4m3fn, KVQuantMode.NONE, torch.float8_e4m3fn),
+    ],
+)
+@pytest.mark.parametrize("fill_std", [0.0, 0.1])
+def test_decode_bench_connector_fills_fp8_caches(
+    cache_dtype, spec_dtype, kv_quant_mode, fp8_dtype, fill_std
+):
+    """fp8 caches, including ones stored as uint8, get encoded fill values."""
+    cache = torch.zeros(4, 16, 8, dtype=spec_dtype)
+    _fill_single_block(cache_dtype, spec_dtype, kv_quant_mode, cache, fill_std)
+
+    values = cache.view(fp8_dtype).float()
+    assert torch.count_nonzero(values[[0, 2, 3]]) == 0
+    filled = values[1]
+    if fill_std == 0:
+        expected = torch.tensor(0.015).to(fp8_dtype).float()
+        torch.testing.assert_close(filled, expected.expand_as(filled))
+    else:
+        assert torch.isfinite(filled).all()
+        assert filled.std() > 0
+
+
+def test_decode_bench_connector_zero_fills_packed_uint8_caches():
+    """uint8 layouts that do not hold plain fp8 values are zeroed."""
+    cache = torch.full((4, 16, 8), 7, dtype=torch.uint8)
+    _fill_single_block("nvfp4", torch.uint8, KVQuantMode.NVFP4, cache)
+
+    assert torch.count_nonzero(cache[1]) == 0
+    assert torch.all(cache[[0, 2, 3]] == 7)
+
+
+@pytest.mark.parametrize("fill_std", [0.0, 0.1])
+def test_decode_bench_connector_startup_fill_fills_registered_caches(fill_std):
+    """Startup fill writes every cache view in place, including strided views."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"startup_fill": True, "fill_std": fill_std},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention", "transposed"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    attention = torch.full((4, 2, 16), -1.0)
+    transposed = torch.full((2, 4, 16), -1.0).transpose(0, 1)
+    connector.register_kv_caches({"attention": attention, "transposed": transposed})
+
+    for filled in (attention, transposed):
+        if fill_std == 0:
+            torch.testing.assert_close(filled, torch.full_like(filled, 0.015))
+        else:
+            assert torch.isfinite(filled).all()
+            assert filled.std() > 0
+
+
+@pytest.mark.parametrize("fill_std", [0.0, 0.1])
+def test_decode_bench_connector_startup_fill_encodes_fp8_caches(fill_std):
+    """Startup fill encodes values in the fp8 dtype of a uint8 fp8 cache."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"startup_fill": True, "fill_std": fill_std},
+        cache_dtype="fp8",
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        ),
+    )
+    cache = torch.zeros(4, 16, 8, dtype=torch.uint8)
+    connector.register_kv_caches({"layer": cache})
+
+    values = cache.view(current_platform.fp8_dtype()).float()
+    if fill_std == 0:
+        expected = torch.tensor(0.015).to(current_platform.fp8_dtype()).float()
+        torch.testing.assert_close(values, expected.expand_as(values))
+    else:
+        assert torch.isfinite(values).all()
+        assert values.std() > 0
+
+
+def test_decode_bench_connector_startup_fill_keeps_zeroed_groups_per_request():
+    """Attention blocks the engine zeroes on allocation are filled per request."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"startup_fill": True},
+    )
+    # Mamba layers make the engine zero newly allocated attention blocks.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((4,), (4,)),
+                    dtypes=(torch.float32, torch.float32),
+                ),
+            ),
+        ],
+    )
+    assert kv_cache_config.needs_kv_cache_zeroing
+    scheduler_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    num_external_tokens = 17
+    request = create_request(
+        request_id=1, num_tokens=num_external_tokens + 1, block_size=16
+    )
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(block_id=1), KVCacheBlock(block_id=2)],
+            [KVCacheBlock(block_id=3)],
+        )
+    )
+    scheduler_connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = scheduler_connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill == {
+        request.request_id: (([1, 2], []), num_external_tokens)
+    }
+
+    worker_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    attention = torch.full((4, 2), -1.0)
+    mamba_states = (torch.zeros(4, 4), torch.zeros(4, 4))
+    worker_connector.register_kv_caches({"attention": attention, "mamba": mamba_states})
+    assert torch.all(attention == -1.0)
+
+    worker_connector.bind_connector_metadata(metadata)
+    worker_connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+    torch.testing.assert_close(attention[1:3], torch.full_like(attention[1:3], 0.015))
+    assert torch.all(attention[[0, 3]] == -1.0)
+
+
+def test_decode_bench_connector_startup_fill_skips_per_step_fill():
+    """Admitted requests need no per-step fill and leave existing KV intact."""
+    block_size = 16
+    runner = DecodeBenchTestRunner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        kv_connector_extra_config={"startup_fill": True},
+    )
+    for kv_cache in runner.kv_caches.values():
+        torch.testing.assert_close(kv_cache, torch.full_like(kv_cache, 0.015))
+        kv_cache.fill_(7.0)
+
+    req1 = runner.new_request([1] * (block_size * 2))
+    scheduler_output, metadata = runner.run_single_step()
+    assert scheduler_output.num_scheduled_tokens == {req1.request_id: 1}
+    assert scheduler_output.scheduled_new_reqs[0].num_computed_tokens == (
+        block_size * 2 - 1
+    )
+    assert metadata.reqs_to_fill == {}
+
+    req2 = runner.new_request([2] * (block_size * 3))
+    scheduler_output, metadata = runner.run_single_step()
+    assert scheduler_output.num_scheduled_tokens == {
+        req1.request_id: 1,
+        req2.request_id: 1,
+    }
+    assert metadata.reqs_to_fill == {}
+
+    # A re-admitted (e.g. preempted) request is not reported again.
+    assert runner.scheduler_connector.get_num_new_matched_tokens(req1, 0) == (
+        0,
+        False,
+    )
+    for kv_cache in runner.kv_caches.values():
+        assert torch.all(kv_cache == 7.0)
+
+
+def test_decode_bench_connector_startup_fill_keeps_circular_buffer_zero_fill():
+    """Circular buffers are still zeroed per request with startup fill."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"startup_fill": True},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_attention"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["compressor_ring"],
+                CircularBufferSpec(
+                    block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+        ],
+    )
+    scheduler_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    num_external_tokens = 17
+    request = create_request(
+        request_id=1, num_tokens=num_external_tokens + 1, block_size=16
+    )
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(block_id=1), KVCacheBlock(block_id=2)],
+            [KVCacheBlock(block_id=4)],
+        )
+    )
+    scheduler_connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = scheduler_connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill == {
+        request.request_id: (([], [4]), num_external_tokens)
+    }
+
+    worker_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    attention_cache = torch.zeros(8, 2)
+    ring_cache = torch.ones(8, 2)
+    worker_connector.register_kv_caches(
+        {"full_attention": attention_cache, "compressor_ring": ring_cache}
+    )
+    assert torch.all(ring_cache == 1.0)
+    worker_connector.bind_connector_metadata(metadata)
+    worker_connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    torch.testing.assert_close(attention_cache, torch.full_like(attention_cache, 0.015))
+    expected_ring = torch.ones_like(ring_cache)
+    expected_ring[4] = 0
+    assert torch.equal(ring_cache, expected_ring)
 
 
 if __name__ == "__main__":
