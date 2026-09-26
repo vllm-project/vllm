@@ -1121,6 +1121,17 @@ class Platform:
         return False
 
     @classmethod
+    def supports_v2_model_runner(cls) -> bool:
+        """Returns whether the built-in V2 model runner can run on this platform.
+
+        The V2 model runner requires Triton. Platform plugins that ship their own
+        worker/model runner and cannot install Triton should override this to
+        return ``False``. vLLM then selects the V1 model runner without probing
+        for Triton and without emitting a fallback warning.
+        """
+        return True
+
+    @classmethod
     def supports_mx(cls) -> bool:
         """Returns whether the current platform supports MX types."""
         return False
