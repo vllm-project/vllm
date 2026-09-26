@@ -177,10 +177,12 @@ class TestAllReduceGemmaRMSNormModel(torch.nn.Module):
         token_num=16,
         eps=1e-6,
         dtype: torch.dtype = torch.float16,
+        use_aiter: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
+        self.use_aiter = use_aiter
         self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
         # Non-trivial weight (~Gemma range) so (1 + w) exercises the scale path.
         for n in self.norm:
@@ -210,6 +212,8 @@ class TestAllReduceGemmaRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
+        if self.use_aiter:
+            return [rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
@@ -450,10 +454,10 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         pytest.param(
             TestAllReduceGemmaRMSNormModel,
             False,
-            False,
+            IS_AITER_FOUND,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="Not supported on ROCm platform",
+                current_platform.is_rocm() and not IS_AITER_FOUND,
+                reason="AITER is required on ROCm",
             ),
         ),
         pytest.param(
@@ -646,7 +650,10 @@ def all_reduce_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        if test_model_cls is TestAllReduceRMSNormModel:
+        if test_model_cls in (
+            TestAllReduceRMSNormModel,
+            TestAllReduceGemmaRMSNormModel,
+        ):
             model = test_model_cls(
                 hidden_size, token_num, dtype=dtype, use_aiter=use_aiter
             )
@@ -667,9 +674,13 @@ def all_reduce_fusion_pass_on_test_model(
         )
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
-        if test_model_cls in (
-            TestAllReduceGemmaRMSNormModel,
-            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+        if (
+            test_model_cls
+            in (
+                TestAllReduceGemmaRMSNormModel,
+                TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+            )
+            and not use_aiter
         ):
             fused_op = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
             fused_nodes = list(find_op_nodes(fused_op, backend.graph_post_pass))
