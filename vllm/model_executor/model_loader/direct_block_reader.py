@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-throughput Single-Reader Block I/O engine for distributed model loading.
 
 Extracts maximum sequential read bandwidth from NVMe storage using multi-threaded
@@ -9,9 +10,10 @@ Supports explicit opt-in Direct I/O (O_DIRECT) via force_o_direct=True or
 VLLM_MOE_FORCE_O_DIRECT=1 for memory-constrained environments.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import logging
+import mmap
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 try:
@@ -44,8 +46,11 @@ def calculate_alignment(
     Returns:
         tuple of (aligned_offset, aligned_size, shift):
         - aligned_offset: Floor of offset to nearest multiple of align.
-        - aligned_size: Ceil of (offset + size) minus aligned_offset, rounded up to align.
-        - shift: Delta (offset - aligned_offset) pointing to target data within aligned buffer.
+        - aligned_size: Ceil of (offset + size) minus aligned_offset,
+          rounded up to align.
+        - shift: Delta (offset - aligned_offset) pointing to target data within
+          aligned buffer.
+
     """
     aligned_offset = (offset // align) * align
     end = offset + size
@@ -64,22 +69,17 @@ def allocate_aligned_buffer(size: int, align: int = BLOCK_ALIGN) -> memoryview:
 
     Returns:
         memoryview slice pointing to an aligned byte sequence.
-    """
-    raw_buffer = bytearray(size + align)
-    addr = id(raw_buffer)
-    # Use memoryview over raw buffer to find 4096-byte aligned offset
-    # In CPython, PyByteArrayObject storage has a pointer to the buffer
-    mv = memoryview(raw_buffer)
-    # On 64-bit platforms, bytearray buffer addresses are obtained via ctypes or mmap
-    # For standalone buffers, mmap is guaranteed to be page-aligned (4096 bytes)
-    import mmap
 
+    """
+    # Standalone anonymous mmap is guaranteed to be page-aligned (4096 bytes)
     mm = mmap.mmap(-1, size, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
     return memoryview(mm)
 
 
 class DirectBlockFileReader:
-    """High-throughput reader utilizing sequential buffered I/O or O_DIRECT and thread pools."""
+    """High-throughput reader utilizing sequential buffered I/O or O_DIRECT
+    and thread pools.
+    """
 
     def __init__(
         self,
@@ -91,11 +91,12 @@ class DirectBlockFileReader:
         self.chunk_size = chunk_size
         self.max_workers = max(1, max_workers)
         self.allow_fallback = allow_fallback
-        env_force = (
-            getattr(envs, "VLLM_MOE_FORCE_O_DIRECT", False)
-            if envs is not None
-            else os.environ.get("VLLM_MOE_FORCE_O_DIRECT", "0").lower() in ("1", "true", "yes")
-        )
+        if envs is not None:
+            env_force = getattr(envs, "VLLM_MOE_FORCE_O_DIRECT", False)
+        else:
+            env_force = os.environ.get(
+                "VLLM_MOE_FORCE_O_DIRECT", "0"
+            ).lower() in ("1", "true", "yes")
         self.force_o_direct = force_o_direct or env_force
         self._executor = ThreadPoolExecutor(
             max_workers=self.max_workers,
@@ -123,12 +124,16 @@ class DirectBlockFileReader:
 
         Args:
             file_path: Absolute path to the source file on disk.
-            dest_buffer: Destination buffer (must be 4096-byte aligned if O_DIRECT is used).
-            file_offset: Start offset in file (must be 4096-aligned for pure O_DIRECT).
-            length: Number of bytes to read. If None, reads from file_offset to EOF.
+            dest_buffer: Destination buffer (must be 4096-byte aligned if
+                O_DIRECT is used).
+            file_offset: Start offset in file (must be 4096-aligned for
+                pure O_DIRECT).
+            length: Number of bytes to read. If None, reads from file_offset
+                to EOF.
 
         Returns:
             Total number of bytes read.
+
         """
         file_size = os.path.getsize(file_path)
         if file_offset >= file_size:
@@ -143,7 +148,8 @@ class DirectBlockFileReader:
         use_o_direct = False
 
         if self.force_o_direct:
-            # Opt-in O_DIRECT path (explicitly bypasses Linux page cache for memory-constrained nodes)
+            # Opt-in O_DIRECT path (explicitly bypasses Linux page cache for
+            # memory-constrained nodes)
             try:
                 fd = os.open(file_path, os.O_RDONLY | O_DIRECT)
                 use_o_direct = True
@@ -151,7 +157,8 @@ class DirectBlockFileReader:
                 if not self.allow_fallback:
                     raise
                 logger.debug(
-                    "O_DIRECT unavailable for %s (%s); falling back to sequential buffered I/O",
+                    "O_DIRECT unavailable for %s (%s); "
+                    "falling back to sequential buffered I/O",
                     file_path,
                     err,
                 )
@@ -159,13 +166,16 @@ class DirectBlockFileReader:
                 fd = os.open(file_path, os.O_RDONLY)
         else:
             # Default: Sequential Buffered I/O with posix_fadvise
-            # Maximizes wire throughput while automatically warming 100% of checkpoint in Linux page cache
+            # Maximizes wire throughput while automatically warming 100% of
+            # checkpoint in Linux page cache
             fd = os.open(file_path, os.O_RDONLY)
 
         try:
             if use_o_direct:
                 try:
-                    return self._read_direct(fd, dest_buffer, file_offset, target_length, file_size)
+                    return self._read_direct(
+                        fd, dest_buffer, file_offset, target_length, file_size
+                    )
                 except OSError as err:
                     if not self.allow_fallback:
                         raise
@@ -173,9 +183,13 @@ class DirectBlockFileReader:
                         "O_DIRECT read failed (%s); falling back to buffered I/O",
                         err,
                     )
-                    return self._read_buffered(fd, dest_buffer, file_offset, target_length, file_size)
+                    return self._read_buffered(
+                        fd, dest_buffer, file_offset, target_length, file_size
+                    )
             else:
-                return self._read_buffered(fd, dest_buffer, file_offset, target_length, file_size)
+                return self._read_buffered(
+                    fd, dest_buffer, file_offset, target_length, file_size
+                )
         finally:
             if fd is not None:
                 os.close(fd)
@@ -207,12 +221,17 @@ class DirectBlockFileReader:
             if chunk_file_off >= file_size:
                 break
             if chunk_file_off + chunk_len > file_size:
-                chunk_len = ((file_size - chunk_file_off + chunk_align - 1) // chunk_align) * chunk_align
+                chunk_len = (
+                    (file_size - chunk_file_off + chunk_align - 1)
+                    // chunk_align
+                ) * chunk_align
 
             buf_start = bytes_scheduled
             buf_end = buf_start + chunk_len
             if buf_end > len(dest_buffer):
-                chunk_len = ((len(dest_buffer) - buf_start) // chunk_align) * chunk_align
+                chunk_len = (
+                    (len(dest_buffer) - buf_start) // chunk_align
+                ) * chunk_align
                 buf_end = buf_start + chunk_len
 
             if chunk_len <= 0:

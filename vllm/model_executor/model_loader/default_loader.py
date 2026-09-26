@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import glob
 import os
@@ -319,7 +320,9 @@ class DefaultModelLoader(BaseModelLoader):
                 enable_fast_moe = extra_config.get(
                     "enable_fast_moe_bypass",
                     getattr(envs, "VLLM_FAST_MOE_BYPASS", False)
-                    or os.environ.get("VLLM_FAST_MOE_BYPASS", "0").lower() in ("1", "true")
+                    or os.environ.get(
+                        "VLLM_FAST_MOE_BYPASS", "0"
+                    ).lower() in ("1", "true"),
                 )
                 if enable_fast_moe:
                     n_shared_experts = 1
@@ -350,16 +353,18 @@ class DefaultModelLoader(BaseModelLoader):
 
                     crossover_threshold_gb = extra_config.get("crossover_threshold_gb")
                     if crossover_threshold_gb is None:
-                        crossover_threshold_gb = extra_config.get("direct_vram_threshold_gb")
+                        crossover_threshold_gb = extra_config.get(
+                            "direct_vram_threshold_gb"
+                        )
                     if crossover_threshold_gb is None:
-                        crossover_threshold_gb = getattr(envs, "VLLM_FAST_MOE_CROSSOVER_GB", None)
+                        crossover_threshold_gb = getattr(
+                            envs, "VLLM_FAST_MOE_CROSSOVER_GB", None
+                        )
                     if crossover_threshold_gb is None:
                         env_crossover = os.environ.get("VLLM_FAST_MOE_CROSSOVER_GB")
                         if env_crossover:
-                            try:
+                            with contextlib.suppress(ValueError):
                                 crossover_threshold_gb = float(env_crossover)
-                            except ValueError:
-                                pass
 
                     tp_size = 1
                     tp_rank = 0

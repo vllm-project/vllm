@@ -1642,13 +1642,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["auto", "direct_io", "direct_vram", "host_staging"],
         case_sensitive=False,
     ),
-    # Scale crossover threshold in GiB between Mode 1 (host staging) and Mode 2 (direct VRAM).
+    # Scale crossover threshold in GiB between Mode 1 (host staging)
+    # and Mode 2 (direct VRAM).
     "VLLM_FAST_MOE_CROSSOVER_GB": lambda: float(
         os.getenv("VLLM_FAST_MOE_CROSSOVER_GB", "300.0")
     ),
-    # Force Linux O_DIRECT on DirectBlockFileReader regardless of chunk size or page cache.
+    # Force Linux O_DIRECT on DirectBlockFileReader regardless of chunk size
+    # or page cache warmth.
     "VLLM_MOE_FORCE_O_DIRECT": lambda: (
-        os.getenv("VLLM_MOE_FORCE_O_DIRECT", "0").strip().lower() in ("1", "true", "yes")
+        os.getenv("VLLM_MOE_FORCE_O_DIRECT", "0").strip().lower()
+        in ("1", "true", "yes")
     ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to

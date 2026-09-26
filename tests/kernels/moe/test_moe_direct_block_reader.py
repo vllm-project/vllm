@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for Asynchronous Direct Block I/O Weight Loader and Single-Reader Broadcast."""
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for Asynchronous Direct Block I/O Weight Loader and Single-Reader
+Broadcast.
+"""
 
 import mmap
 import os
 import tempfile
+
 import pytest
-from safetensors.torch import save_file
 import torch
+from safetensors.torch import save_file
 
 from vllm.model_executor.model_loader.direct_block_reader import (
     DirectBlockFileReader,
     calculate_alignment,
 )
 from vllm.model_executor.model_loader.moe_fast_loader import (
-    SafetensorsMoEIndex,
     check_page_cache_warmth,
 )
 from vllm.model_executor.model_loader.shared_pinned_pool import (
@@ -22,7 +25,9 @@ from vllm.model_executor.model_loader.shared_pinned_pool import (
 
 
 def test_calculate_alignment():
-    """Verifies that calculate_alignment computes correct 4096-byte boundaries and shifts."""
+    """Verifies that calculate_alignment computes correct 4096-byte boundaries
+    and shifts.
+    """
     # Case 1: Perfectly aligned 4096-byte block
     off, sz, shift = calculate_alignment(0, 4096, 4096)
     assert off == 0
@@ -85,7 +90,8 @@ def synthetic_multishard_checkpoint(tmp_path):
     ]
 
     for shard_idx, sdict in enumerate(shard_dicts):
-        shard_path = str(tmp_path / f"model-{shard_idx:05d}-of-{num_shards:05d}.safetensors")
+        shard_name = f"model-{shard_idx:05d}-of-{num_shards:05d}.safetensors"
+        shard_path = str(tmp_path / shard_name)
         save_file(sdict, shard_path)
         shard_paths.append(shard_path)
 
@@ -93,7 +99,9 @@ def synthetic_multishard_checkpoint(tmp_path):
 
 
 def test_shared_pinned_buffer_pool_lifecycle():
-    """Verifies that SharedPinnedBufferPool initializes, exposes slots, and cleans up properly."""
+    """Verifies that SharedPinnedBufferPool initializes, exposes slots,
+    and cleans up properly.
+    """
     pool_prefix = "test_fast_moe_pool_life"
     slot_size = 1024 * 1024  # 1 MiB
 
@@ -133,14 +141,18 @@ def test_shared_pinned_buffer_pool_lifecycle():
 
 
 def test_check_page_cache_warmth(synthetic_multishard_checkpoint):
-    """Verifies that check_page_cache_warmth accurately inspects Linux VFS page-cache state."""
+    """Verifies that check_page_cache_warmth accurately inspects Linux VFS
+    page-cache state.
+    """
     shard_paths, _, _, _ = synthetic_multishard_checkpoint
     warmth = check_page_cache_warmth(shard_paths, sample_mb=1)
     assert 0.0 <= warmth <= 1.0
 
 
 def test_direct_block_file_reader(synthetic_multishard_checkpoint):
-    """Verifies that DirectBlockFileReader correctly reads file bytes into memory-mapped buffers."""
+    """Verifies that DirectBlockFileReader correctly reads file bytes into
+    memory-mapped buffers.
+    """
     shard_paths, _, _, _ = synthetic_multishard_checkpoint
     target_shard = shard_paths[0]
     file_size = os.path.getsize(target_shard)
@@ -148,7 +160,12 @@ def test_direct_block_file_reader(synthetic_multishard_checkpoint):
     reader = DirectBlockFileReader(chunk_size=1024 * 1024, max_workers=2)
     with tempfile.TemporaryFile() as tf:
         tf.truncate(file_size)
-        mm = mmap.mmap(tf.fileno(), file_size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+        mm = mmap.mmap(
+            tf.fileno(),
+            file_size,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ | mmap.PROT_WRITE,
+        )
         mv = memoryview(mm)
 
         bytes_read = reader.read_file_to_buffer(target_shard, mv)
@@ -164,13 +181,17 @@ def test_direct_block_file_reader(synthetic_multishard_checkpoint):
 
 
 def test_direct_block_file_reader_sequential_buffered(tmp_path):
-    """Verifies that DirectBlockFileReader default sequential buffered reader is bitwise accurate."""
+    """Verifies that DirectBlockFileReader default sequential buffered reader
+    is bitwise accurate.
+    """
     test_data = os.urandom(256 * 1024)  # 256 KiB
     test_file = tmp_path / "test_shard.bin"
     test_file.write_bytes(test_data)
 
     buf = bytearray(len(test_data))
-    with DirectBlockFileReader(chunk_size=64 * 1024, max_workers=2, force_o_direct=False) as reader:
+    with DirectBlockFileReader(
+        chunk_size=64 * 1024, max_workers=2, force_o_direct=False
+    ) as reader:
         assert not reader.force_o_direct
         n = reader.read_file_to_buffer(str(test_file), buf)
         assert n == len(test_data)

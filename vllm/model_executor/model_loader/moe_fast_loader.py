@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fast Safetensors MoE bypass loader.
 
 Pre-indexes safetensors shard headers to consolidate individual 2D MoE expert
@@ -7,36 +8,31 @@ before yielding to the model loader. Eliminates thousands of Python generator
 iterations, submodule tree traversals, and non-contiguous GPU strided DMA copies.
 """
 
-from collections import defaultdict
-from collections.abc import Generator
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+import contextlib
 import hashlib
 import json
 import logging
 import math
 import os
-import re
 import struct
 import time
+from collections import defaultdict
+from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any
 
-from safetensors import safe_open
+import regex as re
 import torch
+from safetensors import safe_open
 
 try:
     from vllm import envs
 except ImportError:
     envs = None
 
-from .direct_block_reader import (
-    DirectBlockFileReader,
-    calculate_alignment,
-)
-from .shared_pinned_pool import (
-    SharedPinnedBufferPool,
-    DEFAULT_SLOT_SIZE,
-)
+from .direct_block_reader import DirectBlockFileReader
+from .shared_pinned_pool import SharedPinnedBufferPool
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +67,7 @@ for _k, _attr in [
 
 try:
     import safetensors.torch
+
     if hasattr(safetensors.torch, "_TYPES"):
         _SAFETENSORS_DTYPE_MAP.update(safetensors.torch._TYPES)
 except ImportError:
@@ -80,7 +77,9 @@ except ImportError:
 def _resolve_safetensors_dtype(
     dtype_str: str, expected_itemsize: int | None = None
 ) -> torch.dtype:
-    """Resolve safetensors dtype string to torch.dtype with robust float8/int fallbacks."""
+    """Resolve safetensors dtype string to torch.dtype with robust float8/int
+    fallbacks.
+    """
     dtype = _SAFETENSORS_DTYPE_MAP.get(dtype_str)
     if dtype is None:
         if dtype_str.startswith("F8_"):
@@ -90,7 +89,10 @@ def _resolve_safetensors_dtype(
         else:
             dtype = torch.bfloat16
 
-    if expected_itemsize is not None and getattr(dtype, "itemsize", None) != expected_itemsize:
+    if (
+        expected_itemsize is not None
+        and getattr(dtype, "itemsize", None) != expected_itemsize
+    ):
         if expected_itemsize == 1:
             dtype = getattr(torch, "float8_e4m3fn", torch.uint8)
         elif expected_itemsize == 2:
@@ -150,10 +152,13 @@ void batch_copy_slices(
             extra_ldflags=["-fopenmp"],
             verbose=False,
         )
-        logger.info("[FastMoE] C++ OpenMP Batch Slice Packer compiled and loaded successfully.")
+        logger.info(
+            "[FastMoE] C++ OpenMP Batch Slice Packer compiled and loaded successfully."
+        )
     except Exception as e:
         logger.warning(
-            "[FastMoE] C++ OpenMP Batch Slice Packer compilation failed (%s); falling back to PyTorch slicing.",
+            "[FastMoE] C++ OpenMP Batch Slice Packer compilation failed (%s); "
+            "falling back to PyTorch slicing.",
             e,
         )
         _FAST_SLICE_PACKER = None
@@ -242,13 +247,9 @@ class MoELayerPlan:
         default_factory=lambda: defaultdict(dict)
     )
     # Shared expert slices when FSE is active: (proj_type, suffix) -> MoESliceLocation
-    shared_slices: dict[tuple[str, str], MoESliceLocation] = field(
-        default_factory=dict
-    )
+    shared_slices: dict[tuple[str, str], MoESliceLocation] = field(default_factory=dict)
     # 3D tensors: (proj_type, suffix) -> MoE3DTensorLocation
-    tensors_3d: dict[tuple[str, str], MoE3DTensorLocation] = field(
-        default_factory=dict
-    )
+    tensors_3d: dict[tuple[str, str], MoE3DTensorLocation] = field(default_factory=dict)
 
 
 class PinnedHostStagingPool:
@@ -529,12 +530,15 @@ class SafetensorsMoEIndex:
                             num_total_experts=0,
                             num_routed_experts=0,
                         )
-                    self.moe_layers[routed_prefix].shared_slices[(proj_cat, suffix)] = slice_loc
+                    self.moe_layers[routed_prefix].shared_slices[(proj_cat, suffix)] = (
+                        slice_loc
+                    )
                     continue
 
                 self.non_moe_keys.append((key, shard_file))
 
-        # Calculate final total expert counts per layer (folding shared experts if FSE active)
+        # Calculate final total expert counts per layer (folding shared experts
+        # if FSE active)
         for plan in self.moe_layers.values():
             if self.fse_enabled and plan.shared_slices:
                 plan.num_total_experts = plan.num_routed_experts + self.n_shared_experts
@@ -624,7 +628,9 @@ def _copy_fse_down(
 
 
 def _prefetch_file_cache(path: str) -> None:
-    """Issue POSIX_FADV_WILLNEED on shard file to initiate asynchronous kernel read-ahead."""
+    """Issue POSIX_FADV_WILLNEED on shard file to initiate asynchronous kernel
+    read-ahead.
+    """
     posix_fadvise = getattr(os, "posix_fadvise", None)
     willneed = getattr(os, "POSIX_FADV_WILLNEED", None)
     if posix_fadvise is None or willneed is None:
@@ -647,12 +653,14 @@ def _stream_shard_direct_to_vram(
     """Streams weights shard-by-shard directly to VRAM with pipelined prefetching.
 
     Maintains a bounded sliding window of at most 2 open handles:
-    - Shard i: actively read and yielded directly to GPU VRAM (zero host staging buffer).
+    - Shard i: actively read and yielded directly to GPU VRAM (zero host
+      staging buffer).
     - Shard i+1: asynchronously prefetched via POSIX_FADV_WILLNEED and pre-opened.
 
     Inter-Rank Phase Invariance:
-    All TP ranks stream shards in identical sorted sequence, maximizing Linux OS page-cache
-    hits across peer ranks while bounding aggregate NVMe I/O to 1.45 TB.
+    All TP ranks stream shards in identical sorted sequence, maximizing Linux
+    OS page-cache hits across peer ranks while bounding aggregate NVMe I/O to
+    1.45 TB.
     """
     sorted_shards = sorted(hf_weights_files)
     num_shards = len(sorted_shards)
@@ -675,7 +683,9 @@ def _stream_shard_direct_to_vram(
         if idx == 0:
             current_handle = safe_open(shard_path, framework="pt", device="cpu")
         else:
-            current_handle = next_handle or safe_open(shard_path, framework="pt", device="cpu")
+            current_handle = next_handle or safe_open(
+                shard_path, framework="pt", device="cpu"
+            )
             next_handle = None
 
         if idx + 1 < num_shards:
@@ -688,7 +698,7 @@ def _stream_shard_direct_to_vram(
                 next_handle = None
 
         try:
-            for key in current_handle.keys():
+            for key in current_handle.keys():  # noqa: SIM118
                 if key == "__metadata__":
                     continue
 
@@ -728,15 +738,23 @@ def _stream_shard_direct_to_vram(
                                 s_chunk = tensor.shape[-1] // index.n_shared_experts
                                 for s_idx in range(index.n_shared_experts):
                                     virt_eid = num_routed + s_idx
-                                    chunk = tensor[..., s_idx * s_chunk : (s_idx + 1) * s_chunk]
-                                    virt_key = f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    chunk = tensor[
+                                        ..., s_idx * s_chunk : (s_idx + 1) * s_chunk
+                                    ]
+                                    virt_key = (
+                                        f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    )
                                     yield virt_key, chunk
                             else:
                                 s_chunk = tensor.shape[0] // index.n_shared_experts
                                 for s_idx in range(index.n_shared_experts):
                                     virt_eid = num_routed + s_idx
-                                    chunk = tensor[s_idx * s_chunk : (s_idx + 1) * s_chunk]
-                                    virt_key = f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    chunk = tensor[
+                                        s_idx * s_chunk : (s_idx + 1) * s_chunk
+                                    ]
+                                    virt_key = (
+                                        f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    )
                                     yield virt_key, chunk
                         continue
                     else:
@@ -763,8 +781,10 @@ def check_page_cache_warmth(
 
     Uses libc.mincore with strided sampling across all checkpoint shards to detect
     non-uniform or partial page-cache eviction.
+
     Returns:
         Fraction in [0.0, 1.0] of sampled pages present in RAM.
+
     """
     if not shards:
         return 1.0
@@ -791,7 +811,8 @@ def check_page_cache_warmth(
                 ("internal", ctypes.c_void_p),
             ]
 
-        # Use sample_mb if few shards (e.g. <=3), else sample_per_shard_mb across all shards
+        # Use sample_mb if few shards (e.g. <=3), else sample_per_shard_mb
+        # across all shards
         bytes_per_shard = (
             max(sample_per_shard_mb, sample_mb // len(shards)) * 1024 * 1024
             if len(shards) <= 3
@@ -839,7 +860,8 @@ def check_page_cache_warmth(
 
 
 class _Streaming3DLayerStager:
-    """Consolidates streaming 2D MoE expert slices into contiguous 3D host staging buffers.
+    """Consolidates streaming 2D MoE expert slices into contiguous 3D host
+    staging buffers.
 
     Eliminates thousands of uncoalesced micro-DMAs and generator iteration stalls
     by staging active layers in a bounded pinned host pool (capacity_per_shape=2)
@@ -881,7 +903,7 @@ class _Streaming3DLayerStager:
         layer_bufs: dict[tuple[str, str], tuple[torch.Tensor, int, str]] = {}
 
         if plan.slices:
-            suffixes = {suf for (_, suf) in plan.slices.keys()}
+            suffixes = {suf for (_, suf) in plan.slices}
             for suf in sorted(suffixes):
                 clean_suf = suf if (suf.startswith(".") or not suf) else f".{suf}"
                 if suf in ("", ".weight"):
@@ -1146,7 +1168,7 @@ class _Streaming3DLayerStager:
             event = torch.cuda.Event() if torch.cuda.is_available() else None
             if event is not None:
                 event.record(torch.cuda.current_stream())
-            for (buf, _, _) in layer_bufs.values():
+            for buf, _, _ in layer_bufs.values():
                 self.pool.release(buf, event=event)
 
 
@@ -1157,14 +1179,19 @@ def _stream_direct_io_broadcast(
     tp_size: int = 1,
     max_workers: int = 4,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Streams weights using single-reader Sequential Buffered I/O and POSIX shared-memory broadcast.
+    """Streams weights using single-reader Sequential Buffered I/O and POSIX
+    shared-memory broadcast.
 
-    - Rank 0 reads from NVMe into aligned double buffers (/dev/shm) via multi-threaded buffered
-      preadv/pread with POSIX_FADV_SEQUENTIAL, saturating wire speed and warming 100% of host DRAM.
-    - Peer ranks (1..tp_size-1) read zero bytes from disk, slicing their parameters directly from RAM.
-    - Achieves theoretical NVMe hardware bandwidth saturation without multi-process disk contention.
-    - Mode 3+1 Streaming 3D Packing: Consolidates 2D expert slices into contiguous 3D host staging
-      buffers on the fly, eliminating tens of thousands of micro-DMAs and generator iteration stalls.
+    - Rank 0 reads from NVMe into aligned double buffers (/dev/shm) via
+      multi-threaded buffered preadv/pread with POSIX_FADV_SEQUENTIAL, saturating
+      wire speed and warming 100% of host DRAM.
+    - Peer ranks (1..tp_size-1) read zero bytes from disk, slicing their
+      parameters directly from RAM.
+    - Achieves theoretical NVMe hardware bandwidth saturation without multi-process
+      disk contention.
+    - Mode 3+1 Streaming 3D Packing: Consolidates 2D expert slices into contiguous
+      3D host staging buffers on the fly, eliminating tens of thousands of
+      micro-DMAs and generator iteration stalls.
     """
     sorted_shards = sorted(hf_weights_files)
     num_shards = len(sorted_shards)
@@ -1174,12 +1201,14 @@ def _stream_direct_io_broadcast(
     # Calculate dynamic slot size (max shard size rounded up to 1 GiB)
     max_shard_bytes = max(os.path.getsize(f) for f in sorted_shards)
     align_bytes = 2 * 1024 * 1024  # 2 MiB alignment for huge pages & O_DIRECT blocks
-    slot_size = max(align_bytes, ((max_shard_bytes + align_bytes - 1) // align_bytes) * align_bytes)
+    slot_size = max(
+        align_bytes, ((max_shard_bytes + align_bytes - 1) // align_bytes) * align_bytes
+    )
 
     hash_key = hashlib.sha256("".join(sorted_shards).encode("utf-8")).hexdigest()[:16]
     pool_prefix = f"vllm_moe_dio_{hash_key}"
 
-    is_reader = (tp_rank == 0)
+    is_reader = tp_rank == 0
     pool = SharedPinnedBufferPool(
         prefix=pool_prefix,
         slot_size=slot_size,
@@ -1208,7 +1237,8 @@ def _stream_direct_io_broadcast(
         if is_reader:
             assert reader is not None
             logger.info(
-                "Single-Reader Sequential Broadcast: Rank 0 reading Shard 0 (%s) at wire speed...",
+                "Single-Reader Sequential Broadcast: Rank 0 reading "
+                "Shard 0 (%s) at wire speed...",
                 sorted_shards[0],
             )
             reader.read_file_to_buffer(sorted_shards[0], pool.get_slot_buffer(0))
@@ -1295,7 +1325,9 @@ def _stream_direct_io_broadcast(
                         )
                         if dest is not None:
                             buf, dst_offset = dest
-                            batch_ops[buf.data_ptr()].append((dst_offset, byte_offset, t_len))
+                            batch_ops[buf.data_ptr()].append(
+                                (dst_offset, byte_offset, t_len)
+                            )
                             num_batched_slices += 1
                             continue
 
@@ -1337,7 +1369,9 @@ def _stream_direct_io_broadcast(
                             )
                             if dest is not None:
                                 buf, dst_offset = dest
-                                batch_ops[buf.data_ptr()].append((dst_offset, byte_offset, t_len))
+                                batch_ops[buf.data_ptr()].append(
+                                    (dst_offset, byte_offset, t_len)
+                                )
                                 num_batched_slices += 1
                                 continue
 
@@ -1360,16 +1394,29 @@ def _stream_direct_io_broadcast(
                                 virt_eid = num_routed + s_idx
                                 chunk_src_offset = byte_offset + s_idx * s_chunk_bytes
                                 dest = stager.get_slice_dest(
-                                    routed_prefix, proj_cat, suffix, virt_eid, s_chunk_bytes
+                                    routed_prefix,
+                                    proj_cat,
+                                    suffix,
+                                    virt_eid,
+                                    s_chunk_bytes,
                                 )
                                 if dest is None:
                                     all_dest_found = False
                                     break
                                 buf, dst_offset = dest
-                                chunk_ops.append((buf.data_ptr(), dst_offset, chunk_src_offset, s_chunk_bytes))
+                                chunk_ops.append(
+                                    (
+                                        buf.data_ptr(),
+                                        dst_offset,
+                                        chunk_src_offset,
+                                        s_chunk_bytes,
+                                    )
+                                )
                             if all_dest_found:
                                 for buf_ptr, dst_off, src_off, nbytes in chunk_ops:
-                                    batch_ops[buf_ptr].append((dst_off, src_off, nbytes))
+                                    batch_ops[buf_ptr].append(
+                                        (dst_off, src_off, nbytes)
+                                    )
                                 num_batched_slices += index.n_shared_experts
                                 continue
 
@@ -1381,12 +1428,16 @@ def _stream_direct_io_broadcast(
                             s_chunk = tensor.shape[-1] // index.n_shared_experts
                             for s_idx in range(index.n_shared_experts):
                                 virt_eid = num_routed + s_idx
-                                chunk = tensor[..., s_idx * s_chunk : (s_idx + 1) * s_chunk]
+                                chunk = tensor[
+                                    ..., s_idx * s_chunk : (s_idx + 1) * s_chunk
+                                ]
                                 copied = stager.copy_fse_slice(
                                     routed_prefix, proj_cat, suffix, virt_eid, chunk
                                 )
                                 if not copied:
-                                    virt_key = f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    virt_key = (
+                                        f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    )
                                     yield virt_key, chunk
                         else:
                             s_chunk = tensor.shape[0] // index.n_shared_experts
@@ -1397,7 +1448,9 @@ def _stream_direct_io_broadcast(
                                     routed_prefix, proj_cat, suffix, virt_eid, chunk
                                 )
                                 if not copied:
-                                    virt_key = f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    virt_key = (
+                                        f"{routed_prefix}.{virt_eid}.{proj}{suffix}"
+                                    )
                                     yield virt_key, chunk
                     continue
 
@@ -1408,7 +1461,8 @@ def _stream_direct_io_broadcast(
                 tensor = raw_view.view(dtype).reshape(shape)
 
                 # Buffer layer non-MoE keys until layer 3D MoE completion to preserve
-                # strict preorder depth-first traversal and avoid AutoWeightsLoader splits
+                # strict preorder depth-first traversal and avoid
+                # AutoWeightsLoader splits
                 m_layer = re.search(r"\blayers\.(\d+)\b", key)
                 if m_layer:
                     layer_idx = int(m_layer.group(1))
@@ -1446,7 +1500,8 @@ def _stream_direct_io_broadcast(
             shard_elapsed_ms = (time.perf_counter() - shard_t0) * 1000.0
             if is_reader and (idx % 10 == 0 or idx == num_shards - 1 or idx < 3):
                 logger.info(
-                    "[FastMoE] Shard %d/%d processed: %d MoE slices batched via C++ OpenMP in %.1f ms (%d active layers staged)",
+                    "[FastMoE] Shard %d/%d processed: %d MoE slices batched "
+                    "via C++ OpenMP in %.1f ms (%d active layers staged)",
                     idx + 1,
                     num_shards,
                     num_batched_slices,
@@ -1491,15 +1546,15 @@ def _consolidate_3d_host_staging(
     local_expert_ids: set[int] | None = None,
     max_workers: int = 8,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Consolidates 2D expert slices into contiguous 3D host staging buffers (Mode 1)."""
+    """Consolidates 2D expert slices into contiguous 3D host staging buffers
+    (Mode 1).
+    """
     index.open_handles()
     pool = PinnedHostStagingPool(capacity_per_shape=2)
 
     try:
         # Phase 1: Yield all non-MoE keys directly via lazy mmap
-        logger.info(
-            "Yielding %d non-MoE parameter keys...", len(index.non_moe_keys)
-        )
+        logger.info("Yielding %d non-MoE parameter keys...", len(index.non_moe_keys))
         for key, shard_file in index.non_moe_keys:
             handle = index.handles[shard_file]
             tensor = handle.get_tensor(key)
@@ -1520,9 +1575,8 @@ def _consolidate_3d_host_staging(
 
                 num_local = len(active_eids)
                 eid_to_slot = {eid: idx for idx, eid in enumerate(active_eids)}
-                is_contiguous = (
-                    len(active_eids) > 0
-                    and active_eids == list(range(active_eids[0], active_eids[-1] + 1))
+                is_contiguous = len(active_eids) > 0 and active_eids == list(
+                    range(active_eids[0], active_eids[-1] + 1)
                 )
                 start_eid = active_eids[0] if is_contiguous else 0
                 end_eid = (active_eids[-1] + 1) if is_contiguous else num_local
@@ -1534,9 +1588,10 @@ def _consolidate_3d_host_staging(
 
                 # Branch 1: If layer has 3D pre-fused tensors
                 if plan.tensors_3d:
-                    suffixes = {suf for (_, suf) in plan.tensors_3d.keys()}
+                    suffixes = {suf for (_, suf) in plan.tensors_3d}
                     for suf in sorted(suffixes):
-                        # Case 1A: Separate 3D gate and up projections -> fuse into gate_up
+                        # Case 1A: Separate 3D gate and up projections ->
+                        # fuse into gate_up
                         gate_loc = plan.tensors_3d.get(("gate", suf))
                         up_loc = plan.tensors_3d.get(("up", suf))
                         if gate_loc and up_loc:
@@ -1624,14 +1679,18 @@ def _consolidate_3d_host_staging(
                             target_shape = (num_local, *gate_up_loc.shape[1:])
                             buf = pool.acquire(target_shape, gate_up_loc.dtype)
                             if is_contiguous:
-                                buf[:routed_end_eid].copy_(slice_obj[start_eid:routed_end_eid])
+                                buf[:routed_end_eid].copy_(
+                                    slice_obj[start_eid:routed_end_eid]
+                                )
                             else:
                                 for slot_idx, eid in enumerate(active_eids):
                                     if eid < plan.num_routed_experts:
                                         buf[slot_idx].copy_(slice_obj[eid])
 
                             if index.fse_enabled and plan.shared_slices:
-                                inter_dim = buf.shape[1] // 2 if len(buf.shape) >= 2 else 0
+                                inter_dim = (
+                                    buf.shape[1] // 2 if len(buf.shape) >= 2 else 0
+                                )
                                 _copy_fse_gate_up(
                                     buf,
                                     plan.shared_slices,
@@ -1659,7 +1718,9 @@ def _consolidate_3d_host_staging(
                             target_shape = (num_local, *down_loc.shape[1:])
                             buf = pool.acquire(target_shape, down_loc.dtype)
                             if is_contiguous:
-                                buf[:routed_end_eid].copy_(slice_obj[start_eid:routed_end_eid])
+                                buf[:routed_end_eid].copy_(
+                                    slice_obj[start_eid:routed_end_eid]
+                                )
                             else:
                                 for slot_idx, eid in enumerate(active_eids):
                                     if eid < plan.num_routed_experts:
@@ -1686,7 +1747,12 @@ def _consolidate_3d_host_staging(
 
                         # Case 1D: Standalone other projections
                         for (cat, s), loc in plan.tensors_3d.items():
-                            if s == suf and cat not in ("gate", "up", "down", "gate_up"):
+                            if s == suf and cat not in (
+                                "gate",
+                                "up",
+                                "down",
+                                "gate_up",
+                            ):
                                 h = index.handles[loc.shard_file]
                                 slice_obj = h.get_slice(loc.key)
                                 target_shape = (num_local, *loc.shape[1:])
@@ -1696,28 +1762,38 @@ def _consolidate_3d_host_staging(
                                 else:
                                     for slot_idx, eid in enumerate(active_eids):
                                         buf[slot_idx].copy_(slice_obj[eid])
-                                clean_suf = suf if (suf.startswith(".") or not suf) else f".{suf}"
+                                clean_suf = (
+                                    suf
+                                    if (suf.startswith(".") or not suf)
+                                    else f".{suf}"
+                                )
                                 yield f"{layer_prefix}.{cat}{clean_suf}", buf
 
                 # Branch 2: If layer has 2D per-expert slices
                 if plan.slices:
-                    # Group by suffix (e.g. "", ".weight_scale", ".weight_scale_inv", ".weight_scale_2")
-                    suffixes = {suf for (_, suf) in plan.slices.keys()}
+                    # Group by suffix (e.g. "", ".weight_scale",
+                    # ".weight_scale_inv", ".weight_scale_2")
+                    suffixes = {suf for (_, suf) in plan.slices}
 
                     for suf in sorted(suffixes):
                         gate_slices = plan.slices.get(("gate", suf), {})
                         up_slices = plan.slices.get(("up", suf), {})
                         down_slices = plan.slices.get(("down", suf), {})
 
-                        # Consolidate SwiGLU / GeGLU gate_up projection if gate and up exist
+                        # Consolidate SwiGLU / GeGLU gate_up projection if gate
+                        # and up exist
                         if gate_slices and up_slices:
                             sample_gate = next(iter(gate_slices.values()))
                             dtype = sample_gate.dtype
                             inter_dim = (
-                                sample_gate.shape[0] if len(sample_gate.shape) >= 2 else 0
+                                sample_gate.shape[0]
+                                if len(sample_gate.shape) >= 2
+                                else 0
                             )
                             hidden_dim = (
-                                sample_gate.shape[1] if len(sample_gate.shape) >= 2 else 0
+                                sample_gate.shape[1]
+                                if len(sample_gate.shape) >= 2
+                                else 0
                             )
 
                             if len(sample_gate.shape) == 2:
@@ -1733,7 +1809,13 @@ def _consolidate_3d_host_staging(
 
                             fused_buffer = pool.acquire(fused_shape, dtype)
 
-                            def copy_gate(eid: int, loc: MoESliceLocation) -> None:
+                            def copy_gate(
+                                eid: int,
+                                loc: MoESliceLocation,
+                                eid_to_slot=eid_to_slot,
+                                fused_buffer=fused_buffer,
+                                inter_dim=inter_dim,
+                            ) -> None:
                                 if eid in eid_to_slot:
                                     slot = eid_to_slot[eid]
                                     h = index.handles[loc.shard_file]
@@ -1743,7 +1825,13 @@ def _consolidate_3d_host_staging(
                                     elif len(t.shape) == 1:
                                         fused_buffer[slot, :inter_dim].copy_(t)
 
-                            def copy_up(eid: int, loc: MoESliceLocation) -> None:
+                            def copy_up(
+                                eid: int,
+                                loc: MoESliceLocation,
+                                eid_to_slot=eid_to_slot,
+                                fused_buffer=fused_buffer,
+                                inter_dim=inter_dim,
+                            ) -> None:
                                 if eid in eid_to_slot:
                                     slot = eid_to_slot[eid]
                                     h = index.handles[loc.shard_file]
@@ -1792,7 +1880,12 @@ def _consolidate_3d_host_staging(
                             down_shape = (num_local, *sample_down.shape)
                             down_buffer = pool.acquire(down_shape, dtype)
 
-                            def copy_down(eid: int, loc: MoESliceLocation) -> None:
+                            def copy_down(
+                                eid: int,
+                                loc: MoESliceLocation,
+                                eid_to_slot=eid_to_slot,
+                                down_buffer=down_buffer,
+                            ) -> None:
                                 if eid in eid_to_slot:
                                     slot = eid_to_slot[eid]
                                     h = index.handles[loc.shard_file]
@@ -1824,14 +1917,20 @@ def _consolidate_3d_host_staging(
 
                             yield yield_key, down_buffer
 
-                        # Handle standalone projections (e.g. dense_h_to_4h without gate)
+                        # Handle standalone projections (e.g. dense_h_to_4h
+                        # without gate)
                         for (cat, s), slices in plan.slices.items():
                             if s == suf and cat not in ("gate", "up", "down"):
                                 sample = next(iter(slices.values()))
                                 shape = (num_local, *sample.shape)
                                 buf = pool.acquire(shape, sample.dtype)
 
-                                def copy_other(eid: int, loc: MoESliceLocation) -> None:
+                                def copy_other(
+                                    eid: int,
+                                    loc: MoESliceLocation,
+                                    eid_to_slot=eid_to_slot,
+                                    buf=buf,
+                                ) -> None:
                                     if eid in eid_to_slot:
                                         slot = eid_to_slot[eid]
                                         h = index.handles[loc.shard_file]
@@ -1843,7 +1942,9 @@ def _consolidate_3d_host_staging(
                                     )
                                 )
                                 clean_suf = (
-                                    suf if (suf.startswith(".") or not suf) else f".{suf}"
+                                    suf
+                                    if (suf.startswith(".") or not suf)
+                                    else f".{suf}"
                                 )
                                 yield f"{layer_prefix}.{cat}{clean_suf}", buf
 
@@ -1876,10 +1977,7 @@ def _resolve_mode_decision(
             active_mode = getattr(envs, "VLLM_FAST_MOE_MODE", None)
         if active_mode is None:
             active_mode = os.getenv("VLLM_FAST_MOE_MODE")
-    if active_mode is not None:
-        active_mode = active_mode.strip().lower()
-    else:
-        active_mode = "auto"
+    active_mode = active_mode.strip().lower() if active_mode is not None else "auto"
 
     # 1. Explicit user manual overrides
     if active_mode == "direct_io" or use_direct_io is True:
@@ -1899,7 +1997,10 @@ def _resolve_mode_decision(
     thresh_override = None
     if env_threshold_gb is not None:
         thresh_override = env_threshold_gb
-    elif direct_vram_threshold_gb is not None and direct_vram_threshold_gb not in (100.0, 300.0):
+    elif direct_vram_threshold_gb is not None and direct_vram_threshold_gb not in (
+        100.0,
+        300.0,
+    ):
         thresh_override = direct_vram_threshold_gb
 
     if thresh_override is not None and total_gb > thresh_override:
@@ -1917,7 +2018,9 @@ def _resolve_mode_decision(
     if warmth < 0.80:
         logger.info(
             "Fast MoE Bypass: Cold page cache detected (%.1f%% < 80.0%%). "
-            "Routing to Mode 3 (Single-Reader Sequential Buffered Broadcast with Streaming 3D Packing) to eliminate multi-rank NVMe contention and micro-DMA serialization.",
+            "Routing to Mode 3 (Single-Reader Sequential Buffered Broadcast "
+            "with Streaming 3D Packing) to eliminate multi-rank NVMe contention "
+            "and micro-DMA serialization.",
             warmth * 100.0,
         )
         return 3
@@ -1925,29 +2028,31 @@ def _resolve_mode_decision(
     # 3. Gate 2: Scale & Concurrency Crossover (Warm Cache)
     # Resolve effective crossover threshold (default 300.0 GB)
     effective_crossover = crossover_threshold_gb
-    if effective_crossover is None:
-        if direct_vram_threshold_gb is not None and direct_vram_threshold_gb not in (100.0,):
-            effective_crossover = direct_vram_threshold_gb
+    if effective_crossover is None and (
+        direct_vram_threshold_gb is not None and direct_vram_threshold_gb != 100.0
+    ):
+        effective_crossover = direct_vram_threshold_gb
     if effective_crossover is None:
         if envs is not None:
             effective_crossover = getattr(envs, "VLLM_FAST_MOE_CROSSOVER_GB", None)
         if effective_crossover is None:
             env_val = os.getenv("VLLM_FAST_MOE_CROSSOVER_GB")
             if env_val:
-                try:
+                with contextlib.suppress(ValueError):
                     effective_crossover = float(env_val)
-                except ValueError:
-                    pass
     if effective_crossover is None:
         effective_crossover = 300.0
 
     # Checkpoints <= effective_crossover (or TP <= 2):
-    # Host memory consumption is strictly bounded to <= 3.8 GiB per rank via layer-by-layer staging.
-    # Consolidates 2D per-expert slices and fuses 3D projections in pinned RAM, eliminating
-    # thousands of uncoalesced PCIe DMA dispatches (restores 11.5x-17.3x speedups).
+    # Host memory consumption is strictly bounded to <= 3.8 GiB per rank via
+    # layer-by-layer staging.
+    # Consolidates 2D per-expert slices and fuses 3D projections in pinned RAM,
+    # eliminating thousands of uncoalesced PCIe DMA dispatches
+    # (restores 11.5x-17.3x speedups).
     if total_gb <= effective_crossover or tp_size <= 2:
         logger.info(
-            "Fast MoE Bypass: Warm cache (%.1f%%) with checkpoint size %.2f GiB <= %.1f GiB (or TP=%d <= 2). "
+            "Fast MoE Bypass: Warm cache (%.1f%%) with checkpoint size "
+            "%.2f GiB <= %.1f GiB (or TP=%d <= 2). "
             "Routing to Mode 1 (Bulk 3D Host Staging with Bounded Pinned Pool).",
             warmth * 100.0,
             total_gb,
@@ -1956,12 +2061,15 @@ def _resolve_mode_decision(
         )
         return 1
 
-    # Checkpoints > effective_crossover and TP >= 4 (e.g. Kimi-K3 1.45 TB, DeepSeek-V4.1 475 GB):
-    # Stream shard-by-shard via Mode 2 with bounded sliding window of 2 open handles to avoid
-    # multi-rank kernel mm->mmap_lock bus contention.
+    # Checkpoints > effective_crossover and TP >= 4 (e.g. Kimi-K3 1.45 TB,
+    # DeepSeek-V4.1 475 GB):
+    # Stream shard-by-shard via Mode 2 with bounded sliding window of 2 open
+    # handles to avoid multi-rank kernel mm->mmap_lock bus contention.
     logger.info(
-        "Fast MoE Bypass: Warm cache (%.1f%%) with ultra-large checkpoint (%.2f GiB > %.1f GiB, TP=%d >= 4). "
-        "Routing to Mode 2 (Shard-Driven Direct-to-VRAM with Pipelined Prefetching).",
+        "Fast MoE Bypass: Warm cache (%.1f%%) with ultra-large checkpoint "
+        "(%.2f GiB > %.1f GiB, TP=%d >= 4). "
+        "Routing to Mode 2 (Shard-Driven Direct-to-VRAM with Pipelined "
+        "Prefetching).",
         warmth * 100.0,
         total_gb,
         effective_crossover,
@@ -1982,10 +2090,12 @@ def _resolve_and_broadcast_mode(
     tp_size: int = 1,
     index: "SafetensorsMoEIndex | None" = None,
 ) -> int:
-    """Deterministically resolves loader mode on Rank 0 and broadcasts to TP ranks.
+    """Deterministically resolves loader mode on Rank 0 and broadcasts
+    to TP ranks.
 
     Multi-Factor Structural Decision Tree:
-        1. Manual user overrides (mode, use_direct_io, use_direct_vram, env_threshold_gb)
+        1. Manual user overrides (mode, use_direct_io, use_direct_vram,
+           env_threshold_gb)
         2. Storage Warmth Check: warmth < 0.80 -> Mode 3 (Direct-I/O Broadcast)
         3. Scale & Concurrency Crossover (Warm Cache):
            - (size <= 300 GB or TP <= 2) -> Mode 1 (Bulk 3D Host Staging)
@@ -1995,6 +2105,7 @@ def _resolve_and_broadcast_mode(
         1: Mode 1 (Bulk 3D Host Staging with Bounded Pinned Pool)
         2: Mode 2 (Shard-Driven Direct-to-VRAM with Pipelined Prefetching)
         3: Mode 3 (Direct-I/O Single-Reader Broadcast)
+
     """
     selected_mode = 0
     if tp_rank == 0:
@@ -2011,7 +2122,11 @@ def _resolve_and_broadcast_mode(
         )
 
     # Synchronize across tensor parallel ranks if distributed is active
-    if tp_size > 1 and torch.distributed.is_available() and torch.distributed.is_initialized():
+    if (
+        tp_size > 1
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    ):
         mode_list = [selected_mode]
         torch.distributed.broadcast_object_list(mode_list, src=0)
         selected_mode = mode_list[0]
@@ -2046,19 +2161,24 @@ def fast_bypass_safetensors_iterator(
     tp_rank: int = 0,
     tp_size: int = 1,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterates through safetensors checkpoint shards with scale-aware MoE ingestion.
+    """Iterates through safetensors checkpoint shards with scale-aware MoE
+    ingestion.
 
     Tri-Modal Ingestion Architecture:
-    1. Mode 1 (Bulk 3D Host Staging): Checkpoints <= 300 GB (e.g. Qwen3.8-Flash-Next, GLM-5.3-Flash, MiniMax-M3).
-       Consolidates slices in pinned CPU host staging buffers to reduce thousands of DMA
-       calls to 192 wire-speed transfers, preserving 11.5x-17.3x load speedups.
-    2. Mode 2 (Shard-Driven Direct-to-VRAM with Pipelined Prefetching): Warm Checkpoints > 300 GB
-       (e.g. Kimi-K3, DeepSeek-V3/V4 with host page cache warmed). Streams one shard at a time with
-       sliding window (POSIX_FADV_WILLNEED on shard i+1 and pre-opened handle).
-    3. Mode 3 (Direct-I/O Broadcast): Cold Checkpoints (e.g. fresh node boot / drop_caches).
-       Designates Rank 0 to read raw blocks via O_DIRECT at wire speed (~4.3 GB/s) into an aligned
-       POSIX shared memory double buffer (/dev/shm). All TP ranks slice tensors in parallel from RAM,
-       eliminating multi-rank disk contention and bringing cold load down to wire-speed NVMe flash limits.
+    1. Mode 1 (Bulk 3D Host Staging): Checkpoints <= 300 GB (e.g.
+       Qwen3.8-Flash-Next, GLM-5.3-Flash, MiniMax-M3). Consolidates slices in
+       pinned CPU host staging buffers to reduce thousands of DMA calls to 192
+       wire-speed transfers, preserving 11.5x-17.3x load speedups.
+    2. Mode 2 (Shard-Driven Direct-to-VRAM with Pipelined Prefetching): Warm
+       Checkpoints > 300 GB (e.g. Kimi-K3, DeepSeek-V3/V4 with host page cache
+       warmed). Streams one shard at a time with sliding window
+       (POSIX_FADV_WILLNEED on shard i+1 and pre-opened handle).
+    3. Mode 3 (Direct-I/O Broadcast): Cold Checkpoints (e.g. fresh node boot /
+       drop_caches). Designates Rank 0 to read raw blocks via O_DIRECT at wire
+       speed (~4.3 GB/s) into an aligned POSIX shared memory double buffer
+       (/dev/shm). All TP ranks slice tensors in parallel from RAM, eliminating
+       multi-rank disk contention and bringing cold load down to wire-speed
+       NVMe flash limits.
     """
     if fse_enabled is None:
         fse_enabled = os.environ.get(
@@ -2096,10 +2216,8 @@ def fast_bypass_safetensors_iterator(
     env_thresh = os.environ.get("VLLM_FAST_MOE_DIRECT_VRAM_THRESHOLD_GB")
     env_threshold_gb = None
     if env_thresh is not None:
-        try:
+        with contextlib.suppress(ValueError):
             env_threshold_gb = float(env_thresh)
-        except ValueError:
-            pass
 
     selected_mode = _resolve_and_broadcast_mode(
         hf_weights_files,
@@ -2119,8 +2237,9 @@ def fast_bypass_safetensors_iterator(
 
     if selected_mode == 3:
         logger.info(
-            "Fast MoE Bypass: Selected Mode 3 (Direct-I/O Single-Reader Broadcast). "
-            "Total checkpoint size: %.2f GiB across %d shard(s), TP size: %d, TP rank: %d.",
+            "Fast MoE Bypass: Selected Mode 3 (Direct-I/O Single-Reader "
+            "Broadcast). Total checkpoint size: %.2f GiB across %d shard(s), "
+            "TP size: %d, TP rank: %d.",
             total_gb,
             len(hf_weights_files),
             tp_size,
@@ -2136,7 +2255,8 @@ def fast_bypass_safetensors_iterator(
         )
     elif selected_mode == 2:
         logger.info(
-            "Fast MoE Bypass: Selected Mode 2 (Shard-Driven Direct-to-VRAM with Pipelined Prefetching). "
+            "Fast MoE Bypass: Selected Mode 2 (Shard-Driven Direct-to-VRAM "
+            "with Pipelined Prefetching). "
             "Total checkpoint size: %.2f GiB across %d shard(s).",
             total_gb,
             len(hf_weights_files),
