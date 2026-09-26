@@ -268,6 +268,12 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
+        # Let the platform replace core Triton kernels (e.g. CPU fallback
+        # implementations) before any worker or model code can launch them.
+        from vllm.platforms import current_platform
+
+        current_platform.register_triton_kernel_overrides()
+
         parallel_config = vllm_config.parallel_config
         if isinstance(parallel_config.worker_cls, str):
             worker_class: type[WorkerBase] = resolve_obj_by_qualname(
