@@ -1268,7 +1268,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _can_run_padded_prompt_tail_as_decode(
         self, scheduler_output: SchedulerOutput
     ) -> bool:
-        """Whether a nonempty prefill-containing batch can use decode dispatch."""
+        """Check decode eligibility for a batch containing prefills."""
         # PCP/adaptive verification can change the scheduler's layout.
         if (
             self.speculative_config is None
@@ -1278,8 +1278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             return False
 
-        # A one-token uncached prompt can also be padded alongside running
-        # decodes. Recurrent backends still need prefill state initialization.
+        # Uncached recurrent prompts still need prefill state initialization.
         if any(
             config.is_hybrid or config.is_attention_free
             for config in (
@@ -1295,8 +1294,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             return False
 
-        # The scheduler gives prefilling rows drafts only to pad their final
-        # token to K+1. Matching decode_query_len (K+bonus) also requires bonus=1.
+        # Prefilling rows get draft slots only for the final-token padding.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         return all(
             n == self.decode_query_len and len(draft_tokens.get(req_id, ())) == n - 1
@@ -1767,8 +1765,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
             if uniform_tok_count is not None:
-                # Prompt-tail inputs are now loaded. Share the target's decode
-                # classification with drafters that reuse its DP sync.
+                # Drafters must reuse the target's DP classification.
                 input_batch.has_prefill = False
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block

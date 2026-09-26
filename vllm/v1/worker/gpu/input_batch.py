@@ -84,9 +84,8 @@ class InputBatch:
     num_computed_prefill_tokens_np: np.ndarray
     # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
-    # Whether execution needs prefill handling. Eligible padded prompt tails
-    # are classified as decode after loading their prompt-token inputs;
-    # is_prefilling_np still records the original per-request prefill state.
+    # Execution classification; may be False for padded prompt tails even when
+    # is_prefilling_np is True.
     has_prefill: bool
 
     # [num_tokens_after_padding]

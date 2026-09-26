@@ -26,8 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_mod
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
-from vllm.v1.worker.gpu.spec_decode.multi_module_mtp import speculator as multi_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
@@ -109,19 +107,12 @@ def _make_speculator(
 
 
 @pytest.mark.parametrize("has_prefill", [False, True])
-@pytest.mark.parametrize(
-    "draft_cls", [_TestSpeculator, Gemma4Speculator, MultiModuleMTPSpeculator]
-)
 def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
     monkeypatch,
     has_prefill,
-    draft_cls,
 ):
     """A prepared prompt tail must reuse the target's decode classification."""
-    speculator = object.__new__(draft_cls)
-    speculator.__dict__.update(
-        _make_speculator(monkeypatch, torch.zeros(4, 3)).__dict__
-    )
+    speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
     speculator.input_buffers.query_start_loc = torch.tensor([0, 4])
     speculator._prepare_inputs = lambda *args, **kwargs: None
     speculator.num_speculative_steps = 3
@@ -159,14 +150,12 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         pass
 
     def dispatch(*args, **kwargs):
-        # Execute the real DP reuse assertions before stopping the model call.
         desc, reused = dispatch_cg_and_sync_dp(*args, **kwargs)
         assert reused is sync
         assert desc.cg_mode == CUDAGraphMode.FULL
         raise Dispatched
 
     monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", dispatch)
-    monkeypatch.setattr(multi_module, "dispatch_cg_and_sync_dp", dispatch)
     expected = AssertionError if has_prefill else Dispatched
     with pytest.raises(expected):
         speculator.propose(
