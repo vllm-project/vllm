@@ -1298,6 +1298,9 @@ class FusedMoEConfig:
     # means unbounded.
     defer_moe_finalize_max_num_tokens: int = -1
 
+    # Require routing to remain separate from expert execution.
+    require_decomposed_backend: bool = False
+
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.

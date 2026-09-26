@@ -53,6 +53,8 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    _non_expert_parameter_prefixes: tuple[str, ...] = ()
+
     def __init__(
         self,
         layer_name: str,
@@ -1011,6 +1013,20 @@ class RoutedExperts(PluggableLayer):
         `build_expert_params_mapping` instead (which take the prefix directly).
         See `build_expert_params_mapping` for the returned tuple format.
         """
+        from vllm.model_executor.layers.fused_moe.expert_substitution import (
+            make_substituted_expert_params_mapping,
+        )
+        from vllm.model_executor.layers.fused_moe.substituted_routed_experts import (
+            SubstitutedRoutedExperts,
+        )
+
+        if any(
+            isinstance(module, SubstitutedRoutedExperts) for module in model.modules()
+        ):
+            return make_substituted_expert_params_mapping(
+                model, ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name
+            )
+
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
         prefix = "base_layer." if has_base_layer else ""
         # These loaders index ``params_dict[full_name]``, so both sides get it.
@@ -1196,7 +1212,7 @@ class RoutedExperts(PluggableLayer):
 
         # Parameters of non-expert submodules that live inside runner (RoutedExperts).
         # These must be excluded from EPLB weight rearrangement.
-        NON_EXPERT_PREFIXES = ()
+        NON_EXPERT_PREFIXES = self._non_expert_parameter_prefixes
 
         assert all(
             weight.is_contiguous()
