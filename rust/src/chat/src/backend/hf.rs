@@ -144,7 +144,14 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let mut files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    let mut files = ResolvedModelFiles::new_with_sources(
+        model_id,
+        options.revision.as_deref(),
+        options.tokenizer.as_deref(),
+        options.tokenizer_revision.as_deref(),
+        options.hf_config_path.as_deref(),
+    )
+    .await?;
     files.apply_overrides(&options.hf_overrides)?;
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
@@ -242,6 +249,9 @@ mod tests {
             "test-model".to_string(),
             LoadModelBackendsOptions {
                 revision: None,
+                tokenizer: None,
+                tokenizer_revision: None,
+                hf_config_path: None,
                 hf_overrides: Default::default(),
                 generation_config: Default::default(),
                 renderer,
