@@ -893,6 +893,11 @@ class RoutedExperts(PluggableLayer):
             qual_name = f"{self.layer_name}.{expert_name}"
             # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
+            # Fully-fused checkpoints stack all experts in one tensor named by
+            # projection (e.g. `gate_up_proj`); per-expert checkpoints prefix the
+            # expert index (e.g. `0.gate_proj`). This distinguishes 2D tensors
+            # stacked over experts (global scales) from single-expert weights.
+            checkpoint_is_fused = not expert_name.split(".", 1)[0].isdigit()
             matched = False
             for param_name, weight_name, expert_id, shard_id in expert_mapping:
                 if weight_name not in qual_name:
@@ -908,9 +913,28 @@ class RoutedExperts(PluggableLayer):
                         for fused_name in ("gate_up_proj", "w13")
                     )
                 )
-                weight_name = qual_name.replace(weight_name, param_name)
-                param_name = weight_name.removeprefix(f"{self.layer_name}.")
-                param = getattr(self, param_name, None)
+                mapped_name = qual_name.replace(weight_name, param_name)
+                resolved_name = mapped_name.removeprefix(f"{self.layer_name}.")
+                param = getattr(self, resolved_name, None)
+                # Fused mappings only cover the bare `.weight`. Compose the
+                # checkpoint's quantization suffix onto the shard prefix so
+                # packed weights and scales resolve, e.g.
+                # `gate_up_proj.weight_scale` -> `w13_weight_scale`. Biases are
+                # excluded: pre-fused bias names must be renamed via a
+                # WeightsMapper instead (see the weight-loading tests).
+                if param is None and param_name.endswith("weight"):
+                    suffix = qual_name.split(weight_name, 1)[1].lstrip(".")
+                    if suffix and "bias" not in suffix:
+                        shard_prefix = param_name.removeprefix("experts.")
+                        shard_prefix = shard_prefix[: -len("weight")]
+                        composed = f"{shard_prefix}{suffix}"
+                        composed_param = getattr(self, composed, None)
+                        if composed_param is not None:
+                            param = composed_param
+                            resolved_name = composed
+                            mapped_name = f"{self.layer_name}.{composed}"
+                weight_name = mapped_name
+                param_name = resolved_name
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):
                         continue
@@ -938,6 +962,16 @@ class RoutedExperts(PluggableLayer):
                         experts_shard = fused_weight.chunk(2, dim=1)[expert_id]
                     else:
                         experts_shard = fused_weight
+                    start = 0
+                elif checkpoint_is_fused and loaded_weight.dim() == 2:
+                    # Fully-fused per-shard scalars stacked over experts: w13
+                    # global scales are [E, 2] (a column per gate/up shard) and
+                    # w2 global scales are [E, 1].
+                    if shard_id in {"w1", "w3"}:
+                        # Repurpose expert_id to pick the w1 (0) or w3 (1) column
+                        experts_shard = loaded_weight.chunk(2, dim=1)[expert_id]
+                    else:
+                        experts_shard = loaded_weight
                     start = 0
                 elif is_per_expert_fused_w13:
                     shard_index = 0 if shard_id == "w1" else 1
