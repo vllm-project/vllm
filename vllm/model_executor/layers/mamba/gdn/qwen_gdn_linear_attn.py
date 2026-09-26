@@ -19,6 +19,7 @@ from vllm.config import (
 )
 from vllm.distributed import (
     divide,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
@@ -43,6 +45,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -57,6 +60,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import rmsnorm_fn
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.utils.torch_utils import (
@@ -82,6 +86,16 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
     from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
+    )
+
+# Optional ROCm AITER FlyDSL kernel that computes RMSNormGated inside the
+# out_proj GEMM at decode, so the normalized values never go through HBM.
+GDN_AITER_NORM_OUT_PROJ_AVAILABLE = bool(rocm_aiter_ops.is_gdn_norm_out_proj_enabled())
+
+if GDN_AITER_NORM_OUT_PROJ_AVAILABLE:
+    from aiter.ops.flydsl import (
+        flydsl_gdn_gated_rmsnorm_out_proj,
+        flydsl_gdn_gated_rmsnorm_out_proj_supported,
     )
 
 logger = init_logger(__name__)
@@ -505,6 +519,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
+        # The fused kernel reads the bf16 out_proj weight directly. A quantized
+        # out_proj keeps the separate norm, which the norm + quant compile pass
+        # fuses with the activation quantization instead. The op also runs the
+        # batches that the kernel does not take, so it is only used when the kernel
+        # runs this layer's shape at 1 token. A model whose shape the kernel never
+        # runs keeps the path above.
+        self.fuse_norm_out_proj = (
+            GDN_AITER_NORM_OUT_PROJ_AVAILABLE
+            and self.norm.activation == "silu"
+            and isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
+            and self.out_proj.weight.dtype == torch.bfloat16
+            and flydsl_gdn_gated_rmsnorm_out_proj_supported(
+                1,
+                self.num_v_heads // self.tp_size,
+                self.head_v_dim,
+                self.hidden_size,
+                self.out_proj.weight.dtype,
+            )
+        )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
@@ -856,6 +889,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
+    def _fused_output_projection(
+        self,
+        core_attn_out: torch.Tensor,
+        z: torch.Tensor,
+    ) -> torch.Tensor:
+        """Part 3 on ROCm: RMSNormGated + out_proj as one custom op.
+
+        The TP all-reduce of out_proj stays outside the op, so the
+        allreduce + RMSNorm compile pass still sees it.
+        """
+        output = torch.ops.vllm.qwen_gdn_gated_rmsnorm_out_proj(
+            core_attn_out,
+            z,
+            self.norm.weight,
+            self.out_proj.weight,
+            self.norm.eps,
+        )
+        if self.out_proj.reduce_results and self.out_proj.tp_size > 1:
+            output = tensor_model_parallel_all_reduce(output)
+        return output
+
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
@@ -888,6 +942,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 use_aiter=True,
             )
 
+            # A LoRA wrapper replaces out_proj after __init__. The fused kernel
+            # would skip its LoRA delta, so it only runs on the plain layer.
+            if self.fuse_norm_out_proj and type(self.out_proj) is RowParallelLinear:
+                return self._fused_output_projection(core_attn_out, z)
             return self._output_projection(core_attn_out, z)
         else:
             return self.forward_cuda(hidden_states)
@@ -1960,4 +2018,63 @@ direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
+)
+
+
+def qwen_gdn_gated_rmsnorm_out_proj(
+    core_attn_out: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """RMSNormGated with a SiLU gate + the unquantized out_proj GEMM of one rank.
+
+    The TP all-reduce is not included. It is a custom op because torch.compile
+    cannot trace the FlyDSL launch, and because the token count is only known
+    here. Decode batches that the AITER kernel supports run as that one kernel.
+    Other batches, such as prefill, run the Triton gated norm and then the GEMM.
+
+    The op takes the weights instead of a layer name. The op is not a splitting
+    op, so it is part of the compiled graph, and a layer name would make the
+    graph of every GDN layer different and compile each one separately.
+    """
+    num_tokens, num_heads, head_dim = core_attn_out.shape
+    if (
+        core_attn_out.is_contiguous()
+        and z.is_contiguous()
+        and flydsl_gdn_gated_rmsnorm_out_proj_supported(
+            num_tokens, num_heads, head_dim, out_weight.shape[0], out_weight.dtype
+        )
+    ):
+        return flydsl_gdn_gated_rmsnorm_out_proj(
+            core_attn_out, z, norm_weight, out_weight, eps=eps
+        )
+    normed = rmsnorm_fn(
+        core_attn_out,
+        norm_weight,
+        None,
+        z=z,
+        eps=eps,
+        group_size=None,
+        norm_before_gate=True,
+        activation="silu",
+    )
+    return rocm_unquantized_gemm_impl(normed.flatten(-2), out_weight)
+
+
+def qwen_gdn_gated_rmsnorm_out_proj_fake(
+    core_attn_out: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return core_attn_out.new_empty((core_attn_out.shape[0], out_weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_gated_rmsnorm_out_proj",
+    op_func=qwen_gdn_gated_rmsnorm_out_proj,
+    fake_impl=qwen_gdn_gated_rmsnorm_out_proj_fake,
 )
