@@ -923,6 +923,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # during actual execution.
         assert self.sampler is not None
         self.sampler(logits, dummy_input_batch)
+        if self.rejection_sampler is not None:
+            # Warm head-dtype logits; scheduler warmup covers processed FP32 logits.
+            assert self.speculator is not None
+            self.rejection_sampler(
+                logits,
+                dummy_input_batch,
+                self.speculator.draft_logits,
+            )
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:

@@ -93,6 +93,62 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 
+# Draft architectures whose Markov head implements the candidate-pruned walk.
+_MARKOV_TOPK_ARCHITECTURES = ("Qwen3DSparkModel", _QWEN3_OMNI_DSPARK_ARCHITECTURE)
+
+DEFAULT_MARKOV_BIAS_TOPK = 16
+"""Default DSpark bigram-side candidate budget (0 = base-logit candidates only)."""
+
+
+def supports_markov_topk(speculative_config: "SpeculativeConfig") -> bool:
+    """Whether the draft architecture can run the candidate-pruned Markov head."""
+    architectures = speculative_config.draft_model_config.architectures
+    return any(
+        architecture in architectures for architecture in _MARKOV_TOPK_ARCHITECTURES
+    )
+
+
+def resolve_markov_bias_topk(speculative_config: "SpeculativeConfig") -> int:
+    """Resolve the DSpark bigram candidate budget (0 = base-logit candidates only).
+
+    The base logits come from a backbone that sees a mask token in every draft
+    slot, so they rank a slot in isolation, whereas the sequential direction of
+    the chain comes from the Markov (bigram) bias. A candidate set taken from
+    the base logits alone therefore misses the tokens the dense head actually
+    prefers; unioning it with the bias's own top-m restores them. Costs one
+    extra ``[m]`` table lookup per draft position.
+    """
+    if resolve_markov_topk(speculative_config) <= 0:
+        return 0
+    hf_config = speculative_config.draft_model_config.hf_config
+    for value in (
+        speculative_config.markov_bias_topk,
+        getattr(hf_config, "markov_bias_topk", None),
+    ):
+        if value is not None:
+            return int(value)
+    return DEFAULT_MARKOV_BIAS_TOPK
+
+
+def resolve_markov_topk(speculative_config: "SpeculativeConfig") -> int:
+    """Resolve the effective DSpark Markov candidate budget (0 = full vocab).
+
+    Precedence: the ``markov_topk`` knob, its legacy ``dspark_draft_topk`` alias,
+    then the checkpoint's own ``markov_topk`` / ``dspark_draft_topk``. When none
+    of them is set the pruned walk stays off (0): candidate pruning is strictly
+    opt-in and the default keeps the original full-vocab Markov projection.
+    """
+    hf_config = speculative_config.draft_model_config.hf_config
+    for value in (
+        speculative_config.markov_topk,
+        speculative_config.dspark_draft_topk,
+        getattr(hf_config, "markov_topk", None),
+        getattr(hf_config, "dspark_draft_topk", None),
+    ):
+        if value is not None:
+            return int(value)
+    return 0
+
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
     hf_config = model_config.hf_config
@@ -607,8 +663,28 @@ class SpeculativeConfig:
     usage."""
 
     dspark_draft_topk: int | None = Field(default=None, ge=1)
-    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
-    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+    """Legacy alias of `markov_topk` (kept for existing serving configs).
+    `markov_topk` takes precedence when both are given."""
+
+    markov_topk: int | None = Field(default=None, ge=0)
+    """For DSpark drafting, evaluate the vanilla Markov head on the top-k
+    base-logit candidates of each draft position instead of the whole draft
+    vocabulary. The bias projection shrinks from `[B, rank] @ [rank, V]` to
+    `[B, k, rank] @ [B, rank, 1]` and selection/sampling happen inside the
+    candidate set, so no per-position full-vocab tensor is materialized. The
+    trained weights are reused unchanged (no retraining); k only trades a little
+    acceptance length for draft latency. Unset (and no checkpoint-level value)
+    keeps the original full-vocab Markov projection: candidate pruning is
+    opt-in. Requires draft tensor parallel size 1."""
+
+    markov_bias_topk: int | None = Field(default=None, ge=0)
+    """Additional candidate budget taken from the Markov head's own bigram
+    ranking instead of the base logits: each draft position scores the union of
+    the `markov_topk` highest base-logit tokens and the `markov_bias_topk`
+    bigram-top tokens of the previously sampled one. The bigram top-m is
+    precomputed once from the trained weights, so this widens the candidate set
+    without a full-vocab projection. Only used when `markov_topk > 0`; unset
+    means 16, and 0 restricts the candidates to the base logits alone."""
 
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
@@ -1500,38 +1576,40 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if self.dspark_draft_topk is not None and self.method != "dspark":
-                    raise ValueError("dspark_draft_topk is only supported by DSpark")
+                for knob in ("markov_topk", "markov_bias_topk", "dspark_draft_topk"):
+                    if getattr(self, knob) is not None and self.method != "dspark":
+                        raise ValueError(f"{knob} is only supported by DSpark")
 
-                dspark_draft_topk = None
                 if self.method == "dspark":
                     hf_config = self.draft_model_config.hf_config
-                    dspark_draft_topk = self.dspark_draft_topk
-                    if dspark_draft_topk is None:
-                        dspark_draft_topk = getattr(
-                            hf_config, "dspark_draft_topk", None
-                        )
-                    if dspark_draft_topk is not None:
-                        draft_vocab_size = (
-                            getattr(hf_config, "draft_vocab_size", None)
-                            or hf_config.vocab_size
-                        )
-                        if not 1 <= dspark_draft_topk <= draft_vocab_size:
+                    draft_vocab_size = (
+                        getattr(hf_config, "draft_vocab_size", None)
+                        or hf_config.vocab_size
+                    )
+                    markov_topk = resolve_markov_topk(self)
+                    if markov_topk > 0:
+                        if markov_topk > draft_vocab_size:
                             raise ValueError(
-                                "dspark_draft_topk must be between 1 and the "
-                                f"draft vocabulary size ({draft_vocab_size})"
+                                "markov_topk must be 0 (full-vocab Markov head) "
+                                "or at most the draft vocabulary size "
+                                f"({draft_vocab_size})"
                             )
-                        if (
-                            "Qwen3DSparkModel"
-                            not in self.draft_model_config.architectures
-                            and _QWEN3_OMNI_DSPARK_ARCHITECTURE
-                            not in self.draft_model_config.architectures
-                        ):
+                        if not supports_markov_topk(self):
                             raise ValueError(
-                                "dspark_draft_topk is only supported by "
-                                "Qwen3DSparkModel and Qwen3OmniDSparkModel"
+                                "markov_topk (and its legacy alias "
+                                "dspark_draft_topk) is only supported by "
+                                f"{' and '.join(_MARKOV_TOPK_ARCHITECTURES)}"
                             )
-                        hf_config.dspark_draft_topk = dspark_draft_topk
+                    markov_bias_topk = resolve_markov_bias_topk(self)
+                    if markov_bias_topk > draft_vocab_size:
+                        raise ValueError(
+                            "markov_bias_topk must be 0 or at most the draft "
+                            f"vocabulary size ({draft_vocab_size})"
+                        )
+                    # Publish the resolved budgets so the speculator, CUDA graph
+                    # capture and the draft-logit cache all agree on one value.
+                    hf_config.markov_topk = markov_topk
+                    hf_config.markov_bias_topk = markov_bias_topk
 
                     assert self.target_model_config is not None
                     _validate_qwen3_omni_dspark(
