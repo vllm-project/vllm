@@ -2040,6 +2040,10 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None,
     ) -> BlockHashWithGroupId | None:
+        skip_async_reattach = (
+            request.num_in_flight_tokens > 0
+            and num_tokens <= request.num_computed_tokens
+        )
         hash_block_size = self.block_pool.hash_block_size
         # Re-key the reserved block at its exported checkpoint boundary.
         checkpoint = self._checkpoints.get(request.request_id)
@@ -2059,6 +2063,15 @@ class MambaManager(SingleTypeKVCacheManager):
                 # state is about to overwrite the block.
                 self.block_pool._maybe_evict_cached_block(checkpoint_block)
                 return None
+            # With async run-ahead, a boundary at or behind the optimistic
+            # computed frontier may already have been moved to a durable CoW
+            # block. Do not reattach its hash to the request-table state block,
+            # which a later in-flight step can overwrite. A boundary beyond the
+            # frontier is a first publication by the current allocation and must
+            # remain eligible. Transient-checkpoint cleanup above is mandatory
+            # even when this retry must not publish a boundary.
+            if skip_async_reattach:
+                return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
             return self.block_pool.cache_partial_block(
@@ -2069,6 +2082,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 block_size=self.block_size,
                 replace_existing_hashes=True,
             )
+        if skip_async_reattach:
+            return None
         if self.block_size == hash_block_size:
             return None
         if num_tokens % self.block_size == 0:
