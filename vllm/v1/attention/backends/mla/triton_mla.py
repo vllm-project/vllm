@@ -111,7 +111,7 @@ class TritonMLABackend(MLACommonBackend):
         return [MultipleOf(16)]
 
     @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
+    def supports_block_size(cls, block_size: int | None, kv_cache_spec=None) -> bool:
         if block_size is None:
             return True
         return block_size % 16 == 0
