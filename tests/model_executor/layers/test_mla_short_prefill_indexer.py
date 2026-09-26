@@ -398,7 +398,12 @@ def test_candidate_selection_keeps_valid_blocks_with_nan_scores(score, start):
 def test_candidate_kernels_preserve_packed_bounds_and_padding(
     width, block_size, k, decode
 ):
-    """Preserve top-k ties, newest blocks, empty rows and candidate clamping."""
+    """Preserve top-k ties, newest blocks, empty rows and candidate clamping.
+
+    The mask covers each row's live ``[0, end)`` span; columns at or past the
+    row's end keep whatever the logits buffer held, because nothing reads them
+    (the row top-k takes the same bounds).
+    """
     from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
         apply_candidate_mask,
         select_candidate_blocks,
@@ -456,7 +461,8 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
         reduce="amax",
         include_self=True,
     )
-    reference = logits.masked_fill((keep == 0) | ~valid, -torch.inf)
+    live = cols < ke[:, None]
+    reference = torch.where(live & ((keep == 0) | ~valid), -torch.inf, logits)
     apply_candidate_mask(logits, starts, ends, candidates, block_size, repeat)
     torch.testing.assert_close(logits, reference, rtol=0, atol=0, equal_nan=True)
     graph = torch.cuda.CUDAGraph()
@@ -468,7 +474,7 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
         logits.fill_(3.0)
         graph.replay()
         keep = valid & (block >= 0) & ((cols - ks[:, None]) // block_size == block)
-        reference = torch.where(keep, 3.0, -torch.inf)
+        reference = torch.where(keep | ~live, 3.0, -torch.inf)
         torch.testing.assert_close(logits, reference, rtol=0, atol=0)
 
 
