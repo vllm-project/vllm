@@ -18,6 +18,8 @@ Limitations:
 
 __all__ = [
     "record_metadata_for_reloading",
+    "start_reload",
+    "finish_reload",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
@@ -25,6 +27,11 @@ __all__ = [
     "support_quantized_model_reload_from_hp_weights",
 ]
 
+import torch
+
+from vllm.config import ModelConfig
+
+from .direct import direct_finish, direct_start
 from .layerwise import (
     finalize_layerwise_processing,
     finalize_layerwise_reload,
@@ -35,3 +42,35 @@ from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,
 )
+
+# Entry points for the engines that have a `reload_mode`. Everything else names
+# the mechanism it wants directly. There is no recovery step: if a reload
+# raises, the model is undefined and the engine must be restarted.
+
+_STARTED_MODE = "_reload_started_mode"
+
+
+def start_reload(model: torch.nn.Module, mode: str = "layerwise") -> None:
+    """Prepare ``model`` to receive checkpoint-format weights.
+
+    ``mode`` is latched on the model, so ``finish_reload`` completes whichever
+    one was started rather than re-reading a config that may have changed.
+    """
+    if mode == "direct":
+        direct_start(model)
+    elif mode == "layerwise":
+        initialize_layerwise_reload(model)
+    else:
+        raise ValueError(f"unknown reload mode {mode!r}")
+    model.__dict__[_STARTED_MODE] = mode
+
+
+def finish_reload(model: torch.nn.Module, model_config: ModelConfig) -> None:
+    """Complete the reload that ``start_reload`` began."""
+    mode = model.__dict__.pop(_STARTED_MODE, None)
+    if mode is None:
+        raise RuntimeError("finish_reload called without a matching start_reload")
+    if mode == "direct":
+        direct_finish(model)
+    else:
+        finalize_layerwise_reload(model, model_config)
