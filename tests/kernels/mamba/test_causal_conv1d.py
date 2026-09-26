@@ -120,37 +120,6 @@ def causal_conv1d_update_ref(
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 
-@pytest.mark.parametrize("itype", [torch.bfloat16, torch.float])
-@pytest.mark.parametrize("silu_activation", [True])
-@pytest.mark.parametrize("has_bias", [True])
-def causal_conv1d_opcheck_fn(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    cu_seq_len: torch.Tensor | None = None,
-    cache_indices: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
-    conv_states: torch.Tensor | None = None,
-    activation: str | None = "silu",
-    null_block_id: int = NULL_BLOCK_ID,
-):
-    """x: (batch, dim, seqlen)
-    weight: (dim, width)
-    bias: (dim,)
-    seq_idx: (batch, seqlen)
-    initial_states: (batch, dim, width - 1)
-    final_states_out: (batch, dim, width - 1), to be written to
-    activation: either None or "silu" or "swish"
-
-    out: (batch, dim, seqlen)
-    """
-    if activation not in [None, "silu", "swish"]:
-        raise NotImplementedError("activation must be None, silu, or swish")
-    if x.stride(-1) != 1:
-        x = x.contiguous()
-    bias = bias.contiguous() if bias is not None else None
-
-
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
