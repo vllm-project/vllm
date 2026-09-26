@@ -1709,6 +1709,47 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         )
 
+    def _num_tokens_with_lookahead(
+        self, num_tokens: int, num_tokens_main_model: int
+    ) -> int:
+        """Effective token count for align-mode allocation.
+
+        Lookahead tokens (scheduler decode/prefill lookahead) are not spec
+        draft tokens: they reserve capacity so that the state page for the
+        next block boundary exists in the same schedule that carries the
+        boundary token. When the main-model sequence ends exactly on a page
+        boundary and lookahead tokens are scheduled beyond it, count one
+        extra page (the next state page); otherwise drop lookahead tokens
+        from the count so the page-column alignment stays intact.
+        """
+        _lookahead = num_tokens - num_tokens_main_model
+        if (
+            _lookahead >= 1
+            and num_tokens_main_model > 0
+            and num_tokens_main_model % self.block_size == 0
+        ):
+            return num_tokens_main_model + self.block_size
+        return num_tokens_main_model
+
+    def _align_num_skipped_blocks(
+        self,
+        num_skipped_blocks: int,
+        num_tokens: int,
+        num_tokens_main_model: int,
+    ) -> int:
+        """Null padding must track the main-model sequence length, not
+        num_tokens when it includes lookahead: the reserved next page is
+        capacity for a FUTURE page, not a skipped page of the current
+        sequence. Padding a null for it displaces the real running-state
+        column: the worker's running-state index is cdiv(main_end, bs) - 1,
+        so a null there makes the next chunk's state pre-copy chain from
+        the null slot, corrupting the recurrent state and collapsing
+        spec-decode acceptance to zero permanently.
+        """
+        if num_tokens != num_tokens_main_model:
+            return max(cdiv(num_tokens_main_model, self.block_size) - 1, 0)
+        return num_skipped_blocks
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -1746,12 +1787,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 apply_admission_cap=apply_admission_cap,
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
-            num_tokens = num_tokens_main_model
+            num_tokens = self._num_tokens_with_lookahead(
+                num_tokens, num_tokens_main_model
+            )
 
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
@@ -1798,6 +1836,10 @@ class MambaManager(SingleTypeKVCacheManager):
                 physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
                 if not blocks_allocated or checkpoint_block:
                     physical_block_cap += self.num_speculative_blocks
+                # The materialized next page (lookahead beyond a page-
+                # aligned main end) is a real allocated block, not a null.
+                if num_tokens != num_tokens_main_model:
+                    physical_block_cap += 1
                 num_new_blocks = min(num_new_blocks, physical_block_cap)
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
@@ -1818,12 +1860,14 @@ class MambaManager(SingleTypeKVCacheManager):
                 request_id, num_tokens, num_tokens_main_model
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
-            num_tokens = num_tokens_main_model
+            # The next-page reserve matters at boundary-aligned main ends:
+            # without it the boundary token's state write targets a column
+            # whose table entry is still a recycled stale block (one-step
+            # NaN, then repetition lock at every page boundary). See
+            # _num_tokens_with_lookahead.
+            num_tokens = self._num_tokens_with_lookahead(
+                num_tokens, num_tokens_main_model
+            )
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
@@ -1860,6 +1904,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_skipped_blocks = (
                     num_required_blocks - self.num_speculative_blocks - 1
                 )
+                num_skipped_blocks = self._align_num_skipped_blocks(
+                    num_skipped_blocks, num_tokens, num_tokens_main_model
+                )
                 # null blocks
                 if prev_block_len < num_skipped_blocks:
                     # minus the internal checkpoint block
@@ -1881,10 +1928,23 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_new_blocks = max(num_required_blocks - len(req_blocks), 0)
                 if has_partial_hit:
                     num_new_blocks = max(num_new_blocks, 0) + 1
-                max_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
-                if not blocks_allocated or checkpoint_block:
-                    max_new_blocks += self.num_speculative_blocks
-                assert num_new_blocks <= max_new_blocks
+                if blocks_allocated:
+                    assert num_new_blocks <= 1 + int(has_partial_hit)
+                else:
+                    assert num_new_blocks <= self.num_speculative_blocks + 1 + int(
+                        has_partial_hit
+                    )
+                # The materialized next page (lookahead beyond a page-
+                # aligned main end) is a real allocated block, not a null.
+                if num_tokens != num_tokens_main_model:
+                    num_new_blocks += 1
+                    if blocks_allocated:
+                        assert num_new_blocks <= 2 + int(has_partial_hit)
+                    else:
+                        assert (
+                            num_new_blocks
+                            <= self.num_speculative_blocks + 2 + int(has_partial_hit)
+                        )
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
