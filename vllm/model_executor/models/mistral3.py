@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -212,8 +212,14 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     ) -> PixtralHFEncoderInfo:
         processor = self.get_hf_processor()
         size = processor.image_processor.size
-        merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
-        if override_size := merged_kwargs.get("size"):
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs(
+            mm_processor_kwargs or {}
+        )
+        image_mm_kwargs = cast(
+            Mapping[str, Any],
+            merged_mm_kwargs.get("images_kwargs", {}),
+        )
+        if override_size := image_mm_kwargs.get("size"):
             size = size | override_size
 
         image_size = size["longest_edge"]

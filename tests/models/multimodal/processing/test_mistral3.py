@@ -100,6 +100,11 @@ def _expected_placeholder_tokens_per_image(
     [
         ({}, (448, 448), 256),
         ({"size": {"longest_edge": 1008}}, (1540, 1540), 1296),
+        (
+            {"images_kwargs": {"size": {"longest_edge": 1008}}},
+            (1540, 1540),
+            1296,
+        ),
         ({"size": {"longest_edge": 1288}}, (1536, 1187), 1656),
         ({"size": {"longest_edge": 1008}}, (29, 29), 4),
         ({"size": {"longest_edge": 1000}}, (1540, 1700), 1188),
@@ -145,6 +150,40 @@ def test_processor_size_override(
     assert hf_placeholder_tokens.count(hf_processor.image_token_id) == (
         expected_from_pixel_values * num_imgs
     )
+    assert prompt_update_tokens == hf_placeholder_tokens
+
+
+def test_scoped_request_size_overrides_configured_flat_size():
+    ctx = build_model_context(
+        _MODEL_ID,
+        mm_processor_kwargs={"size": {"longest_edge": 1008}},
+        limit_mm_per_prompt={"image": 1},
+        model_config_kwargs=_MODEL_CONFIG_KWARGS,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = AutoProcessor.from_pretrained(
+        _MODEL_ID,
+        fix_mistral_regex=True,
+    )
+
+    hf_processor_mm_kwargs: dict[str, object] = {
+        "images_kwargs": {"size": {"longest_edge": 1288}}
+    }
+    image = Image.new("RGB", (1536, 1187), color=(127, 127, 127))
+
+    merged_mm_kwargs = processor.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+    pixel_values, hf_placeholder_tokens = _process_images_with_hf(
+        hf_processor, [image], merged_mm_kwargs
+    )
+    prompt_update_tokens = _placeholder_tokens_from_prompt_updates(
+        processor, [image], pixel_values, hf_processor_mm_kwargs
+    )
+
+    expected_from_pixel_values = _expected_placeholder_tokens_per_image(
+        hf_processor, pixel_values[0]
+    )
+    assert expected_from_pixel_values == 1656
+    assert hf_placeholder_tokens.count(hf_processor.image_token_id) == 1656
     assert prompt_update_tokens == hf_placeholder_tokens
 
 
