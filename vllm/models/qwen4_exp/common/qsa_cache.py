@@ -398,7 +398,10 @@ def build_qsa_metadata_triton(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build QSA side-cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+    # Graph padding can make the final query offset exceed the real token count.
+    num_mapped_tokens = min(
+        int(common_attn_metadata.query_start_loc_cpu[-1]), num_tokens
+    )
     token_to_req = token_to_req_buffer[:num_tokens]
     logical_positions = logical_positions_buffer[:num_tokens]
     visible_blocks = visible_blocks_buffer[:num_tokens]
@@ -476,7 +479,10 @@ def _build_qsa_metadata_torch(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     del request_capacity
     num_tokens = common_attn_metadata.num_actual_tokens
-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+    # Graph padding can make the final query offset exceed the real token count.
+    num_mapped_tokens = min(
+        int(common_attn_metadata.query_start_loc_cpu[-1]), num_tokens
+    )
     logical_positions = logical_positions_buffer[:num_tokens]
     visible_blocks = visible_blocks_buffer[:num_tokens]
 

@@ -24,6 +24,38 @@ requires_qsa_kernels = pytest.mark.skipif(
 )
 
 
+def test_qsa_metadata_clamps_graph_padded_query_end() -> None:
+    """A padded graph query must not map more than the real token count."""
+    num_actual_tokens = 1
+    query_start_loc = torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_actual_tokens=num_actual_tokens,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=torch.tensor([2401, 0, 0, 0], dtype=torch.int32),
+        slot_mapping=torch.tensor([0], dtype=torch.int64),
+        block_table_tensor=torch.tensor([[0], [0], [0], [0]], dtype=torch.int32),
+        token_to_req_indices=lambda buffer: buffer.zero_(),
+    )
+
+    token_to_req, logical_positions, visible_blocks, slot_mapping = (
+        qsa_cache._build_qsa_metadata_torch(
+            common,
+            torch.empty(num_actual_tokens, dtype=torch.int32),
+            torch.empty(num_actual_tokens, dtype=torch.int64),
+            torch.empty(num_actual_tokens, dtype=torch.int32),
+            torch.empty(num_actual_tokens, dtype=torch.int64),
+            storage_block_size=1,
+            compress_ratio=1,
+        )
+    )
+
+    assert token_to_req.tolist() == [0]
+    assert logical_positions.tolist() == [2400]
+    assert visible_blocks.tolist() == [2401]
+    assert slot_mapping.tolist() == [0]
+
+
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
