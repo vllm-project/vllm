@@ -591,10 +591,10 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
-- label: ":nvidia: (H100) LM Eval Humming Activation FP8/INT8 TEMPORARY"
-  key: lm-eval-humming-h100-act
+- label: ":nvidia: (H100) LM Eval Humming Qwen3.5 35B Activation FP8 TEMPORARY"
+  key: lm-eval-humming-h100-qwen35-35b-act-fp8
   optional: true
-  timeout_in_minutes: 90
+  timeout_in_minutes: 30
   device: h100
   num_devices: 1
   source_file_dependencies:
@@ -604,8 +604,97 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-qwen35-35b-act-fp8.txt
+
+- label: ":nvidia: (H100) LM Eval Humming Qwen3.5 35B Activation INT8 TEMPORARY"
+  key: lm-eval-humming-h100-qwen35-35b-act-int8
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-qwen35-35b-act-int8.txt
+
+- label: ":nvidia: (H100) LM Eval Humming Qwen3 30B W8 Activation FP8 TEMPORARY"
+  key: lm-eval-humming-h100-qwen3-30b-w8-act-fp8
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-qwen3-30b-w8-act-fp8.txt
+
+- label: ":nvidia: (H100) LM Eval Humming Qwen3 30B W4 Activation FP8 TEMPORARY"
+  key: lm-eval-humming-h100-qwen3-30b-w4-act-fp8
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-qwen3-30b-w4-act-fp8.txt
+
+- label: ":nvidia: (H100) LM Eval Humming Qwen3 30B Activation INT8 TEMPORARY"
+  key: lm-eval-humming-h100-qwen3-30b-act-int8
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-qwen3-30b-act-int8.txt
+
+- label: ":nvidia: (H100) LM Eval Humming GPT-OSS TEMPORARY"
+  key: lm-eval-humming-h100-gpt-oss
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-gpt-oss.txt
+
+- label: ":nvidia: (H100) LM Eval Humming Small Models TEMPORARY"
+  key: lm-eval-humming-h100-small-models
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-small-models.txt
 
 - label: ":nvidia: (H100) LM Eval Humming DeepEP TEMPORARY"
   key: lm-eval-humming-h100-deepep
@@ -642,10 +731,10 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
 
-- label: ":nvidia: (B200) LM Eval Humming Activation FP8/INT8 TEMPORARY"
-  key: lm-eval-humming-b200-act
+- label: ":nvidia: (B200) LM Eval Humming Qwen3.5 35B TEMPORARY"
+  key: lm-eval-humming-b200-qwen35-35b
   optional: true
-  timeout_in_minutes: 50
+  timeout_in_minutes: 30
   device: b200-k8s
   num_devices: 1
   source_file_dependencies:
@@ -655,8 +744,67 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-b200-qwen35-35b.txt
+
+- label: ":nvidia: (B200) LM Eval Humming Qwen3 30B Activation FP8 TEMPORARY"
+  key: lm-eval-humming-b200-qwen3-30b-act-fp8
+  optional: true
+  timeout_in_minutes: 30
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-b200-qwen3-30b-act-fp8.txt
+
+- label: ":nvidia: (B200) LM Eval Humming Qwen3 30B Activation INT8 TEMPORARY"
+  key: lm-eval-humming-b200-qwen3-30b-act-int8
+  optional: true
+  timeout_in_minutes: 30
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-b200-qwen3-30b-act-int8.txt
+
+- label: ":nvidia: (B200) LM Eval Humming GPT-OSS TEMPORARY"
+  key: lm-eval-humming-b200-gpt-oss
+  optional: true
+  timeout_in_minutes: 30
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-b200-gpt-oss.txt
+
+- label: ":nvidia: (B200) LM Eval Humming Small Models TEMPORARY"
+  key: lm-eval-humming-b200-small-models
+  optional: true
+  timeout_in_minutes: 30
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-b200-small-models.txt
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k8v4"
   key: lm-eval-turboquant-k8v4

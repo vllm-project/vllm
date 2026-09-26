@@ -1,0 +1,3 @@
+Qwen2-1.5B-Instruct-FP8W8-humming-act-fp8.yaml
+Qwen3-0.6B-MXFP8-humming-act-fp8.yaml
+Qwen3-4B-mixed-quant-RTN-no-w4a4-humming.yaml
