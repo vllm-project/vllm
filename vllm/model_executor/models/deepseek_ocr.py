@@ -616,8 +616,18 @@ class DeepseekOCRForCausalLM(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        def _filter_mtp_weights(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if name.startswith(("mtp_module.", "mtp_embed_tokens.")):
+                    continue
+                yield name, weight
+
         loader = AutoWeightsLoader(self)
-        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        autoloaded_weights = loader.load_weights(
+            _filter_mtp_weights(weights), mapper=self.hf_to_vllm_mapper
+        )
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
