@@ -20,6 +20,7 @@ from tests.utils import (
     multi_gpu_test,
 )
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -35,6 +36,7 @@ pytestmark = pytest.mark.skipif(
 
 HIDDEN_SIZE = 7168
 LATENT_SIZE = 3584
+SHARED_INTERMEDIATE = 6144
 EPS = 1e-5
 DTYPE = torch.bfloat16
 
@@ -68,6 +70,8 @@ def _tail_runner(
         "routed_output_transform": transform,
         "_up_proj_shard_size": HIDDEN_SIZE // tp_size,
         "_logged_sharded_tail": False,
+        "_tail_shardable": True,
+        "_w_tail": None,
         "moe_config": SimpleNamespace(
             tp_size=tp_size,
             ep_size=1,
@@ -161,9 +165,50 @@ def _check_writes_only_its_own_shard(
     torch.testing.assert_close(local[:, end:], before[:, end:], atol=0, rtol=0)
 
 
+def _check_fused_matches_unfused(device: torch.device, tp_size: int, rank: int) -> None:
+    """Per-rank partials differ once fused, so compare the reduced outputs."""
+    transform = _build_transform(device)
+    runner = _tail_runner(transform, tp_size)
+    group = get_tp_group().device_group
+    torch.manual_seed(1000 + rank)
+    k = SHARED_INTERMEDIATE // tp_size
+    w_down = torch.randn(HIDDEN_SIZE, k, device=device, dtype=DTYPE) / k**0.5
+    shared_mlp = SimpleNamespace(
+        down_proj=SimpleNamespace(weight=torch.nn.Parameter(w_down.clone(), False)),
+        act_fn=SituAndMul(beta=4.0, linear_beta=25.0),
+        down_proj_fused_into_tail=False,
+    )
+
+    assert runner.fuse_shared_down_proj_into_tail(shared_mlp)
+    assert shared_mlp.down_proj_fused_into_tail
+
+    for iteration, num_tokens in enumerate((1, 5, 16, 64)):
+        torch.manual_seed(100 * iteration + rank + 1)
+        routed_output, _ = _rank_partials(num_tokens, device)
+        gate_up = torch.randn(num_tokens, 2 * w_down.shape[1], device=device)
+        gate_up = gate_up.to(DTYPE)
+
+        expected = F.linear(
+            F.rms_norm(
+                _all_reduced(routed_output, group),
+                (LATENT_SIZE,),
+                transform.norm.weight,
+                EPS,
+            ),
+            transform.up_proj.weight,
+        )
+        shared = F.linear(shared_mlp.act_fn.forward_native(gate_up), w_down)
+        expected.add_(_all_reduced(shared, group))
+
+        actual = runner._shard_up_proj_tail(routed_output, gate_up, None)
+
+        torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+
+
 _CHECKS = {
     "matches_replicated": _check_matches_replicated,
     "own_shard_only": _check_writes_only_its_own_shard,
+    "fused_matches_unfused": _check_fused_matches_unfused,
 }
 
 
@@ -199,6 +244,25 @@ def test_sharded_tail_tp8_matches_replicated_projection() -> None:
 @multi_gpu_test(num_gpus=4)
 def test_sharded_tail_tp4_writes_only_its_own_shard() -> None:
     _run_ranks("own_shard_only", 4)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_fused_tail_tp4_matches_unfused_tail() -> None:
+    _run_ranks("fused_matches_unfused", 4)
+
+
+@multi_gpu_test(num_gpus=8)
+def test_fused_tail_tp8_matches_unfused_tail() -> None:
+    _run_ranks("fused_matches_unfused", 8)
+
+
+def test_does_not_fuse_an_unshardable_tail() -> None:
+    """Without the sharded tail there is no final reduce to sum the partials."""
+    shared_mlp = SimpleNamespace(down_proj_fused_into_tail=False)
+    runner = _runner(_tail_shardable=False)
+
+    assert not runner.fuse_shared_down_proj_into_tail(shared_mlp)
+    assert not shared_mlp.down_proj_fused_into_tail
 
 
 def _runner(**attrs) -> ROCmLatentMoERunner:

@@ -4,6 +4,7 @@ from typing import cast
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_reduce,
@@ -54,6 +55,41 @@ class ROCmLatentMoERunner(MoERunner):
                 scope="global",
             )
         self._logged_sharded_tail = False
+        self._w_tail: torch.Tensor | None = None
+
+    def fuse_shared_down_proj_into_tail(self, shared_mlp: torch.nn.Module) -> bool:
+        """Run the shared-expert act + down proj and a K-sharded up proj as one GEMM."""
+        if not self._tail_shardable:
+            return False
+        transform = self.routed_output_transform
+        assert transform is not None
+        up_proj = transform.up_proj
+        down_proj = shared_mlp.down_proj
+        latent_size = up_proj.weight.shape[1]
+        tp_size = self.moe_config.tp_size
+        if (
+            latent_size % tp_size != 0
+            or up_proj.weight.dtype != torch.bfloat16
+            or down_proj.weight.dtype != torch.bfloat16
+        ):
+            return False
+        k = latent_size // tp_size
+        k0 = get_tensor_model_parallel_rank() * k
+        act_fn = shared_mlp.act_fn
+
+        def pack(gate_up: torch.Tensor, latent: torch.Tensor) -> torch.Tensor:
+            return torch.cat(
+                [act_fn.forward_native(gate_up), latent[:, k0 : k0 + k]], dim=-1
+            )
+
+        n_down = down_proj.weight.shape[1]
+        self._w_tail = torch.cat(
+            [down_proj.weight.data, up_proj.weight.data[:, k0 : k0 + k]], dim=1
+        ).contiguous()
+        down_proj.weight.data = self._w_tail[:, :n_down]
+        self._tail_pack = act_fn.maybe_compile(pack)
+        shared_mlp.down_proj_fused_into_tail = True
+        return True
 
     def _shard_up_proj_tail(
         self,
@@ -76,6 +112,18 @@ class ROCmLatentMoERunner(MoERunner):
         latent = tensor_model_parallel_all_reduce(fused_output)
         if transform.norm is not None:
             latent = transform.norm(latent)
+
+        if self._w_tail is not None:
+            a = self._tail_pack(shared_output, latent)
+            if rocm_aiter_ops.is_tgemm_enabled():
+                from aiter.tuned_gemm import tgemm
+
+                out = tgemm.mm(a, self._w_tail)
+            else:
+                out = torch.nn.functional.linear(a, self._w_tail)
+            return self._maybe_reduce_final_output(
+                out, trunc_size, output_is_reduced=False
+            )
 
         shard_size = self._up_proj_shard_size
         shard_start = get_tensor_model_parallel_rank() * shard_size
