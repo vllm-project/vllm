@@ -422,6 +422,40 @@ steps:
   num_devices: 8
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-r1-tp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval DeepSeek R1 TP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/config/
+      - vllm/distributed/
+      - vllm/model_executor/models/
+      - vllm/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/model_executor/layers/layernorm.py
+      - csrc/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-deepseek-r1-tp.txt
 
 - label: ":nvidia: (H200) LM Eval DeepSeek R1 DP"
   key: lm-eval-deepseek-r1-dp-8xh200
@@ -431,6 +465,40 @@ steps:
   num_devices: 8
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-r1-dp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval DeepSeek R1 DP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/config/
+      - vllm/distributed/
+      - vllm/model_executor/models/
+      - vllm/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/model_executor/layers/layernorm.py
+      - csrc/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-deepseek-r1-dp.txt
 
 - label: ":nvidia: (H200) LM Eval DeepSeek V3.2 TP"
   key: lm-eval-deepseek-v32-tp-8xh200
@@ -440,6 +508,40 @@ steps:
   num_devices: 8
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-tp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval DeepSeek V3.2 TP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/config/
+      - vllm/distributed/
+      - vllm/model_executor/models/
+      - vllm/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/model_executor/layers/layernorm.py
+      - csrc/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-deepseek-v32-tp.txt
 
 - label: ":nvidia: (H200) LM Eval DeepSeek V3.2 DP"
   key: lm-eval-deepseek-v32-dp-8xh200
@@ -449,6 +551,40 @@ steps:
   num_devices: 8
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-dp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval DeepSeek V3.2 DP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/config/
+      - vllm/distributed/
+      - vllm/model_executor/models/
+      - vllm/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/model_executor/layers/layernorm.py
+      - csrc/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-deepseek-v32-dp.txt
 
 - label: ":nvidia: (H200) LM Eval Nemotron 3 Super"
   key: lm-eval-nemotron-3-super-8xh200
@@ -458,6 +594,40 @@ steps:
   num_devices: 8
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-nemotron-3-super.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Nemotron 3 Super"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/config/
+      - vllm/distributed/
+      - vllm/model_executor/models/
+      - vllm/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/model_executor/layers/layernorm.py
+      - csrc/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/mamba/
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-nemotron-3-super.txt
 
 - label: ":amd: (MI300) LM Eval Large Models"
   key: amd-lm-eval-large-models
