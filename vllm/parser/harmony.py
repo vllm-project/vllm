@@ -133,7 +133,7 @@ class HarmonyParser(DelegatingParser):
         if len(messages) <= self._num_processed_messages:
             return None
         msg = messages[self._num_processed_messages]
-        msg.recipient = self._normalize_recipient(msg.recipient)
+        msg.channel, msg.recipient = self._normalize_header(msg.channel, msg.recipient)
         self._num_processed_messages += 1
         return msg
 
@@ -247,8 +247,9 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        prev_recipient = self._normalize_recipient(
-            self._harmony_parser.current_recipient
+        _, prev_recipient = self._normalize_header(
+            self._harmony_parser.current_channel,
+            self._harmony_parser.current_recipient,
         )
         result = self.process_chunk(delta_token_ids)
         if finished:
@@ -340,9 +341,9 @@ class HarmonyParser(DelegatingParser):
         reasoning_token_count = 0
         for token_id in token_ids:
             self._harmony_parser.process(token_id)
-            channel = self._harmony_parser.current_channel
-            recipient = self._normalize_recipient(
-                self._harmony_parser.current_recipient
+            channel, recipient = self._normalize_header(
+                self._harmony_parser.current_channel,
+                self._harmony_parser.current_recipient,
             )
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
@@ -402,15 +403,27 @@ class HarmonyParser(DelegatingParser):
         return super().adjust_request(request)
 
     @staticmethod
-    def _normalize_recipient(recipient: str | None) -> str | None:
-        """Remove constrained formats misparsed into recipients by older Harmony."""
-        if recipient is None:
-            return None
+    def _normalize_header(
+        channel: str | None, recipient: str | None
+    ) -> tuple[str | None, str | None]:
+        """Repair header tokens that Harmony misparses into the recipient.
 
-        constrain_index = recipient.find("<|constrain|>")
-        if constrain_index == -1:
-            return recipient
-        return recipient[:constrain_index].rstrip() or None
+        Older Harmony leaks ``<|constrain|>`` into the recipient. gpt-oss can
+        also restart a header, e.g. ``<|channel|>commentary to=assistant
+        <|channel|>analysis``, in which case the last channel applies.
+        """
+        if recipient is None:
+            return channel, None
+
+        recipient = recipient.split("<|constrain|>", 1)[0]
+        recipient, restarted, restarted_channel = recipient.partition("<|channel|>")
+        recipient = recipient.strip()
+        if restarted:
+            channel = restarted_channel.strip() or channel
+            # A restarted header addressed to the assistant itself is stray.
+            if recipient == "assistant":
+                recipient = ""
+        return channel, recipient or None
 
 
 _JSON_CONSTRAINS = [" json", " <|constrain|>json"]

@@ -362,6 +362,33 @@ class TestParse:
         assert content == "Here is the answer"
         assert tool_calls is None
 
+    def test_stray_assistant_header_is_reasoning(self, harmony_parser, chat_request):
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                "<|channel|>commentary to=assistant<|channel|>analysis"
+                "<|message|>I'm thinking<|end|>"
+                "<|start|>assistant<|channel|>final<|message|>Hello"
+            ),
+        )
+
+        assert reasoning == "I'm thinking"
+        assert content == "Hello"
+        assert tool_calls is None
+
+    def test_restarted_header_tool_name(self, harmony_parser, chat_request):
+        _, _, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                "<|channel|>commentary to=functions.ls<|channel|>commentary"
+                ' <|constrain|>json<|message|>{"path": "."}<|call|>'
+            ),
+        )
+
+        assert tool_call_tuples(tool_calls) == [("ls", json.dumps({"path": "."}))]
+
     def test_tool_call_dotted_name(self, harmony_parser, chat_request):
         response = [tool_call("math.sum", '{"a": 2, "b": 3}')]
 
@@ -699,6 +726,23 @@ class TestParseDelta:
         )
 
         assert delta is None
+
+    def test_stray_assistant_header_is_reasoning(self, harmony_parser, chat_request):
+        delta = harmony_parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output(
+                "<|channel|>commentary to=assistant<|channel|>analysis"
+                "<|message|>I'm thinking<|end|>"
+                "<|start|>assistant<|channel|>final<|message|>Hello"
+            ),
+            request=chat_request,
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "I'm thinking"
+        assert delta.content == "Hello"
+        assert not delta.tool_calls
 
     def test_cross_channel_with_tool(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
