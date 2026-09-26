@@ -833,10 +833,12 @@ class MoRIIOConnectorScheduler:
     def _release_write_prefill_blocks(self, request_id: ReqId, params: dict[str, Any]):
         transfer_id = params.get("transfer_id")
         if transfer_id is None:
-            logger.warning(
-                "Cannot release WRITE prefill blocks for request %s: "
-                "missing transfer_id",
+            # Returning leaks the producer's blocks; nothing else frees them.
+            logger.error(
+                "Leaking WRITE prefill blocks for request %s: missing "
+                "transfer_id in kv_transfer_params (keys=%s)",
                 request_id,
+                sorted(params.keys()),
             )
             return
 
@@ -850,17 +852,38 @@ class MoRIIOConnectorScheduler:
                     raise ValueError("no peer zmq address for request")
                 remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
             except ValueError:
-                logger.warning(
-                    "Cannot release WRITE prefill blocks for request %s: "
-                    "missing remote notify address",
+                logger.error(
+                    "Leaking WRITE prefill blocks for request %s "
+                    "(transfer_id=%s, remote_dp_rank=%s): cannot resolve the "
+                    "remote notify address from params or request id",
                     request_id,
+                    transfer_id,
+                    remote_dp_rank,
                 )
                 return
 
         remote_notify_port = int(remote_notify_port)
+
+        # Same per-pod resolution as the notify path: a pod binds notify
+        # sockets only for its local ranks, and may sit at a different IP.
+        try:
+            dp_local = int(params.get("remote_dp_size_local", 0) or 0)
+        except (TypeError, ValueError):
+            dp_local = 0
+
+        release_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
+        release_host = remote_host
+        remote_hosts = params.get("remote_hosts") or []
+        if dp_local > 0 and remote_hosts:
+            pod_idx = pod_index(remote_dp_rank, dp_local)
+            if 0 <= pod_idx < len(remote_hosts):
+                release_host = remote_hosts[pod_idx]
+
         for tp_index in range(self.tp_size):
-            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
-            self._send_transfer_release(transfer_id, remote_host, target_port)
+            target_port = remote_notify_port + get_port_offset(
+                release_dp_rank, tp_index
+            )
+            self._send_transfer_release(transfer_id, release_host, target_port)
 
     def update_state_after_alloc(
         self,
