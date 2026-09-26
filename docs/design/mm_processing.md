@@ -60,6 +60,8 @@ with:
 
 The kernel accepts `uint8`, `float16`, `bfloat16` and `float32` inputs. The `uint8` path is the primary fast path: raw bytes travel to the device unprocessed, and the rescale factor is folded into `weight` — no separate divide-by-255 step. Compute is always done in fp32 inside the kernel.
 
+Mistral3 passes individual unpadded CHW images to the Pixtral vision tower. On CUDA, `FusedMMInputNorm` uses a stride-aware Triton kernel for these images, including cropped views, without copying them into a contiguous buffer first.
+
 #### Optimized Data Path
 
     Before: CPU decode → CPU resize → CPU rescale (÷255) → CPU normalize
@@ -78,10 +80,11 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 - The flag is **enabled by default** for all models that support it.
 - Currently, it’s on by default for these architectures:
 
-| name         | Architecture                         | Example HF Models                   |
-|--------------|--------------------------------------|-------------------------------------|
-| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
-| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
+| name         | Architecture                         | Example HF Models                                     |
+|--------------|--------------------------------------|-------------------------------------------------------|
+| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
+| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
+| `mistral3`   | `Mistral3ForConditionalGeneration`   | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
 
 #### Key Properties and Gains
 

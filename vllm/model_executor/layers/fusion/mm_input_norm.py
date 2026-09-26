@@ -255,15 +255,6 @@ class FusedMMInputNorm(CustomOp):
     # Internal helpers shared by the platform-specific forward_* methods
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _unpack_2d(pixel_values: torch.Tensor) -> tuple[int, int]:
-        assert pixel_values.ndim == 2, (
-            f"pixel_values must be 2D (patches, size), got {pixel_values.dim()}D "
-            f"with shape {tuple(pixel_values.shape)}"
-        )
-        patches, size = pixel_values.shape
-        return patches, size
-
     def _patch_size(self, size: int) -> int:
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
@@ -282,7 +273,7 @@ class FusedMMInputNorm(CustomOp):
         This is the semantic reference implementation and the fallback used
         on any platform without a specialised kernel.
         """
-        patches, size = self._unpack_2d(pixel_values)
+        patches, size = pixel_values.shape
         patch_size = self._patch_size(size)
 
         # weight/bias are fp32, so type promotion makes the arithmetic fp32
@@ -296,7 +287,7 @@ class FusedMMInputNorm(CustomOp):
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
-        patches, size = self._unpack_2d(pixel_values)
+        patches, size = pixel_values.shape
         patch_size = self._patch_size(size)
 
         x3 = pixel_values.reshape(patches, self.channel, patch_size)

@@ -115,6 +115,8 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
+    supports_mm_device_do_normalize = False
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_encoder.": "vision_tower.",

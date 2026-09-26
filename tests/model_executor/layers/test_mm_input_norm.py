@@ -5,6 +5,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
@@ -12,6 +13,7 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     NormParams,
     fused_mm_input_norm_triton,
 )
+from vllm.model_executor.models.pixtral import pixtral_patch_embed
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
@@ -55,6 +57,59 @@ def _reference_input_norm(
 _RGB_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _RGB_STD = [0.26862954, 0.26130258, 0.27577711]
 _RGB_RESCALE = 1.0 / 255.0
+
+
+@requires_vllm_config
+@requires_triton
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize(("channels", "patch_shape"), [(3, (4, 4)), (2, (2, 4))])
+def test_pixtral_patch_embed_preserves_image_order_and_strides(
+    dtype: torch.dtype,
+    normalize: bool,
+    channels: int,
+    patch_shape: tuple[int, int],
+):
+    """Packed projection matches CHW normalization and patch convolution."""
+    norm = (
+        FusedMMInputNorm(
+            _RGB_MEAN[:channels],
+            _RGB_STD[:channels],
+            _RGB_RESCALE,
+            channel=channels,
+        ).to(_DEVICE)
+        if normalize
+        else IdentityInputNorm()
+    )
+    weight = torch.randn(32, channels, *patch_shape, device=_DEVICE, dtype=dtype)
+    images = [
+        torch.randint(0, 256, (channels, 17, 18), device=_DEVICE, dtype=torch.uint8),
+        torch.randint(0, 256, (channels, 25, 17), device=_DEVICE, dtype=torch.uint8)[
+            :, 1:17, 1:17
+        ],
+        torch.randint(0, 256, (channels, 19, 20), device=_DEVICE, dtype=torch.uint8)[
+            :, 1:17, 2:18
+        ],
+    ]
+    reference = []
+    for image in images:
+        if normalize:
+            normalized = (
+                image.float() * norm.weight[:, None, None] + norm.bias[:, None, None]
+            )
+        else:
+            normalized = image
+        reference.append(
+            F.conv2d(normalized.to(dtype).unsqueeze(0), weight, stride=patch_shape)
+        )
+    packed, actual = pixtral_patch_embed(images, weight, norm)
+    for expected, result in zip(reference, actual):
+        torch.testing.assert_close(result, expected, rtol=0.01, atol=0.02)
+    expected_packed = torch.cat(
+        [result.flatten(2).transpose(1, 2) for result in reference], dim=1
+    )
+    torch.testing.assert_close(packed, expected_packed, rtol=0.01, atol=0.02)
 
 
 def _check_against_reference(

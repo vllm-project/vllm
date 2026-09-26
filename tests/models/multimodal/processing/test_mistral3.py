@@ -6,8 +6,13 @@ import pytest
 import torch
 from PIL import Image
 from transformers import AutoProcessor, BatchFeature
+from transformers.models.pixtral import PixtralProcessor
 
-from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.models.lightonocr import (
+    LightOnOCRForConditionalGeneration,
+    LightOnOCRProcessingInfo,
+)
 from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -123,6 +128,9 @@ def test_processor_size_override(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+    vllm_hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    assert isinstance(vllm_hf_processor, PixtralProcessor)
+
     hf_processor = AutoProcessor.from_pretrained(
         model_id,
         fix_mistral_regex=True,
@@ -148,7 +156,56 @@ def test_processor_size_override(
     assert prompt_update_tokens == hf_placeholder_tokens
 
 
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mm_device_do_normalize():
+    ctx = build_model_context(
+        _MODEL_ID,
+        limit_mm_per_prompt={"image": 2},
+        model_config_kwargs=_MODEL_CONFIG_KWARGS,
+    )
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = False
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [
+        Image.new("RGB", (31, 47), color=(17, 89, 231)),
+        Image.new("RGB", (48, 32), color=(201, 13, 127)),
+    ]
+    prompt = [processor.info.get_hf_config().image_token_index] * len(images)
+    mm_items = processor.info.parse_mm_data({"image": images})
+
+    normalized_inputs = processor(prompt, mm_items=mm_items)
+    normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = True
+    raw_inputs = processor(prompt, mm_items=mm_items)
+    raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert all(value.dtype == torch.uint8 for value in raw_values)
+
+    input_norm = build_mm_input_norm(ctx.model_config)
+    patch_size = processor.info.get_hf_config().vision_config.patch_size
+
+    def pack_patches(image: torch.Tensor) -> torch.Tensor:
+        channels, height, width = image.shape
+        rows = height // patch_size
+        cols = width // patch_size
+        return (
+            image[:, : rows * patch_size, : cols * patch_size]
+            .reshape(channels, rows, patch_size, cols, patch_size)
+            .permute(1, 3, 0, 2, 4)
+            .reshape(-1, channels * patch_size**2)
+        )
+
+    for raw, normalized in zip(raw_values, normalized_values):
+        output = input_norm(pack_patches(raw), normalized.dtype)
+        torch.testing.assert_close(
+            output, pack_patches(normalized), rtol=1e-5, atol=1e-6
+        )
+
+
 def test_lightonocr_keeps_vision_config_image_size():
+    assert not LightOnOCRForConditionalGeneration.supports_mm_device_do_normalize
+
     ctx = build_model_context(
         _LIGHTON_MODEL_ID,
         mm_processor_kwargs={"size": {"longest_edge": 1008}},
