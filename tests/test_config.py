@@ -146,6 +146,82 @@ def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
     assert config.scheduler_config.disable_chunked_mm_input is expected
 
 
+def _replayssm_config(
+    use_full_rank_gate: bool, num_speculative_tokens: int, kda_layers=(1,)
+):
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            mamba_cache_mode="none",
+        ),
+        num_speculative_tokens=num_speculative_tokens,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="KimiLinearForCausalLM",
+            hf_text_config=SimpleNamespace(
+                linear_attn_config={
+                    "use_full_rank_gate": use_full_rank_gate,
+                    "kda_layers": list(kda_layers),
+                }
+            ),
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=False,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        use_v2_model_runner=False,  # Triton ReplaySSM runs on runner V1
+    )
+
+
+def test_replayssm_without_spec_decode_fails_at_config_time():
+    """The layer refuses this too, but only once weights are loading.
+
+    On a checkpoint of that size that is minutes of work before the user
+    learns that --use-replayssm needed --speculative-config.
+    """
+    with pytest.raises(ValueError, match="only with speculative decoding"):
+        VllmConfig.validate_mamba_cached_kernel(_replayssm_config(True, 0))
+
+
+def test_replayssm_is_left_alone_without_the_full_rank_gate():
+    """The refusal lives in the layer the full-rank gate selects.
+
+    The same architecture serves standalone Kimi-Linear through a different
+    implementation that has no such requirement, so keying the check on the
+    architecture name would reject a configuration that works.
+    """
+    config = _replayssm_config(False, 0)
+
+    VllmConfig.validate_mamba_cached_kernel(config)
+
+    assert config.cache_config.use_replayssm
+    assert not config.cache_config.use_kda_recoverssm
+
+
+def test_replayssm_is_left_alone_when_no_layer_is_kda():
+    """The gate only reaches the guarded layer if there is a KDA layer.
+
+    An empty kda_layers list is a supported layout, and it builds none.
+    """
+    config = _replayssm_config(True, 0, kda_layers=())
+
+    VllmConfig.validate_mamba_cached_kernel(config)
+
+    assert config.cache_config.use_replayssm
+
+
+def test_replayssm_with_spec_decode_is_accepted():
+    config = _replayssm_config(True, 3)
+    config.use_v2_model_runner = True
+
+    VllmConfig.validate_mamba_cached_kernel(config)
+
+    assert config.cache_config.use_kda_recoverssm
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(

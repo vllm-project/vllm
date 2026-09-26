@@ -352,6 +352,22 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
+def _uses_full_rank_kda(model_config: ModelConfig | None) -> bool:
+    """Whether the checkpoint selects the KDA layer that needs RecoverSSM.
+
+    The refusal this mirrors lives in that layer's constructor, and the layer
+    is only chosen on a KDA layer whose checkpoint asks for the full-rank gate:
+    the same architecture also serves standalone Kimi-Linear through a
+    different, unguarded implementation.
+    """
+    if model_config is None:
+        return False
+    kda_config = getattr(model_config.hf_text_config, "linear_attn_config", None) or {}
+    return bool(
+        kda_config.get("use_full_rank_gate", False) and kda_config.get("kda_layers")
+    )
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -3423,6 +3439,18 @@ class VllmConfig:
             self.cache_config.use_kda_recoverssm = False
             return self
         self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+
+        if not self.cache_config.use_kda_recoverssm and _uses_full_rank_kda(
+            self.model_config
+        ):
+            # The model layer raises the same refusal, but only once weights
+            # are being loaded; the condition is already known here.
+            raise ValueError(
+                "Kimi-K3 supports --use-replayssm only with speculative "
+                "decoding: its ReplaySSM path is RecoverSSM, which runs on "
+                "draft tokens. Pass --speculative-config, or drop "
+                "--use-replayssm."
+            )
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
