@@ -3258,7 +3258,7 @@ def test_kv_transfer_group_planning_is_tp_invariant(kv_connector):
         config = _grouping_config()
         config.kv_transfer_config = object() if kv_connector else None
         groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
-            kv_cache_utils.unify_kv_cache_spec_page_size(specs), config
+            kv_cache_utils.unify_kv_cache_spec_page_size(specs), config, specs
         )
         return max(len(group.layer_names) for group in groups)
 
