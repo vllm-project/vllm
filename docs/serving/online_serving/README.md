@@ -102,7 +102,7 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
 
 ### LoRA dynamic loading
 
-LoRA dynamic loading & unloading is enabled in the API server. This should ONLY be used for local development!
+Runtime LoRA loading & unloading are disabled by default. To use the endpoints below, start the server with `--enable-lora` and set `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`. This should ONLY be used for local development; see the [security guidance](../../usage/security.md#dynamic-lora-loading).
 
 - `/v1/load_lora_adapter` - LoRA dynamic loading
 - `/v1/unload_lora_adapter` - LoRA dynamic unloading
@@ -157,7 +157,9 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
-- `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
+- `/tokenizer_info` - Get tokenizer information, including chat templates and
+  configuration (only with `--enable-tokenizer-info-endpoint`; see the
+  [security guidance](../../usage/security.md#unprotected-endpoints-no-api-key-required))
 
 ## Elastic Expert Parallelism (EEP)
 
