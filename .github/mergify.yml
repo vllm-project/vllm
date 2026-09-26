@@ -450,7 +450,7 @@ pull_request_rules:
       - files=docs/features/structured_outputs.md
       - files~=^examples/features/structured_outputs/
       - files~=^tests/v1/structured_output/
-      - files=tests/entrypoints/llm/test_struct_output_generate.py
+      - files~=^tests/entrypoints/llm/structured_output/
       - files~=^vllm/v1/structured_output/
   actions:
     label:
