@@ -1083,7 +1083,6 @@ class Scheduler(SchedulerInterface):
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
-                        # Uncached prompts may need recurrent state initialization.
                         and num_computed_tokens > 0
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
