@@ -285,6 +285,17 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         wrapper = self._wrapper
         assert wrapper is not None
 
+        # VLLM_MOE_SKIP_PADDING (on by default) makes the topk kernels write -1
+        # into topk_ids for cudagraph padding rows. The b12x kernels index the
+        # expert state with these ids directly, so the sentinel has to be
+        # neutralized here: route padding rows to expert 0 with zero weight,
+        # contributing nothing to the output. Done branchlessly to stay
+        # cudagraph-capturable.
+        topk_ids = topk_ids.to(torch.int32)
+        is_padding = topk_ids < 0
+        topk_ids = torch.where(is_padding, 0, topk_ids)
+        topk_weights = torch.where(is_padding, 0.0, topk_weights)
+
         wrapper_output = wrapper.run(
             x=hidden_states,
             w1_weight=w1,
@@ -294,7 +305,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
-            token_selected_experts=topk_ids.to(torch.int32),
+            token_selected_experts=topk_ids,
             token_final_scales=topk_weights,
         )
         output.copy_(wrapper_output)

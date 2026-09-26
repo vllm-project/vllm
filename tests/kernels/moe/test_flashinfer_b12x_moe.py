@@ -222,6 +222,130 @@ def test_flashinfer_b12x_moe(
         torch.testing.assert_close(sm12x_output, torch_output, atol=2e-1, rtol=2e-1)
 
 
+@pytest.mark.parametrize(
+    "m,topk,pad_mode",
+    [
+        # half padded, 64 routed rows -> static b12x path
+        (32, 2, "half"),
+        # ALL rows padded, 768 routed rows -> crosses the 640-row static/dynamic cutover.
+        # This is the shape that faulted in production.
+        (384, 2, "all"),
+        # vLLM documents that cudagraph padding rows may carry NaN/Inf activations; a zero
+        # route weight must still yield exactly zero, not 0 * NaN.
+        (32, 2, "nan"),
+    ],
+)
+@torch.inference_mode()
+def test_flashinfer_b12x_moe_tolerates_padding_sentinel(m, topk, pad_mode, workspace_init):
+    """Padding rows carrying the -1 sentinel must not reach the b12x kernels.
+
+    ``VLLM_MOE_SKIP_PADDING`` makes the topk kernels write -1 into ``topk_ids``
+    for cudagraph padding rows. The b12x kernels index the expert state with
+    those ids directly, so an unhandled -1 writes out of bounds and trips an
+    MMU fault (Xid 31 on SM12x). Padding rows must contribute nothing.
+    """
+    n, k, e = 128, 256, 8
+    dtype = torch.bfloat16
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 15
+        w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 15
+
+        gs = torch.ones(1, device="cuda", dtype=torch.float32)
+        sf_vec_size = 16
+
+        w1_reordered, _ = reorder_w1w3_to_w3w1(
+            w1_bf16.clone(),
+            torch.ones((e, 2 * n, 1), device="cuda", dtype=torch.float32),
+        )
+        w1_q_flat, w1_sf_flat = fp4_quantize(
+            w1_reordered.reshape(e * 2 * n, k),
+            global_scale=gs,
+            sf_vec_size=sf_vec_size,
+            is_sf_swizzled_layout=True,
+        )
+        w1_q = w1_q_flat.view(e, 2 * n, k // 2)
+        w1_blockscale = w1_sf_flat.view(e, 2 * n, w1_sf_flat.shape[1])
+
+        w2_q_flat, w2_sf_flat = fp4_quantize(
+            w2_bf16.reshape(e * k, n),
+            global_scale=gs,
+            sf_vec_size=sf_vec_size,
+            is_sf_swizzled_layout=True,
+        )
+        w2_q = w2_q_flat.view(e, k, n // 2)
+        w2_blockscale = w2_sf_flat.view(e, k, w2_sf_flat.shape[1])
+
+        ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
+        quant_config = nvfp4_moe_quant_config(
+            g1_alphas=ones_e,
+            g2_alphas=ones_e,
+            a1_gscale=ones_e,
+            a2_gscale=ones_e,
+            w1_scale=w1_blockscale,
+            w2_scale=w2_blockscale,
+        )
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            in_dtype=dtype,
+        )
+        experts = FlashInferB12xExperts(
+            moe_config=moe_config, quant_config=quant_config
+        )
+        _process_b12x_weights(
+            experts, w1_blockscale, w2_blockscale, ones_e, ones_e
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
+            experts,
+        )
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+        num_real = 0 if pad_mode == "all" else m // 2
+        padded_ids = topk_ids.clone()
+        padded_ids[num_real:] = -1
+        if pad_mode == "nan":
+            # Poison the padded rows' activations.
+            a[num_real:] = float("nan")
+
+        def _run(ids):
+            return kernel.apply(
+                hidden_states=a,
+                w1=w1_q,
+                w2=w2_q,
+                topk_weights=topk_weights,
+                topk_ids=ids,
+                global_num_experts=e,
+                activation=MoEActivation.SILU,
+                apply_router_weight_on_input=False,
+                expert_map=None,
+            )
+
+        out = _run(padded_ids)
+        # Padding rows contribute nothing -- exactly zero, and finite even when the padded
+        # activations were NaN.
+        assert torch.equal(out[num_real:], torch.zeros_like(out[num_real:]))
+        assert torch.isfinite(out[num_real:]).all()
+        if num_real:
+            # Real rows are unaffected by the presence of padding rows.
+            assert torch.isfinite(out[:num_real]).all()
+            ref_out = _run(topk_ids)
+            torch.testing.assert_close(out[:num_real], ref_out[:num_real])
+
+
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [8, 16])
 @pytest.mark.parametrize("topk", [1, 2, 4])
