@@ -710,6 +710,7 @@ async def async_request_vllm_rerank(
         # this is to avoid dropping some of the requests.
         "truncate_prompt_tokens": -1,
     }
+    _update_payload_common(payload, request_func_input)
 
     headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
