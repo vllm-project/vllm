@@ -18,7 +18,10 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
-HIDDEN_SIZES = [17, 1024, 1025, 1026, 5137, 8193]
+# 1024 and 4096 take the single-read per-token path at one vector per thread.
+# 8192 takes it at two vectors per thread for fp32 and falls back to the
+# two-pass kernel for 16-bit types; 16384 and 32768 fall back for both.
+HIDDEN_SIZES = [17, 1024, 1025, 1026, 4096, 5137, 8192, 8193, 16384, 32768]
 NUM_TOKENS = [1, 7, 4096]
 SCALE_UBS = [True, False]
 SEEDS = [0]
@@ -135,6 +138,45 @@ def test_dynamic_per_tensor_fp8_quant_strided_input(
 
     ref_out, ref_scale = ref_dynamic_per_tensor_fp8_quant(x)
     assert torch.equal(ref_scale, ops_scale)
+    assert torch.equal(ref_out.view(torch.uint8), ops_out.view(torch.uint8))
+
+
+@pytest.mark.parametrize("pad", [8, 16])
+@pytest.mark.parametrize("do_scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_dynamic_per_token_fp8_quant_strided_input(
+    pad: int, do_scale_ub: bool, dtype: torch.dtype, seed: int
+) -> None:
+    """A padded view must match its contiguous copy exactly, scales and bytes.
+
+    pad=8 misaligns the rows for vector loads, so the view takes the two-pass
+    kernel while the contiguous copy takes the single-read kernel. pad=16 keeps
+    the rows aligned but non-contiguous, so the single-read kernel runs on both
+    and must handle the row stride.
+    """
+    set_random_seed(seed)
+    num_tokens, hidden_size = 64, 4096
+
+    full = torch.rand(num_tokens, hidden_size + pad, dtype=dtype, device="cuda")
+    x = full[:, :hidden_size]
+    assert not x.is_contiguous()
+    scale_ub = (
+        torch.mean(x).to(dtype=torch.float32, device="cuda") if do_scale_ub else None
+    )
+
+    ops_out, ops_scales = ops.scaled_fp8_quant(
+        x, scale_ub=scale_ub, use_per_token_if_dynamic=True
+    )
+    contig_out, contig_scales = ops.scaled_fp8_quant(
+        x.contiguous(), scale_ub=scale_ub, use_per_token_if_dynamic=True
+    )
+    assert torch.equal(ops_scales, contig_scales)
+    assert torch.equal(ops_out.view(torch.uint8), contig_out.view(torch.uint8))
+
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE, scale_ub)
+    assert torch.equal(ref_scales, ops_scales)
     assert torch.equal(ref_out.view(torch.uint8), ops_out.view(torch.uint8))
 
 
