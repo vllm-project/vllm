@@ -51,6 +51,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
+from vllm.utils.weight_checksum_utils import merge_finish_checksums
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -907,11 +908,24 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
-        """Finish the weight update and set its version if provided."""
-        self.llm_engine.collective_rpc("finish_weight_update")
+    def finish_weight_update(
+        self, weight_version: str | None = None, checksum: bool = False
+    ) -> dict[str, str] | None:
+        """Finish the weight update and set its version if provided.
+
+        Args:
+            weight_version: Version to record for the committed weights.
+            checksum: Whether to return this instance's weight digests.
+
+        Returns:
+            Rank-qualified weight digests when requested, otherwise None.
+        """
+        per_worker = self.llm_engine.collective_rpc(
+            "finish_weight_update", kwargs={"checksum": checksum}
+        )
         if weight_version is not None:
             self.llm_engine.set_weight_version(weight_version)
+        return merge_finish_checksums(per_worker)
 
     def update_weight_version(self, new_version: str) -> None:
         """Set the weight version without updating weights."""

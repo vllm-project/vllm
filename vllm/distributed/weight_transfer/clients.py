@@ -18,6 +18,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdatePayload,
     WeightTransferUpdateRequest,
 )
+from vllm.utils.weight_checksum_utils import merge_finish_checksums
 
 if TYPE_CHECKING:
     from ray.actor import ActorHandle
@@ -67,13 +68,14 @@ class HTTPVLLMWeightSyncClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _post(self, path: str, json: dict[str, Any] | None = None) -> None:
+    def _post(self, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
         import requests
 
         response = requests.post(
             f"{self.base_url}/{path}", json=json, timeout=self.timeout
         )
         response.raise_for_status()
+        return response.json() if response.content else {}
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         self._post("init_weight_transfer_engine", {"init_info": init_info})
@@ -86,11 +88,18 @@ class HTTPVLLMWeightSyncClient:
             "update_weights", {"update_info": _json_safe_update_payload(update_info)}
         )
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
-        json = (
-            {"weight_version": weight_version} if weight_version is not None else None
-        )
-        self._post("finish_weight_update", json)
+    def finish_weight_update(
+        self, weight_version: str | None = None, checksum: bool = False
+    ) -> dict[str, str] | None:
+        body: dict[str, Any] = {}
+        if weight_version is not None:
+            body["weight_version"] = weight_version
+        if checksum:
+            body["checksum"] = True
+        # A finish that did not ask for digests, or a server predating the
+        # option, answers without the field.
+        response = self._post("finish_weight_update", body or None) or {}
+        return response.get("checksums")
 
 
 class RayVLLMWeightSyncClient:
@@ -120,11 +129,16 @@ class RayVLLMWeightSyncClient:
         request = WeightTransferUpdateRequest(update_info=update_info)
         ray.get([h.update_weights.remote(request) for h in self.handles])
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
+    def finish_weight_update(
+        self, weight_version: str | None = None, checksum: bool = False
+    ) -> dict[str, str] | None:
         import ray
 
-        ray.get([h.finish_weight_update.remote() for h in self.handles])
+        per_actor = ray.get(
+            [h.finish_weight_update.remote(checksum=checksum) for h in self.handles]
+        )
         if weight_version is not None:
             ray.get(
                 [h.update_weight_version.remote(weight_version) for h in self.handles]
             )
+        return merge_finish_checksums(per_actor)

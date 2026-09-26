@@ -268,6 +268,14 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
+    async def compute_weight_checksums_all(self) -> list[dict[str, str]]:
+        """Return weight checksums from every engine managed by this client."""
+        raise NotImplementedError
+
+    async def reset_weights(self) -> None:
+        """Randomize checksum-covered model tensors on every managed engine."""
+        raise NotImplementedError
+
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
@@ -300,8 +308,18 @@ class EngineClient(ABC):
         """Batched weight update for RL training."""
         raise NotImplementedError
 
-    async def finish_weight_update(self, weight_version: str | None = None) -> None:
-        """Finish the weight update and set its version if provided."""
+    async def finish_weight_update(
+        self, weight_version: str | None = None, checksum: bool = False
+    ) -> dict[str, str] | None:
+        """Finish the weight update and set its version if provided.
+
+        Args:
+            weight_version: Version to record for the committed weights.
+            checksum: Whether to return this engine's weight digests.
+
+        Returns:
+            Rank-qualified weight digests when requested, otherwise None.
+        """
         raise NotImplementedError
 
     async def update_weight_version(self, new_version: str) -> None:

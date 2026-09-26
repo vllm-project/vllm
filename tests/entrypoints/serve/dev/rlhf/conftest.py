@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared fixtures and helpers for the RL lifecycle test suite.
-
-All test modules under this directory import from here to avoid duplication.
-
-RFC: https://github.com/vllm-project/vllm/issues/45585
-PR:  https://github.com/vllm-project/vllm/pull/45586
 """
 
 import contextlib
@@ -14,8 +9,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
-from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -65,107 +58,73 @@ _DUMMY_ARGS = [
 # ---------------------------------------------------------------------------
 # Server harness
 # ---------------------------------------------------------------------------
-
-
-def _warm_up(url: str) -> None:
-    """Put one request through the engine before tests start timing things.
-
-    /health turns green before any request has travelled the request path, and
-    that first pass costs seconds on a loaded machine.
-    """
-    response = gen(url, max_tokens=4, timeout=120)
-    assert ok(response), f"warm-up generation failed: {response}"
-
-
 @contextmanager
 def server(
     extra_args=None,
-    port: int = 8770,
+    port: int | None = None,
     timeout: float = 180.0,
     dummy_weights: bool = False,
+    *,
+    model: str | None = None,
+    env_dict: dict[str, str] | None = None,
+    enable_sleep_mode: bool = True,
+    enforce_eager: bool = True,
+    weight_transfer_config: dict | None = None,
 ):
-    """Launch a vLLM server with the dev router; yield its base URL.
+    """Yield a dev-server URL using the repository's process/port lifecycle.
 
     Args:
-        extra_args:      Additional CLI flags appended after the base args.
-        port:            HTTP port to bind (caller is responsible for uniqueness).
-        timeout:         Seconds to wait for /health before giving up.
-        dummy_weights:   If True, use --load-format dummy (fast, no real weights).
-
+        extra_args: Additional vLLM CLI options.
+        port: Optional explicit port; otherwise allocate an available port.
+        timeout: Server startup timeout in seconds.
+        dummy_weights: Skip checkpoint loading for protocol-only tests.
+        model: Model to load; defaults to VLLM_TEST_MODEL.
+        env_dict: Environment overrides passed only to the server.
+        enable_sleep_mode: Allocate weights/cache through the sleep backend.
+        enforce_eager: Disable graphs unless the scenario explicitly tests them.
+        weight_transfer_config: Optional serialized transfer-backend config.
     """
-    env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
-    base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
-    cmd = [
-        sys.executable,
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
-        MODEL_NAME,
-        "--port",
-        str(port),
-        "--served-model-name",
-        "m",
-        *(base + (extra_args or [])),
+    from tests.utils import RemoteOpenAIServer
+
+    args = [
+        arg
+        for arg in (_DUMMY_ARGS if dummy_weights else _BASE_ARGS)
+        if arg not in ("--enable-sleep-mode", "--enforce-eager")
     ]
-    proc = subprocess.Popen(
-        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-    )
-    url = f"http://localhost:{port}"
-    try:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                err = (
-                    proc.stderr.read(4000).decode(errors="replace")
-                    if proc.stderr
-                    else ""
-                )
-                raise RuntimeError(f"vllm server exited during startup:\n{err}")
-            with contextlib.suppress(Exception):
-                if requests.get(f"{url}/health", timeout=3).status_code == 200:
-                    break
-            time.sleep(1)
-        else:
-            proc.terminate()
-            raise RuntimeError("vllm server did not start in time")
-        _warm_up(url)
-        yield url
-    finally:
-        proc.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=10)
-        if proc.poll() is None:
-            proc.kill()
+    if enable_sleep_mode:
+        args.append("--enable-sleep-mode")
+    if enforce_eager:
+        args.append("--enforce-eager")
+    args += ["--served-model-name", "m", *(extra_args or [])]
+    if port is not None:
+        args += ["--port", str(port)]
+    if weight_transfer_config is not None:
+        args += ["--weight-transfer-config", json.dumps(weight_transfer_config)]
+    with RemoteOpenAIServer(
+            model or MODEL_NAME,
+            args,
+            auto_port=port is None,
+            seed=None if "--seed" in args else 0,
+            env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
+            max_wait_seconds=timeout,
+    ) as remote:
+        yield remote.url_root
 
 
-# ---------------------------------------------------------------------------
-# Polling helper (200-lie workaround)
-# ---------------------------------------------------------------------------
+@contextmanager
+def reusable_server(*args, **kwargs):
+    """Reuse one server and clean the parent only after server shutdown.
 
-
-def poll_until(
-    predicate: Callable[[], bool],
-    timeout: float = 10.0,
-    interval: float = 0.5,
-) -> bool:
-    """Poll predicate() until it returns True or timeout expires.
-
-    Workaround for the vLLM sleep/wake "200-lie" — the HTTP endpoints may
-    return 200 before the underlying operation is complete, so callers that
-    need to verify state *after* an operation can use this helper instead of
-    assuming the 200 means completion.
-
-    Returns True if predicate became true within timeout, False otherwise.
+    Callers use pytest.mark.skip_global_cleanup so function-scoped cleanup
+    does not run while this longer-lived server still owns GPU resources.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if predicate():
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
+    try:
+        with server(*args, **kwargs) as url:
+            yield url
+    finally:
+        from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+        cleanup_dist_env_and_memory()
 
 
 # ---------------------------------------------------------------------------
@@ -174,42 +133,38 @@ def poll_until(
 
 
 def gen(url, prompt="The capital of France is", max_tokens=8, timeout=30):
-    """Fire a /v1/completions request; return JSON or None on any error."""
-    try:
-        r = requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            },
-            timeout=timeout,
-        )
-        return r.json()
-    except Exception:
-        return None
+    """Generate a completion, propagating transport and server failures."""
+    response = requests.post(
+        f"{url}/v1/completions",
+        json={
+            "model": "m",
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def gen_with_logprobs(
     url, prompt="The capital of France is", max_tokens=8, logprobs=5, timeout=30
 ):
-    """Fire a /v1/completions request with logprobs; return JSON or None."""
-    try:
-        r = requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-                "logprobs": logprobs,
-            },
-            timeout=timeout,
-        )
-        return r.json()
-    except Exception:
-        return None
+    """Generate a completion, propagating transport and server failures."""
+    response = requests.post(
+        f"{url}/v1/completions",
+        json={
+            "model": "m",
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "logprobs": logprobs,
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def ok(resp) -> bool:
@@ -241,6 +196,7 @@ class StreamResult:
 
 
 def stream_completion(url: str, result: StreamResult, max_tokens: int) -> None:
+    """Consume a streaming completion into ``result``; never raises."""
     try:
         with requests.post(
             f"{url}/v1/completions",
@@ -274,6 +230,7 @@ def stream_completion(url: str, result: StreamResult, max_tokens: int) -> None:
 
 
 def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thread]:
+    """Start a streaming request and wait until its first token arrives."""
     result = StreamResult()
     thread = threading.Thread(
         target=stream_completion,
@@ -302,6 +259,7 @@ def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thr
 
 
 def pause(url, mode="abort", clear_cache=True):
+    """POST /pause and return its status code."""
     return requests.post(
         f"{url}/pause",
         params={"mode": mode, "clear_cache": clear_cache},
@@ -310,10 +268,12 @@ def pause(url, mode="abort", clear_cache=True):
 
 
 def resume(url):
+    """POST /resume and return its status code."""
     return requests.post(f"{url}/resume", timeout=10).status_code
 
 
 def completion_with_cache_details(url: str, prompt: str) -> dict[str, Any]:
+    """Generate with logprobs so prefix-cache hits are visible in usage."""
     response = requests.post(
         f"{url}/v1/completions",
         json={
@@ -330,6 +290,7 @@ def completion_with_cache_details(url: str, prompt: str) -> dict[str, Any]:
 
 
 def golden_output(response: dict[str, Any]) -> dict[str, Any]:
+    """Extract the output fields that must be reproducible across pause cycles."""
     choice = response["choices"][0]
     usage = response["usage"]
     return {
@@ -342,6 +303,7 @@ def golden_output(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def cached_tokens(response: dict[str, Any]) -> int:
+    """Return the number of prompt tokens served from the prefix cache."""
     return response["usage"]["prompt_tokens_details"]["cached_tokens"]
 
 
@@ -351,25 +313,30 @@ def cached_tokens(response: dict[str, Any]) -> int:
 
 
 def sleep(url, level=1, mode="abort"):
+    """POST /sleep and return its status code."""
     return requests.post(
         f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15
     ).status_code
 
 
 def wake(url, tags=None):
+    """POST /wake_up for the given tags and return its status code."""
     params = {"tags": tags} if tags else {}
     return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
 
 
 def is_sleeping(url) -> bool:
+    """Return whether the server currently reports itself asleep."""
     return requests.get(f"{url}/is_sleeping", timeout=5).json()["is_sleeping"]
 
 
 def is_paused(url) -> bool:
+    """Return whether the scheduler currently reports itself paused."""
     return requests.get(f"{url}/is_paused", timeout=5).json()["is_paused"]
 
 
 def health(url) -> int:
+    """Return the /health status code, or 0 if the server is unreachable."""
     try:
         return requests.get(f"{url}/health", timeout=5).status_code
     except Exception:
@@ -381,7 +348,33 @@ def health(url) -> int:
 # ---------------------------------------------------------------------------
 
 
+def weight_checker(
+    url: str, action: str, baseline=None, checksums=None
+) -> requests.Response:
+    """POST one weight-checker action and return the raw response.
+
+    ``checksums`` carries a caller's other checksum reports, which makes
+    ``compare`` hold them against the baseline as well.
+    """
+    payload = {"action": action}
+    if baseline is not None:
+        payload["baseline"] = baseline
+    if checksums is not None:
+        payload["checksums"] = checksums
+    return requests.post(f"{url}/weight_checker", json=payload, timeout=180)
+
+
+def collective_rpc(url: str, method: str) -> requests.Response:
+    """Invoke an existing worker method through the development RPC API."""
+    return requests.post(
+        f"{url}/collective_rpc",
+        json={"method": method, "timeout": 900},
+        timeout=900,
+    )
+
+
 def start_weight_update(url, is_checkpoint_format=True):
+    """POST /start_weight_update and return the raw response."""
     return requests.post(
         f"{url}/start_weight_update",
         json={"is_checkpoint_format": is_checkpoint_format},
@@ -390,10 +383,12 @@ def start_weight_update(url, is_checkpoint_format=True):
 
 
 def finish_weight_update(url):
+    """POST /finish_weight_update and return the raw response."""
     return requests.post(f"{url}/finish_weight_update", timeout=10)
 
 
 def get_world_size(url, include_dp=True):
+    """Return the engine's reported world size for the given DP inclusion."""
     return requests.get(
         f"{url}/get_world_size",
         params={"include_dp": include_dp},
