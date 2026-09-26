@@ -792,11 +792,23 @@ class ECMooncakeWorker:
             completions = result.get("items", []) if isinstance(result, dict) else []
             if len(completions) != len(items):
                 raise RuntimeError("Malformed EC completion response")
-            for (push, _), completion in zip(items, completions):
-                if not completion.get("completed"):
-                    raise RuntimeError(
-                        f"Unknown EC reservation for mm_hash={push.spec.mm_hash}"
-                    )
+            rejected = [
+                push.spec.mm_hash
+                for (push, _), completion in zip(items, completions)
+                if not completion.get("completed")
+            ]
+            if rejected:
+                # A missing reservation means the consumer no longer waits on
+                # this transfer: its request was aborted, or a concurrent
+                # duplicate push of the same content already landed. Failing
+                # the whole batch would turn one stale reservation into
+                # collateral timeouts of unrelated consumer requests.
+                logger.warning(
+                    "EC Mooncake consumer rejected %d/%d completion(s): mm_hashes=%s",
+                    len(rejected),
+                    len(items),
+                    rejected,
+                )
 
         def track(index: int, future: Future[None]) -> None:
             records = {
