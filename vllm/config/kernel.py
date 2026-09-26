@@ -196,6 +196,7 @@ LinearBackend = Literal[
     "cutlass",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
+    "flashinfer_cutedsl_dynamic",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "flashinfer_b12x",
@@ -225,6 +226,12 @@ class KernelConfig:
     vLLM IR op priority for dispatching/lowering during the forward pass.
     Platform defaults appended automatically during VllmConfig.__post_init__.
     """
+
+    nvfp4_dynamic_max_tokens: int = Field(default=0, ge=0, le=16)
+    """Experimental CuTe NVFP4 A16 cutoff. Zero selects CuTe W4A4 for every call."""
+
+    nvfp4_dynamic_silu_max_tokens: int | None = Field(default=None, ge=0, le=16)
+    """A16 cutoff for fused SiLU down projections. None inherits the linear cutoff."""
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
