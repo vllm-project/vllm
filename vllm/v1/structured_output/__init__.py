@@ -112,6 +112,26 @@ class StructuredOutputManager:
             )
         return structured_req.reasoner
 
+    @staticmethod
+    def _prompt_skips_reasoning(
+        reasoner: "ReasoningParser", prompt_token_ids: Sequence[int]
+    ) -> bool:
+        """Whether `prompt_token_ids` provably never opens a reasoning block.
+
+        True only when the parser exposes a reasoning-start marker and the
+        prompt does not contain it, which means no reasoning-end token will
+        follow and a structured-output constraint has nothing to wait for.
+        False when the marker is unknown, so parsers that do not expose one
+        keep waiting exactly as before.
+        """
+        start_str = reasoner.reasoning_start_str
+        if not start_str:
+            return False
+        start_id = reasoner.vocab.get(start_str)
+        if start_id is None:
+            return False
+        return start_id not in prompt_token_ids
+
     def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:
             return
@@ -249,7 +269,16 @@ class StructuredOutputManager:
             # is an independent code path, it is kept for now.
             # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
             # it can be removed.
-            if reasoner.is_reasoning_end(request.prompt_token_ids or []):
+            prompt_token_ids = request.prompt_token_ids or []
+            if reasoner.is_reasoning_end(prompt_token_ids):
+                return 0
+            # `is_reasoning_end()` is False both for a prompt sitting inside an
+            # open reasoning block and for one that never entered reasoning at
+            # all, such as a `/v1/completions` prompt that renders no chat
+            # template. Only the former should hold the constraint back: the
+            # latter never emits a reasoning-end token, so waiting for one
+            # leaves the request unconstrained for its whole completion.
+            if self._prompt_skips_reasoning(reasoner, prompt_token_ids):
                 return 0
             structured_req.reasoning_ended = False
 

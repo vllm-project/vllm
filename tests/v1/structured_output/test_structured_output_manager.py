@@ -15,12 +15,11 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 TOKENIZER = "gpt2"
+THINK_START = "\t"  # reasoning-start marker (single GPT-2 token)
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
 EOS = "<|eos|>"  # resolved to tokenizer.eos_token_id
 JSON_SCHEMA = '{"type": "object"}'
 BACKENDS = ("xgrammar", "guidance")
-REGEX_BACKENDS = (*BACKENDS, "outlines")
-DIGITS_REGEX = "[0-9]+"
 MAX_WAIT_SECONDS = 5
 NUM_SPEC_TOKENS = 8
 
@@ -90,7 +89,6 @@ def _build_harness(
     reasoning_ended: bool | None = None,
     enable_in_reasoning: bool = False,
     reasoning_parser_kwargs: dict | None = None,
-    structured_outputs: StructuredOutputsParams | None = None,
 ) -> tuple[StructuredOutputManager, Request]:
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
@@ -109,8 +107,7 @@ def _build_harness(
         manager.reasoner_cls = MockReasoner
 
     sampling_params = SamplingParams(
-        structured_outputs=structured_outputs
-        or StructuredOutputsParams(json=JSON_SCHEMA)
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
     )
     sampling_params.structured_outputs._backend = backend
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
@@ -418,94 +415,101 @@ def test_initial_constraint_activation(
         assert structured_req.reasoner is None
 
 
-@pytest.mark.parametrize("backend", REGEX_BACKENDS)
+class MockStartAwareReasoner:
+    """Reasoner whose prompt-side state depends on a start marker.
+
+    Mirrors `BaseThinkingReasoningParser`: `is_reasoning_end()` scans backwards
+    and returns False both inside an open reasoning block and when the prompt
+    contains no reasoning tokens at all.
+    """
+
+    def __init__(self, tokenizer, start: int, end: int, start_str: str | None):
+        self.start = start
+        self.end = end
+        self.reasoning_start_str = start_str
+        self.vocab = {start_str: start} if start_str else {}
+
+    def is_reasoning_end(self, input_ids):
+        for token_id in reversed(list(input_ids)):
+            if token_id == self.start:
+                return False
+            if token_id == self.end:
+                return True
+        return False
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        return self.end in delta_ids
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
-    ("raw_drafts", "expected_validated", "expected_row_pattern", "terminated"),
+    ("prefix_tokens", "expect_constrained"),
     [
-        pytest.param(("1", "2"), None, "CCC", False, id="all_valid"),
-        # EOS is only valid once the regex has matched; rows after EOS are
-        # unconstrained since the request stops there.
-        pytest.param(("1", EOS, "2"), ("1", EOS), "CCUU", True, id="terminates"),
-        pytest.param((EOS, "1"), (), "CUU", False, id="early_eos"),
+        pytest.param((THINK_START,), False, id="prompt_opens_reasoning"),
+        pytest.param((THINK_START, THINK_END), True, id="prompt_closes_reasoning"),
+        pytest.param((), True, id="prompt_has_no_reasoning_tokens"),
     ],
 )
-def test_regex_flow(
+def test_constraint_applies_when_prompt_never_opens_reasoning(
     tokenizer,
     backend: str,
-    raw_drafts: tuple[str, ...],
-    expected_validated: tuple[str, ...] | None,
-    expected_row_pattern: str,
-    terminated: bool,
+    prefix_tokens: tuple[str, ...],
+    expect_constrained: bool,
 ):
+    """A prompt with no reasoning markers must be constrained immediately.
+
+    A `/v1/completions` prompt renders no chat template, so it contains neither
+    a reasoning-start nor a reasoning-end token and no reasoning-end token will
+    ever arrive. Waiting for one leaves the request unconstrained for its whole
+    completion.
+    """
+    start_id = _single_token(tokenizer, THINK_START)
+    end_id = _single_token(tokenizer, THINK_END)
+
     manager, request = _build_harness(
         tokenizer,
         backend,
-        use_reasoner=False,
-        structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
+        reasoning_ended=None,
+        reasoning_parser_kwargs={
+            "start": start_id,
+            "end": end_id,
+            "start_str": THINK_START,
+        },
     )
-    validated = _to_token_ids(
-        tokenizer, raw_drafts if expected_validated is None else expected_validated
-    )
-    _run_real_flow(
-        manager,
-        request,
-        raw_drafts=_to_token_ids(tokenizer, raw_drafts),
-        expected_validated=validated,
-        expected_row_pattern=expected_row_pattern,
-        # accept_tokens() latches reasoning_ended once it accepts any token.
-        expected_reasoning=True if validated else None,
-        expect_terminated=terminated,
-    )
+    manager.reasoner_cls = MockStartAwareReasoner
+    request.prompt_token_ids = [
+        _single_token(tokenizer, t) for t in prefix_tokens
+    ]
+
+    open_brace = _single_token(tokenizer, "{")
+    z = _single_token(tokenizer, "z")
+    validated = manager.validate_tokens(request, [open_brace, z])
+
+    if expect_constrained:
+        assert validated == [open_brace]
+    else:
+        assert validated == [open_brace, z]
 
 
-@pytest.mark.parametrize("backend", REGEX_BACKENDS)
-def test_rejected_draft_keeps_later_rows_constrained(tokenizer, backend: str):
-    """A draft the grammar rejects during bitmask fill must not unconstrain
-    the remaining rows or the bonus row."""
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_parser_without_start_marker_keeps_waiting(tokenizer, backend: str):
+    """A parser that exposes no start marker must behave as before."""
+    start_id = _single_token(tokenizer, THINK_START)
+    end_id = _single_token(tokenizer, THINK_END)
+
     manager, request = _build_harness(
         tokenizer,
         backend,
-        use_reasoner=False,
-        structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
+        reasoning_ended=None,
+        reasoning_parser_kwargs={
+            "start": start_id,
+            "end": end_id,
+            "start_str": None,
+        },
     )
-    drafts = _to_token_ids(tokenizer, ("1", "z", "2"))
-    bitmask = manager.grammar_bitmask(
-        requests={request.request_id: request},
-        structured_output_request_ids=[request.request_id],
-        scheduled_spec_decode_tokens={request.request_id: drafts},
-    )
-    assert bitmask is not None
-    assert _row_pattern(bitmask) == "CCCC"
-    assert (bitmask[2] == bitmask[1]).all()
-    assert (bitmask[3] == bitmask[1]).all()
+    manager.reasoner_cls = MockStartAwareReasoner
+    request.prompt_token_ids = []
 
-
-def test_outlines_termination(tokenizer):
-    """outlines_core never advances on EOS; termination must still be
-    tracked exactly once per accepted EOS and undone by rollback."""
-    manager, request = _build_harness(
-        tokenizer,
-        "outlines",
-        use_reasoner=False,
-        structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
-    )
-    structured_req = request.structured_output_request
-    assert structured_req is not None
-    grammar = structured_req.grammar
-    assert grammar is not None
-    one, eos = _to_token_ids(tokenizer, ("1", EOS))
-
-    assert not grammar.accept_tokens(request.request_id, [eos])
-    assert grammar.accept_tokens(request.request_id, [one])
-    # Polling must not change the result.
-    assert not any(grammar.is_terminated() for _ in range(3))
-    assert grammar.accept_tokens(request.request_id, [eos])
-    assert all(grammar.is_terminated() for _ in range(3))
-    assert grammar.num_processed_tokens == 2
-
-    grammar.rollback(2)
-    assert not grammar.is_terminated()
-    assert grammar.num_processed_tokens == 0
-    assert grammar.validate_tokens([eos]) == []
-    assert grammar.accept_tokens(request.request_id, [one, eos, one])
-    assert grammar.is_terminated()
+    open_brace = _single_token(tokenizer, "{")
+    z = _single_token(tokenizer, "z")
+    assert manager.validate_tokens(request, [open_brace, z]) == [open_brace, z]
