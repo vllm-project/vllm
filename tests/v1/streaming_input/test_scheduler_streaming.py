@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from concurrent.futures import Future
 from unittest.mock import MagicMock
 
 import torch
@@ -12,7 +13,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -23,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_types import StructuredOutputGrammar
 
 STOP_TOKEN = 128001
 
@@ -172,6 +174,129 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
+
+    def _assert_streaming_session_structured_output_update(
+        self,
+        session_params: SamplingParams,
+        continuation_params: SamplingParams,
+        expected_status: RequestStatus,
+    ):
+        scheduler = create_scheduler()
+        session = Request(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=session_params,
+            pooling_params=None,
+            resumable=True,
+        )
+        scheduler.add_request(session)
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        scheduler.num_waiting_for_streaming_input = 1
+
+        continuation = Request(
+            request_id="session",
+            prompt_token_ids=[4, 5, 6],
+            sampling_params=continuation_params,
+            pooling_params=None,
+            resumable=True,
+        )
+        expected_structured_output = continuation.structured_output_request
+        if expected_structured_output is not None:
+            expected_structured_output.grammar = Future()
+
+        scheduler.add_request(continuation)
+
+        assert session.structured_output_request is expected_structured_output
+        assert session.sampling_params is continuation_params
+        assert session.status == expected_status
+
+    def test_streaming_session_adds_structured_output(self):
+        """A continuation must install and wait for its pending grammar."""
+        self._assert_streaming_session_structured_output_update(
+            SamplingParams(max_tokens=10),
+            SamplingParams(
+                max_tokens=10,
+                structured_outputs=StructuredOutputsParams(choice=["yes", "no"]),
+            ),
+            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+        )
+
+    def test_streaming_session_clears_structured_output(self):
+        """A plain continuation must remove the previous chunk's grammar."""
+        self._assert_streaming_session_structured_output_update(
+            SamplingParams(
+                max_tokens=10,
+                structured_outputs=StructuredOutputsParams(choice=["yes", "no"]),
+            ),
+            SamplingParams(max_tokens=10),
+            RequestStatus.WAITING,
+        )
+
+    def test_streaming_session_replaces_structured_output(self):
+        """A structured continuation must replace the previous grammar."""
+        self._assert_streaming_session_structured_output_update(
+            SamplingParams(
+                max_tokens=10,
+                structured_outputs=StructuredOutputsParams(choice=["old"]),
+            ),
+            SamplingParams(
+                max_tokens=10,
+                structured_outputs=StructuredOutputsParams(choice=["new"]),
+            ),
+            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+        )
+
+    def test_queued_structured_output_continuation_waits_for_grammar(self):
+        scheduler = create_scheduler()
+        session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
+        scheduler.add_request(session)
+        scheduler_output = scheduler.schedule()
+        session.num_computed_tokens = len(session.prompt_token_ids)
+
+        continuation = Request(
+            request_id="session",
+            prompt_token_ids=[4, 5, 6],
+            sampling_params=SamplingParams(
+                max_tokens=10,
+                structured_outputs=StructuredOutputsParams(choice=["yes", "no"]),
+            ),
+            pooling_params=None,
+            resumable=True,
+        )
+        structured_output = continuation.structured_output_request
+        assert structured_output is not None
+        grammar_future: Future[StructuredOutputGrammar] = Future()
+        structured_output.grammar = grammar_future
+
+        scheduler.add_request(continuation)
+        assert list(session.streaming_queue) == [
+            StreamingUpdate.from_request(continuation)
+        ]
+
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[session.request_id],
+                req_id_to_index={session.request_id: 0},
+                sampled_token_ids=[[STOP_TOKEN]],
+                logprobs=None,
+                prompt_logprobs_dict={session.request_id: None},
+                pooler_output=[],
+            ),
+        )
+
+        assert session.structured_output_request is structured_output
+        assert session.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+        assert session in scheduler.skipped_waiting
+        assert session not in scheduler.running
+
+        grammar_future.set_result(MagicMock())
+        scheduler.schedule()
+
+        assert session.status == RequestStatus.RUNNING
+        assert session in scheduler.running
+        assert session not in scheduler.skipped_waiting
 
     def test_update_request_as_session_with_multimodal(self):
         scheduler = create_scheduler()
