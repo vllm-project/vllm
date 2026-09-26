@@ -22,6 +22,9 @@ from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -165,6 +168,89 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
     block_tables.get_dummy_slot_mappings.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "full_cudagraph,max_query_len,expected_max_query_len",
+    [(False, None, None), (True, None, 8), (True, 1, 1), (True, 3, 3)],
+)
+def test_capture_query_length_covers_replay_batches(
+    full_cudagraph, max_query_len, expected_max_query_len
+):
+    """Mixed FULL graphs must capture prefill kernels as well as decode kernels."""
+    num_tokens = num_reqs = 8
+    buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
+    block_tables = MagicMock()
+    block_tables.cp_size = 1
+    block_tables.get_dummy_block_tables.return_value = ()
+    block_tables.get_dummy_slot_mappings.return_value = torch.empty(
+        0, num_tokens, dtype=torch.int64
+    )
+    model_state = MagicMock()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+
+    gpu_cudagraph_utils.prepare_inputs_to_capture(
+        num_reqs,
+        num_tokens,
+        model_state,
+        buffers,
+        block_tables,
+        [],
+        kv_cache_config,
+        full_cudagraph=full_cudagraph,
+        max_query_len=max_query_len,
+    )
+
+    batch = model_state.prepare_attn.call_args.args[0]
+    assert batch.num_scheduled_tokens.max() == 1
+    assert batch.max_query_len == expected_max_query_len
+
+
+@pytest.mark.parametrize(
+    "uniform_token_count,max_query_len,expected_max_query_len",
+    [(1, None, 1), (None, 3, 3), (None, None, 8)],
+)
+def test_speculator_capture_preserves_decode_query_bounds(
+    monkeypatch, uniform_token_count, max_query_len, expected_max_query_len
+):
+    """Draft decode graphs keep narrow queries while mixed graphs cover prefill."""
+    num_tokens = num_reqs = 8
+    desc = BatchExecutionDescriptor(
+        CUDAGraphMode.FULL,
+        num_tokens,
+        num_reqs,
+        uniform_token_count=uniform_token_count,
+        max_query_len=max_query_len,
+    )
+    manager = SpeculatorCudaGraphManager.__new__(SpeculatorCudaGraphManager)
+    manager.max_num_reqs = num_reqs
+    manager.dp_size = 1
+    buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
+    block_tables = MagicMock()
+    block_tables.cp_size = 1
+    block_tables.get_dummy_block_tables.return_value = ()
+    block_tables.get_dummy_slot_mappings.return_value = torch.empty(
+        0, num_tokens, dtype=torch.int64
+    )
+    model_state = MagicMock()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+
+    def capture(self, create_forward_fn, progress_bar_desc):
+        for warmup in (True, False):
+            create_forward_fn(desc, warmup)(desc.cg_mode)
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+    manager.capture(
+        MagicMock(), model_state, buffers, block_tables, [], kv_cache_config
+    )
+
+    assert model_state.prepare_attn.call_count == 2
+    for call in model_state.prepare_attn.call_args_list:
+        assert call.args[0].max_query_len == expected_max_query_len
+
+
 _DECODE_QUERY_LEN = 3
 
 
@@ -208,6 +294,7 @@ def _make_spec_decode_manager(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    varlen_decode: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -230,6 +317,7 @@ def _make_spec_decode_manager(
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
+        varlen_decode=varlen_decode,
     )
     manager._graphs_captured = True
     return manager
@@ -285,6 +373,28 @@ def test_mixed_batch_never_selects_a_uniform_decode_graph(monkeypatch):
     assert desc.cg_mode == CUDAGraphMode.PIECEWISE
     assert desc.uniform_token_count is None
     assert desc.num_tokens == 16
+
+
+def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
+    """A varlen decode graph replays any decode batch within its query-length
+    bound. The runner passes no bound for a batch with a prefill, which must not
+    replay one however short the prefill is."""
+    manager = _make_spec_decode_manager(monkeypatch, varlen_decode=True)
+
+    def dispatch(max_query_len):
+        return manager.dispatch(
+            num_reqs=3,
+            num_tokens=6,
+            uniform_token_count=None,
+            num_active_loras=0,
+            max_query_len=max_query_len,
+        )
+
+    desc = dispatch(_DECODE_QUERY_LEN)
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.max_query_len == _DECODE_QUERY_LEN
+    assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
+    assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
