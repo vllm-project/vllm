@@ -202,6 +202,20 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_mixed_causal(cls) -> bool:
+        """Check if backend supports mixed causal/non-causal batches, i.e. a
+        tensor-valued ``CommonAttentionMetadata.causal`` holding one flag per
+        request.
+
+        Unlike `supports_non_causal`, which only asks whether a batch can be
+        run bidirectionally, this asks whether causality can vary *within* a
+        batch. Backends whose routing or kernel arguments are batch-wide must
+        leave this False so they are not selected for models that emit
+        per-request flags (e.g. DiffusionGemma).
+        """
+        return False
+
+    @classmethod
     def supports_batch_invariance(cls) -> bool:
         return False
 
@@ -293,6 +307,7 @@ class AttentionBackend(ABC):
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
         use_rswa: bool = False,
+        use_mixed_causal: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -331,6 +346,11 @@ class AttentionBackend(ABC):
             invalid_reasons.append("R-SWA not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
+        if use_mixed_causal and not cls.supports_mixed_causal():
+            invalid_reasons.append(
+                "mixed causal/non-causal requests within a batch not supported "
+                "(supported by TRITON_ATTN, FLASH_ATTN on FA4, and CPU_ATTN)"
+            )
         if use_mla and use_non_causal and use_dcp and not cls.supports_non_causal_dcp():
             invalid_reasons.append("non-causal MLA attention with DCP not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():

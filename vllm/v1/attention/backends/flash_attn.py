@@ -392,6 +392,12 @@ class FlashAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_mixed_causal(cls) -> bool:
+        # Per-request flags are forwarded as FA4's `dynamic_causal` argument;
+        # FA2/FA3 have no equivalent and the impl raises for them.
+        return get_flash_attn_version() == 4
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """FlashAttention supports all attention types."""
         return attn_type in (
