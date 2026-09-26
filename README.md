@@ -53,7 +53,7 @@ vLLM is flexible and easy to use with:
 vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
 
 - Decoder-only LLMs (e.g., Llama, Qwen, Gemma)
-- Mixture-of-Expert LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
+- Mixture-of-Experts LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
 - Hybrid attention and state-space models (e.g., Mamba, Qwen3.5)
 - Multi-modal models (e.g., LLaVA, Qwen-VL, Pixtral)
 - Embedding and retrieval models (e.g., E5-Mistral, GTE, ColBERT)
