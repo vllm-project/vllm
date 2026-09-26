@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 from abc import ABC, abstractmethod
 
 import torch
@@ -74,6 +75,13 @@ class BaseModelLoader(ABC):
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
 
+            # Reclaim memory before and after weight processing.
+            # This is crucial for avoiding OOM on discrete GPUs when using
+            # raw driver allocations like DeepEP v2 or NCCL cumem.
+            gc.collect()
+            if current_platform.is_cuda_alike():
+                torch.accelerator.empty_cache()
+
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
             if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -89,6 +97,13 @@ class BaseModelLoader(ABC):
                 finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
+
+            # Reclaim memory before and after weight processing.
+            # This is crucial for avoiding OOM on discrete GPUs when using
+            # raw driver allocations like DeepEP v2 or NCCL cumem.
+            gc.collect()
+            if current_platform.is_cuda_alike():
+                torch.accelerator.empty_cache()
 
         return model.eval()
 
