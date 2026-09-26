@@ -77,8 +77,12 @@ __global__ void moe_wna16_gemm_kernel(
             origin_k = BLOCK_SIZE_N * i + threadIdx.x / 4 * 4 + order;
           }
 
-          origin_k += token_index / top_k * size_k + blockIdx.z * BLOCK_SIZE_K;
-          block_input[m * BLOCK_SIZE_K + k] = input[origin_k];
+          // (token_index / top_k) * size_k reaches size_m * size_k, which
+          // exceeds 2 ** 31 for large prefills.
+          const int64_t input_offset =
+              static_cast<int64_t>(token_index / top_k) * size_k +
+              blockIdx.z * BLOCK_SIZE_K + origin_k;
+          block_input[m * BLOCK_SIZE_K + k] = input[input_offset];
         }
       }
     }
@@ -216,8 +220,11 @@ __global__ void moe_wna16_gemm_kernel(
       if (mul_topk_weight) {
         res[m] *= topk_weights[token_index];
       }
-      atomicAdd(&output[token_index * size_n + offset_n],
-                Dtype::float2num(res[m]));
+      // token_index reaches size_m * top_k, so token_index * size_n exceeds
+      // 2 ** 31 before any other index in this kernel does.
+      const int64_t output_offset =
+          static_cast<int64_t>(token_index) * size_n + offset_n;
+      atomicAdd(&output[output_offset], Dtype::float2num(res[m]));
     }
 
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
