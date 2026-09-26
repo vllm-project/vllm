@@ -7,6 +7,7 @@ The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import errno
 import mmap
 import os
 import threading
@@ -34,7 +35,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -204,6 +205,26 @@ def fs_tier_with_events(tmp_path):
         locality="LOCAL",
     )
     yield tier
+    tier.shutdown()
+
+
+@pytest.fixture
+def fs_tier_with_checksums(tmp_path):
+    from vllm.v1.kv_offload.tiering.fs.io import probe_xattr
+
+    if not probe_xattr(str(tmp_path)):
+        pytest.skip("tmp_path does not support user extended attributes")
+    tensor = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=4,
+        n_write_threads=4,
+        checksum_blocks=True,
+    )
+    yield tier, tensor
     tier.shutdown()
 
 
@@ -730,6 +751,155 @@ def test_transient_load_failure_leaves_file(fs_tier, monkeypatch, use_c_ext):
     os.rename(saved, path)
     with open(path, "rb") as f:
         assert f.read() == original
+
+
+# ---------------------------------------------------------------------------
+# Block checksums
+# ---------------------------------------------------------------------------
+
+
+def test_crc32c_matches_standard_check_value():
+    from vllm.v1.kv_offload.tiering.fs.io import crc32c
+
+    assert crc32c(b"123456789") == 0xE3069283
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_checksum_is_recorded_and_verified(
+    fs_tier_with_checksums, monkeypatch, use_c_ext
+):
+    """Both I/O paths record the same CRC32C and load a block that matches it."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, tensor = fs_tier_with_checksums
+    expected = tensor[0].clone()
+
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    recorded = os.getxattr(path, io_mod._CHECKSUM_XATTR)
+    assert int.from_bytes(recorded, "big") == io_mod.crc32c(expected.numpy().tobytes())
+
+    tier.submit_load(make_job(2, [key(1)], [1], is_promotion=True))
+    assert all(r.success for r in drain(tier))
+    assert torch.equal(tensor[1], expected)
+
+
+@pytest.mark.parametrize("bad_record", [False, True])
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_checksum_mismatch_fails_load_and_removes_block(
+    fs_tier_with_checksums, monkeypatch, use_c_ext, bad_record
+):
+    """A corrupt block or record is removed and flagged; earlier blocks are kept."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier_with_checksums
+    keys = [key(1), key(2)]
+    tier.submit_store(make_job(1, keys, [0, 1]))
+    assert all(r.success for r in drain(tier))
+    bad_path = tier.file_mapper.get_file_name(key(2))
+    if bad_record:
+        os.setxattr(bad_path, io_mod._CHECKSUM_XATTR, b"\x00\x01\x02")
+    else:
+        # Same size, so the short-read check cannot catch it.
+        with open(bad_path, "r+b") as f:
+            f.write(b"\xff" * 16)
+
+    tier.submit_load(make_job(2, keys, [2, 3], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+    assert tuple(results[0].successful_keys) == (key(1),)
+    assert results[0].checksum_failed
+    assert not os.path.exists(bad_path)
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_block_stored_without_checksum_still_loads(
+    fs_tier, fs_tier_with_checksums, monkeypatch, use_c_ext
+):
+    """Enabling checksums on an existing cache must not invalidate it."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    legacy_tier, legacy_tensor = fs_tier
+    tier, tensor = fs_tier_with_checksums
+    legacy_tensor[0] = tensor[0]
+
+    legacy_tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(legacy_tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    with pytest.raises(OSError):
+        os.getxattr(path, io_mod._CHECKSUM_XATTR)
+
+    tier.submit_load(make_job(2, [key(1)], [1], is_promotion=True))
+    assert all(r.success for r in drain(tier))
+    assert torch.equal(tensor[1], tensor[0])
+
+
+def test_checksum_is_set_before_the_block_is_published(
+    fs_tier_with_checksums, monkeypatch
+):
+    """The rename publishes the block, so the temp file must already be stamped."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", False)
+    real_replace = os.replace
+    seen = []
+
+    def checking_replace(src, dst):
+        seen.append(os.getxattr(src, io_mod._CHECKSUM_XATTR))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(io_mod.os, "replace", checking_replace)
+    tier, _ = fs_tier_with_checksums
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    assert len(seen) == 1 and len(seen[0]) == 4
+
+
+def test_checksums_require_xattr_support(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+
+    monkeypatch.setattr(mgr_mod, "probe_xattr", lambda directory: False)
+    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    with pytest.raises(ValueError, match="extended attributes"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            checksum_blocks=True,
+        )
+
+
+def test_checksum_failure_metric_is_defined_only_when_enabled(fs_tier, monkeypatch):
+    """Without checksums the metric is undefined, so EBADMSG must not be counted."""
+    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+
+    assert FileSystemTierManager.build_metric_definitions({}) == {}
+    metrics = FileSystemTierManager.build_metric_definitions({"checksum_blocks": True})
+    assert metrics[TieringOffloadingMetrics.CHECKSUM_FAILURES].labelnames == ("tier",)
+
+    def failing_load(*args, **kwargs):
+        raise OSError(errno.EBADMSG, "Bad message")
+
+    monkeypatch.setattr(mgr_mod, "batch_load_block", failing_load)
+    tier, _ = fs_tier
+    tier.submit_load(make_job(1, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1
+    assert not any(r.success or r.checksum_failed for r in results)
 
 
 # ---------------------------------------------------------------------------

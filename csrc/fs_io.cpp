@@ -5,11 +5,19 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#if defined(__x86_64__)
+  #include <nmmintrin.h>
+#endif
 
 #if defined(O_DIRECT)
 constexpr int kODirectFlag = O_DIRECT;
@@ -17,9 +25,113 @@ constexpr int kODirectFlag = O_DIRECT;
 constexpr int kODirectFlag = 0;
 #endif
 
+// Extended attribute holding a block's CRC32C as four big-endian bytes. Must
+// match _CHECKSUM_XATTR in vllm/v1/kv_offload/tiering/fs/io.py.
+constexpr const char* kChecksumXattr = "user.vllm.kv_crc32c";
+constexpr size_t kChecksumSize = 4;
+
+// errno of fgetxattr when the attribute is absent.
+#if defined(__APPLE__)
+constexpr int kXattrAbsentErrno = ENOATTR;
+#else
+constexpr int kXattrAbsentErrno = ENODATA;
+#endif
+
 extern "C" {
 
 namespace {
+
+// CRC32C (Castagnoli) polynomial, bit-reflected.
+constexpr uint32_t kCrc32cPolyReflected = 0x82F63B78;
+
+constexpr std::array<uint32_t, 256> kCrc32cTable = [] {
+  std::array<uint32_t, 256> table{};
+  for (uint32_t i = 0; i < 256; i++) {
+    uint32_t crc = i;
+    for (int bit = 0; bit < 8; bit++) {
+      crc = (crc & 1) ? (crc >> 1) ^ kCrc32cPolyReflected : crc >> 1;
+    }
+    table[i] = crc;
+  }
+  return table;
+}();
+
+inline uint32_t crc32c_update_sw(uint32_t crc, const uint8_t* data,
+                                 size_t size) {
+  for (size_t i = 0; i < size; i++) {
+    crc = kCrc32cTable[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+  }
+  return crc;
+}
+
+#if defined(__x86_64__)
+__attribute__((target("sse4.2"))) inline uint32_t crc32c_update_hw(
+    uint32_t crc, const uint8_t* data, size_t size) {
+  uint64_t crc64 = crc;
+  for (; size >= 8; data += 8, size -= 8) {
+    uint64_t word;
+    std::memcpy(&word, data, sizeof(word));
+    crc64 = _mm_crc32_u64(crc64, word);
+  }
+  crc = static_cast<uint32_t>(crc64);
+  for (; size > 0; data++, size--) {
+    crc = _mm_crc32_u8(crc, *data);
+  }
+  return crc;
+}
+
+inline bool has_crc32c_hw() { return __builtin_cpu_supports("sse4.2"); }
+#endif
+
+// Must match crc32c in vllm/v1/kv_offload/tiering/fs/io.py.
+inline uint32_t crc32c(const char* data, size_t size) {
+  const auto* bytes = reinterpret_cast<const uint8_t*>(data);
+#if defined(__x86_64__)
+  static const bool use_hw = has_crc32c_hw();
+  if (use_hw) {
+    return ~crc32c_update_hw(0xFFFFFFFF, bytes, size);
+  }
+#endif
+  return ~crc32c_update_sw(0xFFFFFFFF, bytes, size);
+}
+
+inline int set_checksum_xattr(int fd, uint32_t crc) {
+  const unsigned char value[kChecksumSize] = {
+      static_cast<unsigned char>(crc >> 24),
+      static_cast<unsigned char>(crc >> 16),
+      static_cast<unsigned char>(crc >> 8), static_cast<unsigned char>(crc)};
+#if defined(__APPLE__)
+  return fsetxattr(fd, kChecksumXattr, value, kChecksumSize, 0, 0);
+#else
+  return fsetxattr(fd, kChecksumXattr, value, kChecksumSize, 0);
+#endif
+}
+
+// Returns 0 if `data` matches the CRC32C recorded on `fd` or none is recorded,
+// EBADMSG on a mismatch, or the errno of a failed lookup.
+inline int verify_checksum(int fd, const char* data, size_t size) {
+  unsigned char value[kChecksumSize];
+#if defined(__APPLE__)
+  const ssize_t len = fgetxattr(fd, kChecksumXattr, value, kChecksumSize, 0, 0);
+#else
+  const ssize_t len = fgetxattr(fd, kChecksumXattr, value, kChecksumSize);
+#endif
+  if (len < 0) {
+    if (errno == kXattrAbsentErrno) {
+      return 0;
+    }
+    // ERANGE: the record is larger than a checksum.
+    return errno == ERANGE ? EBADMSG : errno;
+  }
+  if (len != static_cast<ssize_t>(kChecksumSize)) {
+    return EBADMSG;
+  }
+  const uint32_t expected = (static_cast<uint32_t>(value[0]) << 24) |
+                            (static_cast<uint32_t>(value[1]) << 16) |
+                            (static_cast<uint32_t>(value[2]) << 8) |
+                            static_cast<uint32_t>(value[3]);
+  return crc32c(data, size) == expected ? 0 : EBADMSG;
+}
 
 // Returns 0 on success, or the std::error_code's POSIX-compatible value on
 // failure, mirroring the errno convention used by the syscalls below.
@@ -38,7 +150,8 @@ inline int ensure_parent_dirs(const std::string& path) {
 // before any subsequent cleanup call can overwrite it. On failure, the temp
 // file is removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
-                        const char* src, size_t size, bool use_o_direct) {
+                        const char* src, size_t size, bool use_o_direct,
+                        bool checksum) {
   if (access(dest_path, F_OK) == 0) {
     return 0;  // Already present.
   }
@@ -58,6 +171,14 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
   if (written < 0 || static_cast<size_t>(written) != size) {
     const int err = written < 0 ? errno : EIO;
     close(fd);  // Best-effort cleanup; the real error is already captured.
+    unlink(tmp_path);
+    return err;
+  }
+
+  // Before the rename, so a published block never lacks it.
+  if (checksum && set_checksum_xattr(fd, crc32c(src, size)) != 0) {
+    const int err = errno;
+    close(fd);
     unlink(tmp_path);
     return err;
   }
@@ -84,8 +205,9 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 // corruption. Open failures and read errors (bytes_read < 0) are
 // transient/ambiguous and leave the file untouched; a close failure after a
 // full read is harmless and does not fail the load.
+// With `checksum`, a CRC32C mismatch also removes the file and returns EBADMSG.
 inline int _load_block(const char* source_path, char* dst, size_t size,
-                       bool use_o_direct) {
+                       bool use_o_direct, bool checksum) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
   if (fd < 0) {
@@ -104,6 +226,17 @@ inline int _load_block(const char* source_path, char* dst, size_t size,
     close(fd);
     unlink(source_path);
     return EIO;
+  }
+
+  if (checksum) {
+    const int err = verify_checksum(fd, dst, size);
+    if (err != 0) {
+      close(fd);
+      if (err == EBADMSG) {
+        unlink(source_path);
+      }
+      return err;
+    }
   }
 
   // A close error after a successful full read is harmless: the data is
@@ -199,16 +332,19 @@ static PyObject* batch_lookup(PyObject* /*self*/, PyObject* args) {
 /// @param use_o_direct bool – whether to open files with O_DIRECT
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
+/// @param checksum     bool – attach each block's CRC32C as an extended
+///                     attribute before publishing it (default False).
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   PyObject* tmp_paths_obj = nullptr;
   PyObject* dest_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
+  int checksum = 0;
 
-  if (!PyArg_ParseTuple(args, "O!O!O!|p", &PyList_Type, &tmp_paths_obj,
+  if (!PyArg_ParseTuple(args, "O!O!O!|pp", &PyList_Type, &tmp_paths_obj,
                         &PyList_Type, &dest_paths_obj, &PyList_Type,
-                        &buffers_obj, &use_o_direct)) {
+                        &buffers_obj, &use_o_direct, &checksum)) {
     return nullptr;
   }
 
@@ -237,9 +373,9 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
-      const int err =
-          _store_block(tmp_paths[i], dest_paths[i], buf,
-                       static_cast<size_t>(buffers[i].len), use_o_direct);
+      const int err = _store_block(tmp_paths[i], dest_paths[i], buf,
+                                   static_cast<size_t>(buffers[i].len),
+                                   use_o_direct, checksum);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -268,14 +404,17 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
 /// @param use_o_direct bool – whether to open files with O_DIRECT
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
+/// @param checksum     bool – check each block against its recorded CRC32C
+///                     (default False). A mismatch raises EBADMSG.
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   PyObject* source_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
+  int checksum = 0;
 
-  if (!PyArg_ParseTuple(args, "O!O!|p", &PyList_Type, &source_paths_obj,
-                        &PyList_Type, &buffers_obj, &use_o_direct)) {
+  if (!PyArg_ParseTuple(args, "O!O!|pp", &PyList_Type, &source_paths_obj,
+                        &PyList_Type, &buffers_obj, &use_o_direct, &checksum)) {
     return nullptr;
   }
 
@@ -302,7 +441,7 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
       char* buf = static_cast<char*>(buffers[i].buf);
       const int err =
           _load_block(source_paths[i], buf, static_cast<size_t>(buffers[i].len),
-                      use_o_direct);
+                      use_o_direct, checksum);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -345,14 +484,16 @@ static PyMethodDef fs_io_C_methods[] = {
     {"batch_store_block", batch_store_block, METH_VARARGS,
      "batch_store_block(tmp_paths: list[str], dest_paths: list[str],\n"
      "                  buffers: list[bytes-like],\n"
-     "                  use_o_direct: bool = True) -> None\n"
+     "                  use_o_direct: bool = True,\n"
+     "                  checksum: bool = False) -> None\n"
      "\n"
      "Store a batch of blocks, each from its own buffer, to disk. Raises on "
      "first error."},
     {"batch_load_block", batch_load_block, METH_VARARGS,
      "batch_load_block(source_paths: list[str],\n"
      "                 buffers: list[writable bytes-like],\n"
-     "                 use_o_direct: bool = True) -> None\n"
+     "                 use_o_direct: bool = True,\n"
+     "                 checksum: bool = False) -> None\n"
      "\n"
      "Load a batch of blocks from disk into corresponding buffers. "
      "Raises on first error."},
