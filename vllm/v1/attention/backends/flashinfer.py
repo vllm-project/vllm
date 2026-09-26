@@ -374,7 +374,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = log2_lse_to_ln(lse_context.transpose(0, 1).contiguous())
+        lse_context = log2_lse_to_ln(lse_context).transpose(0, 1)
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,

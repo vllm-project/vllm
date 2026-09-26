@@ -27,8 +27,11 @@ SLIDING_WINDOWS = [None, 64]
 
 
 @pytest.mark.parametrize("backend", ["fa2", "cudnn"])
+@pytest.mark.parametrize("strided_context", [False, True])
 @torch.inference_mode()
-def test_dcp_prefill_lse_merge_and_replay(monkeypatch, backend: str) -> None:
+def test_dcp_prefill_lse_merge_and_replay(
+    monkeypatch, backend: str, strided_context: bool
+) -> None:
     """Merge real ragged attention with base-2 context, including empty context."""
     import math
     from types import SimpleNamespace
@@ -48,6 +51,11 @@ def test_dcp_prefill_lse_merge_and_replay(monkeypatch, backend: str) -> None:
     )
     context_lse[:, 0] = -torch.inf
     context_log2 = (context_lse.T / math.log(2)).contiguous()
+    if strided_context:
+        # AG/RS combine returns a rank's head slice of a wider NH tensor.
+        all_rank_lse = torch.empty(tokens, heads * 3, device=q.device)
+        context_log2 = all_rank_lse[:, heads : 2 * heads].copy_(context_log2)
+        assert not context_log2.is_contiguous()
     group = SimpleNamespace(all_gather=lambda tensor, dim: tensor)
     monkeypatch.setattr(fi_backend, "get_dcp_group", lambda: group)
     wrapper = object.__new__(fi_backend.BatchDCPPrefillWrapper)
@@ -86,6 +94,14 @@ def test_dcp_prefill_lse_merge_and_replay(monkeypatch, backend: str) -> None:
     with torch.cuda.graph(graph):
         wrapper.run(layer, q, (k, v), k, v, out)
     q.mul_(0.5).add_(0.4)
+    context_lse.add_(0.7)
+    context_log2.copy_(context_lse.T / math.log(2))
+    out.fill_(torch.nan)
+    graph.replay()
+    check_output()
+    context_lse.fill_(-torch.inf)
+    context_log2.fill_(-torch.inf)
+    out.fill_(torch.nan)
     graph.replay()
     check_output()
 
