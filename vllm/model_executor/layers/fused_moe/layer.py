@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -83,6 +84,24 @@ def determine_expert_counts(
     )
 
     return global_num_experts, logical_num_experts, num_fused_shared_experts
+
+
+def _adapt_routed_experts_cls(
+    selected_cls: type[RoutedExperts],
+) -> type[RoutedExperts]:
+    routed_experts_cls = current_platform.get_fused_moe_routed_experts_cls(selected_cls)
+    if not isinstance(routed_experts_cls, type) or not issubclass(
+        routed_experts_cls, RoutedExperts
+    ):
+        raise TypeError("Platform must return a RoutedExperts class.")
+    return routed_experts_cls
+
+
+def _adapt_runner_cls(selected_cls: type[MoERunner]) -> type[MoERunner]:
+    runner_cls = current_platform.get_fused_moe_runner_cls(selected_cls)
+    if not isinstance(runner_cls, type) or not issubclass(runner_cls, MoERunner):
+        raise TypeError("Platform must return a MoERunner class.")
+    return runner_cls
 
 
 def FusedMoEFactory(
@@ -379,6 +398,7 @@ def FusedMoEFactory(
     # This will hold all expert weight parameters
     if routed_experts_cls is None:
         routed_experts_cls = RoutedExperts
+    routed_experts_cls = _adapt_routed_experts_cls(routed_experts_cls)
 
     assert params_dtype is not None
     routed_experts = routed_experts_cls(
@@ -414,6 +434,7 @@ def FusedMoEFactory(
 
     if runner_cls is None:
         runner_cls = MoERunner
+    runner_cls = _adapt_runner_cls(runner_cls)
 
     runner = runner_cls(
         layer_name=layer_name,
