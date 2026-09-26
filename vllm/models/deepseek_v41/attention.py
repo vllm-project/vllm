@@ -1105,12 +1105,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # DeepseekV4SWACache.
         if not self.is_kv_source:
             return None
-        # fp8_ds_mla is a UE8M0 block-scaled uint8 layout whose page rounds up
-        # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
-        # use natural element-size pages.
+        # DeepSeek-V4.1 sparse-MLA pages are compressed states. Ratio-1 and
+        # ratio-2 layers use 64 and 128 tokens respectively to carry at least
+        # 64 kernel states, while preserving any larger configured page width.
+        block_size = max(
+            vllm_config.cache_config.block_size,
+            64 * self.compress_ratio,
+        )
         uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
