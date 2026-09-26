@@ -142,6 +142,9 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
+        def getsockopt_string(self, _option):
+            return "inproc://dummy"
+
     monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
@@ -376,7 +379,7 @@ def test_dplb_finished_requests_release_inflight():
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
 )
-def test_apply_ready_response_syncs_block_size(effective_size, other_size):
+def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
@@ -384,8 +387,11 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
+    client.coordinator_input_address = None
+    client.coordinator_output_address = None
 
     payload = msgspec.msgpack.encode(
         EngineCoreReadyResponse(
@@ -406,6 +412,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
             instance_id="test-instance",
             supports_lora=False,
             max_loras=0,
+            coord_store_port=1234,
+            coordinator_input_address="tcp://127.0.0.1:1235",
+            coordinator_output_address="tcp://127.0.0.1:1236",
         )
     )
     fields = msgspec.msgpack.decode(payload)
@@ -426,6 +435,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
 
     client._apply_ready_response(b"")
     assert cache_config.effective_attention_block_size is None
+    assert client.vllm_config.parallel_config._coord_store_port == 1234
+    assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+    assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
@@ -436,6 +448,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
 
@@ -1506,6 +1519,7 @@ def test_apply_ready_response_retains_kv_event_sources():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
 
     def ready(rank: int, config: KVEventsConfig | None) -> bytes:
