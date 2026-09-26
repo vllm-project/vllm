@@ -144,6 +144,9 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
             "TOOL_START": TOOL_CALL_START,
             "TOOL_END": TOOL_CALL_END,
         },
+        required_tool_choice_text_fallback_terminals=frozenset(
+            {"TOOL_START", "TOOL_END"}
+        ),
         transitions={
             **reasoning_transitions,
             (ParserState.REASONING, "THINK_START"): Transition(
