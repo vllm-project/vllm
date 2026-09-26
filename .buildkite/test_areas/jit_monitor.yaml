@@ -20,3 +20,24 @@ steps:
     # instead of running until the build timeout.
     - export PYTHONFAULTHANDLER=1
     - pytest -v -s jit_monitor/test_no_runtime_jit.py --timeout=900 --timeout-method=thread
+  mirror:
+    amd:
+      # Focused MRV2 regression; the broader model/backend matrix is pending.
+      label: ':amd: (MI355) MRV2 Sampler JIT Warmup'
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 10
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/jit_monitor/
+      - tests/models/utils.py
+      - tests/utils.py
+      - vllm/v1/worker/gpu/
+      - vllm/v1/sample/ops/topk_topp_sampler.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      commands:
+      - pytest -v -s tests/jit_monitor/test_no_runtime_jit_rocm.py --timeout=300
