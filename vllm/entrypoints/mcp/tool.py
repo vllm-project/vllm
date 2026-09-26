@@ -14,6 +14,8 @@ from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
+    from openai.types.responses import ResponseFunctionToolCall
+
     # Avoid circular import.
     from vllm.entrypoints.openai.responses.context import ConversationContext
 
@@ -51,7 +53,11 @@ class Tool(ABC):
         pass
 
     @abstractmethod
-    async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+    async def get_result_parsable_context(
+        self,
+        context: "ConversationContext",
+        tool_call: "ResponseFunctionToolCall",
+    ) -> Any:
         pass
 
 
@@ -89,7 +95,11 @@ class HarmonyBrowserTool(Tool):
             tool_output_msgs.append(msg)
         return tool_output_msgs
 
-    async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+    async def get_result_parsable_context(
+        self,
+        context: "ConversationContext",
+        tool_call: "ResponseFunctionToolCall",
+    ) -> Any:
         raise NotImplementedError("Not implemented yet")
 
     @property
@@ -149,7 +159,11 @@ class HarmonyPythonTool(Tool):
             tool_output_msgs.append(msg)
         return tool_output_msgs
 
-    async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+    async def get_result_parsable_context(
+        self,
+        context: "ConversationContext",
+        tool_call: "ResponseFunctionToolCall",
+    ) -> Any:
         """This function converts parsable context types to harmony and
         back so we can use GPTOSS demo python tool
         """
@@ -157,8 +171,7 @@ class HarmonyPythonTool(Tool):
 
         assert isinstance(context, ParsableContext)
 
-        last_msg = context.response_messages[-1]
-        args = json.loads(last_msg.arguments)
+        args = json.loads(tool_call.arguments)
 
         last_msg_harmony = Message(
             author=Author(role="assistant", name=None),
@@ -173,7 +186,7 @@ class HarmonyPythonTool(Tool):
             processed = ResponseFunctionToolCallOutputItem(
                 id=f"fco_{random_uuid()}",
                 type="function_call_output",
-                call_id=f"call_{random_uuid()}",
+                call_id=tool_call.call_id,
                 output=msg.content[0].text,
                 status="completed",
             )

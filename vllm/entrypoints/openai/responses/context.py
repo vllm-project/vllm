@@ -24,7 +24,6 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -316,6 +315,7 @@ class ParsableContext(ConversationContext):
 
         self.response_messages: list[ResponseInputOutputItem] = response_messages
         self.num_init_messages = len(response_messages)
+        self._generation_start_index = len(response_messages)
         self.finish_reason: str | None = None
         self.enable_auto_tools = enable_auto_tools
 
@@ -415,27 +415,61 @@ class ParsableContext(ConversationContext):
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
         self.response_messages.extend(output)
+        self._generation_start_index = len(self.response_messages)
+
+    def _get_builtin_tool_session_name(
+        self, message: ResponseFunctionToolCall
+    ) -> str | None:
+        if message.name in ("code_interpreter", "python"):
+            return "python" if "python" in self.available_tools else None
+        if message.name == "web_search_preview":
+            return "browser" if "browser" in self.available_tools else None
+        if message.name.startswith("container"):
+            return "container" if "container" in self.available_tools else None
+        return None
+
+    def _get_pending_builtin_tool_calls(self) -> list[ResponseFunctionToolCall]:
+        """Return the trailing built-in calls emitted by the current turn.
+
+        Tool calls from one assistant turn are stored as a contiguous suffix.
+        Requiring every call in that suffix to be an enabled built-in tool keeps
+        mixed client-managed and server-managed tool turns fail-closed.
+        """
+        tool_calls: list[ResponseFunctionToolCall] = []
+        current_turn_messages = self.response_messages[self._generation_start_index :]
+        for message in reversed(current_turn_messages):
+            if not isinstance(message, ResponseFunctionToolCall):
+                break
+            tool_calls.append(message)
+
+        tool_calls.reverse()
+        if not tool_calls:
+            return []
+
+        session_names = [
+            self._get_builtin_tool_session_name(call) for call in tool_calls
+        ]
+        if all(session_name is None for session_name in session_names):
+            return []
+        if any(session_name is None for session_name in session_names):
+            raise ValueError(
+                "A single assistant turn cannot mix server-managed built-in "
+                "tool calls with client-managed function calls."
+            )
+        return tool_calls
 
     def need_builtin_tool_call(self) -> bool:
-        """Return true if the last message is a builtin tool call
-        that the request has enabled."""
-        last_message = self.response_messages[-1]
-        if last_message.type != "function_call":
-            return False
-        if last_message.name in ("code_interpreter", "python"):
-            return "python" in self.available_tools
-        if last_message.name == "web_search_preview":
-            return "browser" in self.available_tools
-        if last_message.name.startswith("container"):
-            return "container" in self.available_tools
-        return False
+        """Return whether the current turn ends with built-in tool calls."""
+        return bool(self._get_pending_builtin_tool_calls())
 
     async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
-            return await tool_session.get_result_parsable_context(self)
+            return await tool_session.get_result_parsable_context(self, last_msg)
         args = json.loads(last_msg.arguments)
         param = {
             "code": args["code"],
@@ -446,7 +480,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"mcpo_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -454,11 +488,13 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
-            return await tool_session.get_result_parsable_context(self)
+            return await tool_session.get_result_parsable_context(self, last_msg)
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.arguments)
@@ -472,7 +508,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -480,8 +516,10 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
+    ) -> list[ResponseInputOutputItem]:
         """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
@@ -499,7 +537,7 @@ class ParsableContext(ConversationContext):
         """
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
-            return await tool_session.get_result_parsable_context(self)
+            return await tool_session.get_result_parsable_context(self, last_msg)
         # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
@@ -514,7 +552,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -522,43 +560,50 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_tool(self) -> list[ResponseInputOutputItem]:
-        if not self.response_messages:
-            return []
-        last_msg = self.response_messages[-1]
-        # change this to a mcp_ function call
-        last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
-        self.response_messages[-1] = last_msg
-        if last_msg.name == "code_interpreter":
-            return await self.call_python_tool(self._tool_sessions["python"], last_msg)
-        elif last_msg.name == "web_search_preview":
-            return await self.call_search_tool(self._tool_sessions["browser"], last_msg)
-        elif last_msg.name.startswith("container"):
-            return await self.call_container_tool(
-                self._tool_sessions["container"], last_msg
-            )
-        return []
+        outputs: list[ResponseInputOutputItem] = []
+        for tool_call in self._get_pending_builtin_tool_calls():
+            # Mark calls handled by the server-side MCP bridge.
+            tool_call.id = f"{MCP_PREFIX}{random_uuid()}"
+
+            session_name = self._get_builtin_tool_session_name(tool_call)
+            assert session_name is not None
+            tool_session = self._tool_sessions[session_name]
+            if session_name == "python":
+                output = await self.call_python_tool(tool_session, tool_call)
+            elif session_name == "browser":
+                output = await self.call_search_tool(tool_session, tool_call)
+            else:
+                output = await self.call_container_tool(tool_session, tool_call)
+            outputs.extend(output)
+        return outputs
 
     def make_response_output_items(self) -> list[ResponseOutputItem]:
         response_messages = self.response_messages[self.num_init_messages :]
         output_messages: list[ResponseOutputItem] = []
+        tool_call_indexes: dict[str, int] = {}
         for message in response_messages:
             if not isinstance(message, ResponseFunctionToolCallOutputItem):
+                if isinstance(message, ResponseFunctionToolCall):
+                    tool_call_indexes[message.call_id] = len(output_messages)
                 output_messages.append(message)
             else:
-                if len(output_messages) == 0:
+                tool_call_index = tool_call_indexes.pop(message.call_id, None)
+                if tool_call_index is None:
                     raise ValueError(
-                        "Cannot have a FunctionToolCallOutput before FunctionToolCall."
+                        "Cannot find a FunctionToolCall matching "
+                        f"call_id '{message.call_id}'."
                     )
-                if isinstance(output_messages[-1], ResponseFunctionToolCall):
-                    output_messages[-1] = McpCall(
-                        id=f"{MCP_PREFIX}{random_uuid()}",
-                        arguments=output_messages[-1].arguments,
-                        name=output_messages[-1].name,
-                        server_label=output_messages[-1].name,
-                        type="mcp_call",
-                        status="completed",
-                        output=message.output,
-                    )
+                tool_call = output_messages[tool_call_index]
+                assert isinstance(tool_call, ResponseFunctionToolCall)
+                output_messages[tool_call_index] = McpCall(
+                    id=f"{MCP_PREFIX}{random_uuid()}",
+                    arguments=tool_call.arguments,
+                    name=tool_call.name,
+                    server_label=tool_call.name,
+                    type="mcp_call",
+                    status="completed",
+                    output=message.output,
+                )
         return output_messages
 
     def render_for_completion(self):
