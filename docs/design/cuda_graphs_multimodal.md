@@ -29,6 +29,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
 | `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
+| `LlavaForConditionalGeneration` | `LLaVA` (CLIP/SigLIP vision towers) | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
@@ -50,6 +51,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `InternVLChatModel` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `KimiVLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Llama4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `LlavaForConditionalGeneration` | ❔ | ❔ | ❔ | ❔ |
 | `Qwen2VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Qwen2_5_VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Qwen3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
@@ -57,6 +59,9 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Qwen3_5MoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Step3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `MiniCPMV` | ✅︎ | ✅︎ | ❔ | ❔ |
+
+!!! note
+    LLaVA's fixed-resolution CLIP/SigLIP path has been tested on an NVIDIA RTX 4090 (Ada) with `TRITON_ATTN` and `FLASH_ATTN`. Pixtral checkpoints using the same `LlavaForConditionalGeneration` architecture are not supported by this encoder CUDA Graph path.
 
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.

@@ -211,6 +211,15 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "llava": VitCudagraphTestConfig(
+        model="llava-hf/llava-interleave-qwen-0.5b-hf",
+        modalities=["image"],
+        image_prompt=qwen_vl_chat_template("<image>\nWhat is in this image?"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [729],
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "idefics3": VitCudagraphTestConfig(
         model="HuggingFaceTB/SmolVLM-256M-Instruct",
         modalities=["image"],
