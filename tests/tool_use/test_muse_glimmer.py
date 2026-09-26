@@ -333,6 +333,149 @@ def test_truncated_cot_no_toolcall_streaming():
     assert tcs == [], f"truncated CoT invoke leaked as streaming tool call: {tcs}"
 
 
+# ------------------------------------------------------- partial ATEM markers
+#
+# An ATEM tag split across chunks is protocol data, not content: it must be
+# held until its closing `>` arrives, and dropped when the turn truncates.
+
+
+_ATEM_MARKERS = [
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    "<atem:invoke",
+    "</atem:invoke>",
+    "<atem:parameter",
+    "</atem:parameter>",
+]
+
+
+def _tool_stream_two_chunks(first: str, second: str):
+    """Feed two chunks through the tool parser.
+
+    Returns (content_deltas, reasoning_deltas, content): one slot per chunk,
+    so tests assert what each delta carried. The concatenation alone cannot
+    tell "held back" apart from "leaked early, completed later", since both
+    arrive at the same full text.
+    """
+    contents, reasonings = [], []
+    prev = ""
+    for cur in (first, first + second):
+        delta = cur[len(prev) :]
+        dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+            T, prev, cur, delta, [], [], [], _FakeReq()
+        )
+        contents.append(dm.content if dm is not None else None)
+        reasonings.append(dm.reasoning if dm is not None else None)
+        prev = cur
+    return contents, reasonings, "".join(c for c in contents if c)
+
+
+def test_open_body_holds_partial_atem_until_tag_completes():
+    first = " to=user<|message|>The answer is <atem:func"
+    second = "tion_calls> as literal text"
+    deltas, _, content = _tool_stream_two_chunks(first, second)
+    assert deltas[0] == "The answer is "
+    assert content == "The answer is <atem:function_calls> as literal text"
+
+
+def test_open_body_holds_partial_atem_with_attributes():
+    first = ' to=user<|message|>answer <atem:invoke name="rea'
+    second = 'd.read"> now'
+    deltas, _, content = _tool_stream_two_chunks(first, second)
+    assert deltas[0] == "answer "
+    assert content == 'answer <atem:invoke name="read.read"> now'
+
+
+# A chunk boundary can also fall before the "atem:" prefix completes. The
+# fragment is still protocol data: held while the body grows, dropped at
+# truncation. "</" prefixes count too, closing tags are equally structural.
+_ATEM_PREFIX_SPLITS = [
+    ("<a", "tem:function_calls>"),
+    ("<at", "em:function_calls>"),
+    ("<ate", "m:function_calls>"),
+    ("<atem", ":function_calls>"),
+    ("</", "atem:function_calls>"),
+    ("</a", "tem:function_calls>"),
+    ("</ate", "m:function_calls>"),
+    ("</atem", ":function_calls>"),
+]
+
+
+def test_open_body_holds_atem_prefix_before_colon():
+    for fragment, rest in _ATEM_PREFIX_SPLITS:
+        deltas, _, content = _tool_stream_two_chunks(
+            f" to=user<|message|>The answer is {fragment}",
+            f"{rest} as literal text",
+        )
+        assert deltas[0] == "The answer is ", fragment
+        assert content == (f"The answer is {fragment}{rest} as literal text"), fragment
+
+
+def test_truncated_turn_drops_atem_prefix_before_colon():
+    for fragment, _ in _ATEM_PREFIX_SPLITS:
+        truncated = f" to=user<|message|>The answer is {fragment}"
+        content = MuseGlimmerToolParser._extract_content(truncated)
+        assert content == "The answer is ", fragment
+
+
+def test_reasoning_body_holds_partial_atem():
+    t = " to=self<|message|>let me call <atem:function"
+    dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+        T, "", t, t, [], [], [], _FakeReq()
+    )
+    assert getattr(dm, "reasoning", None) == "let me call "
+
+
+def test_prose_atem_mention_streams_immediately():
+    t = " to=user<|message|>the <atem: protocol looks"
+    dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+        T, "", t, t, [], [], [], _FakeReq()
+    )
+    assert dm.content == "the <atem: protocol looks"
+
+
+def test_truncated_turn_drops_partial_atem_marker():
+    truncated = " to=user<|message|>The answer is <atem:func"
+    assert MuseGlimmerToolParser._extract_content(truncated) == "The answer is "
+    # a closed body keeps complete ATEM text it legitimately contains
+    closed = " to=user<|message|>use <atem:function_calls> like this<|eom|>"
+    assert MuseGlimmerToolParser._extract_content(closed) == (
+        "use <atem:function_calls> like this"
+    )
+
+
+def test_every_atem_marker_split_never_leaks_into_content():
+    raw = (
+        " to=user<|message|>The answer is 42.<|eom|>"
+        "<|start|>assistant to=read.read<|message|>"
+        '<atem:function_calls><atem:invoke name="read.read">'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>'
+        "</atem:invoke></atem:function_calls><|eom|>"
+    )
+    for marker in _ATEM_MARKERS:
+        for i in range(1, len(marker)):
+            cut = raw.find(marker[:i])
+            assert cut != -1
+            cut += i
+            *_, content = _tool_stream_two_chunks(raw[:cut], raw[cut:])
+            assert content == "The answer is 42."
+
+
+def test_atem_marker_split_in_user_body_waits_for_completion():
+    # Same split positions, but the marker sits in a visible to=user body,
+    # where the completed tag is legitimate literal text. The first delta
+    # must stop before the fragment no matter where the boundary falls;
+    # the tool-channel variant above cannot observe this at all.
+    for marker in _ATEM_MARKERS:
+        for i in range(1, len(marker)):
+            deltas, _, content = _tool_stream_two_chunks(
+                f" to=user<|message|>The answer is {marker[:i]}",
+                f"{marker[i:]} as literal text",
+            )
+            assert deltas[0] == "The answer is ", (marker, i)
+            assert content == (f"The answer is {marker} as literal text"), (marker, i)
+
+
 # ------------------------------------------------------- name normalization
 #
 # MuseGlimmer emits `get_weather.get_weather` for a bare-registered
