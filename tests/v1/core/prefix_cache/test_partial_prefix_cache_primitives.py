@@ -613,3 +613,75 @@ def test_replaced_block_does_not_name_a_removed_parent():
         boundary_hash(req, hash_block_size, 6)
     )
     assert stored_event.token_ids == req.all_token_ids[6:10]
+
+
+def test_reanchored_partial_block_reports_the_widened_mm_window():
+    """A re-anchored partial entry must describe the features of the span it stores.
+
+    Re-anchoring moves ``block_start`` back to the surviving block-aligned ancestor,
+    which widens the stored span. The ``extra_keys`` window is derived from
+    ``block_start``, so it has to be computed *after* the re-anchor: a feature that
+    reaches into the widened part of the span belongs to this entry, and dropping it
+    would let two requests with different multimodal content publish the same key.
+    """
+    hash_block_size = 2
+    block_size = 6
+    kv_cache_group_id = 0
+    # Covers tokens [6, 8): inside the re-anchored span [6, 10), outside the
+    # un-re-anchored span [8, 10).
+    req = make_request(
+        "0",
+        [0, 0, 1, 1, 2, 2, 3, 3],
+        hash_block_size,
+        sha256,
+        mm_positions=[PlaceholderRange(offset=6, length=2)],
+        mm_hashes=["A"],
+    )
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=kv_cache_group_id,
+    )
+    assert (
+        pool.cache_partial_block(
+            request=req,
+            block=blocks[1],
+            num_tokens=8,
+            kv_cache_group_id=kv_cache_group_id,
+            block_size=block_size,
+        )
+        is not None
+    )
+    pool.take_events()
+
+    req.append_output_token_ids([4, 4])
+    assert (
+        pool.cache_partial_block(
+            request=req,
+            block=blocks[1],
+            num_tokens=10,
+            kv_cache_group_id=kv_cache_group_id,
+            block_size=block_size,
+            replace_existing_hashes=True,
+        )
+        is not None
+    )
+    removed_event, stored_event = pool.take_events()
+    assert isinstance(removed_event, BlockRemoved)
+    assert isinstance(stored_event, BlockStored)
+
+    # Re-anchored onto the 6-token boundary, so the entry spans [6, 10) ...
+    assert stored_event.token_ids == req.all_token_ids[6:10]
+    assert stored_event.block_size == block_size - hash_block_size
+    # ... and therefore reports the feature covering [6, 8).
+    assert stored_event.extra_keys == [(("A", 0),)]
