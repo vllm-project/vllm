@@ -679,7 +679,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 def test_qsa_decode_selection_correctness(
-    decode_query_len: int, num_requests: int, dtype: torch.dtype
+    workspace_init, decode_query_len: int, num_requests: int, dtype: torch.dtype
 ) -> None:
     torch.manual_seed(1)
     heads, head_dim = 4, 128
@@ -1357,3 +1357,72 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
+
+
+@pytest.mark.parametrize("backend", ["auto", "persistent", "cooperative", "torch"])
+def test_qsa_topk_dispatches_through_shared_backend(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """_topk must defer to the shared SparseIndexerTopk dispatcher and pass a
+    block-granular max_seq_len bound rather than the padded logits width."""
+    seen: dict = {}
+
+    class _Recorder:
+        def __init__(self, name: str) -> None:
+            seen["backend"] = name
+
+        def __call__(
+            self, logits, seq_lens, next_n, topk_indices, topk_tokens, max_seq_len
+        ) -> None:
+            seen.update(next_n=next_n, topk_tokens=topk_tokens, max_seq_len=max_seq_len)
+
+    monkeypatch.setattr(qsa_indexer_ops, "get_indexer_topk", _Recorder)
+
+    logits = torch.empty(33, 8192, dtype=torch.float32)
+    visible_blocks = torch.full((33,), 100, dtype=torch.int32)
+    block_indices = torch.empty(33, 512, dtype=torch.int32)
+    # token_topk 2048 / ratio 4 -> 512 blocks; 4096 tokens -> 1024 blocks.
+    qsa_indexer_ops._topk(logits, visible_blocks, 2048, 4, block_indices, backend, 4096)
+    assert seen == {
+        "backend": backend,
+        "next_n": 1,
+        "topk_tokens": 512,
+        "max_seq_len": 1024,
+    }
+
+    # No context bound: fall back to the padded logits width, which is safe
+    # because it is never below the per-row block count.
+    qsa_indexer_ops._topk(logits, visible_blocks, 2048, 4, block_indices, backend)
+    assert seen["max_seq_len"] == logits.shape[1]
+
+
+@requires_qsa_kernels
+def test_qsa_selection_forwards_backend_and_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """qsa_select_paged_decode must forward topk_backend and max_seq_len."""
+    seen: dict = {}
+    monkeypatch.setattr(
+        qsa_indexer_ops,
+        "_topk",
+        lambda *args, **kwargs: seen.update(args=args, kwargs=kwargs),
+    )
+
+    q = torch.randn(2, 4, 128, device="cuda", dtype=torch.bfloat16)
+    cache = torch.randn(4, 16, 1, 128, device="cuda", dtype=torch.bfloat16)
+    page_table = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
+    visible_blocks = torch.full((2,), 8, dtype=torch.int32, device="cuda")
+    block_indices = torch.empty(2, 512, dtype=torch.int32, device="cuda")
+    qsa_indexer_ops.qsa_select_paged_decode(
+        q,
+        cache,
+        page_table,
+        visible_blocks,
+        2048,
+        4,
+        2,
+        block_indices,
+        max_seq_len=4096,
+        topk_backend="torch",
+    )
+    assert seen["args"][-2:] == ("torch", 4096)

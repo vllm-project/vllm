@@ -5,13 +5,12 @@
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-_TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
 
 
@@ -474,28 +473,24 @@ def _topk(
     token_topk: int,
     compress_ratio: int,
     block_indices: torch.Tensor,
-    topk_workspace: torch.Tensor,
+    max_seq_len: int | None = None,
+    topk_backend: str = "auto",
 ) -> None:
     # similar dispatch logic as DeepSeek indexer
     block_topk = token_topk // compress_ratio
-    use_cooperative_topk = (
-        logits.shape[0] <= 64
-        and logits.stride(0) % 4 == 0
-        and current_platform.has_device_capability(90)
-        and not current_platform.is_device_capability_family(120)
+    max_blocks = (
+        logits.shape[1]
+        if max_seq_len is None
+        else min(triton.cdiv(max_seq_len, compress_ratio), logits.shape[1])
     )
-    topk_op = (
-        torch.ops._C.cooperative_topk
-        if use_cooperative_topk
-        else torch.ops._C.persistent_topk
-    )
-    topk_op(
+
+    get_indexer_topk(topk_backend)(
         logits,
         visible_blocks,
+        1,
         block_indices,
-        topk_workspace,
         block_topk,
-        logits.shape[1],
+        max_blocks,
     )
 
 
@@ -508,6 +503,8 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    max_seq_len: int | None = None,
+    topk_backend: str = "auto",
 ) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
@@ -522,6 +519,9 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
+        max_seq_len: Longest context length in the batch this step. Falls back
+            to the logits width when omitted.
+        topk_backend: ``kernel_config.sparse_indexer_topk_backend`` value.
 
     """
     assert token_topk % compress_ratio == 0
@@ -566,7 +566,8 @@ def qsa_select_paged_decode(
         token_topk,
         compress_ratio,
         block_indices,
-        torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
+        max_seq_len,
+        topk_backend,
     )
 
 
@@ -581,6 +582,7 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    topk_backend: str = "auto",
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -597,6 +599,7 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
+        topk_backend: ``kernel_config.sparse_indexer_topk_backend`` value.
 
     """
     assert token_topk % compress_ratio == 0
@@ -612,9 +615,6 @@ def qsa_select_paged_prefill(
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
-    topk_workspace = torch.empty(
-        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
-    )
 
     for query_start in range(0, rows, rows_per_chunk):
         query_end = min(query_start + rows_per_chunk, rows)
@@ -636,7 +636,8 @@ def qsa_select_paged_prefill(
             token_topk,
             compress_ratio,
             block_indices[query_slice],
-            topk_workspace,
+            max_seq_len,
+            topk_backend,
         )
 
 
