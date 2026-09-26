@@ -1102,11 +1102,20 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
-                    # num_external_tokens == 0: nothing to push, so don't tell
-                    # the producer to write into these blocks.
-                    block_notify_list = (
-                        blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                    )
+                    # num_external_tokens == 0: this connector has no KV to pull
+                    # for the request (MultiConnector chose another connector, or
+                    # it was a full local cache hit). An empty block_notify_list
+                    # makes the producer reject the handshake and hold its
+                    # deferred write-prefill blocks until timeout, exhausting the
+                    # pool under warm concurrency. Release them and skip the
+                    # notify instead.
+                    if num_external_tokens == 0:
+                        self._release_write_prefill_blocks(
+                            request.request_id, params
+                        )
+                        params["do_remote_prefill"] = False
+                        return
+                    block_notify_list = blocks.get_block_ids()[0]
 
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
