@@ -98,6 +98,9 @@
                 "type": "string"
             }
         },
+        "affinity": {
+            "type": "object"
+        },
         "autoscaling": {
             "type": "object",
             "properties": {
@@ -318,7 +321,6 @@
         "extraContainers",
         "extraInit",
         "extraPorts",
-        "gpuModels",
         "image",
         "labels",
         "livenessProbe",
