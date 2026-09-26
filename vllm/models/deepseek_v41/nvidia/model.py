@@ -287,12 +287,21 @@ class DeepseekV4DecoderLayer(nn.Module):
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 mhc_fused_post_pre_splits,
             )
-            from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
+            from vllm.model_executor.kernels.mhc.warmup import (
+                MHC_PRE_NORM_KERNEL,
+                MHC_PRENORM_GEMM_WARMUP,
+            )
 
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             if self.use_sequence_parallel:
                 tp_size = vllm_config.parallel_config.tensor_parallel_size
                 max_tokens = (max_tokens + tp_size - 1) // tp_size
+            for input_size in (self.hidden_size, self.hc_mult * self.hidden_size):
+                MHC_PRENORM_GEMM_WARMUP.register_warmup(
+                    max_tokens=max_tokens,
+                    input_size=input_size,
+                    hc_mult=self.hc_mult,
+                )
             # The epilogue compiles per projection width and per pre-mix mode.
             # The first layer projects the broadcast embedding, so it reads one
             # hidden_size-wide row and selects stream zero; every later sublayer

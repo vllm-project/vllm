@@ -5,13 +5,15 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import torch
+
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     compute_num_split,
     mhc_pre_big_fuse_with_norm_tilelang,
 )
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
 from vllm.utils.math_utils import cdiv
 
 
@@ -19,6 +21,50 @@ def compute_mhc_pre_num_splits(input_size: int, num_tokens: int) -> int:
     splits = compute_num_split(64, input_size, cdiv(num_tokens, 64))
     # Bound both GEMM and fused-normalization specializations during startup.
     return 1 if splits == 1 else 4 if splits <= 4 else 16
+
+
+class MHCPrenormGemmWarmup(VllmJitKernel["MHCPrenormGemmWarmup.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        input_size: int
+        mix_size: int
+        n_splits: int
+
+    def get_warmup_keys(
+        self, *, max_tokens: int, input_size: int, hc_mult: int
+    ) -> list[CompileKey]:
+        if not is_deep_gemm_supported():
+            return []
+        splits = {
+            compute_mhc_pre_num_splits(input_size, n)
+            for n in range(1, max_tokens + 1, 64)
+        }
+        return [
+            self.CompileKey(input_size, hc_mult * (hc_mult + 2), n_splits)
+            for n_splits in sorted(splits)
+        ]
+
+    def compile(self, compile_key: CompileKey) -> None:
+        # M is dynamic in DeepGEMM's prenorm kernel; one row warms each
+        # projection width and split count without allocating a prefill batch.
+        x = torch.zeros(1, compile_key.input_size, device="cuda", dtype=torch.bfloat16)
+        fn = torch.zeros(
+            compile_key.mix_size,
+            compile_key.input_size,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        out = torch.empty(
+            compile_key.n_splits,
+            1,
+            compile_key.mix_size,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        sqrsum = torch.empty(
+            compile_key.n_splits, 1, device="cuda", dtype=torch.float32
+        )
+        tf32_hc_prenorm_gemm(x, fn, out, sqrsum, compile_key.n_splits)
 
 
 class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
@@ -99,3 +145,4 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
 
 
 MHC_PRE_NORM_KERNEL = MHCPreNormKernel()
+MHC_PRENORM_GEMM_WARMUP = MHCPrenormGemmWarmup()

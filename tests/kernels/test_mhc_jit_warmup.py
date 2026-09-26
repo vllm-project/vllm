@@ -23,6 +23,45 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
 from vllm.model_executor.warmup import jit_warmup_tilelang_helper
 
 
+@pytest.mark.parametrize("input_size", [5120, 20480])
+@pytest.mark.parametrize("max_tokens", [16, 2053, 8192])
+def test_mhc_projection_warmup_covers_intermediate_prefills(
+    monkeypatch: pytest.MonkeyPatch, input_size: int, max_tokens: int
+) -> None:
+    """Decode and maximum prefill alone miss the intermediate split-4 GEMM."""
+    from vllm.model_executor.kernels.mhc import warmup
+
+    monkeypatch.setattr(warmup, "is_deep_gemm_supported", lambda: True)
+    kernel = warmup.MHCPrenormGemmWarmup()
+    keys = kernel.get_warmup_keys(
+        max_tokens=max_tokens, input_size=input_size, hc_mult=4
+    )
+    assert len(keys) == len(set(keys))
+    for num_tokens in range(1, max_tokens + 1):
+        assert (
+            kernel.CompileKey(
+                input_size,
+                24,
+                warmup.compute_mhc_pre_num_splits(input_size, num_tokens),
+            )
+            in keys
+        )
+
+
+def test_mhc_projection_warmup_skips_unsupported_deep_gemm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.kernels.mhc import warmup
+
+    monkeypatch.setattr(warmup, "is_deep_gemm_supported", lambda: False)
+    assert (
+        warmup.MHCPrenormGemmWarmup().get_warmup_keys(
+            max_tokens=8192, input_size=5120, hc_mult=4
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
