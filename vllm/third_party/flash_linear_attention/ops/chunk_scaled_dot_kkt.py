@@ -23,9 +23,9 @@ from .utils import FLA_CHUNK_SIZE
 # to k's native storage dtype (bf16/fp16) so fast WMMA is used instead.
 _CAST_DOT_TO_K_DTYPE = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.platforms.rocm import on_gfx1x, on_gfx10x
 
-    _CAST_DOT_TO_K_DTYPE = on_gfx1x()
+    _CAST_DOT_TO_K_DTYPE = on_gfx1x() or on_gfx10x()
 
 
 @triton.heuristics(
