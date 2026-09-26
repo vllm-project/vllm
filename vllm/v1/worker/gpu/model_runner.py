@@ -1254,35 +1254,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
-        # The scheduler gives prefilling requests draft slots only when padding
-        # their final token. Require that complete verifier layout on every row.
-        # PCP/adaptive verification change that layout. Recurrent models need
-        # state-aware admission (e.g. an uncached tail must remain a prefill).
-        is_padded_prompt_tail = (
-            batch_state.has_prefill
-            and self.speculative_config is not None
-            and self.adaptive_verification is None
-            and self.pcp_manager is None
-            and self.model_state.num_new_sampled_tokens_per_step == 1
-            and all(
-                not (config.is_hybrid or config.is_attention_free)
-                for config in (
-                    self.model_config,
-                    self.speculative_config.draft_model_config,
-                )
-            )
-            and self.decode_query_len > 1
-            and all(
-                n == self.decode_query_len
-                and len(draft_tokens.get(req_id, ())) == n - 1
-                for req_id, n in num_tokens_per_req.items()
-            )
-        )
         return batch_state, get_uniform_decode_token_count(
             num_reqs,
             num_toks,
             max_query_len,
-            has_prefill=batch_state.has_prefill and not is_padded_prompt_tail,
+            has_prefill=(
+                batch_state.has_prefill
+                and not self._can_run_padded_prompt_tail_as_decode(scheduler_output)
+            ),
+        )
+
+    def _can_run_padded_prompt_tail_as_decode(
+        self, scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Whether a nonempty prefill-containing batch can use decode dispatch."""
+        # PCP/adaptive verification can change the scheduler's layout.
+        if (
+            self.speculative_config is None
+            or self.decode_query_len <= 1
+            or self.adaptive_verification is not None
+            or self.pcp_manager is not None
+        ):
+            return False
+
+        # Recurrent models need state-aware admission: uncached prompt tails
+        # still require prefill kernels even when their query shape matches.
+        if any(
+            config.is_hybrid or config.is_attention_free
+            for config in (
+                self.model_config,
+                self.speculative_config.draft_model_config,
+            )
+        ):
+            return False
+
+        # The scheduler gives prefilling rows drafts only to pad their final
+        # token to K+1. Matching decode_query_len (K+bonus) also requires bonus=1.
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        return all(
+            n == self.decode_query_len and len(draft_tokens.get(req_id, ())) == n - 1
+            for req_id, n in scheduler_output.num_scheduled_tokens.items()
         )
 
     def _prepare_padding_mask(

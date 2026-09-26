@@ -157,8 +157,9 @@ def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
     manager._graphs_captured = case != "uncaptured-tail"
 
     output = SchedulerOutput.make_empty()
+    # The scheduler pads prompt tails to K+1 even if decode uses K+bonus.
     output.num_scheduled_tokens = {
-        "tail": width,
+        "tail": k + 1,
         **({"decode": width} if mixed else {}),
     }
     output.scheduled_spec_decode_tokens = {
