@@ -54,6 +54,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # Scheduler Metadata.
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
+    assert len(scheduler.async_load_waiting) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0

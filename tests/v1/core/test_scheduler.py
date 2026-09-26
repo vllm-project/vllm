@@ -2395,7 +2395,11 @@ def _step_until_done(
 
 
 def _num_waiting_requests(scheduler: Scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+    return (
+        len(scheduler.waiting)
+        + len(scheduler.skipped_waiting)
+        + len(scheduler.async_load_waiting)
+    )
 
 
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
@@ -2944,7 +2948,7 @@ def test_kv_connector_handles_preemption(
     if is_async:
         waiting_req_ids = [
             req.request_id
-            for req in scheduler.skipped_waiting
+            for req in scheduler.async_load_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         ]
         assert len(waiting_req_ids) == 1
@@ -5227,7 +5231,7 @@ def test_prepend_skipped_requests_order():
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
     for req in expected_waiting_reqs[:2]:
-        scheduler.skipped_waiting.add_request(req)
+        scheduler.async_load_waiting.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -5237,12 +5241,12 @@ def test_prepend_skipped_requests_order():
     # pop the third request which is expected to be running
     expected_waiting_reqs.pop(2)
 
-    # verify waiting order is preserved
-    waiting_reqs = list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    # verify waiting order is preserved, with the parked async loads first
+    waiting_reqs = list(scheduler.async_load_waiting) + list(scheduler.waiting)
     assert waiting_reqs == expected_waiting_reqs
 
 
-def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
+def test_remote_kv_promotion_drains_before_grammar_prefix():
     scheduler = create_scheduler(max_num_seqs=1)
     scheduler.connector = Mock()
     scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
@@ -5260,31 +5264,32 @@ def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
     req_grammar_2.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
     req_grammar_2.structured_output_request = Mock(grammar=object())
 
-    # simulate a remote-KV request that is ready to be promoted now.
+    # simulate a remote-KV request that is ready to be promoted now. Parked
+    # loads hold KV blocks, so they drain ahead of the grammar requests.
     req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler.waiting.remove_requests([req_grammar_1, req_grammar_2, req_remote])
     scheduler.skipped_waiting.add_request(req_grammar_1)
     scheduler.skipped_waiting.add_request(req_grammar_2)
-    scheduler.skipped_waiting.add_request(req_remote)
+    scheduler.async_load_waiting.add_request(req_remote)
     scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
     scheduler._update_waiting_for_remote_kv = Mock()
 
     output = scheduler.schedule()
 
     assert output.scheduled_new_reqs
-    assert output.scheduled_new_reqs[0].req_id == req_grammar_1.request_id
+    assert output.scheduled_new_reqs[0].req_id == req_remote.request_id
     waiting_req_ids = [
         req.request_id
         for req in list(scheduler.skipped_waiting) + list(scheduler.waiting)
     ]
     assert waiting_req_ids == [
+        req_grammar_1.request_id,
         req_grammar_2.request_id,
-        req_remote.request_id,
         req_tail.request_id,
     ]
 
 
-def test_fcfs_mixed_skipped_waiting_types_keep_order():
+def test_fcfs_mixed_blocked_types_remote_load_drains_first():
     scheduler = create_scheduler(max_num_batched_tokens=20)
     scheduler._update_waiting_for_remote_kv = Mock()
 
@@ -5305,7 +5310,8 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
     for req in (req_grammar, req_remote, req_stream, req_regular, req_tail):
         scheduler.add_request(req)
     scheduler.schedule()
-    assert list(scheduler.skipped_waiting) == [req_grammar, req_remote, req_stream]
+    assert list(scheduler.skipped_waiting) == [req_grammar, req_stream]
+    assert list(scheduler.async_load_waiting) == [req_remote]
 
     scheduler.finish_requests(req_regular.request_id, RequestStatus.FINISHED_ABORTED)
     assert not scheduler.running
@@ -5316,8 +5322,8 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
 
     second_output = scheduler.schedule()
     expected_order = [
-        req_grammar.request_id,
         req_remote.request_id,
+        req_grammar.request_id,
         req_stream.request_id,
         req_tail.request_id,
     ]
