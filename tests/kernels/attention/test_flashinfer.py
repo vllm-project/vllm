@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from itertools import product
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
 
 try:
     import flashinfer
@@ -16,6 +18,13 @@ except ImportError:
         )
 
 import torch
+
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.flashinfer import (
+    FP8_DTYPE,
+    _nvfp4_combined_page_views,
+)
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
@@ -145,6 +154,409 @@ def _make_cg_decode_wrapper(
         ),
         use_tensor_cores=use_tensor_cores,
     )
+
+
+_TEST_KV_LAYOUTS = {"NHD": KVCacheLayout.LBNHC, "HND": KVCacheLayout.LBHNC}
+
+
+def _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, name: str):
+    """Pin the layout FlashInferImpl reads from the cache config."""
+    monkeypatch.setattr(
+        flashinfer_backend.FlashInferImpl,
+        "kv_cache_layout",
+        property(lambda self: _TEST_KV_LAYOUTS[name]),
+    )
+
+
+def _storage_offsets(tensor: torch.Tensor) -> set[int]:
+    return {
+        tensor.storage_offset()
+        + sum(idx * stride for idx, stride in zip(indices, tensor.stride()))
+        for indices in product(*(range(size) for size in tensor.shape))
+    }
+
+
+def _make_nvfp4_impl(flashinfer_backend, monkeypatch, *, trtllm, writer):
+    """FlashInferImpl for nvfp4 KV with trtllm-gen availability faked per phase."""
+    # The impl looks the writer up with getattr(..., None); None means absent.
+    monkeypatch.setattr(
+        flashinfer_backend.flashinfer,
+        "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+        writer,
+        raising=False,
+    )
+    # SM12x reports a Blackwell family but has no trtllm-gen path.
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_heads, num_kv_heads, is_prefill=False: trtllm[is_prefill],
+    )
+    return flashinfer_backend.FlashInferImpl(
+        num_heads=1,
+        head_size=128,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+
+
+@pytest.mark.parametrize(
+    ("capability", "use_dcp", "reason"),
+    [
+        ((8, 0), False, None),
+        ((8, 6), False, None),
+        ((10, 0), False, None),
+        # SM90 and SM12x decode through XQA, which has no NVFP4 support.
+        ((9, 0), False, "SM8x or SM100"),
+        ((12, 0), False, "SM8x or SM100"),
+        ((8, 0), True, "decode context parallelism"),
+    ],
+)
+def test_flashinfer_nvfp4_validate_configuration(capability, use_dcp, reason):
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    reasons = FlashInferBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="nvfp4",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(*capability),
+        attn_type="decoder",
+        use_dcp=use_dcp,
+    )
+
+    if reason is None:
+        assert reasons == []
+    else:
+        assert any(reason in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("trtllm_supported", [False, True])
+def test_flashinfer_nvfp4_scale_search_requires_trtllm(monkeypatch, trtllm_supported):
+    """Plain nvfp4 has a path without trtllm-gen; scale-search variants do not,
+    because only the trtllm-gen store implements the search."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "supports_trtllm_attention",
+        lambda is_prefill: trtllm_supported,
+    )
+
+    backend = flashinfer_backend.FlashInferBackend
+    assert backend.supports_kv_cache_dtype("nvfp4")
+    assert backend.supports_kv_cache_dtype("nvfp4_4over6") is trtllm_supported
+
+
+@pytest.mark.parametrize(
+    ("use_trtllm_gen", "expected"), [(False, torch.bfloat16), (True, FP8_DTYPE)]
+)
+def test_flashinfer_nvfp4_q_data_type(use_trtllm_gen, expected):
+    """The native FlashInfer kernels read a model-dtype query; only trtllm-gen
+    takes an FP8 query."""
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
+    builder.cache_dtype = "nvfp4"
+    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(disable_flashinfer_q_quantization=False)
+    )
+
+    q_dtype = builder.get_q_data_type(is_prefill=True, use_trtllm_gen=use_trtllm_gen)
+
+    assert q_dtype == expected
+
+
+@pytest.mark.parametrize(
+    ("shape", "odd_size_one_stride"),
+    [((2, 4, 3), False), ((2, 3, 4), False), ((2, 1, 3), True)],
+    ids=["NHD", "HND", "size-one-dim"],
+)
+def test_nvfp4_combined_page_views_split_packed_page(shape, odd_size_one_stride):
+    head_size = 128
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+    kv_cache = torch.empty(*shape, 2 * full_dim, dtype=torch.uint8)
+    if odd_size_one_stride:
+        # The stride of a size-one dimension never addresses memory.
+        stride = list(kv_cache.stride())
+        stride[1] = 7
+        kv_cache = kv_cache.as_strided(kv_cache.shape, stride)
+
+    (k_data, v_data), (k_scales, v_scales) = _nvfp4_combined_page_views(
+        kv_cache, head_size
+    )
+
+    items = shape[1] * shape[2]
+    base = kv_cache.storage_offset()
+    assert k_data.shape == v_data.shape == (*shape, head_size // 2)
+    assert k_scales.shape == v_scales.shape == (*shape, head_size // 16)
+    assert k_data.storage_offset() == base
+    assert k_scales.storage_offset() == base + items * (head_size // 2)
+    assert v_data.storage_offset() == base + items * full_dim
+    assert v_scales.storage_offset() == base + items * (full_dim + head_size // 2)
+    offsets = [_storage_offsets(t) for t in (k_data, k_scales, v_data, v_scales)]
+    assert len(set().union(*offsets)) == sum(map(len, offsets))
+
+
+@pytest.mark.parametrize(
+    ("make_cache", "match"),
+    [
+        (
+            lambda f: torch.as_strided(
+                torch.empty(4000, dtype=torch.uint8),
+                (2, 4, 3, 2 * f),
+                (2000, 400, 37, 1),
+            ),
+            "strides are not compatible",
+        ),
+        (
+            lambda f: torch.empty((2, 4, 3, 2 * f), dtype=torch.uint8)[..., :f],
+            "last dimension does not match head size",
+        ),
+        (lambda f: torch.empty((2, 2, 4, 3, 2 * f), dtype=torch.uint8), "must be 4D"),
+    ],
+    ids=["strides", "side-slice", "rank"],
+)
+def test_nvfp4_combined_page_views_reject_other_layouts(make_cache, match):
+    kv_cache = make_cache(nvfp4_kv_cache_full_dim(128))
+
+    with pytest.raises(ValueError, match=match):
+        _nvfp4_combined_page_views(kv_cache, 128)
+
+
+@pytest.mark.parametrize(
+    ("prefill_ok", "decode_ok"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_flashinfer_nvfp4_native_update_needs_trtllm_in_both_phases(
+    monkeypatch, prefill_ok, decode_ok
+):
+    """The trtllm-gen store is used only when trtllm-gen serves both prefill and
+    decode, whatever the SM family reports; otherwise the slot writer is bound."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    def writer(*args, **kwargs):
+        pass
+
+    impl = _make_nvfp4_impl(
+        flashinfer_backend,
+        monkeypatch,
+        trtllm={True: prefill_ok, False: decode_ok},
+        writer=writer,
+    )
+
+    native = prefill_ok and decode_ok
+    assert impl.use_native_nvfp4_kv_cache_update is native
+    assert impl._nvfp4_slot_writer is (None if native else writer)
+
+
+def test_flashinfer_nvfp4_requires_slot_writer_without_trtllm(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    with pytest.raises(RuntimeError, match="NVFP4 slot-mapping KV cache update"):
+        _make_nvfp4_impl(
+            flashinfer_backend,
+            monkeypatch,
+            trtllm={True: False, False: False},
+            writer=None,
+        )
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
+def test_flashinfer_nvfp4_kv_cache_views_cover_page_and_follow_rebinding(
+    monkeypatch, layout
+):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, layout)
+    num_kv_heads, head_size = 3, 128
+    logical = (2, 2 * num_kv_heads, 16, nvfp4_kv_cache_full_dim(head_size))
+    order = (0, 2, 1, 3) if layout == "NHD" else (0, 1, 2, 3)
+    inverse = tuple(order.index(i) for i in range(4))
+
+    def make_cache() -> tuple[torch.Tensor, torch.Tensor]:
+        physical = torch.empty([logical[i] for i in order], dtype=torch.uint8)
+        return physical, physical.permute(*inverse)
+
+    impl = flashinfer_backend.FlashInferImpl.__new__(flashinfer_backend.FlashInferImpl)
+    impl.head_size = head_size
+    impl.num_kv_heads = num_kv_heads
+    impl.kv_cache_dtype = "nvfp4"
+    impl.use_native_nvfp4_kv_cache_update = False
+    impl._nvfp4_kv_cache_view_key = None
+    impl._nvfp4_kv_cache_views = None
+
+    physical, kv_cache = make_cache()
+    views = impl._get_nvfp4_kv_cache_views(kv_cache)
+
+    offsets = [_storage_offsets(t) for t in (*views.data, *views.block_scales)]
+    assert len(set().union(*offsets)) == sum(map(len, offsets)) == physical.numel()
+    assert impl._get_nvfp4_kv_cache_views(kv_cache) is views
+    _, rebound = make_cache()
+    rebound_views = impl._get_nvfp4_kv_cache_views(rebound)
+    assert rebound_views.data[0].data_ptr() == rebound.data_ptr()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
+    monkeypatch,
+) -> None:
+    """Drive the SM8x NVFP4 contract end to end.
+
+    The slot-mapping writer fills a production-shaped combined page, the
+    cached views are rebuilt from that same allocation, and the native
+    FlashInfer prefill reads it back.  The result is compared against
+    attention over the KV the writer actually stored, so a layout or stride
+    mistake in either direction shows up as a numerical mismatch.
+    """
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    # The slot-mapping writer is the contract this path is built on; a
+    # FlashInfer build without it must fail here, not quietly skip.
+    assert hasattr(flashinfer, "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping")
+
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    page_size = 16
+    num_qo_heads = 4
+    num_kv_heads = 1
+    head_size = 128
+    # One request whose context is longer than the current chunk, i.e. the
+    # continuation-prefill shape the fallback has to serve.
+    seq_lens = [96]
+    query_lens = [32]
+    num_reqs = len(seq_lens)
+    pages_per_req = [(s + page_size - 1) // page_size for s in seq_lens]
+    num_pages = sum(pages_per_req)
+
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, "NHD")
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_heads, num_kv_heads, is_prefill=False: False,
+    )
+
+    impl = flashinfer_backend.FlashInferImpl(
+        num_heads=num_qo_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+    assert not impl.use_native_nvfp4_kv_cache_update
+
+    # Production allocation: 2 * num_kv_heads head slots of packed fp4 + scales.
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+    physical = torch.zeros(
+        (num_pages, page_size, 2 * num_kv_heads, full_dim),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    kv_cache = physical.permute(0, 2, 1, 3)
+
+    block_tables = torch.arange(num_pages, dtype=torch.int32, device="cuda").reshape(
+        num_reqs, max(pages_per_req)
+    )
+
+    raw_key = (
+        torch.randn((seq_lens[0], num_kv_heads, head_size), dtype=dtype, device="cuda")
+        * 0.2
+    )
+    raw_value = torch.randn_like(raw_key) * 0.2
+    slot_mapping = torch.tensor(
+        [
+            int(block_tables[0, t // page_size].item()) * page_size + t % page_size
+            for t in range(seq_lens[0])
+        ],
+        dtype=torch.int64,
+        device="cuda",
+    )
+
+    one = torch.ones((), dtype=torch.float32, device="cuda")
+    layer = SimpleNamespace(_k_scale=one, _v_scale=one)
+    layer._q_scale_float = 1.0
+    layer._k_scale_float = 1.0
+    layer._v_scale_float = 1.0
+
+    # Real write through the production entry point.
+    impl.do_kv_cache_update(layer, raw_key, raw_value, kv_cache, slot_mapping)
+    assert physical.any(), "slot-mapping writer stored nothing"
+
+    views = impl._get_nvfp4_kv_cache_views(kv_cache)
+
+    # Reference KV: what the writer actually stored, dequantized.
+    deq_k = torch.empty(
+        (num_reqs, seq_lens[0], num_kv_heads, head_size), dtype=dtype, device="cuda"
+    )
+    deq_v = torch.empty_like(deq_k)
+    flashinfer.nvfp4_kv_dequantize_paged(
+        views.data,
+        views.block_scales,
+        block_tables,
+        torch.tensor(seq_lens, dtype=torch.int32, device="cuda"),
+        one,
+        one,
+        deq_k,
+        deq_v,
+        kv_layout="NHD",
+    )
+
+    query = (
+        torch.randn(
+            (query_lens[0], num_qo_heads, head_size), dtype=dtype, device="cuda"
+        )
+        * 0.2
+    )
+    workspace = torch.empty(64 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, "NHD")
+    wrapper.plan(
+        torch.tensor([0, query_lens[0]], dtype=torch.int32),
+        torch.tensor([0, pages_per_req[0]], dtype=torch.int32),
+        block_tables[0, : pages_per_req[0]].contiguous(),
+        torch.tensor([seq_lens[0] % page_size or page_size], dtype=torch.int32),
+        num_qo_heads,
+        num_kv_heads,
+        head_size,
+        page_size,
+        causal=True,
+        q_data_type=dtype,
+        kv_data_type=torch.uint8,
+        o_data_type=dtype,
+    )
+
+    output = torch.empty_like(query)
+    impl._run_native_nvfp4_prefill(
+        layer, wrapper, query, output, views.data, views.block_scales
+    )
+
+    # Causal attention over exactly the KV the writer stored.
+    key = deq_k[0].repeat_interleave(num_qo_heads // num_kv_heads, dim=1)
+    value = deq_v[0].repeat_interleave(num_qo_heads // num_kv_heads, dim=1)
+    logits = torch.einsum("qhd,khd->hqk", query.float(), key.float())
+    logits *= head_size**-0.5
+    q_pos = torch.arange(
+        seq_lens[0] - query_lens[0], seq_lens[0], device="cuda"
+    ).unsqueeze(1)
+    k_pos = torch.arange(seq_lens[0], device="cuda").unsqueeze(0)
+    logits.masked_fill_(k_pos > q_pos, float("-inf"))
+    reference = torch.einsum("hqk,khd->qhd", logits.softmax(dim=-1), value.float())
+
+    torch.testing.assert_close(output.float(), reference.float(), atol=2e-2, rtol=2e-2)
 
 
 def test_fast_decode_plan_importable() -> None:
