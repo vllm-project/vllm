@@ -8,12 +8,12 @@ in ``common/``); this module picks the right one for the current platform.
 
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    from .amd.sparse_indexer import (
-        SparseAttnIndexerKpool,
-    )
+if current_platform.is_cpu():
+    from .cpu.sparse_indexer import SparseAttnIndexerKpool
+elif current_platform.is_rocm():
+    from .amd.sparse_indexer import SparseAttnIndexerKpool  # type: ignore[assignment]
 else:
-    from .nvidia.sparse_indexer import (
+    from .nvidia.sparse_indexer import (  # type: ignore[assignment]
         SparseAttnIndexerKpool,
     )
 
