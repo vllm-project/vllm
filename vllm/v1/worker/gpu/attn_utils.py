@@ -441,6 +441,7 @@ def build_attn_metadata(
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     is_prefilling: torch.Tensor | None = None,
+    seq_lens_cpu_lower_bound: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
@@ -459,6 +460,8 @@ def build_attn_metadata(
         ]
     if seq_lens_cpu_upper_bound is not None:
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
+    if seq_lens_cpu_lower_bound is not None:
+        seq_lens_cpu_lower_bound = seq_lens_cpu_lower_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
     token_to_req_indices: torch.Tensor | None = None
@@ -494,6 +497,7 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            seq_lens_cpu_lower_bound=seq_lens_cpu_lower_bound,
             max_seq_len=max_seq_len,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,

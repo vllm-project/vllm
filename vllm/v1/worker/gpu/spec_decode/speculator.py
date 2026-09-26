@@ -43,6 +43,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def compute_draft_seq_lens_cpu_lower_bound(
+    seq_lens_cpu_lower_bound: torch.Tensor,
+    step: int,
+    num_speculative_steps: int,
+    num_reqs: int,
+    num_reqs_padded: int,
+) -> torch.Tensor:
+    """CPU lower bound on seq_lens for draft step ``step``, as a new tensor.
+
+    The target lower bound already allows for the drafts of the step in
+    flight. The verification just run may reject up to num_speculative_steps
+    more, which the target bounds still count. Padded entries are zero.
+    """
+    draft_lower_bound = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+    torch.add(
+        seq_lens_cpu_lower_bound[:num_reqs],
+        step - num_speculative_steps,
+        out=draft_lower_bound[:num_reqs],
+    )
+    draft_lower_bound[:num_reqs].clamp_(min=0)
+    return draft_lower_bound
+
+
 def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
     """Whether the target replaces the drafter's input with its HC residual.
 
@@ -301,6 +324,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        seq_lens_cpu_lower_bound: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # A FULL graph replays a captured shape whose padded requests each hold
@@ -332,6 +356,15 @@ class DraftModelSpeculator(BaseSpeculator):
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
+        draft_seq_lens_cpu_lower_bound = None
+        if seq_lens_cpu_lower_bound is not None:
+            draft_seq_lens_cpu_lower_bound = compute_draft_seq_lens_cpu_lower_bound(
+                seq_lens_cpu_lower_bound,
+                step,
+                self.num_speculative_steps,
+                num_reqs,
+                num_reqs_padded,
+            )
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
@@ -365,6 +398,7 @@ class DraftModelSpeculator(BaseSpeculator):
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
+            seq_lens_cpu_lower_bound=draft_seq_lens_cpu_lower_bound,
         )
         return attn_metadata
 
@@ -520,6 +554,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        seq_lens_cpu_lower_bound: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req
         return self._build_attn_metadata(
@@ -530,4 +565,5 @@ class DraftModelSpeculator(BaseSpeculator):
             step=step,
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            seq_lens_cpu_lower_bound=seq_lens_cpu_lower_bound,
         )

@@ -451,6 +451,10 @@ class CommonAttentionMetadata:
     table. Rows of one request are adjacent, so equal neighbours are PCP
     chunks sharing one KV context."""
 
+    seq_lens_cpu_lower_bound: torch.Tensor | None = None
+    """(batch_size,) CPU lower bound on seq_lens. It differs from the upper
+    bound only while drafts of a step still in flight may be rejected."""
+
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
     request index to list of (start, end) token position ranges
@@ -480,6 +484,9 @@ class CommonAttentionMetadata:
         return self.query_start_loc[1:] - self.query_start_loc[:-1]
 
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
+        if "seq_lens_cpu_upper_bound" in kwargs or "seq_lens" in kwargs:
+            # A lower bound not updated along with seq_lens is stale.
+            kwargs.setdefault("seq_lens_cpu_lower_bound", None)
         return replace(self, **kwargs)
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
@@ -546,6 +553,7 @@ class CommonAttentionMetadata:
                 self.dcp_local_seq_lens_cpu_upper_bound
             ),
             seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
+            seq_lens_cpu_lower_bound=maybe_slice_reqs(self.seq_lens_cpu_lower_bound),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
