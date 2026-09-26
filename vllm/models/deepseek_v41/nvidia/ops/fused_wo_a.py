@@ -85,22 +85,19 @@ def _scale(amax: Float32):
 class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
-        tokens: int
+        # T=1..96 uses at most 46 keys per (n_groups, heads_per_group, o_lora_rank).
+        tokens_per_tile: int
+        token_tiles: int
+        full_tiles: bool
         n_groups: int
         heads_per_group: int
         o_lora_rank: int
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
-        # Keep the 32-token tile's register footprint for larger batches.
-        total_tokens = compile_key.tokens
-        # Balance three tiles with a multiple of four tokens in each.
-        tokens = (
-            cute.ceil_div(total_tokens, 12) * 4
-            if 64 < total_tokens <= 96
-            else min(total_tokens, 32)
-        )
-        token_tiles = cute.ceil_div(total_tokens, tokens)
+        tokens = compile_key.tokens_per_tile
+        token_tiles = compile_key.token_tiles
+        full_tiles = compile_key.full_tiles
         acc_cols = 1 << (tokens - 1).bit_length()
         tile_m = max(8, acc_cols)
         tile_n = 128
@@ -130,7 +127,11 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             ws: cpasync.TmaInfo,
             q: cute.Tensor,
             qs: cute.Tensor,
+            num_tokens: Int32,
         ):
+            total_tokens = num_tokens
+            if cutlass.const_expr(full_tiles):
+                total_tokens = Int32(tokens * token_tiles)
             tid, _, _ = cute.arch.thread_idx()
             bid, token_tile, _ = cute.arch.block_idx()
             token_start = Int32(0)
@@ -419,7 +420,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                     ):
                         token = split + i * heads_per_group
                         if cutlass.const_expr(
-                            total_tokens % tokens == 0
+                            full_tiles
                             and (
                                 tokens <= heads_per_group
                                 or tokens % heads_per_group == 0
@@ -467,6 +468,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             ws: cute.Tensor,
             q: cute.Tensor,
             qs: cute.Tensor,
+            num_tokens: Int32,
             stream: CUstream,
         ):
             layout = cute.make_composed_layout(
@@ -488,7 +490,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                 cute.make_layout((tile_n, num_stages)),
                 (tile_n, num_stages),
             )
-            device_kernel(x, positions, rope, tma, ws_tma, q, qs).launch(
+            device_kernel(x, positions, rope, tma, ws_tma, q, qs, num_tokens).launch(
                 grid=(n_tiles * heads_per_group, token_tiles, 1),
                 block=(threads, 1, 1),
                 cluster=(heads_per_group, 1, 1),
@@ -501,8 +503,17 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
     def dispatch(  # type: ignore[override]
         self, *, tokens: int, n_groups: int, heads_per_group: int, o_lora_rank: int
     ) -> CompileKey:
+        token_tiles = (tokens + 31) // 32
+        # Host integer arithmetic: balance tiles in multiples of four tokens.
+        tile_tokens = (
+            tokens
+            if token_tiles == 1
+            else (tokens + 4 * token_tiles - 1) // (4 * token_tiles) * 4
+        )
         return self.CompileKey(
-            tokens=tokens,
+            tokens_per_tile=tile_tokens,
+            token_tiles=token_tiles,
+            full_tiles=tokens % tile_tokens == 0,
             n_groups=n_groups,
             heads_per_group=heads_per_group,
             o_lora_rank=o_lora_rank,
@@ -511,8 +522,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
     def get_warmup_keys(
         self, *, max_tokens: int, n_groups: int, heads_per_group: int, o_lora_rank: int
     ) -> list[CompileKey]:
-        # Target graphs, draft graphs and eager batches use different token
-        # counts, so warm every count the dispatcher accepts.
+        # Trace all accepted token counts and deduplicate shared tile shapes.
         return self._trace_dispatch(self.dispatch)(
             tokens=WarmupIntRange(1, max_tokens + 1),
             n_groups=n_groups,
@@ -521,7 +531,12 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
-        tokens, groups = compile_key.tokens, compile_key.n_groups
+        tokens = (
+            compile_key.tokens_per_tile * compile_key.token_tiles
+            if compile_key.full_tiles
+            else cute.sym_int()
+        )
+        groups = compile_key.n_groups
         rank = compile_key.o_lora_rank
         n = groups * rank
         k = compile_key.heads_per_group * _HEAD_DIM
@@ -543,6 +558,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             ),
             make_fake_tensor(Float8E4M3FN, (tokens, n), (n, 1)),
             make_fake_tensor(Uint8, (128 * n // 32,), (1,)),
+            Int32(0),
         )
 
     @kernel_launcher
@@ -569,6 +585,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             weight_scale,
             q,
             scales,
+            tokens,
         )
         compile_key = self.dispatch(
             tokens=tokens,

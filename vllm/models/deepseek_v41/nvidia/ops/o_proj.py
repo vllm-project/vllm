@@ -18,9 +18,13 @@ from vllm.platforms import current_platform
 
 
 def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
-    # Additional token tiles only pay off for smaller grids.
-    ctas_per_tile = layer.n_local_heads * (layer.o_lora_rank // 128)
-    return 96 if ctas_per_tile <= 128 else 32
+    max_tokens = getattr(layer, "_fused_wo_a_token_limit", None)
+    if max_tokens is None:
+        # Additional token tiles only pay off for smaller grids.
+        ctas_per_tile = layer.n_local_heads * (layer.o_lora_rank // 128)
+        max_tokens = 96 if ctas_per_tile <= 128 else 32
+        layer._fused_wo_a_token_limit = max_tokens
+    return max_tokens
 
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
