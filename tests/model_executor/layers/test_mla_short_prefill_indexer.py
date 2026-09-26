@@ -267,9 +267,11 @@ def test_skipped_k_cache_insert_accepts_no_k(
 
 
 @pytest.mark.parametrize("fp8_query", [False, True])
+@pytest.mark.parametrize("prepared_mha", [False, True])
 def test_deepseek_v32_dispatches_selected_mha(
     monkeypatch: pytest.MonkeyPatch,
     fp8_query: bool,
+    prepared_mha: bool,
 ) -> None:
     attn_metadata = SimpleNamespace(num_actual_tokens=2)
     kv_cache = torch.empty(1)
@@ -301,7 +303,11 @@ def test_deepseek_v32_dispatches_selected_mha(
     q_nope = torch.randn(2, 1, 2)
     q_pe = torch.randn(2, 1, 2)
     mqa_q = torch.randn(2, 1, 2)
-    mha_q = torch.cat((q_nope, q_pe + 1 if fp8_query else mqa_q), dim=-1)
+    if fp8_query and not prepared_mha:
+        mqa_q = mqa_q.to(torch.float8_e4m3fn)
+    mha_q = torch.cat(
+        (q_nope, q_pe + 1 if fp8_query and not prepared_mha else mqa_q), dim=-1
+    )
     kv_c = torch.empty(2, 2)
     k_pe = torch.empty(2, 2)
     output = torch.empty(2, 2)
