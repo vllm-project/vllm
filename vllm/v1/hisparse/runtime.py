@@ -333,6 +333,7 @@ def allocate_hisparse_host_pools(
             None,
         )
 
+    tp_group = get_tp_group()
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
@@ -342,9 +343,10 @@ def allocate_hisparse_host_pools(
         rank=0,
         kv_bytes_per_chunk=num_blocks * host_block_stride,
         cpu_page_size=sum(tensor_sizes),
-        barrier=get_tp_group().barrier,
+        barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_only_on_creator=True,
+        unlink_owner=tp_group.rank_in_group == 0,
     )
     try:
         for start, end in _hisparse_registration_ranges(
@@ -358,7 +360,7 @@ def allocate_hisparse_host_pools(
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        region.cleanup()
+        region.abort_startup_cleanup()
         raise
     return pools, [], region
 

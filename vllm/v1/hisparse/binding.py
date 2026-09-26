@@ -144,7 +144,7 @@ def init_hisparse_kv_cache(
         return kv_caches
     except Exception:
         if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
+            host_pool.shared_region.abort_startup_cleanup()
         raise
 
 

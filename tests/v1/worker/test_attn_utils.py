@@ -344,11 +344,11 @@ def test_fast_prefill_dispatch_preserves_active_lora_count(
 
 class _FakeSharedHostRegion:
     def __init__(self) -> None:
-        self.cleanup_calls = 0
+        self.abort_calls = 0
         self.base_tensor = torch.empty(1, dtype=torch.int8)
 
-    def cleanup(self) -> None:
-        self.cleanup_calls += 1
+    def abort_startup_cleanup(self) -> None:
+        self.abort_calls += 1
 
 
 def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
@@ -420,7 +420,7 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
             {},
             SimpleNamespace(),
         )
-    assert region.cleanup_calls == 1
+    assert region.abort_calls == 1
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():
