@@ -15,6 +15,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     elif speculative_config.method == "dflash":
+        if "LiLiCorrDraftModel" in speculative_config.draft_model_config.architectures:
+            from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
+                LiLiCorrSpeculator,
+            )
+
+            return LiLiCorrSpeculator(vllm_config, device)
         if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
             from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
                 DFlash2Speculator,

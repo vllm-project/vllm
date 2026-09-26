@@ -223,7 +223,6 @@ def test_shared_query_quant_preserves_projection(
     with set_current_vllm_config(
         VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
     ):
-        kernel = cls(Mxfp8LinearLayerConfig())
         # Match the checkpoint's TP4 attention and replicated indexer widths.
         if projection == "attention":
             linear = ColumnParallelLinear.__new__(ColumnParallelLinear)
@@ -247,6 +246,7 @@ def test_shared_query_quant_preserves_projection(
         )
         linear.weight = torch.nn.Parameter(w, requires_grad=False)
         linear.weight_scale = torch.nn.Parameter(ws, requires_grad=False)
+        kernel = cls(Mxfp8LinearLayerConfig(weight_shape=w.shape))
         quant_config = DeepseekV4FP8Config.from_config(
             {
                 "quant_method": "fp8",
