@@ -10,6 +10,7 @@ import os
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -485,6 +486,29 @@ def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
     with _region(iid, num_chunks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
+
+
+def test_hugetlbfs_dir_rounds_mapping_to_huge_pages(iid, monkeypatch):
+    """A huge-page directory maps whole huge pages but exposes only the KV."""
+    huge_page = 2 * 1024 * 1024
+    real_statvfs = os.statvfs
+    monkeypatch.setattr(
+        region_module.os,
+        "statvfs",
+        lambda path: (
+            SimpleNamespace(f_bsize=huge_page)
+            if path == "/dev/shm"
+            else real_statvfs(path)
+        ),
+    )
+    free_space_check = MagicMock()
+    monkeypatch.setattr(region_module, "check_shm_free_space", free_space_check)
+
+    with _region(iid, num_chunks=3) as r:
+        assert r.is_hugetlb
+        assert os.path.getsize(r.mmap_path) == huge_page
+        assert r.base_tensor.numel() == r.total_size_bytes == 3 * PAGE_SIZE
+    free_space_check.assert_not_called()
 
 
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
@@ -1010,6 +1034,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        shm_path="/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 

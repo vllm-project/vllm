@@ -227,7 +227,8 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 
 
 @pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+@pytest.mark.parametrize("host_pool_dir", [None, "/dev/hugepages"])
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch, host_pool_dir):
     page = mmap.PAGESIZE
     tp_group = MagicMock()
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
@@ -280,6 +281,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             world_size=1,
             distributed_executor_backend="uni",
         ),
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="HiSparseConnector",
+            kv_connector_extra_config={
+                "host_pool_gib": 1,
+                "host_pool_dir": host_pool_dir,
+            },
+        ),
     )
 
     pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -299,8 +307,14 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "kv_bytes_per_chunk": 4 * page,
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
-        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
+        # Huge pages are reserved outside of the RAM that psutil reports.
+        "creator_memory_check": (
+            hisparse_runtime_module.check_hisparse_host_memory
+            if host_pool_dir is None
+            else None
+        ),
         "populate_only_on_creator": True,
+        "shm_dir": host_pool_dir or "/dev/shm",
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -335,7 +349,9 @@ def test_shared_host_pool_tracks_successful_registrations(
     ]
     monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     config = SimpleNamespace(
-        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
+        instance_id="test",
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        kv_transfer_config=None,
     )
     context = (
         pytest.raises(RuntimeError, match="cudaHostRegister failed")
@@ -395,6 +411,25 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     assert backing.numel() == 44
     assert backing.data_ptr() == region.base_tensor.data_ptr()
     assert pool.registered is region.base_tensor
+
+
+def test_private_host_pool_maps_unlinked_file_in_host_pool_dir(monkeypatch, tmp_path):
+    """A host_pool_dir pool is file-backed yet leaves no file to leak."""
+    pinned: list[torch.Tensor] = []
+    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pinned.append)
+    size = mmap.PAGESIZE + 10
+
+    host_pool, registered = hisparse_runtime_module.allocate_pinned_host_pool(
+        size, str(tmp_path)
+    )
+
+    assert list(tmp_path.iterdir()) == []
+    assert pinned == [registered]
+    assert registered.nbytes == 2 * mmap.PAGESIZE
+    assert host_pool.nbytes == size
+    assert host_pool.data_ptr() == registered.data_ptr()
+    host_pool.fill_(7)
+    assert int(registered[:size].sum()) == 7 * size
 
 
 def test_hisparse_registration_chunks_end_between_host_blocks():
