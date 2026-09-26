@@ -162,6 +162,10 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
+        if current_platform.is_xpu():
+            return hasattr(torch.ops._C, "xpu_host_register") and hasattr(
+                torch.ops._C, "xpu_host_unregister"
+            )
         return current_platform.is_cuda_alike() and not current_platform.is_rocm()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
