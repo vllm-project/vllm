@@ -7,6 +7,7 @@ from typing import Any
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -314,6 +315,7 @@ class HYV3ToolParser(ToolParser):
         self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer = ""
+        self._stream_regex_timed_out = False
 
         if (
             self.tool_calls_start_token_id is None
@@ -332,14 +334,20 @@ class HYV3ToolParser(ToolParser):
         try:
             function_call_tuples = []
             # start_token{name}sep_token{args}end_token...
-            function_calls = self.tool_call_regex.findall(model_output)
+            function_calls = self.tool_call_regex.findall(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
             if function_calls:
                 function_call_tuples.extend(function_calls)
                 remaining = model_output.split(self.tool_call_end_token)[-1]
-                function_calls = self.tool_call_portion_regex.findall(remaining)
+                function_calls = self.tool_call_portion_regex.findall(
+                    remaining, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                )
                 function_call_tuples += function_calls
             else:
-                function_calls = self.tool_call_portion_regex.findall(model_output)
+                function_calls = self.tool_call_portion_regex.findall(
+                    model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                )
                 if function_calls:
                     function_call_tuples.extend(function_calls)
             tool_calls = []
@@ -348,7 +356,10 @@ class HYV3ToolParser(ToolParser):
                 function_name = function_name.strip()
                 function_args = function_args.strip()
 
-                arg_pairs = self.func_args_regex.findall(function_args)
+                arg_pairs = self.func_args_regex.findall(
+                    function_args,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
                 arg_dict = {}
                 for key, value in arg_pairs:
                     parsed_value = HYV3ToolParser._parse_value(
@@ -365,6 +376,8 @@ class HYV3ToolParser(ToolParser):
                     )
                 )
             return tool_calls
+        except TimeoutError:
+            raise
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             return []
@@ -391,6 +404,18 @@ class HYV3ToolParser(ToolParser):
                     content=content if content else None,
                 )
 
+            except TimeoutError:
+                self._stream_regex_timed_out = True
+                logger.warning(
+                    "Regex timeout occurred when matching tool call pattern."
+                )
+                logger.debug(
+                    "Regex timeout occurred when matching user input: %s",
+                    model_output,
+                )
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
             except Exception:
                 logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(
@@ -415,6 +440,8 @@ class HYV3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        if self._stream_regex_timed_out:
+            return None
         # Check whether current tokens contain the tool_calls start token
         if self.tool_calls_start_token_id not in current_token_ids:
             return DeltaMessage(content=delta_text)
@@ -510,7 +537,15 @@ class HYV3ToolParser(ToolParser):
             end_idx += len(self.tool_call_end_token)
             complete_call = self._buffer[start_idx:end_idx]
             self._buffer = self._buffer[end_idx:]
-            for call in self._extract_tool_calls(complete_call, request):
+            try:
+                parsed_calls = self._extract_tool_calls(complete_call, request)
+            except TimeoutError:
+                self._stream_regex_timed_out = True
+                logger.warning(
+                    "Regex timeout occurred when matching tool call pattern."
+                )
+                return deltas
+            for call in parsed_calls:
                 self.current_tool_id += 1
                 arguments = call.function.arguments
                 self.prev_tool_call_arr.append(
@@ -557,7 +592,14 @@ class HYV3ToolParser(ToolParser):
             remaining = ""
 
         # --- scan all fully closed kv pairs ---
-        arg_pairs = self.func_args_regex.findall(args_text)
+        try:
+            arg_pairs = self.func_args_regex.findall(
+                args_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            self._stream_regex_timed_out = True
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         for key, value in arg_pairs:
             key = key.strip()
             if key not in self._completed_args:
@@ -568,8 +610,15 @@ class HYV3ToolParser(ToolParser):
 
         # --- detect partial (unclosed) kv at the tail ---
         last_closed_end = 0
-        for m in self.func_args_regex.finditer(args_text):
-            last_closed_end = m.end()
+        try:
+            for m in self.func_args_regex.finditer(
+                args_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
+                last_closed_end = m.end()
+        except TimeoutError:
+            self._stream_regex_timed_out = True
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         tail = args_text[last_closed_end:]
 
         partial_key: str | None = None

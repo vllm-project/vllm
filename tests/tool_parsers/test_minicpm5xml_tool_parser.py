@@ -4,10 +4,11 @@
 
 import json
 import random
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import vllm.envs as envs
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.generate.base.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -15,6 +16,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.tool_parsers import minicpm5xml_tool_parser as minicpm5xml_mod
 from vllm.tool_parsers.minicpm5xml_tool_parser import MiniCPM5XMLToolParser
 
 
@@ -785,3 +787,58 @@ class TestParameterWhitespace:
         assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
             "content": "    def foo():\n        pass\n"
         }
+
+
+def test_regex_timeout_treated_as_no_tool_call(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    model_output = "<function " + "a" * 100
+    mock_regex = MagicMock()
+    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(minicpm5xml_mod, "_FUNC_BLOCK_REGEX", mock_regex):
+        result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called is False
+    assert result.tool_calls == []
+    assert result.content == model_output
+    mock_regex.finditer.assert_called_once()
+    assert (
+        mock_regex.finditer.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
+
+
+def test_streaming_regex_timeout_skips_later_deltas(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    mock_regex = MagicMock()
+    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
+    current_text = "<function " + "a" * 100
+    later_text = current_text + "x"
+
+    with patch.object(minicpm5xml_mod, "_FUNC_BLOCK_REGEX", mock_regex):
+        first = parser.extract_tool_calls_streaming(
+            "",
+            current_text,
+            current_text,
+            [],
+            [],
+            [],
+            request,
+        )
+        second = parser.extract_tool_calls_streaming(
+            current_text,
+            later_text,
+            "x",
+            [],
+            [],
+            [],
+            request,
+        )
+
+    assert first is None
+    assert second is None
+    mock_regex.finditer.assert_called_once()
+    assert (
+        mock_regex.finditer.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
