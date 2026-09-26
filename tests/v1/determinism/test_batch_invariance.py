@@ -11,6 +11,7 @@ from utils import (
     BACKENDS,
     TEST_MODEL,
     _extract_step_logprobs,
+    _prompt_with_tokens,
     _random_prompt,
     skip_if_not_cuda,
     skip_unsupported,
@@ -201,8 +202,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         },
     )
 
-    # Use more realistic prompts for better token generation
-    prompts = [_random_prompt(10, 50) for _ in range(32)]
+    prompts = [_prompt_with_tokens(random.randint(1920, 2048)) for _ in range(32)]
 
     # Chunked prefill is covered by
     # test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill below.

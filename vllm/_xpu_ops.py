@@ -995,6 +995,7 @@ class xpu_ops:
         cu_seqlens_k: torch.Tensor | None = None,
         # passed in qwen vl
         dropout_p: float = 0.0,
+        num_splits=0,
         # The following parameters are not used in xpu kernel currently,
         # we keep API compatible to CUDA's.
         scheduler_metadata=None,
@@ -1002,7 +1003,6 @@ class xpu_ops:
         q_descale=None,
         k_descale=None,
         v_descale=None,
-        num_splits=0,
         return_softmax_lse: bool | None = False,
         s_aux: torch.Tensor | None = None,
         return_attn_probs: bool | None = False,
@@ -1037,6 +1037,7 @@ class xpu_ops:
             q=q,
             k=k,
             v=v,
+            num_splits_kv=num_splits if num_splits > 0 else None,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
