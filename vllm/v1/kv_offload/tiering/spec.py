@@ -459,6 +459,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                calibrate_load_path=bool(
+                    self.extra_config.get("calibrate_load_path", False)
+                ),
             )
         except Exception:
             worker_mmap.cleanup()
