@@ -108,7 +108,7 @@ class GuidanceBackend(StructuredOutputBackend):
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
-        self.serialized_grammar = serialize_guidance_grammar(
+        serialized_grammar = serialize_guidance_grammar(
             request_type,
             grammar_spec,
             self.disable_any_whitespace,
@@ -117,7 +117,7 @@ class GuidanceBackend(StructuredOutputBackend):
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
-            self.serialized_grammar,
+            serialized_grammar,
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 

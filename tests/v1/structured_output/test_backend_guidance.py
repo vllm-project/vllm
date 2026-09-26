@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import sys
+import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 from transformers import AutoTokenizer
@@ -231,3 +234,83 @@ def test_mistral_tokenizer_compile_grammar(
     grammar = backend.compile_grammar(request_type, grammar_spec)
     assert grammar is not None
     assert not grammar.is_terminated()
+
+
+def test_compile_grammar_no_race_condition():
+    """Concurrent compile_grammar calls must not cross-contaminate schemas.
+
+    Regression test for a race condition where the shared instance attribute
+    self.serialized_grammar allowed one request's grammar spec to overwrite
+    another's under the default async thread-pool compilation path.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+    )
+    backend = GuidanceBackend(
+        vllm_config,
+        tokenizer=tokenizer,
+        vocab_size=50257,
+    )
+
+    schema_a = json.dumps(
+        {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        }
+    )
+    schema_b = json.dumps(
+        {
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+            "additionalProperties": False,
+        }
+    )
+
+    tokens_a = tokenizer.encode('{"name": "hello"}')
+    tokens_b = tokenizer.encode('{"count": 42}')
+
+    barrier = threading.Barrier(2)
+
+    def compile_synced(schema: str):
+        barrier.wait(timeout=5)
+        return backend.compile_grammar(StructuredOutputOptions.JSON, schema)
+
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            for _ in range(200):
+                barrier.reset()
+                future_a = executor.submit(compile_synced, schema_a)
+                future_b = executor.submit(compile_synced, schema_b)
+
+                grammar_a = future_a.result()
+                grammar_b = future_b.result()
+
+                accepted_a = grammar_a.validate_tokens(tokens_a)
+                assert accepted_a == tokens_a, (
+                    f"Grammar A rejected its own valid tokens "
+                    f"(accepted {len(accepted_a)}/{len(tokens_a)})"
+                )
+
+                accepted_b = grammar_b.validate_tokens(tokens_b)
+                assert accepted_b == tokens_b, (
+                    f"Grammar B rejected its own valid tokens "
+                    f"(accepted {len(accepted_b)}/{len(tokens_b)})"
+                )
+
+                cross_a = grammar_a.validate_tokens(tokens_b)
+                assert cross_a != tokens_b, (
+                    "Grammar A should not accept all of Grammar B's tokens"
+                )
+
+                cross_b = grammar_b.validate_tokens(tokens_a)
+                assert cross_b != tokens_a, (
+                    "Grammar B should not accept all of Grammar A's tokens"
+                )
+    finally:
+        sys.setswitchinterval(old_interval)
