@@ -156,7 +156,7 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
         # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
         ("KimiLinearForCausalLM", not current_platform.is_rocm()),
-        ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
+        ("KimiK3ForConditionalGeneration", True),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],

@@ -169,6 +169,10 @@ def test_kda_recoverssm_derivation_is_revalidated():
 
     VllmConfig.validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
+    if current_platform.is_rocm():
+        # ROCm Kimi-K3 ReplaySSM; RecoverSSM stays off.
+        assert not config.cache_config.use_kda_recoverssm
+        return
     assert config.cache_config.use_kda_recoverssm
 
     config.cache_config.mamba_cache_mode = "align"
@@ -189,6 +193,38 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.model_config.architecture = "KimiLinearForCausalLM"
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_rocm_v2_runner_skip_is_limited_to_kimi_kda(monkeypatch):
+    """ROCm Kimi-K3 ReplaySSM may use MRV2; other ROCm ReplaySSM backends
+    still require Model Runner V1."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            mamba_cache_mode="none",
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="KimiK3ForConditionalGeneration",
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=False,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+    VllmConfig.validate_mamba_cached_kernel(config)
+
+    config.model_config.architecture = "NemotronHForCausalLM"
+    with pytest.raises(ValueError, match="Triton ReplaySSM requires Model Runner V1"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 

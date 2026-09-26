@@ -20,6 +20,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.kimi_k25 import KimiK25MediaPixelInputs
 from vllm.model_executor.models.kimi_k25_vit import (
@@ -34,6 +35,10 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
+    append_kda_replayssm_buffers,
+    append_kda_replayssm_dtypes,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -61,6 +66,7 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsReplaySSM,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
@@ -228,17 +234,47 @@ class KimiK3ForConditionalGeneration(
             batch_size
         )
 
+    @staticmethod
+    def _kda_replayssm_params(vllm_config: VllmConfig) -> tuple[bool, int]:
+        """Whether ReplaySSM is active, and its ring capacity.
+
+        The platform sizes mamba pages from these classmethods, so they must
+        report the ring buffers that ``KimiK3DeltaAttention`` actually
+        allocates. Otherwise the page is padded too small and the mamba/attn
+        block ids stop lining up.
+        """
+        cache_config = vllm_config.cache_config
+        spec_config = vllm_config.speculative_config
+        num_spec = spec_config.num_speculative_tokens if spec_config else 0
+        if (
+            not current_platform.is_rocm()
+            or cache_config is None
+            or not getattr(cache_config, "use_replayssm", False)
+            or num_spec <= 0
+        ):
+            return False, 0
+        cache_len = max(cache_config.replayssm_buffer_len, 2 * (num_spec + 1))
+        return True, cache_len
+
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
         text_config = vllm_config.model_config.hf_config.text_config
         temp_vllm_config = vllm_config.with_hf_config(text_config)
-        return KimiLinearForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+        base = KimiLinearForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+        enabled, _ = cls._kda_replayssm_params(vllm_config)
+        if not enabled:
+            return base
+        return append_kda_replayssm_dtypes(base, vllm_config.model_config.dtype)
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         text_config = vllm_config.model_config.hf_config.text_config
         temp_vllm_config = vllm_config.with_hf_config(text_config)
-        return KimiLinearForCausalLM.get_mamba_state_shape_from_config(temp_vllm_config)
+        base = KimiLinearForCausalLM.get_mamba_state_shape_from_config(temp_vllm_config)
+        enabled, cache_len = cls._kda_replayssm_params(vllm_config)
+        if not enabled:
+            return base
+        return append_kda_replayssm_buffers(base, cache_len)
 
     @classmethod
     def get_mamba_state_copy_func(cls):
