@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import time
 from concurrent.futures import Future
 
@@ -14,7 +15,10 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+from vllm.v1.structured_output.backend_guidance import (
+    GuidanceBackend,
+    process_for_additional_properties,
+)
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 TOKENIZER = "openai-community/gpt2"
@@ -231,3 +235,82 @@ def test_mistral_tokenizer_compile_grammar(
     grammar = backend.compile_grammar(request_type, grammar_spec)
     assert grammar is not None
     assert not grammar.is_terminated()
+
+
+def test_process_for_additional_properties_preserves_literals() -> None:
+    """Literal values under const/enum/default/examples must not be rewritten
+    when they contain a 'properties' or 'patternProperties' key (#58695)."""
+    feature = {
+        "type": "Feature",
+        "geometry": None,
+        "properties": {"name": "HQ"},
+        "patternProperties": {"^x": "y"},
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "const_field": {"const": feature},
+            "enum_field": {"enum": [feature]},
+            "default_field": {"type": "object", "default": feature},
+            "examples_field": {"type": "object", "examples": [feature]},
+            "properties": {"type": "string"},
+            "const": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+            },
+        },
+        "$defs": {
+            "item": {
+                "type": "object",
+                "properties": {"label": {"type": "string"}},
+            }
+        },
+    }
+
+    processed = process_for_additional_properties(schema)
+
+    assert processed["additionalProperties"] is False
+    assert processed["$defs"]["item"]["additionalProperties"] is False
+    assert processed["properties"]["const"]["additionalProperties"] is False
+    assert "additionalProperties" not in processed["properties"]
+    assert processed["properties"]["const_field"]["const"] == feature
+    assert processed["properties"]["enum_field"]["enum"] == [feature]
+    assert processed["properties"]["default_field"]["default"] == feature
+    assert processed["properties"]["examples_field"]["examples"] == [feature]
+
+
+@pytest.mark.parametrize("keyword", ["const", "enum"])
+def test_disable_additional_properties_accepts_literal_with_properties_key(
+    keyword: str,
+) -> None:
+    """GuidanceBackend with disable_additional_properties=True must accept the
+    original literal value under const/enum and reject injected
+    additionalProperties (#58695)."""
+    feature = {"type": "Feature", "geometry": None, "properties": {"name": "HQ"}}
+    rewritten = {**feature, "additionalProperties": False}
+    schema = {keyword: feature if keyword == "const" else [feature]}
+
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(
+            backend="guidance",
+            disable_additional_properties=True,
+        )
+    )
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    backend = GuidanceBackend(
+        vllm_config,
+        tokenizer=tokenizer,
+        vocab_size=50257,
+    )
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON,
+        json.dumps(schema),
+    )
+
+    valid_tokens = tokenizer.encode(json.dumps(feature)) + [tokenizer.eos_token_id]
+    rewritten_tokens = tokenizer.encode(json.dumps(rewritten)) + [
+        tokenizer.eos_token_id
+    ]
+
+    assert grammar.validate_tokens(valid_tokens) == valid_tokens
+    assert grammar.validate_tokens(rewritten_tokens) != rewritten_tokens
