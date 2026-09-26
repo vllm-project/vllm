@@ -2855,6 +2855,10 @@ class BlockHashListWithBlockSize:
 
     def __getitem__(self, idx):
         if isinstance(idx, int):
+            if idx < 0:
+                idx += len(self)
+                if idx < 0:
+                    raise IndexError("block hash index out of range")
             return self._get_value_at(idx)
 
         if isinstance(idx, slice):

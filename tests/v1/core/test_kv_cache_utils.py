@@ -3990,6 +3990,22 @@ def test_hma_not_disabled_when_kv_events_enabled():
     )
 
 
+@pytest.mark.parametrize("scale_factor", [1, 2, 3])
+@pytest.mark.parametrize("num_hashes", [0, 1, 2, 5, 6, 7])
+def test_block_hash_view_indexes_only_complete_blocks(scale_factor, num_hashes):
+    """Integer indexing must agree with the complete-block sequence."""
+    raw = [BlockHash(bytes([i])) for i in range(num_hashes)]
+    view = kv_cache_utils.BlockHashListWithBlockSize(raw, 2, 2 * scale_factor)
+    expected = raw[scale_factor - 1 :: scale_factor]
+
+    assert list(view) == expected
+    for index in range(-len(expected), len(expected)):
+        assert view[index] == expected[index]
+    for index in (-len(expected) - 1, len(expected)):
+        with pytest.raises(IndexError):
+            view[index]
+
+
 def test_resolve_block_hashes_gate():
     # Resolve symbols through the module so they stay consistent with each other
     # even after other tests reload ``kv_cache_utils``.
