@@ -155,7 +155,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent reading from secondary tiers into the primary "
-                "tier, in seconds, labeled by tier."
+                "tier, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here. Use "
+                "PROMOTION_LATENCY for tier-independent promotion timing."
             ),
             labelnames=("tier",),
         )
@@ -169,7 +171,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent writing from the primary tier to secondary "
-                "tiers, in seconds, labeled by tier."
+                "tiers, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here."
             ),
             labelnames=("tier",),
         )
@@ -238,6 +241,32 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 "Number of active secondary-tier cascade jobs, labeled by tier."
             ),
             labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of per-job latency for secondary-tier promotion "
+                    "attempts, measured from job creation until the tier reports "
+                    "completion so that tier queueing is included, labeled by "
+                    "tier, in seconds. Includes failed attempts."
+                ),
+                labelnames=("tier",),
+                buckets=(
+                    0.005,
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.1,
+                    0.25,
+                    0.5,
+                    1,
+                    2.5,
+                    5,
+                    10,
+                    30,
+                    60,
+                ),
+            )
         )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
