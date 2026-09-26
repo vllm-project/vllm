@@ -18,13 +18,16 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import cache
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
+from types import CodeType, MethodType
 from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
+from transformers.modeling_rope_utils import dynamic_rope_update
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -328,19 +331,106 @@ def get_feature_request_tip(
     return f"{prefix}{tip}"
 
 
+def dynamic_rope_update_is_noop(vllm_config: "VllmConfig") -> bool:
+    """Whether Transformers' `@dynamic_rope_update` can never rescale `inv_freq`.
+
+    The decorator only recomputes `inv_freq` once the longest position it has seen
+    grows past `max_seq_len_cached`, which starts out at `max_position_embeddings`,
+    and only restores the original `inv_freq` after such a growth. vLLM never feeds
+    positions beyond `max_model_len`, so a context capped at or below
+    `max_position_embeddings` leaves both branches unreachable.
+    """
+    text_config = vllm_config.model_config.hf_config.get_text_config()
+    max_position_embeddings = getattr(text_config, "max_position_embeddings", None)
+    if max_position_embeddings is None:
+        return False
+    return vllm_config.model_config.max_model_len <= max_position_embeddings
+
+
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
     Defaults to `True` but is disabled in the following situations:
 
-    - The model uses dynamic rope scaling.
+    - The model uses dynamic rope scaling which can still rescale `inv_freq` within
+      `max_model_len`. When it cannot, `remove_noop_dynamic_rope_update` strips the
+      decorator and the model becomes compilable again.
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
-    # Dynamic rope scaling is not compatible with torch.compile
     rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
     if rope_parameters:
         # Nest rope_parameters if not nested already to simplify logic
         if not is_rope_parameters_nested(rope_parameters):
             rope_parameters = {"": rope_parameters}
-        return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
+        if any(rp["rope_type"] == "dynamic" for rp in rope_parameters.values()):
+            return dynamic_rope_update_is_noop(vllm_config)
     return True
+
+
+@cache
+def _dynamic_rope_update_code() -> CodeType:
+    """The code object of the wrapper `@dynamic_rope_update` returns.
+
+    `dynamic_rope_update` wraps with `functools.wraps`, which makes the wrapper
+    indistinguishable from the function it wraps by name, so identify it by the
+    code object every wrapper it creates shares.
+    """
+
+    def probe(self, x, position_ids, layer_type=None): ...
+
+    return dynamic_rope_update(probe).__code__
+
+
+def _undecorated_rope_forward(module: nn.Module) -> Callable | None:
+    """`module.forward` with Transformers' `@dynamic_rope_update` removed.
+
+    Returns `None` if the decorator is not in `module.forward`'s wrapper chain.
+    """
+    code = _dynamic_rope_update_code()
+    func: Callable | None = module.forward
+    while func is not None:
+        wrapped = getattr(func, "__wrapped__", None)
+        if getattr(func, "__code__", None) is code:
+            return wrapped
+        func = wrapped
+    return None
+
+
+def remove_noop_dynamic_rope_update(model: nn.Module, max_model_len: int) -> None:
+    """Remove `@dynamic_rope_update` from the RoPE modules it cannot do anything to.
+
+    The decorator reads `torch.max(position_ids)` back to the host and branches on
+    it, which forces a device sync that neither CUDA graph capture nor
+    `torch.compile` can express. Dropping it where the branches are unreachable
+    keeps the rest of the model eligible for both.
+
+    Only call this when `dynamic_rope_update_is_noop` holds for the model, since
+    that is what makes the rescaling unreachable in the first place.
+    """
+    for name, module in model.named_modules():
+        rope_type = getattr(module, "rope_type", None)
+        if rope_type is None:
+            continue
+        # `rope_type` is a mapping from layer type to rope type for models whose
+        # layers do not all share a rope configuration
+        rope_types = (
+            tuple(rope_type.values()) if isinstance(rope_type, dict) else (rope_type,)
+        )
+        # "longrope" keeps switching `inv_freq` no matter the context length
+        if "longrope" in rope_types:
+            continue
+        if not any(isinstance(rt, str) and "dynamic" in rt for rt in rope_types):
+            continue
+        # Per layer type caches shadow `max_seq_len_cached` when they are present
+        cached = [
+            v for k, v in vars(module).items() if k.endswith("max_seq_len_cached")
+        ]
+        if not cached or any(max_model_len > c for c in cached):
+            continue
+        undecorated = _undecorated_rope_forward(module)
+        if undecorated is None:
+            continue
+        # Transformers stacks `@torch.no_grad()` on top of `@dynamic_rope_update`,
+        # so put it back around the forward we unwrapped
+        module.forward = MethodType(torch.no_grad()(undecorated), module)
+        logger.debug("Removed no-op `@dynamic_rope_update` from %s", name)
