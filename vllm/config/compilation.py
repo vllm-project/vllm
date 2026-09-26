@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import _USE_LAYERNAME, is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -1165,28 +1165,20 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
-                    if self.pass_config.fuse_rope_kvcache:
-                        logger.warning_once(
-                            "fuse_rope_kvcache is enabled, but splitting_ops is None "
-                            "and Inductor graph partition is not enabled."
-                            "Disabling fuse_rope_kvcache."
-                            "Please either set splitting_ops to an empty list []"
-                            "or set use_inductor_graph_partition to True "
-                            "to enable RoPE+KV cache fusion."
-                        )
+                    if not self._keep_kv_cache_update_in_graph(
+                        self.pass_config.fuse_rope_kvcache
+                        or self.pass_config.fuse_qk_norm_rope_kvcache,
+                        "RoPE+KV cache fusion",
+                    ):
                         self.pass_config.fuse_rope_kvcache = False
-                    if self.pass_config.fuse_qk_norm_rope_kvcache:
-                        logger.warning_once(
-                            "fuse_qk_norm_rope_kvcache is enabled, but "
-                            "splitting_ops is None and Inductor graph partition "
-                            "is not enabled. Disabling fuse_qk_norm_rope_kvcache. "
-                            "Please either set splitting_ops to an empty list [] "
-                            "or set use_inductor_graph_partition to True "
-                            "to enable QK-Norm+RoPE+KV cache fusion."
-                        )
                         self.pass_config.fuse_qk_norm_rope_kvcache = False
-                    self.splitting_ops.append("vllm::unified_kv_cache_update")
-                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+                        self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    if not self._keep_kv_cache_update_in_graph(
+                        self.pass_config.fuse_rope_kvcache_cat_mla,
+                        "MLA RoPE+KV cache fusion",
+                    ):
+                        self.pass_config.fuse_rope_kvcache_cat_mla = False
+                        self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
@@ -1251,6 +1243,26 @@ class CompilationConfig:
                 "deepep_low_latency, nixl_ep, or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
+
+    def _keep_kv_cache_update_in_graph(self, requested: bool, name: str) -> bool:
+        """Whether a requested fusion can keep its kv cache update op in the graph.
+
+        Only free once `layer_name` is hoisted out of the graph; before that it
+        costs one compiled graph per attention layer.
+        """
+        if not requested:
+            return False
+        if not _USE_LAYERNAME:
+            logger.warning_once(
+                "%s is enabled, but layer names are baked into the compiled "
+                "graph, so keeping the kv cache update op in it would compile "
+                "one graph per attention layer. Disabling the fusion. Use "
+                "torch >= 2.11 with VLLM_USE_LAYERNAME=1, or set "
+                "use_inductor_graph_partition to True.",
+                name,
+            )
+            return False
+        return True
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant

@@ -248,7 +248,10 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
 
     if not rocm_aiter_ops.is_enabled():
         return False
-    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding") and (
+        cfg.compilation_config.use_inductor_graph_partition
+        or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+    )
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -2029,10 +2032,6 @@ class VllmConfig:
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
-        # Re-compute compile ranges after platform-specific config updates
-        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
-        self._set_compile_ranges()
-
         if self.parallel_config.all2all_backend == "moonep":
             if (
                 self.model_config is not None
@@ -2092,6 +2091,12 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
+
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled), and
+        # after set_splitting_ops_for_v1, which decides whether the RoPE+KV
+        # cache fusions that add a compile range endpoint survive.
+        self._set_compile_ranges()
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism, native rms norm tracing errors due to

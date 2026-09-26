@@ -22,11 +22,13 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config import compilation as compilation_config_module
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
+    _USE_LAYERNAME,
     _is_torch_equal_or_newer,
     is_torch_equal,
 )
@@ -366,6 +368,59 @@ def test_splitting_ops_dynamic():
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+@pytest.mark.skipif(
+    not _USE_LAYERNAME,
+    reason="Requires hoisted layer names",
+)
+@pytest.mark.parametrize(
+    "flag,op",
+    [
+        ("fuse_rope_kvcache", "vllm::unified_kv_cache_update"),
+        ("fuse_qk_norm_rope_kvcache", "vllm::unified_kv_cache_update"),
+        ("fuse_rope_kvcache_cat_mla", "vllm::unified_mla_kv_cache_update"),
+    ],
+)
+def test_splitting_ops_kv_cache_update_fusion(flag, op):
+    config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    config.set_splitting_ops_for_v1(all2all_backend="naive")
+    assert "vllm::unified_kv_cache_update" in config.splitting_ops
+    assert "vllm::unified_mla_kv_cache_update" in config.splitting_ops
+
+    # PassConfig.__post_init__ rejects these flags off their platform, so set
+    # them afterwards to keep the test platform-independent.
+    config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    setattr(config.pass_config, flag, True)
+    config.set_splitting_ops_for_v1(all2all_backend="naive")
+    assert getattr(config.pass_config, flag)
+    assert op not in config.splitting_ops
+    other = {
+        "vllm::unified_kv_cache_update",
+        "vllm::unified_mla_kv_cache_update",
+    } - {op}
+    assert other.issubset(set(config.splitting_ops))
+    assert config.splitting_ops_contain_attention()
+
+
+@pytest.mark.parametrize(
+    "flag,op",
+    [
+        ("fuse_rope_kvcache", "vllm::unified_kv_cache_update"),
+        ("fuse_qk_norm_rope_kvcache", "vllm::unified_kv_cache_update"),
+        ("fuse_rope_kvcache_cat_mla", "vllm::unified_mla_kv_cache_update"),
+    ],
+)
+def test_splitting_ops_kv_cache_update_fusion_needs_hoisted_layer_names(
+    flag, op, monkeypatch
+):
+    monkeypatch.setattr(compilation_config_module, "_USE_LAYERNAME", False)
+    config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    setattr(config.pass_config, flag, True)
+    config.set_splitting_ops_for_v1(all2all_backend="naive")
+    assert not getattr(config.pass_config, flag)
+    assert op in config.splitting_ops
+    assert config.splitting_ops_contain_attention()
 
 
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
