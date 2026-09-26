@@ -18,8 +18,8 @@ The following options control internode communications in vLLM:
 
 #### 2. **KV Cache Transfer Configuration:**
 
-- `--kv-ip`: The IP address for KV cache transfer communications (default: 127.0.0.1)
-- `--kv-port`: The port for KV cache transfer communications (default: 14579)
+- `--kv-transfer-config.kv_ip` (or via `--kv-transfer-config '{"kv_ip":"..."}'`): The IP address for KV cache transfer communications (default: 127.0.0.1)
+- `--kv-transfer-config.kv_port` (or via `--kv-transfer-config '{"kv_port":...}'`): The port for KV cache transfer communications (default: 14579)
 
 #### 3. **Data Parallel Configuration:**
 
