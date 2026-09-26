@@ -21,6 +21,7 @@ from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from ...utils import spawn_new_process_for_each_test
+from .test_ple import _make_file_gather_embedding
 
 
 def _text_config(**kwargs) -> Qwen4ExpTextConfig:
@@ -175,6 +176,7 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
     model_state.ngram_context_offsets = torch.arange(-3, 0, dtype=torch.int64)
     model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
+    model_state.file_gather_modules = []
 
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -222,6 +224,39 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     torch.testing.assert_close(model_inputs["ngram_context"], expected_context)
     assert model_inputs["query_start_loc"].data_ptr() == query_start_loc.data_ptr()
     assert model_inputs["ngram_context"].data_ptr() == ngram_context.data_ptr()
+
+
+def test_qwen4_exp_model_state_stages_file_gather_rows(monkeypatch, tmp_path) -> None:
+    """Rows are staged from the same PLE inputs the forward receives."""
+    module, table = _make_file_gather_embedding(monkeypatch, tmp_path, bind=True)
+    model_state = object.__new__(Qwen4ExpModelState)
+    model_state.uses_ngram_embedding = True
+    model_state.ngram_eos_token_id = 0
+    model_state.ngram_context = torch.empty((4, 1), dtype=torch.int32)
+    model_state.ngram_context_offsets = torch.arange(-1, 0, dtype=torch.int64)
+    model_state.ple_query_start_loc = torch.empty(5, dtype=torch.int32)
+    model_state.file_gather_modules = [module]
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=2,
+        idx_mapping=torch.tensor([0, 1]),
+        query_start_loc=torch.tensor([0, 4, 6], dtype=torch.int32),
+        input_ids=torch.tensor([5, 9, 3, 7, 2, 11]),
+    )
+    req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=torch.tensor([2, 1])),
+        all_token_ids=SimpleNamespace(gpu=torch.tensor([[1, 8, 6], [4, 3, 3]])),
+    )
+
+    with patch.object(MambaHybridModelState, "prepare_inputs", return_value={}):
+        model_inputs = model_state.prepare_inputs(input_batch, req_states)
+
+    ids = module.compute_ngram_ids(
+        input_batch.input_ids,
+        model_inputs["query_start_loc"],
+        model_inputs["ngram_context"],
+    )
+    assert torch.equal(module.ngram_embedding._staging[:6], table[ids])
 
 
 def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:

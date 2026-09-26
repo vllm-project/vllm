@@ -83,10 +83,7 @@ directly from the Triton kernel through unified virtual addressing (UVA),
 prefetching on a side CUDA stream so transfers overlap with the compute of
 preceding layers. The freed GPU memory goes to the KV cache.
 
-`cpu_offload` defaults to `true` (on): it follows the
-`VLLM_PLE_CPU_OFFLOAD` environment variable, which also defaults to `true`.
-An explicit `--engram-config` value takes precedence over the environment
-variable.
+`cpu_offload` defaults to `true` and is set only through `--engram-config`.
 
 To keep the tables resident on GPU instead (e.g. when host memory is
 scarce):
@@ -96,8 +93,40 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
   --engram-config.cpu_offload false
 ```
 
-or equivalently `VLLM_PLE_CPU_OFFLOAD=0`. CPU offload requires a GPU with UVA
-support; vLLM fails fast when it is unavailable.
+CPU offload requires a GPU with UVA support; vLLM fails fast when it is
+unavailable.
+
+## Host file gather (Qwen4Exp)
+
+`host_file_gather` serves Qwen4Exp PLE rows from the loader's own file
+mapping of the safetensors shards instead of allocating the table. Set
+`--engram-config '{"host_file_gather": true}'`. It applies only to Qwen4Exp
+and takes precedence over `cpu_offload`.
+
+Rows stay in the checkpoint dtype: an FP8 table stays FP8 and is dequantized
+on the GPU, and an unquantized table must match `--dtype`. CPU offload
+converts on load; this mode rejects the mismatch at load.
+
+Faulted pages are reclaimable page cache, shared across co-located processes.
+They appear in each process's RSS as file-backed (`RssFile`), and PSS is
+where they are split across processes. A write to the mapping copies that
+page into anonymous RSS. Each step pays a host sync, and every TP rank
+gathers all rows. Co-located ranks share the cache; ranks on different
+machines do not.
+
+Serving depends on the checkpoint files staying unchanged while the server
+runs: an in-place overwrite serves the new bytes, truncation kills the worker
+with SIGBUS, and deleting or renaming the files is safe.
+
+The first touch of a row costs a disk read, and a page evicted under memory
+pressure is read again on the next miss. By default no prewarm is needed; for
+a fast first request, read the PLE files once after the server has started
+and allocated its KV cache.
+
+Reload is unsupported and fails closed. ROCm and elastic EP reject the key.
+Load paths that do not hand over file-backed safetensors tensors fail at bind
+(`eager`, `.bin`, runai, `fastsafetensors`, `instanttensor`). The multithread
+loader is file-backed and is admitted. `--load-format dummy` serves zeros.
 
 ## Data-parallel topologies (DeepSeek V4.1)
 
@@ -118,7 +147,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
+`host_file_gather`.
 
 ## Sharing host tables across DP replicas
 
