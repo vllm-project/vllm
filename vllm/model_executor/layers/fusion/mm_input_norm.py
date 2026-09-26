@@ -195,6 +195,10 @@ class IdentityInputNorm(nn.Module):
     ``visual_dtype`` here.
     """
 
+    @property
+    def input_dtype(self) -> torch.dtype | None:
+        return None
+
     def forward(
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
@@ -250,6 +254,10 @@ class FusedMMInputNorm(CustomOp):
         device = torch.get_default_device()
         self.register_buffer("weight", (rescale_factor / std).to(device))
         self.register_buffer("bias", (-mean / std).to(device))
+
+    @property
+    def input_dtype(self) -> torch.dtype | None:
+        return torch.uint8
 
     # ------------------------------------------------------------------
     # Internal helpers shared by the platform-specific forward_* methods
