@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write # Allow committer-requested updates where the token has access.
   issues: write
   pull-requests: write
 

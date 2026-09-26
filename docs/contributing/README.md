@@ -325,17 +325,21 @@ review process:
   in the upstream repository. Your branch must contain every commit currently
   on that branch: **zero commits behind**. This also applies to PRs targeting
   release branches or another PR's branch.
-- If the PR is behind, the bot reports the count without creating a new build.
-  Merge or rebase onto the latest target branch, then rerun the command. If the
-  target branch advances in the meantime, update your branch and try again.
+- For `/ci run` (including `all` and `nightly`), requesters with repository
+  `write`, `maintain`, or `admin` permission authorize one attempt to update a
+  stale PR from its target branch before CI starts. The bot waits for the
+  updated head and rechecks freshness. Fork permissions or conflicts can
+  prevent the update; if it fails, update manually and rerun the command.
+  Other requesters and `/amd-ci run` must update stale branches manually.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
-  `/amd-ci run all --allow-stale`. The same authorization requirements apply.
+  `/amd-ci run all --allow-stale`. This skips automatic branch updates;
+  the same authorization requirements apply.
   The bot reports the lag and warns that outdated CI configuration may cause
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - Retrying or cancelling builds does not check branch freshness.
-- These commands do not modify your branch or enforce merge requirements.
+- These commands do not enforce merge requirements or change PR labels.
   Direct Buildkite launches are outside this workflow. No additional token is
   needed.
 
