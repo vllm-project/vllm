@@ -63,13 +63,14 @@ SM_SCALE = HEAD_DIM**-0.5
         "expected",
     ),
     [
-        pytest.param(8, 4, 64, 4, False, id="tp1-below-min-batch"),
-        pytest.param(16, 4, 64, 4, True, id="tp1-supported"),
+        pytest.param(2, 4, 64, 4, False, id="tp1-below-min-batch"),
+        pytest.param(4, 4, 64, 4, True, id="tp1-min-batch"),
+        pytest.param(4, 4, 32, 2, False, id="tp2-below-min-batch"),
+        pytest.param(8, 4, 32, 2, True, id="tp2-min-batch"),
+        pytest.param(8, 4, 16, 1, False, id="tp4-below-min-batch"),
         pytest.param(16, 4, 16, 1, True, id="tp4-min-batch"),
-        pytest.param(24, 4, 16, 1, True, id="tp4-intermediate-batch"),
-        pytest.param(32, 4, 16, 1, True, id="tp4-supported"),
-        pytest.param(16, 1, 64, 4, True, id="tp1-query-len-1"),
-        pytest.param(16, 1, 16, 1, True, id="tp4-query-len-1"),
+        pytest.param(4, 1, 64, 4, False, id="regular-decode-keeps-old-floor"),
+        pytest.param(16, 1, 64, 4, True, id="regular-decode-min-batch"),
         pytest.param(16, 2, 64, 4, True, id="tp1-query-len-2"),
         pytest.param(16, 2, 16, 1, True, id="tp4-query-len-2"),
         pytest.param(16, 32, 64, 4, True, id="query-len-upper-bound"),
@@ -83,7 +84,13 @@ def test_msa_cutlass_decode_static_dispatch(
     expected: bool,
     num_q_heads: int,
     num_kv_heads: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda capability: capability == (10, 3),
+    )
     assert (
         should_prepare_decode_metadata(
             batch_size,
@@ -94,6 +101,51 @@ def test_msa_cutlass_decode_static_dispatch(
             kv_cache_dtype="fp8_e4m3",
             page_size=BLOCK_SIZE,
             topk_blocks=TOPK,
+        )
+        is expected
+    )
+
+
+def test_msa_cutlass_decode_static_dispatch_keeps_sm100_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda _: False,
+    )
+    kwargs = {
+        "decode_backend": "cutlass",
+        "num_q_heads": 64,
+        "num_kv_heads": 4,
+        "kv_cache_dtype": "fp8_e4m3",
+        "page_size": BLOCK_SIZE,
+        "topk_blocks": TOPK,
+    }
+    assert not should_prepare_decode_metadata(8, DEFAULT_QUERY_LEN, **kwargs)
+    assert should_prepare_decode_metadata(16, DEFAULT_QUERY_LEN, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("min_batch_size", "batch_size", "expected"),
+    [(8, 4, False), (8, 8, True), (16, 8, False), (16, 16, True)],
+)
+def test_msa_cutlass_decode_static_dispatch_honors_batch_override(
+    min_batch_size: int,
+    batch_size: int,
+    expected: bool,
+) -> None:
+    assert (
+        should_prepare_decode_metadata(
+            batch_size,
+            DEFAULT_QUERY_LEN,
+            decode_backend="cutlass",
+            num_q_heads=64,
+            num_kv_heads=4,
+            kv_cache_dtype="fp8_e4m3",
+            page_size=BLOCK_SIZE,
+            topk_blocks=TOPK,
+            min_batch_size=min_batch_size,
         )
         is expected
     )
@@ -239,6 +291,7 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.kv_cache_dtype = "fp8_e4m3"
     builder.decode_backend = "cutlass"
     builder.msa_cutlass_plan_cache = object()
+    builder.msa_cutlass_min_batch_size = None
 
     metadata = builder.build(
         0,
@@ -434,6 +487,10 @@ def _make_topk(
         pytest.param(64, 4, 8, 8, False, id="tp1-query-len-8"),
         pytest.param(16, 1, 8, 1, True, id="tp4-query-len-1"),
         pytest.param(16, 1, 16, 4, True, id="tp4-query-len-4"),
+        # Measured B300 EAGLE3 dispatch boundaries.
+        pytest.param(64, 4, 2, 4, True, id="tp1-batch-4-query-len-4"),
+        pytest.param(32, 2, 4, 4, True, id="tp2-batch-8-query-len-4"),
+        pytest.param(16, 1, 8, 4, True, id="tp4-batch-16-query-len-4"),
     ],
 )
 def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(

@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH: int | None = None
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -352,6 +353,27 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def get_minimax_m3_msa_cutlass_min_batch() -> int | None:
+    """Resolve an optional MiniMax M3 CUTLASS MSA batch override."""
+    raw = os.getenv("VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH")
+    if raw is None or raw.strip().lower() == "auto":
+        return None
+    value = raw.strip().lower()
+    if value in ("", "0", "false", "no", "off"):
+        return 16
+    try:
+        min_batch = int(value)
+    except ValueError:
+        min_batch = 0
+    if min_batch < 1:
+        logger.warning(
+            "Invalid VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH=%r; falling back to 16",
+            raw,
+        )
+        return 16
+    return min_batch
 
 
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
@@ -1425,6 +1447,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
+    # Override the automatic MiniMax M3 CUTLASS sparse-decode crossover.
+    # Set this to 16 (or a false-like value) to restore the original gate.
+    "VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH": (get_minimax_m3_msa_cutlass_min_batch),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
