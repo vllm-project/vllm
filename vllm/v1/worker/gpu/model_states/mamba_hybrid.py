@@ -297,7 +297,7 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self._align_mode:
+        if self._align_mode and input_batch.seq_lens.is_cuda:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
             for group_idx, group_id in enumerate(mamba_group_ids):
