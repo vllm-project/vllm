@@ -18,6 +18,8 @@ from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
+    resolve_flashinfer_autotune_v2_root,
+    use_flashinfer_autotune_v2,
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
@@ -432,33 +434,40 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
-    cache_path = resolve_flashinfer_autotune_file(runner)
-    if is_leader:
-        logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+    use_autotune_v2 = use_flashinfer_autotune_v2(runner)
+    if use_autotune_v2:
+        from flashinfer import autotune_v2, autotune_v2_reload
 
-    # We skip EPLB here since we don't want to record dummy metrics.
-    # Randomize inputs to avoid every token pick the same experts,
-    # which lead to some EP ranks receiving no tokens and skipping their
-    # MoE kernel entirely, and cause hang due to all-reduce collective
-    # during synchronized autotuning.
-    # Read cached autotune results and broadcast to all ranks.
-    cached_results: bytes | None = None
-    if is_leader and cache_path.exists():
-        with open(cache_path, "rb") as f:
-            cached_results = f.read()
-    cached_results = world.broadcast_object(cached_results, src=0)
-    if cached_results is not None:
-        write_flashinfer_autotune_cache(cache_path, cached_results)
-        world.barrier()
-        tuner.load_configs(str(cache_path))
+        cache_root = resolve_flashinfer_autotune_v2_root()
+        if is_leader:
+            logger.info_once(
+                "Using FlashInfer managed autotune cache (root=%s)",
+                cache_root if cache_root is not None else "flashinfer default",
+            )
+        autotune_context = autotune_v2(
+            mode="tune", cache_root=cache_root, **autotune_kwargs
+        )
+    else:
+        cache_path = resolve_flashinfer_autotune_file(runner)
+        if is_leader:
+            logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+
+        # Read cached autotune results and broadcast to all ranks.
+        cached_results: bytes | None = None
+        if is_leader and cache_path.exists():
+            with open(cache_path, "rb") as f:
+                cached_results = f.read()
+        cached_results = world.broadcast_object(cached_results, src=0)
+        if cached_results is not None:
+            write_flashinfer_autotune_cache(cache_path, cached_results)
+            world.barrier()
+            tuner.load_configs(str(cache_path))
+        autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)
 
     group = world.cpu_group if world.world_size > 1 else None
     set_autotune_process_group(group)
     try:
-        with (
-            torch.inference_mode(),
-            fi_utils.autotune(tune_mode=True, **autotune_kwargs),
-        ):
+        with torch.inference_mode(), autotune_context:
             hisparse_enabled = (
                 runner.vllm_config.attention_config.hisparse_config is not None
             )
@@ -478,5 +487,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if world.world_size > 1:
         world.barrier()
-    if is_leader:
+    if use_autotune_v2:
+        if world.world_size > 1:
+            # All ranks serve the shared store's final state after publishing.
+            autotune_v2_reload()
+            world.barrier()
+    elif is_leader:
         tuner.save_configs(str(cache_path))
