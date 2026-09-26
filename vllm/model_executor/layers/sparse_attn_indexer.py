@@ -10,7 +10,7 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -42,7 +42,9 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerDecodeRowShard,
     DeepseekV32IndexerMetadata,
+    restore_decode_row_order,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -315,6 +317,84 @@ def kv_cache_as_quant_view(
             stride=(page_bytes, fp4_bytes, fp4_bytes, 1),
         )
     return kv_cache.unsqueeze(-2)
+
+
+def _select_rows(x: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+    # index_select has no FP8 kernel; gather the raw bytes.
+    if x.element_size() == 1:
+        return x.view(torch.uint8).index_select(0, rows).view(x.dtype)
+    return x.index_select(0, rows)
+
+
+def _row_sharded_decode_topk(
+    q_quant: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    weights: torch.Tensor,
+    kv_cache: torch.Tensor,
+    row_shard: DeepseekV32IndexerDecodeRowShard,
+    num_decode_tokens: int,
+    max_seq_len: int,
+    topk_indices_buffer: torch.Tensor,
+    topk_tokens: int,
+    max_model_len: int,
+    use_fp4_cache: bool,
+    candidate_blocks: torch.Tensor | None,
+    candidate_block_size: int,
+    candidate_write: bool,
+    topk_backend: str,
+) -> None:
+    """Score this rank's decode rows, then all-gather every rank's top-k.
+
+    Candidate blocks stay rank-local: the source layer and its consumers see
+    the same rows in the same order, at the front of ``candidate_blocks``.
+    """
+    rows = row_shard.rows
+    num_rows = rows.shape[0]
+    q = _select_rows(q_quant[:num_decode_tokens], rows).unsqueeze(1)
+    if use_fp4_cache:
+        q = q.view(torch.int8)
+    q_scale_rows = (
+        _select_rows(q_scale[:num_decode_tokens], rows).unsqueeze(1)
+        if q_scale is not None
+        else None
+    )
+    logits = fp8_fp4_paged_mqa_logits(
+        (q, q_scale_rows),
+        kv_cache,
+        weights[:num_decode_tokens].index_select(0, rows),
+        row_shard.seq_lens,
+        row_shard.block_table,
+        row_shard.schedule_metadata,
+        max_model_len=max_model_len,
+        clean_logits=False,
+        indices=row_shard.indices,
+    )
+    if candidate_blocks is not None:
+        row_ends = row_shard.seq_lens.reshape(-1)
+        local_candidates = candidate_blocks[:num_rows]
+        if candidate_write:
+            _select_candidate_blocks(
+                logits,
+                None,
+                row_ends,
+                local_candidates.shape[1],
+                candidate_block_size,
+                local_candidates,
+            )
+        else:
+            _apply_candidate_mask(
+                logits, None, row_ends, local_candidates, candidate_block_size
+            )
+    local_topk = torch.empty(
+        (num_rows, topk_tokens), dtype=torch.int32, device=logits.device
+    )
+    get_indexer_topk(topk_backend)(
+        logits, row_shard.seq_lens, 1, local_topk, topk_tokens, max_seq_len
+    )
+    gathered = get_tp_group().all_gather(local_topk, dim=0)
+    topk_indices_buffer[:num_decode_tokens, :topk_tokens].copy_(
+        restore_decode_row_order(gathered, row_shard, num_decode_tokens)
+    )
 
 
 @eager_break_during_capture
@@ -641,6 +721,25 @@ def sparse_attn_indexer(
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
+        if decode_metadata.row_shard is not None:
+            _row_sharded_decode_topk(
+                q_quant,
+                q_scale,
+                weights,
+                kv_cache,
+                decode_metadata.row_shard,
+                num_decode_tokens,
+                attn_metadata_narrowed.max_seq_len,
+                topk_indices_buffer,
+                topk_tokens,
+                max_model_len,
+                use_fp4_cache,
+                candidate_blocks,
+                candidate_block_size,
+                candidate_write,
+                topk_backend,
+            )
+            return topk_indices_buffer
         decode_lens = decode_metadata.decode_lens
         # requires_padding can be computed False for ragged warmup/mixed
         # batches (seen on SM120 TP=2: 8 tokens over 6 seqs -> uniform
