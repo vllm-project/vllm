@@ -248,10 +248,26 @@ def build_offloading_config(
         )
 
     kv_events_config = vllm_config.kv_events_config
+    # MLA workers normalize cache_config.cache_dtype in place (e.g. fp8 ->
+    # fp8_ds_mla for sparse MLA) in the worker process, so with the mp executor
+    # the scheduler never sees the rewrite and the namespace identity splits on
+    # the executor choice. The KV cache specs travel from the workers and carry
+    # the normalized string in both modes; derive the identity from them when
+    # they agree, and keep the config knob otherwise.
+    spec_cache_dtypes = {
+        cache_dtype_str
+        for group in kv_cache_config.kv_cache_groups
+        for spec in iter_layer_specs(group.kv_cache_spec)
+        if (cache_dtype_str := getattr(spec, "cache_dtype_str", None))
+    }
     cache_dtype = (
-        vllm_config.model_config.dtype
-        if vllm_config.cache_config.cache_dtype == "auto"
-        else vllm_config.cache_config.cache_dtype
+        spec_cache_dtypes.pop()
+        if len(spec_cache_dtypes) == 1
+        else (
+            vllm_config.model_config.dtype
+            if vllm_config.cache_config.cache_dtype == "auto"
+            else vllm_config.cache_config.cache_dtype
+        )
     )
 
     return OffloadingConfig(

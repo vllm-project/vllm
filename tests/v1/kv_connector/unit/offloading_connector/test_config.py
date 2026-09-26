@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -794,6 +795,40 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
     )
 
     assert not _replicated_layout(kv_cache_config)
+
+
+def test_model_dtype_identity_uses_normalized_spec_dtype():
+    """#56894: sparse MLA workers rewrite cache_dtype (fp8 -> fp8_ds_mla) in the
+    worker process; the namespace identity must come from the spec, which
+    carries the normalized value under both uni and mp executors."""
+    spec = replace(_mla_spec(), cache_dtype_str="fp8_ds_mla")
+    num_blocks = 4
+    layer_stride = spec.page_size_bytes * num_blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=layer_stride * 2,
+                layers=["layer0", "layer1"],
+                layer_stride=layer_stride,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer1"], spec)],
+    )
+    config = _make_vllm_config()
+    config.cache_config.cache_dtype = "fp8"
+    assert build_offloading_config(config, kv_cache_config).model.dtype == "fp8_ds_mla"
+
+
+def test_model_dtype_identity_keeps_knob_without_spec_dtype_str():
+    """Plain specs carry no dtype string: the cache_dtype knob stands."""
+    config = _make_vllm_config()
+    config.cache_config.cache_dtype = "fp8"
+    assert (
+        build_offloading_config(config, _make_mla_kv_cache_config()).model.dtype
+        == "fp8"
+    )
 
 
 @pytest.mark.parametrize(
