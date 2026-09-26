@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
+from vllm.platforms import current_platform
 
 
 def decode_nccl_unique_id(
@@ -135,6 +136,21 @@ class NCCLRendezvous(Protocol):
     world_size: int
 
 
+def _require_usable_communicator(comm: "PyNcclCommunicator") -> "PyNcclCommunicator":
+    """Reject a disabled or unavailable communicator, since every collective on it
+    is a no-op and the transfer would leave the workers on stale weights.
+
+    Skipped on CUDA/ROCm.
+    """
+    if not current_platform.is_cuda_alike() and (comm.disabled or not comm.available):
+        raise RuntimeError(
+            "NCCL weight transfer needs a working PyNccl communicator, but it "
+            f"disabled itself on {current_platform.device_type} "
+            f"(rank={comm.rank}, world_size={comm.world_size})."
+        )
+    return comm
+
+
 def stateless_init_process_group(
     master_address: str,
     master_port: int,
@@ -154,7 +170,7 @@ def stateless_init_process_group(
     pg = StatelessProcessGroup.create(
         host=master_address, port=master_port, rank=rank, world_size=world_size
     )
-    return PyNcclCommunicator(pg, device=device)
+    return _require_usable_communicator(PyNcclCommunicator(pg, device=device))
 
 
 def uid_init_process_group(
@@ -170,11 +186,13 @@ def uid_init_process_group(
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-    return PyNcclCommunicator.from_unique_id_bytes(
-        nccl_unique_id_bytes,
-        rank=rank,
-        world_size=world_size,
-        device=device,
+    return _require_usable_communicator(
+        PyNcclCommunicator.from_unique_id_bytes(
+            nccl_unique_id_bytes,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+        )
     )
 
 
