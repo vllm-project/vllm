@@ -395,6 +395,15 @@ class OffloadingManager(ABC):
         """
         return False
 
+    def poll_pending_work(self) -> None:
+        """Service background work between scheduler steps.
+
+        Called on the scheduler side while the engine waits for a model
+        step, never concurrently with the per-step methods. The default
+        does nothing.
+        """
+        return
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return

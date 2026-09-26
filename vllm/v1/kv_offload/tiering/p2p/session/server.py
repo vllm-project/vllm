@@ -449,8 +449,8 @@ class ServerRole:
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
 
-        Called once per scheduler step with a ``parent`` handle valid
-        only for this call. Drains newly-enqueued LookupMsgs, re-polls
+        Called at least once per scheduler step with a ``parent`` handle
+        valid only for this call. Drains newly-enqueued LookupMsgs, re-polls
         any parked HIT_PENDING / RETRY keys, and releases the
         bookkeeping for lookups closed since the last serve.
         """

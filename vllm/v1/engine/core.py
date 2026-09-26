@@ -27,6 +27,7 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -106,6 +107,73 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+# Interval between connector service sweeps while the engine core waits
+# for a model step.
+KV_CONNECTOR_POLL_INTERVAL_S = 0.005
+
+
+class ConnectorPoller:
+    """Services a KV connector's scheduler-side work while the engine core
+    thread waits on a model step.
+
+    The connector is touched by one thread at a time: the engine core
+    thread outside ``wait`` and the poller thread inside it. ``wait`` hands
+    the connector over by raising ``_waiting`` under the lock and takes it
+    back the same way, so a sweep in progress when the model output arrives
+    completes before the engine core continues. An exception raised by a
+    sweep is re-raised from ``wait`` on the engine core thread.
+    """
+
+    def __init__(
+        self,
+        connector: KVConnectorBase_V1,
+        interval_s: float = KV_CONNECTOR_POLL_INTERVAL_S,
+    ) -> None:
+        self._connector = connector
+        self._interval_s = interval_s
+        self._lock = threading.Lock()
+        self._waiting = False
+        self._wake = threading.Event()
+        self._closed = False
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="kv-connector-poller", daemon=True
+        )
+        self._thread.start()
+
+    def wait(self, future: Future[Any]) -> Any:
+        with self._lock:
+            self._waiting = True
+        self._wake.set()
+        try:
+            return future.result()
+        finally:
+            with self._lock:
+                self._waiting = False
+                error, self._error = self._error, None
+            self._wake.clear()
+            if error is not None:
+                raise error
+
+    def close(self) -> None:
+        self._closed = True
+        self._wake.set()
+        self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while not self._closed:
+            self._wake.wait()
+            if self._closed:
+                return
+            with self._lock:
+                if self._waiting and self._error is None:
+                    try:
+                        self._connector.poll_pending_work()
+                    except BaseException as exc:
+                        self._error = exc
+            time.sleep(self._interval_s)
 
 
 class EngineCore:
@@ -190,6 +258,9 @@ class EngineCore:
         # handshake metadata from all workers so the connector in the scheduler
         # will have the full context
         kv_connector = self.scheduler.get_kv_connector()
+        self.connector_poller: ConnectorPoller | None = (
+            ConnectorPoller(kv_connector) if kv_connector is not None else None
+        )
         if kv_connector is not None:
             # Collect and store KV connector xfer metadata from workers
             # (after KV cache registration)
@@ -647,7 +718,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_model_output(future)
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
@@ -660,6 +731,11 @@ class EngineCore:
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _wait_for_model_output(self, future: Future[Any]) -> Any:
+        if self.connector_poller is None:
+            return future.result()
+        return self.connector_poller.wait(future)
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -745,7 +821,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_model_output(future)
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -797,6 +873,8 @@ class EngineCore:
 
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
+        if self.connector_poller is not None:
+            self.connector_poller.close()
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()

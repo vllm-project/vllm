@@ -200,8 +200,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     blocks from the peer) and server-role (serving blocks to the peer)
     over the same control connection.
 
-    Single-threaded: every public method runs on the scheduler thread, and
-    the engine drives polling via ``get_finished_jobs()`` once per step.
+    Never re-entered: every public method runs on the engine core thread
+    or, while the engine waits on a model step, on the connector poller,
+    and the two never overlap. The engine drives polling via
+    ``get_finished_jobs()`` at least once per step.
     ``has_pending_work()`` keeps the engine ticking so the control transport
     and existing sessions are polled even when no requests are scheduled.
     """
