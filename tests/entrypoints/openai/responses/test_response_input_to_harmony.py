@@ -48,7 +48,7 @@ class TestResponseInputToHarmonyMessage:
     def test_user_message_string_content(self):
         msg = response_input_to_harmony(
             {"type": "message", "role": "user", "content": "Hello"},
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.USER
@@ -59,7 +59,7 @@ class TestResponseInputToHarmonyMessage:
         """Omitting 'type' should fall through to the message branch."""
         msg = response_input_to_harmony(
             {"role": "user", "content": "Hello"},
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.USER
@@ -70,7 +70,7 @@ class TestResponseInputToHarmonyMessage:
         as developer messages with DeveloperContent."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "system", "content": "Be helpful."},
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.DEVELOPER
@@ -80,7 +80,7 @@ class TestResponseInputToHarmonyMessage:
     def test_assistant_message_gets_final_channel(self):
         msg = response_input_to_harmony(
             {"type": "message", "role": "assistant", "content": "The answer is 42."},
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.ASSISTANT
@@ -92,7 +92,7 @@ class TestResponseInputToHarmonyMessage:
         '# Instructions' header the model was trained on."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "developer", "content": "Be concise."},
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.DEVELOPER
@@ -109,7 +109,7 @@ class TestResponseInputToHarmonyMessage:
                     {"type": "text", "text": "Part two."},
                 ],
             },
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.USER
@@ -129,7 +129,7 @@ class TestResponseInputToHarmonyMessage:
                     {"type": "text", "text": "Rule 2."},
                 ],
             },
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.DEVELOPER
@@ -148,7 +148,7 @@ class TestResponseInputToHarmonyMessage:
                     {"type": "reasoning_text", "text": "I should call get_weather."}
                 ],
             },
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.ASSISTANT
@@ -157,7 +157,7 @@ class TestResponseInputToHarmonyMessage:
 
     def test_reasoning_pydantic_model_input(self):
         """A Pydantic ResponseReasoningItem should be model_dump()'d before parsing."""
-        msg = response_input_to_harmony(_REASONING_ITEM, prev_responses=[])
+        msg = response_input_to_harmony(_REASONING_ITEM, function_calls_by_id={})
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "analysis"
@@ -174,7 +174,7 @@ class TestResponseInputToHarmonyMessage:
                 "name": "get_weather",
                 "arguments": '{"location": "Paris"}',
             },
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.author.role == Role.ASSISTANT
@@ -186,7 +186,7 @@ class TestResponseInputToHarmonyMessage:
     def test_function_call_empty_arguments(self):
         msg = response_input_to_harmony(
             {"type": "function_call", "name": "ping", "arguments": ""},
-            prev_responses=[],
+            function_calls_by_id={},
         )
 
         assert msg.recipient == "functions.ping"
@@ -199,7 +199,7 @@ class TestResponseInputToHarmonyMessage:
     def test_function_call_output_channel_recipient_and_author_name(self):
         msg = response_input_to_harmony(
             {"type": "function_call_output", "call_id": "call_test", "output": "18°C"},
-            prev_responses=[_PREV_CALL],
+            function_calls_by_id={"call_test": _PREV_CALL},
         )
 
         assert msg.author.role == Role.TOOL
@@ -208,16 +208,7 @@ class TestResponseInputToHarmonyMessage:
         assert msg.recipient == "assistant"
         assert msg.content[0].text == "18°C"
 
-    def test_function_call_output_uses_most_recent_matching_call(self):
-        """When multiple prev_responses share a call_id, the last one wins
-        because the search is reversed."""
-        earlier = ResponseFunctionToolCall(
-            id="fc_old",
-            call_id="call_test",
-            name="old_func",
-            arguments="{}",
-            type="function_call",
-        )
+    def test_function_call_output_uses_indexed_matching_call(self):
         later = ResponseFunctionToolCall(
             id="fc_new",
             call_id="call_test",
@@ -232,22 +223,7 @@ class TestResponseInputToHarmonyMessage:
                 "call_id": "call_test",
                 "output": "result",
             },
-            prev_responses=[earlier, later],
-        )
-
-        assert msg.author.name == "functions.get_weather"
-
-    def test_function_call_output_skips_non_function_call_items_in_prev_responses(
-        self,
-    ):
-        """ResponseReasoningItem entries in prev_responses should be ignored."""
-        msg = response_input_to_harmony(
-            {
-                "type": "function_call_output",
-                "call_id": "call_test",
-                "output": "18°C",
-            },
-            prev_responses=[_REASONING_ITEM, _PREV_CALL],
+            function_calls_by_id={"call_test": later},
         )
 
         assert msg.author.name == "functions.get_weather"
@@ -262,17 +238,17 @@ class TestResponseInputToHarmonyMessage:
                     "call_id": "no_such_id",
                     "output": "x",
                 },
-                prev_responses=[_PREV_CALL],
+                function_calls_by_id={"call_test": _PREV_CALL},
             )
         assert exc_info.value.parameter == "input"
 
-    def test_function_call_output_raises_on_empty_prev_responses(self):
+    def test_function_call_output_raises_on_empty_function_call_index(self):
         with pytest.raises(
             VLLMValidationError, match="No call message found for"
         ) as exc_info:
             response_input_to_harmony(
                 {"type": "function_call_output", "call_id": "call_test", "output": "x"},
-                prev_responses=[],
+                function_calls_by_id={},
             )
         assert exc_info.value.parameter == "input"
 
@@ -284,6 +260,6 @@ class TestResponseInputToHarmonyMessage:
         with pytest.raises(VLLMValidationError, match="Unknown input type") as exc_info:
             response_input_to_harmony(
                 {"type": "image_url", "url": "https://example.com/img.png"},
-                prev_responses=[],
+                function_calls_by_id={},
             )
         assert exc_info.value.parameter == "input"

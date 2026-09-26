@@ -1120,6 +1120,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                     return
                 current_index += 1
 
+            if event_deque and event_deque[-1].type == "response.completed":
+                return
+
             await new_event_signal.wait()
 
     async def retrieve_responses(
@@ -1197,13 +1200,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
+        include_output_logprobs = request.is_include_output_logprobs()
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
-            if not request.is_include_output_logprobs():
+            if not include_output_logprobs:
                 return []
             if hide_stream_metadata:
                 return []
