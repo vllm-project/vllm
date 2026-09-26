@@ -1926,6 +1926,66 @@ def test_per_request_spec_decode_acceptance_disabled_by_default():
     assert scheduler.requests[req.request_id].spec_decode_metrics is None
 
 
+@pytest.mark.parametrize("stop_kind", ["eos", "stop_token", "max_tokens"])
+def test_spec_decode_terminal_step_counts_committed_tokens(stop_kind):
+    """Stop truncation changes mean length but preserves verifier acceptance."""
+    scheduler = create_scheduler(
+        num_speculative_tokens=5,
+        per_request_spec_decode_metrics="summary",
+    )
+    terminal_token = EOS_TOKEN_ID if stop_kind == "eos" else 103
+    [request] = create_requests(
+        num_requests=1,
+        num_tokens=1,
+        max_tokens=4 if stop_kind == "max_tokens" else 16,
+        stop_token_ids=[terminal_token] if stop_kind == "stop_token" else None,
+    )
+    scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), make_output(scheduler))
+    drafts = [101, 102, terminal_token, 104, 105]
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [drafts]))
+    scheduled = scheduler.schedule()
+    model_output = make_output(scheduler)
+    model_output.sampled_token_ids = [drafts + [106]]
+    outputs = scheduler.update_from_output(scheduled, model_output)
+
+    emitted = outputs[0].outputs[0]
+    assert emitted.new_token_ids == drafts[:3]
+    assert emitted.finished
+    metrics = emitted.spec_decode_metrics.to_dict()
+    assert metrics["num_accepted_draft_tokens"] == 5
+    assert metrics["mean_acceptance_length"] == pytest.approx(3.0)
+    assert metrics["num_committed_tokens"] == 3
+    stats = outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_accepted_tokens == 5
+    assert stats.num_committed_tokens == 3
+
+
+def test_spec_decode_fully_invalidated_request_preserves_batch_stats():
+    """A later request with no valid drafts must not erase earlier stats."""
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        per_request_spec_decode_metrics="summary",
+    )
+    requests = create_requests(num_requests=2, num_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), make_output(scheduler))
+    ids = [request.request_id for request in requests]
+    scheduler.update_draft_token_ids(DraftTokenIds(ids, [[101, 102, 103], [-1] * 3]))
+    scheduled = scheduler.schedule()
+    scheduled.num_invalid_spec_tokens = {ids[1]: 3}
+    model_output = make_output(scheduler)
+    model_output.sampled_token_ids = [[101, 102, 104], [105]]
+    outputs = scheduler.update_from_output(scheduled, model_output)
+
+    stats = outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats is not None
+    assert stats.num_draft_tokens == 3
+    assert stats.num_accepted_tokens == 2
+    assert stats.num_committed_tokens == 4
+
+
 def test_spec_decoding_stats_empty_output():
     """Test that spec decoding stats handle empty output tokens gracefully.
 
