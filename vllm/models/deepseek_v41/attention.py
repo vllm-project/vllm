@@ -116,13 +116,19 @@ def _fill_short_context_topk_indices(
     )
 
 
-# Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
-# DeepSeek's V4.1 record -- all 512 dims (RoPE included) as fp8 e4m3 with one
-# UE8M0 scale per 32 dims, 512 data bytes + 16 scale bytes per token, pages
-# rounded to the kernel's 512 B TMA stride -- only in its SM100 sparse-decode
-# kernels. Every other arch keeps the V4 record: 448 fp8 NoPE + 64 bf16 RoPE
-# plus 7 UE8M0 scales of 64 dims and a pad byte (584 B, 576 B pages).
+# Which packed fp8_ds_mla record a V4.1 layer writes. DeepSeek's V4.1 record --
+# all 512 dims (RoPE included) as fp8 e4m3 with one UE8M0 scale per 32 dims,
+# 512 data bytes + 16 scale bytes per token, pages rounded to 512 B -- is
+# decoded by FlashMLA's SM100 sparse-decode kernels and by the ROCm sparse
+# decode on gfx950. The archs without one of those keep the V4 record: 448 fp8
+# NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a pad byte (584 B,
+# 576 B pages). Both the attention layer and the indexer spec read this, and
+# they share a block, so it has to be one answer for the whole layer.
 def _use_v41_mxfp8_kv_record() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import _ON_GFX950
+
+        return _ON_GFX950
     return current_platform.is_device_capability_family(100)
 
 
@@ -191,6 +197,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
     # a single attention class dispatches across arch-specific layouts.
     use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # Whether this layer's kernel decodes an NVFP4 compressed cache. Only that
+    # record changes width; the sliding-window one stays fp8.
+    reads_nvfp4_compressed_cache: ClassVar[bool] = False
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -511,10 +520,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # sum, and 512 satisfies both TMA strides in play (512 for the V4.1
         # fp8 record, 256 for NVFP4).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
-        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
+        if self.kv_cache_dtype == "nvfp4_ds_mla" and not (
+            self.kv_mxfp8 or self.reads_nvfp4_compressed_cache
+        ):
             raise ValueError(
-                "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
-                "decodes only on SM100."
+                "nvfp4_ds_mla needs a kernel that decodes an NVFP4 compressed "
+                "cache: FlashMLA's SM100 sparse decode, or the ROCm sparse "
+                "decode on gfx950."
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay
