@@ -55,7 +55,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    align_remote_regions_by_layer,
     get_base_request_id,
+    select_remote_regions,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -368,6 +370,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._recving_transfers = defaultdict(list)
         w._is_hma_required = False
         w.xfer_stats = NixlKVConnectorStats()
+        w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
@@ -385,6 +388,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._transfer_layer_names = ()
         w._transfer_layer_region_indices = ()
         w._transfer_layer_group_ids = ()
+        w.block_len_per_layer = []
         w.dst_region_num_blocks = {}
         w.dst_region_group_ids = {}
         w.dst_uses_region_group_mapping = {}
@@ -1813,6 +1817,15 @@ def _layer_routing_worker(
     return worker
 
 
+def _align(worker: _StubWriterWorker, metadata: NixlAgentMetadata) -> None:
+    align_remote_regions_by_layer(
+        metadata,
+        worker._transfer_layer_names,
+        worker._transfer_layer_region_indices,
+        worker.block_len_per_layer,
+    )
+
+
 @pytest.mark.parametrize(
     ("region_num_blocks", "expected"),
     [(None, [1, 2, 15, 21, 22]), ([4, 7, 5], [1, 2, 9, 12, 13])],
@@ -1842,6 +1855,40 @@ def test_layer_metadata_round_trip():
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
 
 
+@pytest.mark.parametrize(
+    "layouts, error",
+    [
+        ({"L0": (-1, 64)}, "escapes its block"),
+        ({"L0": (0, 0)}, "escapes its block"),
+        ({"L0": (200, 64)}, "escapes its block"),
+        ({"L1": (0, 64)}, "has no layout"),
+        ({"L0": (0, 32)}, "page sizes must match"),
+    ],
+)
+def test_packed_layer_alignment_rejects_invalid_page_layout(layouts, error):
+    worker = _layer_routing_worker([["L0"]], {"L0": 0})
+    worker.block_len_per_layer = [64]
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.packed_member_layouts = layouts
+    with pytest.raises(AssertionError, match=error):
+        _align(worker, metadata)
+
+
+def test_layer_alignment_preserves_nonpacked_regions_alongside_packed_layers():
+    worker = _layer_routing_worker([["a"], ["b"]], {"a": 0, "b": 1})
+    worker.block_len_per_layer = [64, 128]
+    metadata = _agent_metadata(
+        [["a", "other"], ["b"]], [0x1000, 0x2000], [192, 128], [256, 128]
+    )
+    metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
+
+    _align(worker, metadata)
+
+    assert metadata.kv_caches_base_addr == [0x1040, 0x2000]
+    assert metadata.block_lens == [64, 128]
+    assert metadata.block_strides == [256, 128]
+
+
 def test_layer_identity_gate_preserves_the_non_hma_path():
     assert _layer_routing_worker([["a"]], {"a": 0})._transfer_layer_region_indices == (
         0,
@@ -1849,6 +1896,7 @@ def test_layer_identity_gate_preserves_the_non_hma_path():
 
     # A base worker (pull) never routes by layer name.
     pull = object.__new__(NixlBaseConnectorWorker)
+    pull.pp_size = 2
     pull._transfer_layer_names = ()
     pull._transfer_layer_region_indices = ()
     pull._transfer_layer_group_ids = ()
@@ -1878,7 +1926,7 @@ def test_layer_alignment_fails_loud_when_remote_omits_layers():
     # KV, so an unannounced peer must fail the handshake instead.
     worker = _layer_routing_worker([["a"]], {"a": 0})
     with pytest.raises(AssertionError, match="no region_members"):
-        worker._align_remote_regions_by_layer(_agent_metadata([], [0xA000], [128]))
+        _align(worker, _agent_metadata([], [0xA000], [128]))
 
 
 def test_layer_alignment_expands_pooled_regions():
@@ -1894,7 +1942,7 @@ def test_layer_alignment_expands_pooled_regions():
     metadata.region_group_ids = [-1, 0]
     metadata.region_names = ["a", "b"]
     metadata.region_mem_types = ["VRAM", "VRAM"]
-    worker._align_remote_regions_by_layer(metadata)
+    _align(worker, metadata)
 
     assert metadata.kv_caches_base_addr == [0xA000, 0xA000, 0xB000]
     assert metadata.block_lens == [128, 128, 128]
@@ -1919,7 +1967,7 @@ def test_layer_alignment_filters_and_reorders_a_pp_stage():
     metadata.region_names = ["l2", "l0", "l3", "l1"]
     metadata.region_mem_types = ["VRAM"] * 4
 
-    worker._align_remote_regions_by_layer(metadata)
+    _align(worker, metadata)
 
     assert worker._transfer_layer_region_indices == (0, 1)
     assert worker._transfer_layer_group_ids == (0, 1)
@@ -1961,7 +2009,7 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     )
     consumer.num_blocks = 4
     consumer.region_num_blocks = remote_num_blocks
-    worker._align_remote_regions_by_layer(consumer)
+    _align(worker, consumer)
 
     # L3 -> remote region 1, L4 -> 2, L5 -> 2. Pairing by index would have sent
     # L5 to region 1 and L4 to region 2's sibling.
@@ -2003,8 +2051,8 @@ def test_layer_alignment_is_canonical_across_remote_orderings():
     rank0 = _agent_metadata([["x"], ["y"]], [0x1000, 0x2000], [64, 128], [256, 512])
     rank1 = _agent_metadata([["y"], ["x"]], [0x2000, 0x1000], [128, 64], [512, 256])
 
-    _layer_routing_worker(local, groups)._align_remote_regions_by_layer(rank0)
-    _layer_routing_worker(local, groups)._align_remote_regions_by_layer(rank1)
+    _align(_layer_routing_worker(local, groups), rank0)
+    _align(_layer_routing_worker(local, groups), rank1)
 
     assert rank0.kv_caches_base_addr == rank1.kv_caches_base_addr == [0x1000, 0x2000]
     assert rank0.block_lens == rank1.block_lens == [64, 128]
@@ -2021,9 +2069,9 @@ def test_layer_alignment_is_idempotent():
     metadata.region_names = ["a", "b"]
     metadata.region_mem_types = ["VRAM", "VRAM"]
 
-    worker._align_remote_regions_by_layer(metadata)
+    _align(worker, metadata)
     aligned = msgspec.msgpack.encode(metadata)
-    worker._align_remote_regions_by_layer(metadata)
+    _align(worker, metadata)
 
     assert msgspec.msgpack.encode(metadata) == aligned
 
@@ -2033,7 +2081,7 @@ def test_layer_alignment_rejects_missing_local_layer():
     metadata = _agent_metadata([["l0"]], [0xA000], [128])
 
     with pytest.raises(AssertionError, match="missing locally owned layers"):
-        worker._align_remote_regions_by_layer(metadata)
+        _align(worker, metadata)
 
 
 def test_layer_alignment_rejects_duplicate_remote_layer():
@@ -2041,7 +2089,7 @@ def test_layer_alignment_rejects_duplicate_remote_layer():
     metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
 
     with pytest.raises(AssertionError, match="in multiple regions"):
-        worker._align_remote_regions_by_layer(metadata)
+        _align(worker, metadata)
 
 
 def test_layer_alignment_rejects_inconsistent_remote_metadata():
@@ -2049,7 +2097,7 @@ def test_layer_alignment_rejects_inconsistent_remote_metadata():
     metadata = _agent_metadata([["a"], ["b"]], [0xA000], [128])
 
     with pytest.raises(AssertionError, match="lengths disagree"):
-        worker._align_remote_regions_by_layer(metadata)
+        _align(worker, metadata)
 
 
 @pytest.mark.parametrize(
@@ -2063,7 +2111,18 @@ def test_layer_alignment_rejects_inconsistent_region_geometry(field):
     original = msgspec.msgpack.encode(metadata)
 
     with pytest.raises(AssertionError, match="lengths disagree"):
-        worker._align_remote_regions_by_layer(metadata)
+        _align(worker, metadata)
+    assert msgspec.msgpack.encode(metadata) == original
+
+
+def test_remote_region_selection_rejects_short_region_list():
+    # The PP layer-window slice uses the same selection as layer routing.
+    metadata = _agent_metadata([], [0xA000, 0xB000], [128, 128])
+    metadata.region_names = ["a"]
+    original = msgspec.msgpack.encode(metadata)
+
+    with pytest.raises(AssertionError, match="lengths disagree"):
+        select_remote_regions(metadata, range(1, 2))
     assert msgspec.msgpack.encode(metadata) == original
 
 

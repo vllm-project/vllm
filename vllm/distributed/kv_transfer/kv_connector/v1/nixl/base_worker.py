@@ -59,7 +59,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    align_remote_regions_by_layer,
     get_representative_spec_type,
+    select_remote_regions,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -165,8 +167,8 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Layer-name routing is supported only by NixlPushConnector for HMA KV
-    # caches under PP.
+    # Layer-name routing is supported only by NixlPushConnector for HMA or
+    # packed KV caches under PP.
     _supports_pp_hma = False
 
     def _compute_desc_ids(
@@ -432,81 +434,21 @@ class NixlBaseConnectorWorker:
             group_by_layer[name] for name in layer_names
         )
 
-    def _requires_layer_name_routing(self) -> bool:
-        """Whether PP push must match HMA layers by name, not region index."""
+    def _tracks_region_layers(self) -> bool:
+        """Whether regions advertise their member layer names.
+
+        Push workers do so for HMA and packed layouts, so a PP producer can
+        match layers by name instead of by region index.
+        """
         return (
             self._supports_pp_hma
-            and self.pp_size > 1
-            and self._is_hma_required
+            and (self._is_hma_required or self._has_packed_cache)
             and not self._has_mamba
         )
 
-    def _align_remote_regions_by_layer(
-        self, nixl_agent_meta: NixlAgentMetadata
-    ) -> None:
-        """Select remote regions for this PP stage in local layer order."""
-        remote_region_layers = nixl_agent_meta.region_members
-        # Region-index routing here would silently transfer stale KV.
-        assert remote_region_layers, "Remote advertised no region_members"
-        assert (
-            len(nixl_agent_meta.kv_caches_base_addr)
-            == len(nixl_agent_meta.block_lens)
-            == len(nixl_agent_meta.block_strides)
-            == len(remote_region_layers)
-        ), "Remote region metadata lengths disagree"
-        assert all(
-            values is None or len(values) == len(remote_region_layers)
-            for values in (
-                nixl_agent_meta.region_num_blocks,
-                nixl_agent_meta.region_group_ids,
-                nixl_agent_meta.region_names,
-                nixl_agent_meta.region_mem_types,
-            )
-        ), "Remote region metadata lengths disagree"
-
-        remote_region_by_layer: dict[str, int] = {}
-        for region_idx, layer_names in enumerate(remote_region_layers):
-            for layer_name in layer_names:
-                assert layer_name not in remote_region_by_layer, (
-                    f"Remote advertised layer {layer_name!r} in multiple regions"
-                )
-                remote_region_by_layer[layer_name] = region_idx
-
-        missing = [
-            name
-            for name in self._transfer_layer_names
-            if name not in remote_region_by_layer
-        ]
-        assert not missing, f"Remote is missing locally owned layers: {missing}"
-
-        remote_regions = [
-            remote_region_by_layer[name] for name in self._transfer_layer_names
-        ]
-        nixl_agent_meta.kv_caches_base_addr = [
-            nixl_agent_meta.kv_caches_base_addr[i] for i in remote_regions
-        ]
-        nixl_agent_meta.block_lens = [
-            nixl_agent_meta.block_lens[i] for i in remote_regions
-        ]
-        nixl_agent_meta.block_strides = [
-            nixl_agent_meta.block_strides[i] for i in remote_regions
-        ]
-        if nixl_agent_meta.region_num_blocks is not None:
-            nixl_agent_meta.region_num_blocks = [
-                nixl_agent_meta.region_num_blocks[i] for i in remote_regions
-            ]
-        if nixl_agent_meta.region_group_ids is not None:
-            nixl_agent_meta.region_group_ids = [
-                nixl_agent_meta.region_group_ids[i] for i in remote_regions
-            ]
-        if nixl_agent_meta.region_mem_types is not None:
-            nixl_agent_meta.region_mem_types = [
-                nixl_agent_meta.region_mem_types[i] for i in remote_regions
-            ]
-        if nixl_agent_meta.region_names is not None:
-            nixl_agent_meta.region_names = list(self._transfer_layer_names)
-        # One layer per region keeps a second alignment pass a no-op.
-        nixl_agent_meta.region_members = [[name] for name in self._transfer_layer_names]
+    def _requires_layer_name_routing(self) -> bool:
+        """Whether PP push must match HMA/packed layers by name, not region index."""
+        return self.pp_size > 1 and self._tracks_region_layers()
 
     def __init__(
         self,
@@ -897,7 +839,10 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
-        # Region layer membership is populated for HMA layouts.
+        # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
+        # block row of a shared allocation.
+        self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
+        # Region layer membership is populated for HMA and packed layouts.
         self.region_members = []
         # Local layer order, set by ``_set_region_layers`` only when
         # routing by layer name. Empty means region-index routing.
@@ -1349,6 +1294,8 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        use_layer_name_routing = self._requires_layer_name_routing()
+        route_packed_layers = self._has_packed_cache and use_layer_name_routing
         self.transfer_topo = TransferTopology(
             tp_rank=self.transfer_tp_rank,
             tp_size=self.transfer_tp_size,
@@ -1366,9 +1313,15 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
+        backend_name = self.backend_name
+        if self._supports_pp_hma and self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            backend_name = ",".join(
+                sorted(backend.get_name() for backend in self.attn_backends)
+            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            self.backend_name,
+            backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -1410,6 +1363,11 @@ class NixlBaseConnectorWorker:
         # CSA-linear needs separate logical regions for attention and state
         # aliases even though every view shares one block-major allocation.
         packed_storage = packed_storage and not self._is_csa_linear
+        if route_packed_layers and any(
+            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for spec in self._layer_specs.values()
+        ):
+            raise NotImplementedError("PP push with packed KV caches requires MLA")
 
         layer_specs: dict[str, KVCacheSpec] = {}
         compressed_region_owners: dict[int, torch.Tensor] = {}
@@ -1436,10 +1394,9 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
-        track_region_layers = (
-            self._supports_pp_hma and self._is_hma_required and not self._has_mamba
-        )
+        track_region_layers = self._tracks_region_layers()
         region_layers: list[list[str]] = []
+        packed_member_layouts: dict[str, tuple[int, int]] = {}
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1584,11 +1541,34 @@ class NixlBaseConnectorWorker:
                 virtual_transfer_pages = _uses_dense_virtual_transfer_pages(
                     layer_spec, cache, physical_page_size, num_blocks
                 )
+                # Push workers address the pages of packed MLA rows by layer.
+                packed_mla_push = (
+                    track_region_layers
+                    and self._has_packed_cache
+                    and packed_storage
+                    and storage_is_block_major
+                    and is_mla_region
+                )
                 if virtual_transfer_pages:
                     # A compressed kernel row can contain multiple NIXL transfer pages.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
+                elif packed_mla_push and use_layer_name_routing:
+                    # PP>1 prefill stage: register only this layer's page of each row.
+                    region_specs = [
+                        (cache.data_ptr(), physical_page_size, block_stride)
+                    ]
+                elif packed_mla_push:
+                    # PP=1 decode or prefill: register whole rows, and advertise where
+                    # this layer's page sits so a PP>1 prefill can write into it.
+                    storage_block_len = registration_len // num_blocks
+                    region_specs = [
+                        (registration_base, storage_block_len, storage_block_len)
+                    ]
+                    offset = cache.data_ptr() - storage_addr
+                    assert offset >= 0 and offset + physical_page_size <= block_stride
+                    packed_member_layouts[layer_name] = (offset, physical_page_size)
                 elif storage_is_block_major and (
                     not page_contiguous
                     and ((packed_storage and is_mla_region) or not self._is_csa_linear)
@@ -1630,7 +1610,9 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
+                # A packed PP producer keeps one region per layer, so aliases at
+                # one address (a layer and its SWA view) stay distinct.
+                if base_addr in seen_base_addresses and not route_packed_layers:
                     region_index = seen_base_addresses.index(base_addr)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
@@ -1714,7 +1696,7 @@ class NixlBaseConnectorWorker:
 
         self._set_region_layers(region_layers)
 
-        if self.pp_size > 1 and not self._is_hma_required:
+        if self.pp_size > 1 and not use_layer_name_routing:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
                 self.vllm_config.parallel_config
             )
@@ -1804,6 +1786,7 @@ class NixlBaseConnectorWorker:
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
+            packed_member_layouts=packed_member_layouts,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -2198,7 +2181,12 @@ class NixlBaseConnectorWorker:
                     "Attention-HMA push does not support decode TP greater than "
                     "prefill TP yet"
                 )
-            self._align_remote_regions_by_layer(nixl_agent_meta)
+            align_remote_regions_by_layer(
+                nixl_agent_meta,
+                self._transfer_layer_names,
+                self._transfer_layer_region_indices,
+                self.block_len_per_layer,
+            )
         elif (
             self.pp_size > 1
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
@@ -2209,25 +2197,7 @@ class NixlBaseConnectorWorker:
             start = self._remote_region_offset
             end = start + num_local_regions
             assert len(nixl_agent_meta.kv_caches_base_addr) >= end
-            nixl_agent_meta.kv_caches_base_addr = nixl_agent_meta.kv_caches_base_addr[
-                start:end
-            ]
-            nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
-            nixl_agent_meta.block_strides = nixl_agent_meta.block_strides[start:end]
-            if nixl_agent_meta.region_num_blocks is not None:
-                nixl_agent_meta.region_num_blocks = nixl_agent_meta.region_num_blocks[
-                    start:end
-                ]
-            if nixl_agent_meta.region_group_ids is not None:
-                nixl_agent_meta.region_group_ids = nixl_agent_meta.region_group_ids[
-                    start:end
-                ]
-            if nixl_agent_meta.region_names is not None:
-                nixl_agent_meta.region_names = nixl_agent_meta.region_names[start:end]
-            if nixl_agent_meta.region_mem_types is not None:
-                nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
-                    start:end
-                ]
+            select_remote_regions(nixl_agent_meta, range(start, end))
 
         ### Register remote engine in TransferTopology (idempotent).
         physical_blocks_per_logical = (
