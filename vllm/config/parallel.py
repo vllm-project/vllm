@@ -262,8 +262,9 @@ class ParallelConfig:
     ) = None
     """
     Backend to use for distributed model workers, either "ray" or "mp"
-    (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
-    is less than or equal to the number of GPUs available, "mp" will be used to
+    (multiprocessing). If the product of pipeline_parallel_size,
+    tensor_parallel_size, and prefill_context_parallel_size is less than
+    or equal to the number of GPUs available, "mp" will be used to
     keep processing on a single host. Otherwise, an error will be raised. To use "mp"
     you must also set nnodes, and to use "ray" you must manually set
     distributed_executor_backend to "ray".
@@ -342,7 +343,8 @@ class ParallelConfig:
     default timeout is used (1800s for gloo)."""
 
     world_size: int = Field(init=False)
-    """world_size is TPxPP, it affects the number of workers we create."""
+    """world_size is TP x PCP x PP (and includes DP for external_launcher);
+    it affects the number of workers we create."""
 
     rank: int = 0
     """Global rank in distributed setup."""
