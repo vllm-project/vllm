@@ -25,6 +25,9 @@ replicaCount: 1
 # -- Deployment strategy configuration
 deploymentStrategy: {}
 
+# -- Seconds before a Deployment rollout is marked failed. Default 2100 is the 30-minute startup budget plus 5 minutes. Increase this when startupProbe.periodSeconds or startupProbe.failureThreshold is increased. A higher deadline also delays ProgressDeadlineExceeded when startup is stuck.
+progressDeadlineSeconds: 2100
+
 # -- Resource configuration
 resources:
   requests:
@@ -162,6 +165,19 @@ livenessProbe:
   failureThreshold: 3
   # -- How often (in seconds) to perform the liveness probe
   periodSeconds: 10
+  # -- Configuration of the Kubelet http request on the server
+  httpGet:
+    # -- Path to access on the HTTP server
+    path: /health
+    # -- Name or number of the port to access on the container, on which the server is listening
+    port: 8000
+
+# -- Startup probe configuration. The default budget is periodSeconds * failureThreshold = 1800 seconds (30 minutes), so a slow model load is not restarted. A longer allowance also delays recovery when startup is genuinely stuck. Set to null to omit the probe. When replacing httpGet with exec or tcpSocket, set httpGet to null so Helm's map merge does not keep both handlers.
+startupProbe:
+  # -- How often (in seconds) to perform the startup probe
+  periodSeconds: 10
+  # -- Number of failures in a row before Kubernetes treats startup as failed
+  failureThreshold: 180
   # -- Configuration of the Kubelet http request on the server
   httpGet:
     # -- Path to access on the HTTP server
