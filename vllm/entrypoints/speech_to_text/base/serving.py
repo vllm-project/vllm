@@ -370,8 +370,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         """
         BASE_OFFSET = 0.02
         init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
-        if tokens[-1] == self.tokenizer.eos_token_id:
+        if tokens and tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
+        if not tokens:
+            return []
 
         tokens_with_start = (init_token,) + tokens
         segments: list[SpeechToTextSegment] = []
