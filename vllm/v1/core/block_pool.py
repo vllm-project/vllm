@@ -707,6 +707,41 @@ class BlockPool:
             if watcher is not None:
                 watcher(block)
 
+    def cache_prefetched_blocks(
+        self,
+        blocks: Sequence[KVCacheBlock],
+        block_hashes: Sequence[BlockHash],
+        group_id: int,
+        num_tokens: int,
+        on_reuse: Callable[[KVCacheBlock], None],
+    ) -> None:
+        """Publish blocks filled outside any request into the prefix cache.
+
+        Used by a request-free prefetch: the blocks were reserved with
+        `get_new_blocks` and filled by a connector transfer, so unlike
+        `cache_full_blocks` there is no request whose tokens produced them and
+        no partial tail to consider - the hashes are supplied by the caller
+        that resolved them. The blocks are released to `unpin_blocks`
+        afterwards, which makes them readable but last-resort eviction
+        candidates: an unused prefetch is evicted before anything a request
+        still references.
+        """
+        assert len(blocks) == len(block_hashes)
+        if not self.enable_caching:
+            # Without prefix caching nothing could look these blocks up again.
+            self.free_blocks(blocks)
+            return
+        for block, block_hash in zip(blocks, block_hashes):
+            assert block.ref_cnt == 1, (
+                "a prefetched block must still be held by its reservation"
+            )
+            self._insert_block_hash(
+                make_block_hash_with_group_id(block_hash, group_id),
+                block,
+                num_tokens=num_tokens,
+            )
+        self.unpin_blocks(blocks, on_reuse)
+
     def unpin_blocks(
         self,
         blocks: Iterable[KVCacheBlock],

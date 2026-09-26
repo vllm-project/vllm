@@ -36,6 +36,9 @@ class _ConnectorMetricName:
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_lookup_async_delay_seconds"
     ALLOCATION_FAILURE = "vllm:kv_offload_allocation_failure"
+    PREFETCH_ACCEPTED = "vllm:kv_offload_prefetch_accepted"
+    PREFETCH_DEFERRED = "vllm:kv_offload_prefetch_deferred"
+    PREFETCH_BLOCKS_PUBLISHED = "vllm:kv_offload_prefetch_blocks_published"
 
 
 class _TransferType:
@@ -124,6 +127,24 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
             documentation=(
                 "Number of KV offload store allocation attempts that failed."
+            ),
+        ),
+        _ConnectorMetricName.PREFETCH_ACCEPTED: OffloadingCounterMetadata(
+            documentation=(
+                "Number of request-free KV prefetches that reserved "
+                "destination blocks and submitted a load."
+            ),
+        ),
+        _ConnectorMetricName.PREFETCH_DEFERRED: OffloadingCounterMetadata(
+            documentation=(
+                "Number of request-free KV prefetches refused because the "
+                "free GPU blocks behind the reserve were insufficient."
+            ),
+        ),
+        _ConnectorMetricName.PREFETCH_BLOCKS_PUBLISHED: OffloadingCounterMetadata(
+            documentation=(
+                "Number of GPU blocks published into the prefix cache by a "
+                "completed request-free KV prefetch."
             ),
         ),
     }
