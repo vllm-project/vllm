@@ -1795,6 +1795,7 @@ NON_CAUSAL_BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
     AttentionBackendEnum.FLEX_ATTENTION,
     "FLEX_ATTENTION_SLOW",
+    AttentionBackendEnum.TRITON_ATTN,
 ]
 
 if current_platform.is_rocm():
