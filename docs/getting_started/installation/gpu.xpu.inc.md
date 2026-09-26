@@ -32,6 +32,22 @@ To install the wheel built from the latest main branch:
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match
 ```
 
+Note that after upgrading to PyTorch 2.14, xpu graph support requires specific oneAPI packages.
+
+```bash
+uv pip install \
+       "intel-cmplr-lib-rt==2026.1.1" \
+       "intel-cmplr-lib-ur==2026.1.1" \
+       "intel-cmplr-lic-rt==2026.1.1" \
+       "intel-sycl-rt==2026.1.1" \
+       "oneccl-devel==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
+       "oneccl==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
+       "dpcpp-cpp-rt==2026.1.1" \
+       "intel-opencl-rt==2026.1.1" \
+       "intel-openmp==2026.1.1" \
+       "intel-pti==1.1.0"
+```
+
 #### Install specific revisions
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
