@@ -427,6 +427,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        _whisper_inner: bool = False,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -455,6 +456,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 at the same index.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
             mm_processor_kwargs: Overrides for `processor.__call__`.
+            _whisper_inner: Internal. Skip Whisper temperature fallback so
+                generate_with_fallback can call generate() without recursing.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -471,6 +474,42 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
+
+        if (
+            not _whisper_inner
+            and not isinstance(sampling_params, (list, tuple))
+        ):
+            from vllm.whisper_generation import (
+                generate_whisper_with_fallback,
+                is_whisper_llm,
+            )
+
+            if is_whisper_llm(self):
+                prompts_list = (
+                    prompts if isinstance(prompts, (list, tuple)) else [prompts]
+                )
+
+                def _generate_once(
+                    p, sampling_params=None, use_tqdm=False
+                ):
+                    return self.generate(
+                        p,
+                        sampling_params=sampling_params,
+                        use_tqdm=use_tqdm,
+                        lora_request=lora_request,
+                        priority=priority,
+                        tokenization_kwargs=tokenization_kwargs,
+                        mm_processor_kwargs=mm_processor_kwargs,
+                        _whisper_inner=True,
+                    )
+
+                return generate_whisper_with_fallback(
+                    self,
+                    prompts_list,
+                    sampling_params,
+                    generate_once=_generate_once,
+                    use_tqdm=use_tqdm,
+                )
 
         return self._run_completion(
             prompts=prompts,
