@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -518,6 +519,7 @@ def split_batch_to_prefill_and_decode(
     )
 
 
+@eager_break_during_capture
 def mamba_mixer(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
