@@ -1568,26 +1568,24 @@ def _get_kv_cache_groups_uniform_page_size(
     # largest. Ties prefer fewer groups.
     bucket_sizes = [len(layers) for layers in layer_buckets]
     min_group_layers = vllm_config.cache_config.min_kv_cache_group_layers
-    # Worst-case memory a padding layer holds per request, in bytes.
+    # Worst-case memory a padding layer holds per request. With a KV connector,
+    # peers (e.g. P/D) may use different TP sizes, which change page bytes but
+    # not the pages each layer needs at its own pre-unification page size, so
+    # count those pages instead of bytes.
+    tp_invariant = vllm_config.kv_transfer_config is not None
+    cost_specs = (
+        (unscaled_kv_cache_spec or kv_cache_spec) if tp_invariant else kv_cache_spec
+    )
     padding_cost = [
-        max(spec.max_memory_usage_bytes(vllm_config) for spec in specs)
-        for specs in spec_buckets
-    ]
-    if vllm_config.kv_transfer_config is not None:
-        # KV transfer peers (e.g. P/D) may use different TP sizes, which change
-        # page bytes but not the number of pages each layer needs before page
-        # sizes are unified; cost padding in those pages instead.
-        page_spec = unscaled_kv_cache_spec or kv_cache_spec
-        padding_cost = [
-            max(
-                cdiv(
-                    page_spec[name].max_memory_usage_bytes(vllm_config),
-                    page_spec[name].page_size_bytes,
-                )
-                for name in names
+        max(
+            cdiv(
+                cost_specs[name].max_memory_usage_bytes(vllm_config),
+                cost_specs[name].page_size_bytes if tp_invariant else 1,
             )
-            for names in layer_buckets
-        ]
+            for name in names
+        )
+        for names in layer_buckets
+    ]
     group_size = min(
         range(
             min(min_group_layers, max(bucket_sizes)),
