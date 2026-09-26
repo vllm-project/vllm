@@ -5,12 +5,14 @@ set -ex
 #   --workspace <dir>    workspace directory (default: ./ep_kernels_workspace)
 #   --mode <mode>        "install" (default) or "wheel"
 #   --deepep-ref <commit> DeepEP commit hash
+#   --moonep-ref <commit> MoonEP commit hash
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 # Pinned in full: an abbreviated hash is not a ref, so a consumer that
 # fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
+MOONEP_COMMIT_HASH=${MOONEP_COMMIT_HASH:-"7745ffa00532d9086b49bab84a65b17f687ede14"}
 
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
@@ -42,6 +44,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             DEEPEP_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        --moonep-ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --moonep-ref requires an argument." >&2
+                exit 1
+            fi
+            MOONEP_COMMIT_HASH="$2"
             shift 2
             ;;
         --nvshmem-ver)
@@ -199,8 +209,9 @@ do_build() {
 #endif' csrc/kernels/backend/symmetric.hpp
     fi
 
-    if [[ "$name" == "DeepEP" ]]; then
-        # DeepEP links against the CUDA driver API in driverless build images.
+    if [[ "$name" == "DeepEP" || "$name" == "MoonEP" ]]; then
+        # DeepEP and MoonEP link against the CUDA driver API in driverless
+        # build images.
         local cuda_driver_stub
         local cuda_driver_stub_dir
         cuda_driver_stub=$(
@@ -231,6 +242,14 @@ do_build \
     "setup.py" \
     "$DEEPEP_COMMIT_HASH" \
     "export NVSHMEM_DIR=$WORKSPACE/nvshmem; "
+
+# build MoonEP (NVLink symmetric-memory EP; no NVSHMEM dependency)
+do_build \
+    "https://github.com/MoonshotAI/MoonEP" \
+    "MoonEP" \
+    "setup.py" \
+    "$MOONEP_COMMIT_HASH" \
+    ""
 
 if [ "$MODE" = "wheel" ]; then
     echo "All wheels written to $WHEEL_DIR"
