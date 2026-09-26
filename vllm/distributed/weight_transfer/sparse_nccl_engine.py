@@ -331,11 +331,12 @@ class SparseNCCLTrainerWeightTransferEngine(
                     future.result()
                 stream = torch.cuda.current_stream()
                 for patch in patches:
+                    # PyNccl reads from data_ptr() without honoring strides.
                     self.model_update_group.broadcast(
-                        patch.indices, src=0, stream=stream
+                        patch.indices.contiguous(), src=0, stream=stream
                     )
                     self.model_update_group.broadcast(
-                        patch.values, src=0, stream=stream
+                        patch.values.contiguous(), src=0, stream=stream
                     )
                 future.result()  # surface inference-side errors
             finally:
