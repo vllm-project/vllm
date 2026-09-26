@@ -137,8 +137,13 @@ def _kda_recoverssm_verify_kernel(
         + offs_v[:, None] * stride_state_v
         + offs_k[None, :] * stride_state_k
     )
-    state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
+    state = tl.load(
+        state_ptrs, mask=mask_state, other=0.0, eviction_policy="evict_first"
+    ).to(tl.float32)
     A = tl.exp(tl.load(A_log_ptr + pid_h).to(tl.float32))
+    dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
+        tl.float32
+    )
 
     for token_offset in tl.static_range(SPEC_QUERY_LEN):
         token_valid = token_offset < query_len
@@ -157,6 +162,7 @@ def _kda_recoverssm_verify_kernel(
             v_ptr + token * stride_v_token + pid_h * V + offs_v,
             mask=token_valid & mask_v,
             other=0.0,
+            eviction_policy="evict_first",
         ).to(tl.float32)
         raw_g = tl.load(
             raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
@@ -170,9 +176,6 @@ def _kda_recoverssm_verify_kernel(
         ).to(tl.float32)
 
         q *= tl.rsqrt(tl.sum(q * q) + 1e-6) * (K**-0.5)
-        dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
-            tl.float32
-        )
         updated_state, correction = _kda_recurrent_step(
             state,
             k,
@@ -191,6 +194,7 @@ def _kda_recoverssm_verify_kernel(
             out_ptr + token * stride_out_token + pid_h * V + offs_v,
             out,
             mask=token_valid & mask_v,
+            eviction_policy="evict_first",
         )
 
         correction_ptr = (
@@ -494,7 +498,7 @@ def _commit_kda_state_kernel(
         + offs_v[:, None] * stride_state_v
         + offs_k[None, :] * stride_state_k
     )
-    initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
+    state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
     A = tl.exp(
         tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(
             tl.float32
@@ -509,13 +513,9 @@ def _commit_kda_state_kernel(
         mask=mask_k,
         other=0.0,
     ).to(tl.float32)
-    final_decay = tl.full([BK], 1.0, tl.float32)
-    final_correction = tl.zeros([BV, BK], tl.float32)
-    boundary_decay = tl.full([BK], 1.0, tl.float32)
-    boundary_correction = tl.zeros([BV, BK], tl.float32)
-
-    for reverse_offset in range(commit_len):
-        token_offset = commit_len - reverse_offset - 1
+    # Replay cached rank-one updates in FP32. Save a boundary only when reached,
+    # rather than retaining separate full-matrix correction accumulators.
+    for token_offset in range(commit_len):
         correction_ptr = (
             correction_cache_ptr + token_offset * stride_correction_cache_pos
         )
@@ -545,32 +545,19 @@ def _commit_kda_state_kernel(
         )
         update = correction[:, None] * normalized_k[None, :]
         decay = tl.exp(gate)
-        final_correction += update * final_decay[None, :]
-        final_decay *= decay
-        if ALIGN_MODE:
-            before_boundary = token_offset < boundary_recovery_len
-            boundary_correction += tl.where(
-                before_boundary,
-                update * boundary_decay[None, :],
-                0.0,
-            )
-            boundary_decay *= tl.where(before_boundary, decay, 1.0)
-
-    state = initial_state * final_decay[None, :] + final_correction
-    if ALIGN_MODE:
-        boundary_ptrs = (
-            state_ptr
-            + boundary_state_idx * state_block_stride
-            + pid_h * stride_state_head
-            + offs_v[:, None] * stride_state_v
-            + offs_k[None, :] * stride_state_k
-        )
-        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
-        tl.store(
-            boundary_ptrs,
-            boundary_state,
-            mask=mask_state & (boundary_state_idx > null_block_id),
-        )
+        state = state * decay[None, :] + update
+        if ALIGN_MODE:  # noqa: SIM102 -- keep the non-align branch compile-time dead
+            if (boundary_state_idx > null_block_id) & (
+                token_offset + 1 == boundary_recovery_len
+            ):
+                boundary_ptrs = (
+                    state_ptr
+                    + boundary_state_idx * state_block_stride
+                    + pid_h * stride_state_head
+                    + offs_v[:, None] * stride_state_v
+                    + offs_k[None, :] * stride_state_k
+                )
+                tl.store(boundary_ptrs, state, mask=mask_state)
 
     final_ptrs = (
         state_ptr
@@ -678,7 +665,10 @@ def kda_recoverssm_verify(
         return out
 
     block_k = triton.next_power_of_2(key_dim)
-    block_v = min(triton.next_power_of_2(value_dim), 32)
+    block_v = min(
+        triton.next_power_of_2(value_dim),
+        (4 if batch <= 8 else 8) if key_dim == 128 else 32,
+    )
     grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
@@ -722,7 +712,7 @@ def kda_recoverssm_verify(
         BV=block_v,
         SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
+        num_warps=1 if key_dim == 128 else 4,
         num_stages=2,
     )
     return out
@@ -1012,7 +1002,7 @@ class KDARecoverSSMCommitContext:
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), 32)
+        block_v = min(triton.next_power_of_2(value_dim), 8 if key_dim == 128 else 32)
         grid = (
             triton.cdiv(value_dim, block_v),
             batch,
@@ -1059,7 +1049,7 @@ class KDARecoverSSMCommitContext:
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            num_warps=1 if key_dim == 128 else 4,
             num_stages=2,
         )
 
