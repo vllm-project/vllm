@@ -76,12 +76,14 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
         resets attention_config.backend to None for draft models, causing
         sliding layers to fall back to FLASH_ATTN which cannot handle
         KV-shared cache. Override to carry the target's backend through.
+
+        model_config stays the target's: get_model() receives the draft
+        model_config explicitly and Gemma4MTPModel reads its config from
+        speculative_config.draft_model_config. Swapping the dense draft in
+        here re-runs verify_with_parallel_config on a draft/target pair,
+        which rejects the expert-less draft under --enable-expert-parallel.
         """
-        draft_model_config = self.speculative_config.draft_model_config
-        draft_vllm_config = replace(
-            self.vllm_config,
-            model_config=draft_model_config,
-        )
+        draft_vllm_config = self.vllm_config
         target_backend = self.vllm_config.attention_config.backend
         if target_backend is not None:
             draft_vllm_config = replace(
