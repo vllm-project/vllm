@@ -191,6 +191,24 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         )
 
 
+def _fused_q_kv_rmsnorm_torch(
+    qr: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pure-torch fallback replicating the kernel math: fp32
+    ``x * rsqrt(mean(x^2) + eps) * w`` per row, stored in the input dtype."""
+
+    def _norm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        xf = x.float()
+        rrms = torch.rsqrt(xf.pow(2).sum(-1, keepdim=True) / x.shape[-1] + eps)
+        return (xf * rrms * w.float()).to(x.dtype)
+
+    return _norm(qr, q_weight), _norm(kv, kv_weight)
+
+
 def fused_q_kv_rmsnorm(
     qr: torch.Tensor,
     kv: torch.Tensor,
@@ -204,6 +222,11 @@ def fused_q_kv_rmsnorm(
     )
     assert qr.stride(-1) == 1 and kv.stride(-1) == 1
     assert q_weight.is_contiguous() and kv_weight.is_contiguous()
+
+    if current_platform.is_cpu():
+        # No Triton on the reference CPU path; the torch formulation is
+        # numerically identical to the kernel.
+        return _fused_q_kv_rmsnorm_torch(qr, kv, q_weight, kv_weight, eps)
 
     qr_out = torch.empty(qr.shape, dtype=qr.dtype, device=qr.device)
     kv_out = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)

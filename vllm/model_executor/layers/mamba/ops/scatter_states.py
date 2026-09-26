@@ -103,3 +103,28 @@ def scatter_states(
         num_warps=8,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
+
+
+def _scatter_states_cpu(
+    state: torch.Tensor,
+    src: torch.Tensor,
+    indices: torch.Tensor,
+) -> None:
+    """CPU fallback with the same contract: in-place row scatter."""
+    state[indices.long()] = src
+
+
+def _scatter_states_cpu_register_warmup(**kwargs) -> None:
+    """No-op stand-in for the Triton dispatcher's warmup registration."""
+    return None
+
+
+if current_platform.is_cpu():
+    # The Triton dispatch spec asserts is_cuda; CPU callers get the plain
+    # torch path instead (same contract, unique slot indices per sequence).
+    # The dispatcher object also exposes ``register_warmup`` (layers warm
+    # kernels at init); keep that attribute alive on the override.
+    scatter_states = _scatter_states_cpu  # type: ignore[assignment]
+    scatter_states.register_warmup = (  # type: ignore[method-assign]
+        _scatter_states_cpu_register_warmup
+    )

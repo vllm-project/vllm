@@ -511,6 +511,22 @@ class CpuPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+            # Hybrid attention/mamba models defaulted their mamba cache for
+            # prefix caching (mode 'align', block-sized mamba blocks) before
+            # this point. 'align' also requires chunked prefill, which was
+            # just disabled. Fall back to the no-prefix-caching convention
+            # (mode 'none', one mamba block per request), mirroring
+            # MambaModelConfig's else-branch. Explicitly user-specified
+            # mamba block sizes are left alone so the config validator can
+            # surface the conflicting request.
+            cache_config = vllm_config.cache_config
+            if cache_config.mamba_cache_mode != "none":
+                cache_config.mamba_cache_mode = "none"
+            if (
+                cache_config.mamba_block_size is not None
+                and not cache_config.user_specified_mamba_block_size
+            ):
+                cache_config.mamba_block_size = model_config.max_model_len
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:

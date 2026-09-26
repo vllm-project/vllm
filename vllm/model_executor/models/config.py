@@ -40,6 +40,29 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class Glm5NextForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # v3.2+ GLM-5.3-Flash checkpoints set ``index_topk`` and run the
+        # kpool sparse indexer on top of MLA. The indexer and top-k selection
+        # need CUDA kernels with no CPU fallback yet, so on CPU those
+        # configs drop to the dense full-attention MLA path that pre-v3.2
+        # checkpoints use natively (``index_topk`` unset).
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cpu():
+            return
+        for hf_config in (model_config.hf_config, model_config.hf_text_config):
+            if getattr(hf_config, "index_topk", None) is not None:
+                logger.warning_once(
+                    "GLM-5.3-Flash sparse attention (index_topk=%s) has no "
+                    "CPU implementation; falling back to the dense MLA path. "
+                    "Set --hf-overrides index_topk=null to silence this.",
+                    hf_config.index_topk,
+                )
+                hf_config.index_topk = None
+
+
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1030,6 +1053,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "Glm5NextForCausalLM": Glm5NextForCausalLMConfig,
+    "Glm5NextForConditionalGeneration": Glm5NextForCausalLMConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
