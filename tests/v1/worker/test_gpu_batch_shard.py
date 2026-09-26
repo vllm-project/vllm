@@ -117,6 +117,7 @@ def _shard_all_ranks(batch: InputBatch, max_num_reqs: int, tp_size: int):
                 max_num_reqs=max_num_reqs,
                 max_num_logits_per_req=8,
                 device=torch.device(DEVICE),
+                adaptive_verification_enabled=False,
             )
         local_batch, sorted_logits_indices, _, metadata = sharder.shard_sampler_inputs(
             batch, None

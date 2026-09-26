@@ -425,6 +425,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     max_num_reqs=self.max_num_reqs,
                     max_num_logits_per_req=self.decode_query_len,
                     device=self.device,
+                    adaptive_verification_enabled=(
+                        self.speculative_config is not None
+                        and self.speculative_config.enable_adaptive_verification
+                    ),
                 )
                 logger.info("Batch-sharded sampling enabled.")
             else:
