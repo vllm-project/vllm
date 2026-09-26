@@ -128,6 +128,75 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     profiler.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_elastic_ep_commit_finishes_before_reraising_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        get_scaling_elastic_ep,
+        set_scaling_elastic_ep,
+    )
+
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm._elastic_ep_lock = asyncio.Lock()
+    llm.vllm_config = MagicMock()
+    llm.vllm_config.parallel_config.data_parallel_size = 4
+    llm.log_stats = False
+
+    commit_started = asyncio.Event()
+    allow_commit_to_finish = asyncio.Event()
+    commit_finished = False
+    commit_cancelled = False
+
+    async def commit_elastic_ep():
+        nonlocal commit_cancelled, commit_finished
+        commit_started.set()
+        try:
+            await allow_commit_to_finish.wait()
+        except asyncio.CancelledError:
+            commit_cancelled = True
+            raise
+        commit_finished = True
+
+    llm.engine_core = MagicMock()
+    llm.engine_core.prepare_elastic_ep = AsyncMock()
+    llm.engine_core.commit_elastic_ep = commit_elastic_ep
+    monkeypatch.setattr(async_llm_module.envs, "VLLM_ELASTIC_EP_DRAIN_REQUESTS", False)
+
+    set_scaling_elastic_ep(False)
+    scale_task = asyncio.create_task(llm.scale_elastic_ep(2))
+    try:
+        await asyncio.wait_for(commit_started.wait(), timeout=5)
+        scale_task.cancel()
+        await asyncio.sleep(0)
+
+        assert not commit_cancelled
+        assert not scale_task.done()
+        assert llm._elastic_ep_lock.locked()
+        assert get_scaling_elastic_ep()
+
+        scale_task.cancel()
+        await asyncio.sleep(0)
+
+        assert not commit_cancelled
+        assert not scale_task.done()
+
+        allow_commit_to_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await scale_task
+
+        assert commit_finished
+        assert llm.vllm_config.parallel_config.data_parallel_size == 2
+        assert not get_scaling_elastic_ep()
+        assert not llm._elastic_ep_lock.locked()
+    finally:
+        allow_commit_to_finish.set()
+        if not scale_task.done():
+            scale_task.cancel()
+        await asyncio.gather(scale_task, return_exceptions=True)
+        set_scaling_elastic_ep(False)
+
+
 async def generate(
     engine: AsyncLLM,
     request_id: str,

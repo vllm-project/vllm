@@ -1221,9 +1221,23 @@ class AsyncLLM(EngineClient):
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        set_scaling_elastic_ep(False)
+        async def finish_commit() -> None:
+            await self.engine_core.commit_elastic_ep()
+            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+            set_scaling_elastic_ep(False)
+
+        commit_task = asyncio.create_task(finish_commit())
+        cancellation_error: asyncio.CancelledError | None = None
+        while not commit_task.done():
+            try:
+                await asyncio.shield(commit_task)
+            except asyncio.CancelledError as exc:
+                if cancellation_error is None:
+                    cancellation_error = exc
+
+        commit_task.result()
+        if cancellation_error is not None:
+            raise cancellation_error
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
