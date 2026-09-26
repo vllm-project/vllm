@@ -1138,8 +1138,10 @@ def get_dcp_local_seq_lens(
 def _mamba_align_block_table_kernel(
     out_ptr,
     block_table_ptr,
-    block_table_stride,
+    block_table_stride_0,
+    block_table_stride_1,
     seq_lens_ptr,
+    seq_lens_stride,
     block_size,
     n_out,
     BLOCK: tl.constexpr,
@@ -1150,19 +1152,30 @@ def _mamba_align_block_table_kernel(
     that expanded to seven kernels over a ``(num_reqs,)`` tensor -- one element
     in a single-request decode -- so almost all of its cost was launch
     overhead rather than work.
+
+    Both block-table strides are passed explicitly. The expression this replaces
+    was ``torch.gather(block_table, 1, ...)``, which honours any layout, and
+    this is a shared utility -- ``gdn_attn``, ``mamba_attn``, ``short_conv_attn``
+    and ``linear_attn`` all call it -- so assuming a column stride of 1 would
+    silently read the wrong slots for a caller holding a non-contiguous view.
+    ``kimi_k3/nvidia/kda_metadata.py`` passes both strides for the same reason.
     """
     req_idx = tl.program_id(0)
-    seq_len = tl.load(seq_lens_ptr + req_idx)
+    seq_len = tl.load(seq_lens_ptr + req_idx * seq_lens_stride)
     # A zero-length request in a CUDA graph has an invalid block table; clamp
     # to 0 so it reads a valid row, exactly as the previous clamp_ did.
     start = tl.maximum((seq_len - 1) // block_size, 0)
     offs = tl.arange(0, BLOCK)
     mask = offs < n_out
     vals = tl.load(
-        block_table_ptr + req_idx * block_table_stride + start + offs,
+        block_table_ptr
+        + req_idx * block_table_stride_0
+        + (start + offs) * block_table_stride_1,
         mask=mask,
         other=0,
     )
+    # `out` is freshly allocated by the caller and therefore contiguous, so its
+    # row stride is exactly n_out.
     tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
 
 
@@ -1205,7 +1218,9 @@ def mamba_get_block_table_tensor(
             out,
             block_table,
             block_table.stride(0),
+            block_table.stride(1),
             seq_lens,
+            seq_lens.stride(0),
             kv_cache_spec.block_size,
             n_out,
             BLOCK=triton.next_power_of_2(n_out),
