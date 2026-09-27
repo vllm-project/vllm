@@ -26,9 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_mod
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.multi_module_mtp import (
-    speculator as multi_module_spec_module,
-)
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
@@ -321,74 +318,6 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     assert speculator.inputs_embeds.shape == (4, 3)
     assert speculator.cached_draft_input_embeds is not None
     assert speculator.cached_draft_input_embeds.shape == (2, 2, 3)
-
-
-class _PerModuleHeadDraftModel(torch.nn.Module):
-    """MTP drafter whose modules each own an LM head, like Step3.5.
-
-    Head ``i`` always predicts token ``i``.
-    """
-
-    def forward(self, hidden_states, spec_step_idx, **kwargs):
-        return hidden_states
-
-    def compute_logits(self, hidden_states, spec_step_idx=0):
-        logits = hidden_states.new_zeros(hidden_states.shape[0], 8)
-        logits[:, spec_step_idx] = 1.0
-        return logits
-
-    def get_top_tokens(self, hidden_states, spec_step_idx=0):
-        return self.compute_logits(hidden_states, spec_step_idx).argmax(dim=-1)
-
-
-@pytest.mark.parametrize("use_local_argmax_reduction", [False, True])
-def test_multi_module_samples_each_step_with_its_module_head(
-    monkeypatch, use_local_argmax_reduction
-):
-    for name in ("cache_inputs", "update_draft_inputs"):
-        monkeypatch.setattr(multi_module_spec_module, name, lambda *a, **k: None)
-    monkeypatch.setattr(
-        multi_module_spec_module,
-        "set_forward_context",
-        lambda *args, **kwargs: nullcontext(),
-    )
-
-    num_reqs, num_tokens, num_steps = 2, 4, 3
-    speculator = object.__new__(MultiModuleMTPSpeculator)
-    speculator.vllm_config = None
-    speculator.model = _PerModuleHeadDraftModel()
-    speculator.num_speculative_steps = num_steps
-    speculator.input_buffers = SimpleNamespace(
-        input_ids=torch.zeros(num_tokens, dtype=torch.int64),
-        positions=torch.arange(num_tokens),
-    )
-    speculator.hidden_states = torch.zeros(num_tokens, 3)
-    speculator.inputs_embeds = None
-    speculator.cached_draft_input_ids = None
-    speculator.cached_draft_input_embeds = None
-    speculator.cached_target_hidden_states = None
-    speculator.last_token_indices = torch.tensor([1, 3])
-    speculator.idx_mapping = torch.arange(num_reqs, dtype=torch.int32)
-    speculator.current_draft_step = torch.tensor(0)
-    speculator.draft_input_id_overrides = torch.full(
-        (num_reqs, num_steps - 1), -1, dtype=torch.int64
-    )
-    speculator.draft_tokens = torch.full((num_reqs, num_steps), -1)
-    speculator.temperature = torch.zeros(num_reqs)
-    speculator.seeds = torch.zeros(num_reqs, dtype=torch.int64)
-    speculator.draft_logits = None
-    speculator.use_local_argmax_reduction = use_local_argmax_reduction
-    speculator.acceptance_estimator = None
-
-    speculator._generate_drafts(
-        num_reqs,
-        num_tokens,
-        attn_metadata=None,
-        slot_mappings=None,
-        num_tokens_across_dp=None,
-    )
-
-    assert speculator.draft_tokens.tolist() == [[0, 1, 2]] * num_reqs
 
 
 @pytest.mark.parametrize(

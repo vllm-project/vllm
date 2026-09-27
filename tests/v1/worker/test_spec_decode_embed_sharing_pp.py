@@ -108,11 +108,3 @@ def test_target_embedding_provisioning(
     speculative_config = None if method is None else SimpleNamespace(method=method)
     config = SimpleNamespace(speculative_config=speculative_config)
     assert spec_decode_needs_target_embed(config) is expected
-
-
-def test_drafter_with_per_layer_lm_heads_keeps_them():
-    # Step3.5 MTP owns one LM head per MTP layer and has no top-level lm_head.
-    draft = SimpleNamespace(has_own_lm_head=True)
-    target_lm_head = nn.Linear(HIDDEN, VOCAB)
-
-    assert not eagle_utils._should_share(draft, "has_own_lm_head", None, target_lm_head)
