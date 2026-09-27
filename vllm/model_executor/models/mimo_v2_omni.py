@@ -689,9 +689,16 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
-        from vllm.multimodal.parse import MultiModalDataParser
+        # Without embedding_fields the EC producer publishes no metadata and
+        # the EPD proxy never rewrites the media item.
+        from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
 
-        return MultiModalDataParser(target_sr=24000.0)
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            target_sr=24000.0,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_mm_max_tokens_per_item(
         self,
