@@ -38,7 +38,9 @@ def _da8w4_prepack_enabled() -> bool:
 
 def _woq_prepack_enabled() -> bool:
     """``ZENTORCH_WOQ_PREPACK=0`` keeps the row-packed W4A16 weight."""
-    return os.environ.get("ZENTORCH_WOQ_PREPACK", "1") != "0"
+    if os.environ.get("ZENTORCH_WOQ_PREPACK", "1") == "0":
+        return False
+    return has_zentorch_op(["zentorch_weight_prepack_for_woq_linear"])
 
 
 def _import_unpack_from_int32():
@@ -269,9 +271,13 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
 
         if needs_unsigned_offset:
             weight_unpacked = (weight_unpacked.to(torch.int32) + 8).clamp(0, 15)
-        repacked = repack_op(
-            weight_unpacked.to(torch.int8).contiguous(), blocked_format=prepacked
-        )
+        # Repack is mandatory: it reorders the nibbles into the order zentorch
+        # reads. Blocking is a separate, optional step on top of that result.
+        repacked = repack_op(weight_unpacked.to(torch.int8).contiguous())
+        if prepacked:
+            repacked = torch.ops.zentorch.zentorch_weight_prepack_for_woq_linear(
+                repacked
+            )
 
         if zp_param is None:
             zp_tc = None
