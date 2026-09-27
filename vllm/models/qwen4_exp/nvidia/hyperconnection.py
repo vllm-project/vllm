@@ -35,6 +35,7 @@ from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
 )
+from .ops.cute_dsl.hc_down_silu import hc_down_silu, is_fused_eligible
 from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -105,6 +106,11 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
+            # Static half of the fused down+SiLU dispatch; the op itself
+            # gates on the runtime token count.
+            self._use_hc_down_silu = is_fused_eligible(
+                self.input_mix_weight_down_block_inject.weight
+            )
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,
@@ -125,6 +131,31 @@ class GatedResidual(nn.Module):
             return_bias=False,
         )
 
+    def _down_and_inject(
+        self, xn: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Down projection + SiLU; also returns injection logits if combined."""
+        if not self.use_combine:
+            # TODO: extend hc_down_silu to the final-mixer (320, 10240) shape.
+            return hc_silu(self.input_mix_weight_down(xn), self.hc_count), None
+
+        if self._use_hc_down_silu:
+            # The op applies the SiLU epilogue itself (fused kernel at small
+            # M, F.linear + hc_silu otherwise).
+            down_and_injection = hc_down_silu(
+                xn,
+                self.input_mix_weight_down_block_inject.weight,
+                self.lora_rank,
+                self.hc_count,
+            )
+        else:
+            down_and_injection = self.input_mix_weight_down_block_inject(xn)
+        split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
+        lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+        if not self._use_hc_down_silu:
+            lora = hc_silu(lora, self.hc_count)
+        return lora, injection
+
     def mix(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -135,16 +166,8 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        if self.use_combine:
-            # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
-            down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        else:
-            lora = self.input_mix_weight_down(xn)
-            injection = None
-
-        lora = hc_silu(lora, self.hc_count)
+        # produce injection logits for combine
+        lora, injection = self._down_and_inject(xn)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
@@ -172,16 +195,8 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        if self.use_combine:
-            # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
-            down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        else:
-            lora = self.input_mix_weight_down(xn)
-            injection = None
-
-        lora = hc_silu(lora, self.hc_count)
+        # produce injection logits for combine
+        lora, injection = self._down_and_inject(xn)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
