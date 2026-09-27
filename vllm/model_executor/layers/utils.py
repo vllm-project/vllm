@@ -377,6 +377,13 @@ def rocm_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # dispatch_unquantized_gemm() picks this backend for any ROCm build,
+    # regardless of the tensor's actual device; the custom op below is only
+    # registered for the CUDA/HIP dispatch key, so route CPU tensors (e.g.
+    # from unit tests that build layers without moving them to the GPU)
+    # through the device-agnostic fallback instead of hard-crashing.
+    if not x.is_cuda:
+        return default_unquantized_gemm(layer, x, weight, bias)
     return torch.ops.vllm.rocm_unquantized_gemm(x, weight, bias)
 
 
