@@ -141,6 +141,88 @@ def dequant_gather_slots(
     )
 
 
+def _pack_workspace_indices(
+    num_tokens: int,
+    max_topk: int,
+    max_swa: int,
+    topk_lens: torch.Tensor | None,
+    swa_lens: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build packed sparse-attention indices without device-to-host reads.
+
+    The final column is a scratch sentinel for invalid scatter destinations.
+    It is discarded before returning, so padded or inactive graph rows cannot
+    issue an out-of-bounds scatter or overwrite a valid packed index.
+    """
+    k_total = max_topk + max_swa
+    block_n = 16
+    packed_width = ((k_total + block_n - 1) // block_n) * block_n
+    scratch = torch.full(
+        (num_tokens, packed_width + 1),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=device,
+    )
+    token_offsets = (
+        torch.arange(num_tokens, device=device, dtype=torch.int32) * k_total
+    )
+
+    if topk_lens is None:
+        swa_range = torch.arange(max_swa, device=device, dtype=torch.int32).unsqueeze(
+            0
+        )
+        row_valid = (swa_lens >= 0) & (swa_lens <= max_swa)
+        swa_valid = row_valid.unsqueeze(1) & (swa_range < swa_lens.unsqueeze(1))
+        swa_workspace_indices = token_offsets.unsqueeze(1) + swa_range
+        scratch[:, :max_swa] = torch.where(
+            swa_valid,
+            swa_workspace_indices,
+            torch.full_like(swa_workspace_indices, -1),
+        )
+        return scratch[:, :packed_width]
+
+    topk_range = torch.arange(max_topk, device=device, dtype=torch.int32).unsqueeze(
+        0
+    )
+    row_valid = (
+        (topk_lens >= 0)
+        & (topk_lens <= max_topk)
+        & (swa_lens >= 0)
+        & (swa_lens <= max_swa)
+        & (topk_lens + swa_lens <= packed_width)
+    )
+    topk_valid = row_valid.unsqueeze(1) & (
+        topk_range < topk_lens.unsqueeze(1)
+    )
+    topk_workspace_indices = token_offsets.unsqueeze(1) + topk_range
+    scratch[:, :max_topk] = torch.where(
+        topk_valid,
+        topk_workspace_indices,
+        torch.full_like(topk_workspace_indices, -1),
+    )
+
+    swa_range = torch.arange(max_swa, device=device, dtype=torch.int32).unsqueeze(0)
+    swa_valid = row_valid.unsqueeze(1) & (swa_range < swa_lens.unsqueeze(1))
+    swa_positions = topk_lens.to(torch.int32).unsqueeze(1) + swa_range
+    destination_valid = (
+        swa_valid & (swa_positions >= 0) & (swa_positions < packed_width)
+    )
+    sentinel = torch.full_like(swa_positions, packed_width)
+    safe_positions = torch.where(destination_valid, swa_positions, sentinel)
+    swa_workspace_indices = token_offsets.unsqueeze(1) + max_topk + swa_range
+    scratch.scatter_(
+        1,
+        safe_positions.to(torch.int64),
+        torch.where(
+            destination_valid,
+            swa_workspace_indices,
+            torch.full_like(swa_workspace_indices, -1),
+        ),
+    )
+    return scratch[:, :packed_width]
+
+
 def xpu_sparse_decode_fp8(
     q: torch.Tensor,  # [num_tokens, num_heads, head_dim]
     kv_cache: torch.Tensor | None,  # [num_blocks, block_size, head_bytes] uint8
@@ -207,76 +289,21 @@ def xpu_sparse_decode_fp8(
 
     ws_3d[:, max_topk:, :] = swa_buf.view(num_tokens, max_swa, OUTPUT_DIM)
 
-    # Build combined indices into the flat workspace and combined lengths.
+    # Build combined indices into the flat workspace.
     # Workspace layout per token t: [topk_0..topk_{max_topk-1}, swa_0..swa_{max_swa-1}]
     # Flat index for token t, position p = t * K_total + p
     #
-    # IMPORTANT: The attention kernel uses combined_lens as a position cutoff —
-    # it only reads indices[0..combined_lens-1]. So indices must be PACKED
-    # contiguously: [valid_topk_indices..., valid_swa_indices..., -1 padding...]
-    if not swa_only and topk_lens is not None:
-        combined_lens = (topk_lens + swa_lens).to(torch.int32)
-    else:
-        combined_lens = swa_lens.to(torch.int32)
-
-    max_combined = int(combined_lens.max().item()) if combined_lens.numel() > 0 else 0
-    # Round up to BLOCK_N=16 alignment for kernel efficiency
-    _BLOCK_N = 16
-    max_combined_padded = ((max_combined + _BLOCK_N - 1) // _BLOCK_N) * _BLOCK_N
-
-    # Build packed index table: [num_tokens, max_combined_padded]
-    # Each token t: [topk_0..topk_{tlen-1}, swa_0..swa_{slen-1}, -1 padding]
-    # Vectorized: for each token, topk indices are t*K_total + 0..tlen-1,
-    #             swa indices are t*K_total + max_topk + 0..slen-1
-    combined_indices = torch.full(
-        (num_tokens, max_combined_padded),
-        fill_value=-1,
-        dtype=torch.int32,
+    # The attention kernel stops at -1, so valid entries must be packed as
+    # [top-k..., SWA..., -1 padding...]. Use the static workspace widths to
+    # keep graph capture free of Tensor.item() synchronizations.
+    combined_indices = _pack_workspace_indices(
+        num_tokens=num_tokens,
+        max_topk=max_topk,
+        max_swa=max_swa,
+        topk_lens=topk_lens if not swa_only else None,
+        swa_lens=swa_lens,
         device=device,
     )
-
-    token_offsets = (
-        torch.arange(num_tokens, device=device, dtype=torch.int32) * K_total
-    )  # [B]
-
-    if not swa_only and topk_lens is not None:
-        # Pack topk: for each token, write t*K_total + 0..tlen-1 at positions 0..tlen-1
-        max_tlen = int(topk_lens.max().item())
-        topk_range = torch.arange(max_tlen, device=device, dtype=torch.int32).unsqueeze(
-            0
-        )
-        topk_valid = topk_range < topk_lens.unsqueeze(1)
-        topk_ws_indices = token_offsets.unsqueeze(1) + topk_range
-        combined_indices[:, :max_tlen] = torch.where(
-            topk_valid,
-            topk_ws_indices,
-            torch.tensor(-1, dtype=torch.int32, device=device),
-        )
-        # Pack swa after topk: positions tlen..tlen+slen-1
-        # Since tlen varies per token, we need per-token offset
-        swa_range = torch.arange(max_swa, device=device, dtype=torch.int32).unsqueeze(0)
-        swa_valid = swa_range < swa_lens.unsqueeze(1)
-        swa_ws_indices = token_offsets.unsqueeze(1) + max_topk + swa_range
-        # Write at position topk_lens[t] + swa_pos for each token
-        for t_idx in range(num_tokens):
-            tlen = int(topk_lens[t_idx].item())
-            slen = int(swa_lens[t_idx].item())
-            combined_indices[t_idx, tlen : tlen + slen] = swa_ws_indices[t_idx, :slen]
-    else:
-        # SWA-only: pack swa indices at positions 0..slen-1
-        # Use min(max_swa, max_combined_padded) because combined_indices only
-        # has max_combined_padded columns, and all valid entries fit within it.
-        effective_swa = min(max_swa, max_combined_padded)
-        swa_range = torch.arange(
-            effective_swa, device=device, dtype=torch.int32
-        ).unsqueeze(0)
-        swa_valid = swa_range < swa_lens.unsqueeze(1)
-        swa_ws_indices = token_offsets.unsqueeze(1) + swa_range  # max_topk=0
-        combined_indices[:, :effective_swa] = torch.where(
-            swa_valid,
-            swa_ws_indices,
-            torch.tensor(-1, dtype=torch.int32, device=device),
-        )
 
     # Call BF16 sparse MLA kernel
     out_attn, _, _ = triton_bf16_mla_sparse_interface(
