@@ -29,6 +29,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -529,6 +530,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
+        if self.compressor is None and self.indexer is None:
+            # Dense layers have nothing to overlap; keep the base serial path.
+            self.aux_stream_list = None
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -600,7 +604,192 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if self.indexer is not None and self.compressor is None:
+            # Serial: qr must sit on the default stream before the q-side
+            # fork below can consume it (ROCm).
+            aux_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super()._run_parallel_input_projections(hidden_states)
+            finally:
+                self.aux_stream_list = aux_streams
         return super()._run_parallel_input_projections(hidden_states)
+
+    def _enable_multi_stream_overlap(self) -> bool:
+        """ROCm multi-stream gates: streams and capture region.
+
+        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
+        the attention inputs on the owning stream. Forking side streams
+        there would rely on runtime HIP event sync, which is unreliable in
+        this overlap on ROCm (event waits can hang), so multi-stream only
+        runs where the fork/join becomes static graph edges: inside capture,
+        or with non-dict metadata (full cudagraph or the profile run), which
+        has no eager breaks.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        return self.aux_stream_list is not None and (
+            torch.cuda.is_current_stream_capturing()
+            or not isinstance(attn_metadata, dict)
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if (
+            self.indexer is None
+            or self._prepare_and_attn_fn == self._prepare_and_attn_eager
+            or not self._enable_multi_stream_overlap()
+        ):
+            # Sequential fallback: no forks outside the capture region, where
+            # HIP event sync is unreliable; MRV1 keeps the input prep in its
+            # wide eager region (#51430).
+            aux_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super().forward(positions, hidden_states, llama_4_scaling)
+            finally:
+                self.aux_stream_list = aux_streams
+
+        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        if self.compressor is not None:
+            q, kv, index_q, index_q_scale, index_weights = self._forward_csa2_full(
+                hidden_states, positions
+            )
+        else:
+            q, kv, index_q, index_q_scale, index_weights = self._forward_csa2_reindex(
+                hidden_states, positions
+            )
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            index_weights,
+            q,
+            kv,
+            positions,
+            attn_out,
+        )
+        return self._o_proj(attn_out, positions)
+
+    def _forward_csa2_full(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """CSA layers: one fork replaces the base pipeline's three.
+
+        Each fork/join is a HIP event pair per side stream on ROCm, so the
+        base three-fork pipeline is expensive there; the compressor chain and
+        the indexer weights projection run fully in parallel with the default
+        chain. The indexer K write and q-side stay serial after the join:
+        ``wk`` consumes the aux-0 latent and the q-side's wq_b consumes the
+        default-stream qr.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        compressor = self.compressor
+        indexer = self.indexer
+        assert compressor is not None and indexer is not None
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None and len(aux_streams) >= 2
+
+        def default_chain():
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            return (
+                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata),
+                qr,
+                qr_scale,
+                kv,
+            )
+
+        def compressor_chain():
+            kv_score = torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            latent = compressor(kv_score, positions)
+            compressor.insert_cache(latent, positions, self.rotary_emb)
+            return latent
+
+        def indexer_weights_chain():
+            # ReplicatedLinear returns (output, bias); bias is None.
+            weights, _ = indexer.weights_proj(hidden_states)
+            return weights
+
+        (q, qr, qr_scale, kv), (latent, indexer_weights) = execute_in_parallel(
+            default_chain,
+            [compressor_chain, indexer_weights_chain],
+            self.ln_events[0],
+            self.ln_events[1:3],
+            aux_streams[:2],
+            enable=True,
+            default_first=True,
+        )
+
+        indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+        index_q, index_q_scale, index_weights_out = indexer.forward_q(
+            qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+        )
+        return q, kv, index_q, index_q_scale, index_weights_out
+
+    def _forward_csa2_reindex(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Indexer-only layers: the q-side overlaps the SWA q path.
+
+        The input projections run serial first: the q-side consumes qr, so
+        it can only overlap the SWA q projection and KV insert.
+        """
+        indexer = self.indexer
+        assert indexer is not None
+        attn_metadata = get_forward_context().attn_metadata
+        # Serial on these layers via the _run_parallel_input_projections
+        # override: qr must sit on the default stream before the fork.
+        qr_kv, _, indexer_weights = self._run_parallel_input_projections(hidden_states)
+        assert indexer_weights is not None
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+
+        def swa_q_chain():
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+        def indexer_q_chain():
+            return indexer.forward_q(
+                qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+            )
+
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None
+        q, aux_results = execute_in_parallel(
+            swa_q_chain,
+            [indexer_q_chain],
+            self.ln_events[0],
+            self.ln_events[1:2],
+            aux_streams[:1],
+            enable=True,
+            default_first=True,
+        )
+        index_q, index_q_scale, index_weights_out = aux_results[0]
+        return q, kv, index_q, index_q_scale, index_weights_out
 
     @functools.cached_property
     def _wq_b_uses_aiter_block_scaled(self) -> bool:
