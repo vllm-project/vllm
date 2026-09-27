@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Regression tests for Qwen2.5-Omni and Qwen3-Omni audio-in-video processor
+"""Regression tests for Qwen2.5-Omni and Qwen3-Omni audio-in-video processor
 caching.
 
 Tests the use_audio_in_video feature where audio is extracted from video and
@@ -50,8 +49,7 @@ def create_mm_data(num_videos: int) -> dict[str, list]:
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize("num_videos", [1, 2])
 def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> None:
-    """
-    Regression test for https://github.com/vllm-project/vllm/pull/36800
+    """Regression test for https://github.com/vllm-project/vllm/pull/36800.
 
     MultiModalProcessorSenderCache.get_and_update_item returns (None, updates)
     on a cache hit, so mm_kwargs["video"] items become None on the second call.
@@ -65,36 +63,32 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
         mm_processor_cache_gb=1,
     )
 
-    # Baseline: no cache, always processes from scratch.
-    baseline_processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config, cache=None
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
     # Sender cache: on a cache hit returns (None, prompt_updates) for each
     # item, setting mm_kwargs["video"] = [None] – the exact condition that
     # triggered the original bug.
     sender_cache = MultiModalProcessorSenderCache(ctx.model_config)
-    cached_processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config, cache=sender_cache
-    )
 
-    video_token_id = baseline_processor.info.get_hf_config().video_token_id
+    video_token_id = processor.info.get_hf_config().video_token_id
 
     mm_data = create_mm_data(num_videos)
     hf_processor_mm_kwargs = {"use_audio_in_video": True}
 
-    def run(processor):
+    def run(processor, cache):
         return processor(
             [video_token_id] * num_videos,
-            mm_items=baseline_processor.info.parse_mm_data(mm_data),
+            mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            cache=cache,
         )["prompt_token_ids"]
 
-    baseline_ids = run(baseline_processor)
+    baseline_ids = run(processor, cache=None)
 
     # First call on the sender-cache processor: cache miss.
     # mm_kwargs["video"] items are real tensors; use_audio_in_video is
     # detected normally from the item data.
-    first_ids = run(cached_processor)
+    first_ids = run(processor, cache=sender_cache)
     assert first_ids == baseline_ids, (
         "Cache-miss call produced different prompt_token_ids than baseline.\n"
         f"  baseline  : {baseline_ids}\n"
@@ -105,7 +99,7 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
     # MultiModalProcessorSenderCache.get_and_update_item returns (None, …),
     # so mm_kwargs["video"] = [None].  Before the fix, use_audio_in_video was
     # not detected, yielding wrong token ids.
-    second_ids = run(cached_processor)
+    second_ids = run(processor, cache=sender_cache)
     assert second_ids == baseline_ids, (
         "Cache-hit call produced different prompt_token_ids than baseline.\n"
         "This is the regression introduced when use_audio_in_video detection\n"
@@ -117,8 +111,7 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
 
 @pytest.mark.parametrize("model_id", MODELS)
 def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
-    """
-    A video with no audio track, combined with `use_audio_in_video=True`,
+    """A video with no audio track, combined with `use_audio_in_video=True`,
     must raise a clear `ValueError` naming the mismatch, rather than an
     opaque `StopIteration`-derived error from the underlying HF processor.
     """
@@ -126,7 +119,7 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
         model_id,
         limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     video_token_id = processor.info.get_hf_config().video_token_id
 
     rng = np.random.RandomState(0)

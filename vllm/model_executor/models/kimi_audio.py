@@ -13,7 +13,7 @@ from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -47,6 +47,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    HFMultiModalInputs,
     ProcessorInputs,
 )
 from vllm.sequence import IntermediateTensors
@@ -179,7 +180,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
@@ -227,27 +228,17 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
     """vLLM multi-modal processor wrapper for Kimi-Audio."""
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Call the HuggingFace processor."""
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         # Convert audio format: [(array, sr), ...] -> [array, ...]
         # KimiAudioProcessor expects raw numpy arrays
-        if audios:
+        mm_data = hf_inputs.hf_data
+        if audios := mm_data.pop("audio", []):
             audio_arrays = []
             for aud in audios:
                 if isinstance(aud, (tuple, list)) and len(aud) == 2:
@@ -259,14 +250,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
                     audio_arrays.append(aud)
             mm_data["audio"] = audio_arrays
 
-        # Use the context's call_hf_processor for proper handling
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,

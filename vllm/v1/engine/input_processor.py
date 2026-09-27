@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import partial
 from typing import Any, Literal
 
 import vllm.envs as envs
@@ -51,6 +52,11 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        # Load the custom logits processor classes once; the returned callable
+        # runs their validate_params hooks per request at admission.
+        self.validate_logits_processors_params = (
+            self._build_logits_processors_params_validator()
+        )
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -81,6 +87,25 @@ class InputProcessor:
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
 
+    def _build_logits_processors_params_validator(
+        self,
+    ) -> Callable[[SamplingParams], None]:
+        """Load the custom logits processor classes and return the per-request
+        params validator for the active model runner."""
+        custom_logitsprocs = self.model_config.logits_processors
+        if self.vllm_config.use_v2_model_runner:
+            from vllm.v1.worker.gpu.sample.logits_processor import (
+                build_custom_logits_processors_params_validator,
+            )
+
+            return build_custom_logits_processors_params_validator(custom_logitsprocs)
+
+        from vllm.v1.sample.logits_processor import (
+            validate_logits_processors_parameters,
+        )
+
+        return partial(validate_logits_processors_parameters, custom_logitsprocs)
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -100,6 +125,8 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+
+            self.validate_logits_processors_params(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
@@ -206,8 +233,7 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """
-        When enable_tower_connector_lora is True, multi-modal embeddings
+        """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
         generated based on the LoRA request to prevent incorrect cache hits.
         """
@@ -354,12 +380,21 @@ class InputProcessor:
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
+            prompt_len = length_from_prompt_token_ids_or_embeds(
+                prompt_token_ids, prompt_embeds
+            )
+            if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
+                raise VLLMValidationError(
+                    f"routed_experts_prompt_start must be between 0 and "
+                    f"the prompt length ({prompt_len}), inclusive.",
+                    parameter="routed_experts_prompt_start",
+                    value=sampling_params.routed_experts_prompt_start,
+                )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len - prompt_len
                 )
-                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
@@ -368,12 +403,7 @@ class InputProcessor:
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
             if sampling_params.trace_decode_token_ids:
-                self._normalize_trace_replay_params(
-                    sampling_params,
-                    length_from_prompt_token_ids_or_embeds(
-                        prompt_token_ids, prompt_embeds
-                    ),
-                )
+                self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
             pooling_params = params.clone()
 

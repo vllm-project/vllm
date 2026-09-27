@@ -55,7 +55,7 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
                 owned_by: "vllm".to_string(),
                 root: Some(state.model.clone()),
                 parent: None,
-                max_model_len: Some(state.text.max_model_len()),
+                max_model_len: state.max_model_len,
             })
             .collect(),
     })
@@ -105,6 +105,7 @@ fn lower_render_request(
         kv_transfer_params: None,
         ec_transfer_params: None,
         content_parts: None,
+        return_token_ids: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;

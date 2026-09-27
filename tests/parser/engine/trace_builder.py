@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
     DeepSeekV32Parser,
+    DeepSeekV41Parser,
     Gemma4Parser,
     Glm47MoeParser,
     InklingParser,
@@ -658,7 +659,7 @@ _DSV4_VOCAB: dict[str, int] = {
 }
 
 
-def _dsv4_param_text(key: str, value: Any) -> str:
+def _dsv4_param_text(key: str, value: Any, dsml: str = _DSML) -> str:
     is_string = isinstance(value, str)
     if is_string:
         val_str = value
@@ -670,36 +671,39 @@ def _dsv4_param_text(key: str, value: Any) -> str:
         val_str = json.dumps(value, ensure_ascii=False)
     string_attr = "true" if is_string else "false"
     return (
-        f'<{_DSML}parameter name="{key}" string="{string_attr}">'
-        f"{val_str}</{_DSML}parameter>\n"
+        f'<{dsml}parameter name="{key}" string="{string_attr}">'
+        f"{val_str}</{dsml}parameter>\n"
     )
 
 
-def _dsv4_tool_text(tc: ToolCallSpec) -> str:
-    parts = [f'<{_DSML}invoke name="{tc.name}">\n']
+def _dsv4_tool_text(tc: ToolCallSpec, dsml: str = _DSML) -> str:
+    parts = [f'<{dsml}invoke name="{tc.name}">\n']
     for key, value in tc.arguments.items():
-        parts.append(_dsv4_param_text(key, value))
-    parts.append(f"</{_DSML}invoke>\n")
+        parts.append(_dsv4_param_text(key, value, dsml))
+    parts.append(f"</{dsml}invoke>\n")
     return "".join(parts)
 
 
 def _dsml_tool_segs(
     scenario: Scenario,
     tag: str,
+    dsml: str = _DSML,
 ) -> list[tuple[str, bool]]:
     if not scenario.tool_calls:
         return []
     parts = ["\n"]
     for tc in scenario.tool_calls:
-        parts.append(_dsv4_tool_text(tc))
+        parts.append(_dsv4_tool_text(tc, dsml))
     return [
-        (f"<{_DSML}{tag}>", True),
+        (f"<{dsml}{tag}>", True),
         ("".join(parts), False),
-        (f"</{_DSML}{tag}>", True),
+        (f"</{dsml}{tag}>", True),
     ]
 
 
-def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]:
+def _dsv4_segments(
+    scenario: Scenario, thinking: bool, *, v41: bool = False
+) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
 
     if thinking:
@@ -716,13 +720,31 @@ def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]
     if scenario.content is not None:
         segs.append((scenario.content, False))
 
-    segs.extend(_dsml_tool_segs(scenario, "tool_calls"))
+    segs.extend(
+        _dsml_tool_segs(scenario, "calls", f"{_DSML} ")
+        if v41
+        else _dsml_tool_segs(scenario, "tool_calls")
+    )
     return segs
 
 
-def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
+def _build_deepseek_v4(
+    scenario: Scenario, validate: bool = True, *, v41: bool = False
+) -> Sample:
     thinking = scenario.reasoning is not None
     chat_kwargs = {"thinking": thinking}
+    parser_cls = DeepSeekV41Parser if v41 else DeepSeekV4Parser
+    model = "deepseek_v41" if v41 else "deepseek_v4"
+    vocab = (
+        {
+            "<think>": 128821,
+            "</think>": 128822,
+            f"<{_DSML} calls>": 128823,
+            f"</{_DSML} calls>": 128824,
+        }
+        if v41
+        else _DSV4_VOCAB
+    )
 
     if thinking:
         expected_reasoning: str | None = scenario.reasoning or ""
@@ -730,10 +752,10 @@ def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
         expected_reasoning = None
 
     sample = _make_sample(
-        sample_id=f"deepseek_v4-{scenario.id}",
+        sample_id=f"{model}-{scenario.id}",
         description=scenario.description,
-        vocab=_DSV4_VOCAB,
-        segments=_dsv4_segments(scenario, thinking),
+        vocab=vocab,
+        segments=_dsv4_segments(scenario, thinking, v41=v41),
         expected_reasoning=expected_reasoning,
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
@@ -744,7 +766,7 @@ def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
         kwargs = {}
         if chat_kwargs:
             kwargs["chat_template_kwargs"] = chat_kwargs
-        _validate_sample(sample, DeepSeekV4Parser, **kwargs)
+        _validate_sample(sample, parser_cls, **kwargs)
     return sample
 
 
@@ -1025,6 +1047,7 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
 _BUILDERS: dict[str, Any] = {
     "deepseek_v32": _build_deepseek_v32,
     "deepseek_v4": _build_deepseek_v4,
+    "deepseek_v41": functools.partial(_build_deepseek_v4, v41=True),
     "gemma4": _build_gemma4,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,

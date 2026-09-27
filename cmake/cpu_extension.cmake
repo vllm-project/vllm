@@ -488,6 +488,7 @@ set(VLLM_EXT_SRC
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
+    "csrc/cpu/cpu_isa.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
@@ -522,6 +523,12 @@ if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
         ${VLLM_EXT_SRC})
 endif()
 
+if (POWER10_FOUND OR POWER11_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_fused_moe_int8.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if(USE_ONEDNN)
     set(VLLM_EXT_SRC
         "csrc/cpu/dnnl_kernels.cpp"
@@ -540,15 +547,24 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
-        "csrc/cpu/sgl-kernels/mla_cache.cpp")
+        "csrc/cpu/sgl-kernels/mla_cache.cpp"
+        "csrc/cpu/sgl-kernels/mhc.cpp"
+        "csrc/cpu/sgl-kernels/store_cache.cpp"
+        "csrc/cpu/sgl-kernels/flash_mla.cpp"
+        "csrc/cpu/sgl-kernels/compressor.cpp"
+        "csrc/cpu/sgl-kernels/paged_mqa_logits.cpp"
+        "csrc/cpu/sgl-kernels/topk.cpp"
+        "csrc/cpu/sgl-kernels/indexer.cpp")
 
     set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/sgl-kernels/fla.cpp"
@@ -558,6 +574,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -574,6 +591,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"

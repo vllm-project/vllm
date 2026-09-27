@@ -14,6 +14,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
+    get_marlin_workspace,
     marlin_make_empty,
     marlin_make_workspace_new,
     marlin_moe_padded_intermediate,
@@ -225,7 +226,7 @@ def test_fp8_marlin_padded_round_trip(shape, use_bias):
         input=x,
         weight=layer.weight,
         weight_scale=layer.weight_scale,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
         bias=layer.bias if use_bias else None,
@@ -288,7 +289,7 @@ def test_nvfp4_marlin_padded_round_trip(shape):
         weight=layer.weight,
         weight_scale=layer.weight_scale,
         weight_global_scale=layer.weight_global_scale,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
     )
@@ -392,7 +393,7 @@ def test_fp8_block_marlin_padded_round_trip(shape):
         input=x,
         weight=layer.weight,
         weight_scale=layer.weight_scale_inv,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
         bias=None,
@@ -440,7 +441,7 @@ def test_mxfp8_marlin_padded_round_trip(shape):
         input=x,
         weight=layer.weight,
         weight_scale=layer.weight_scale,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
     )
@@ -756,7 +757,7 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(device),
     )
     with set_current_vllm_config(VllmConfig()):
         ref = torch_experts(
@@ -833,7 +834,7 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(device),
     )
     with set_current_vllm_config(VllmConfig()):
         ref = torch_experts(

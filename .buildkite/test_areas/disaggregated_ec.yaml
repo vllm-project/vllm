@@ -1,0 +1,16 @@
+group: Disaggregated EC
+depends_on:
+  - image-build
+steps:
+- label: ":nvidia: (L4) Scale-out EC Connector E2E"
+  key: scale-out-ec-e2e-2-gpus
+  timeout_in_minutes: 40
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/ec_transfer/
+    - vllm/entrypoints/scale_out/
+    - tests/entrypoints/scale_out/ec_integration/
+  commands:
+    - bash entrypoints/scale_out/ec_integration/run_scale_out_ec_e2e_test.sh

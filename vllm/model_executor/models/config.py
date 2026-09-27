@@ -330,7 +330,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
         if quant_config is not None and quant_config.get("quant_method") == "fp8":
             model_type = getattr(model_config.hf_config, "model_type", None)
-            if model_type == "deepseek_v4":
+            if model_type in ("deepseek_v4", "deepseek_v41"):
                 model_config.hf_config.quantization_config["quant_method"] = (
                     "deepseek_v4_fp8"
                 )
@@ -343,7 +343,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
             and hf_text_quant_config.get("quant_method") == "fp8"
         ):
             model_type = getattr(model_config.hf_text_config, "model_type", None)
-            if model_type == "deepseek_v4":
+            if model_type in ("deepseek_v4", "deepseek_v41"):
                 model_config.hf_text_config.quantization_config["quant_method"] = (
                     "deepseek_v4_fp8"
                 )
@@ -445,8 +445,7 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Perform early validation and setup for hybrid attention/mamba models.
+        """Perform early validation and setup for hybrid attention/mamba models.
 
         Block size alignment with mamba page sizes is handled later by
         Platform.update_block_size_for_backend(), which runs after model
@@ -454,6 +453,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         Args:
             vllm_config: vLLM Config
+
         """
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
@@ -609,12 +609,12 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Enable FULL_AND_PIECEWISE cuda graph mode by default (required
+        """Enable FULL_AND_PIECEWISE cuda graph mode by default (required
         to get good performance for mamba layers in V1).
 
         Args:
             vllm_config: vLLM Config
+
         """
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -1003,6 +1003,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
+    "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501

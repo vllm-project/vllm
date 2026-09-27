@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -34,8 +35,13 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.processing import PromptInsertion
+from vllm.renderers import renderer_from_config
+from vllm.utils.async_utils import make_async
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.llm_engine import LLMEngine
 
+from ..models.utils import build_model_context
 from ..utils import create_new_process_for_each_test
 
 pytestmark = pytest.mark.cpu_test
@@ -753,6 +759,74 @@ def test_processor_cache_shared_across_loras():
 
     receiver_cache.get_and_update_features([feature_lora_b])
     assert feature_lora_b.data == item_data
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize(
+    "release_error",
+    [
+        None,
+        "requires a completed pause first",
+        "requires all executor memory to be resident",
+    ],
+    ids=["released", "not-paused", "nonresident-memory"],
+)
+@pytest.mark.asyncio
+async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
+    """Release must not leave a sender hit pointing at a cleared receiver."""
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
+    )
+    model_config = ctx.model_config
+
+    sender = MultiModalProcessorSenderCache(model_config)
+    receiver = MultiModalReceiverCache(model_config)
+    item = _dummy_item({"pixel_values": 16})
+    mm_hash = "image_A"
+    payload, _ = sender.get_and_update_item((item, []), mm_hash)
+    assert receiver.get_and_update_item(payload, mm_hash) is item
+    assert sender.get_and_update_item(None, mm_hash)[0] is None
+
+    renderer = renderer_from_config(VllmConfig(model_config=model_config))
+    renderer._mm_processor_cache = sender
+
+    def release():
+        if release_error:
+            raise RuntimeError(release_error)
+        receiver.clear_cache()
+
+    engine = SimpleNamespace(
+        renderer=renderer,
+        engine_core=SimpleNamespace(
+            release_kv_cache_memory=release,
+            release_kv_cache_memory_async=make_async(
+                release,
+                executor=renderer._executor,
+            ),
+        ),
+        logger_manager=Mock(),
+    )
+
+    async def call_release():
+        if use_async:
+            await AsyncLLM.release_kv_cache_memory(engine)
+        else:
+            LLMEngine.release_kv_cache_memory(engine)
+
+    if release_error:
+        with pytest.raises(RuntimeError, match=release_error):
+            await call_release()
+        engine.logger_manager.record_sleep_state.assert_not_called()
+    else:
+        await call_release()
+        engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
+
+    payload, _ = sender.get_and_update_item((item, []), mm_hash)
+    assert payload is item
+    assert receiver.get_and_update_item(payload, mm_hash) is item
 
 
 _SLEEP_VISION_PROMPT = (

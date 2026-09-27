@@ -85,7 +85,11 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     EngineCoreSentinel,
     fault_tolerant_wrapper,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_kind,
+    is_full_attention_spec,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -168,6 +172,7 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
@@ -382,6 +387,21 @@ class EngineCore:
             )
         return scheduler_kv_cache_config
 
+    def _initialize_effective_attention_block_size(self) -> None:
+        cache_config = self.vllm_config.cache_config
+        cache_config.effective_attention_block_size = None
+        cache_manager = getattr(self.scheduler, "kv_cache_manager", None)
+        if cache_manager is None:
+            return
+        block_sizes = {
+            manager.block_size
+            for manager in cache_manager.coordinator.single_type_managers
+            if is_full_attention_spec(manager.kv_cache_spec)
+        }
+        cache_config.effective_attention_block_size = (
+            block_sizes.pop() if len(block_sizes) == 1 else None
+        )
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         supported_tasks = self.model_executor.supported_tasks
         self._log_pooler_config(supported_tasks)
@@ -441,6 +461,32 @@ class EngineCore:
             supported_pooling_tasks,
         )
 
+    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
+        """Return serializable KV cache metadata for external event consumers
+        (e.g., Dynamo). This function has no call sites within vLLM but needs to
+        be kept.
+        """
+        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
+        if kv_cache_config is None:
+            return []
+
+        kv_cache_manager = cast(Any, self.scheduler).kv_cache_manager
+        managers = kv_cache_manager.coordinator.single_type_managers
+        metadata: list[dict[str, int | str | None]] = []
+        for group_idx, (group, manager) in enumerate(
+            zip(kv_cache_config.kv_cache_groups, managers, strict=True)
+        ):
+            spec = group.kv_cache_spec
+            metadata.append(
+                {
+                    "group_idx": group_idx,
+                    "kind": get_kv_cache_spec_kind(spec).value,
+                    "block_size": manager.block_size,
+                    "sliding_window": getattr(spec, "sliding_window", None),
+                }
+            )
+        return metadata
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -489,7 +535,6 @@ class EngineCore:
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
-
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
@@ -592,7 +637,6 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -643,7 +687,6 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -824,10 +867,11 @@ class EngineCore:
         # reset_connector=True so external connectors clear alongside
         # local caches, matching the pause_generation(clear_cache=True)
         # contract. No-op when no connector is configured.
-        self.reset_prefix_cache(
+        if not self.reset_prefix_cache(
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
-        )
+        ):
+            raise RuntimeError("Failed to reset the KV connector cache.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
@@ -887,8 +931,8 @@ class EngineCore:
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
-        """
 
+        """
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
@@ -914,11 +958,15 @@ class EngineCore:
         pause_future.add_done_callback(pause_complete)
         return future
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep.
 
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+
+        Returns:
+            Whether all executor memory is resident again (fully awake).
+
         """
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
@@ -929,8 +977,30 @@ class EngineCore:
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        if not self.model_executor.is_sleeping:
+        fully_awake = not self.model_executor.is_sleeping
+        if fully_awake:
             self.resume_scheduler()
+        return fully_awake
+
+    def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical memory. Requires a completed pause
+        and all executor memory to be resident. Kept requests are recomputed
+        after wake-up.
+        """
+        if not (
+            self.is_scheduler_paused()
+            and not self.scheduler.has_requests()
+            and not self.batch_queue
+        ):
+            raise RuntimeError(
+                "release_kv_cache_memory() requires a completed pause first"
+            )
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "release_kv_cache_memory() requires all executor memory to be resident"
+            )
+        self._reset_caches()
+        self.model_executor.discard(("kv_cache",))
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1146,8 +1216,7 @@ class EngineCoreProc(EngineCore):
         vllm_config: VllmConfig,
         client_handshake_address: str | None,
     ) -> Generator[EngineZmqAddresses, None, None]:
-        """
-        Perform startup handshakes.
+        """Perform startup handshakes.
 
         For DP=1 or offline mode, this is with the colocated front-end process.
 
@@ -1282,7 +1351,6 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
-
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
@@ -1428,7 +1496,6 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
-
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1459,7 +1526,6 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
-
         # Step the engine core.
         outputs, model_executed = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
@@ -1533,7 +1599,6 @@ class EngineCoreProc(EngineCore):
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
         """Dispatch request from client."""
-
         if request_type == EngineCoreRequestType.WAKEUP:
             return
         elif request_type == EngineCoreRequestType.ADD:
@@ -1629,7 +1694,6 @@ class EngineCoreProc(EngineCore):
 
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
-
         # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
@@ -1649,6 +1713,9 @@ class EngineCoreProc(EngineCore):
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
             block_size=self.vllm_config.cache_config.block_size,
             mamba_block_size=self.vllm_config.cache_config.mamba_block_size,
+            effective_attention_block_size=(
+                self.vllm_config.cache_config.effective_attention_block_size
+            ),
             dp_stats_address=self.frontend_stats_publish_address,
             dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
             vllm_version=VLLM_VERSION,
@@ -1680,6 +1747,8 @@ class EngineCoreProc(EngineCore):
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
+                if self.vllm_config.weight_transfer_config is not None
+                else False
             ),
         )
 
@@ -1691,7 +1760,6 @@ class EngineCoreProc(EngineCore):
         ready_event: threading.Event,
     ):
         """Input socket IO thread."""
-
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
@@ -1790,7 +1858,6 @@ class EngineCoreProc(EngineCore):
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int
     ):
         """Output socket IO thread."""
-
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
         # Send buffers to reuse.
@@ -1935,8 +2002,12 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            engine._finish_pause(clear_cache)
-            future.set_result(None)
+            try:
+                engine._finish_pause(clear_cache)
+            except Exception as e:
+                future.set_exception(e)
+            else:
+                future.set_result(None)
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
@@ -2180,7 +2251,6 @@ class DPEngineCoreProc(EngineCoreProc):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
-
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
@@ -2345,8 +2415,7 @@ class DPEngineCoreProc(EngineCoreProc):
     def _eep_send_engine_core_notification(
         self, notification_type: EEPNotificationType
     ):
-        """
-        Send notifications to EngineCoreClient, which can then forward
+        """Send notifications to EngineCoreClient, which can then forward
         the notifications to other engine core processes. It is used for:
         1) In scale down: removing core engines to notify EngineCoreClient
            so EngineCoreClient can release their ray placement groups;
@@ -2396,9 +2465,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
 
 class EngineCoreActorMixin:
-    """
-    Ray actor for running EngineCore in a data parallel context
-    """
+    """Ray actor for running EngineCore in a data parallel context."""
 
     def __init__(
         self,
@@ -2452,13 +2519,10 @@ class EngineCoreActorMixin:
     def _set_visible_devices(self, vllm_config: VllmConfig, local_dp_rank: int):
         from vllm.platforms import current_platform
 
-        if current_platform.is_xpu():
-            pass
-        else:
-            device_control_env_var = current_platform.device_control_env_var
-            self._set_assigned_physical_gpu_ids(
-                vllm_config, local_dp_rank, device_control_env_var
-            )
+        device_control_env_var = current_platform.device_control_env_var
+        self._set_assigned_physical_gpu_ids(
+            vllm_config, local_dp_rank, device_control_env_var
+        )
 
     def _set_assigned_physical_gpu_ids(
         self,
@@ -2494,16 +2558,14 @@ class EngineCoreActorMixin:
         vllm_config: VllmConfig,
         client_handshake_address: str | None,
     ):
-        """
-        For Ray, we don't need to actually perform handshake.
+        """For Ray, we don't need to actually perform handshake.
         All addresses information is known before the actor creation.
         Therefore, we simply yield these addresses.
         """
         yield self.addresses
 
     def wait_for_init(self):
-        """
-        Wait until the engine core is initialized.
+        """Wait until the engine core is initialized.
 
         This is just an empty method. When ray.get() on this method
         (or any other method of the actor) returns, it is guaranteed
@@ -2512,9 +2574,7 @@ class EngineCoreActorMixin:
         pass
 
     def run(self):
-        """
-        Run the engine core busy loop.
-        """
+        """Run the engine core busy loop."""
         try:
             self.run_busy_loop()  # type: ignore[attr-defined]
         except SystemExit:

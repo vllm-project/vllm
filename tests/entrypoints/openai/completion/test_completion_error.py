@@ -303,7 +303,7 @@ def test_completion_metrics_carries_both_timing_and_spec_decode():
 
 @pytest.mark.asyncio
 async def test_completion_error_non_stream():
-    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -439,7 +439,7 @@ async def test_renderer_only_completion_request_skips_mm_cache():
 
 @pytest.mark.asyncio
 async def test_completion_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
@@ -14,27 +15,21 @@ logger = init_logger(__name__)
 
 
 def get_mm_max_toks_per_item(
-    model_config: ModelConfig,
-    mm_registry: MultiModalRegistry,
     processor: BaseMultiModalProcessor,
     mm_counts: Mapping[str, int],
+    cache: BaseMultiModalProcessorCache | None,
 ) -> Mapping[str, int]:
-    """
-    Get the maximum number of tokens per data item from each modality based
+    """Get the maximum number of tokens per data item from each modality based
     on underlying model configuration.
     """
     max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
-        seq_len=model_config.max_model_len,
+        seq_len=processor.info.ctx.model_config.max_model_len,
         mm_counts=mm_counts,
     )
     if max_tokens_per_item is not None:
         return max_tokens_per_item
 
-    mm_inputs = mm_registry.get_dummy_mm_inputs(
-        model_config,
-        mm_counts=mm_counts,
-        processor=processor,
-    )
+    mm_inputs = processor.get_dummy_mm_inputs(mm_counts, cache=cache)
 
     return {
         modality: sum(item.get_num_embeds() for item in placeholders)
@@ -66,7 +61,7 @@ class MultiModalBudget:
                 if enable_cache
                 else None
             )
-            processor = mm_registry.create_processor(model_config, cache=cache)
+            processor = mm_registry.create_processor(model_config)
 
             self.cache = cache
             self.processor = processor
@@ -92,9 +87,8 @@ class MultiModalBudget:
             active_modalities = tower_modalities | embed_only_modalities
 
             all_mm_max_toks_per_item = get_mm_max_toks_per_item(
-                model_config,
-                mm_registry,
                 processor,
+                cache=cache,
                 mm_counts=dict.fromkeys(active_modalities, 1),
             )
 
@@ -195,26 +189,32 @@ class MultiModalBudget:
     def get_encoder_budget(self) -> int:
         return min(self.encoder_compute_budget, self.encoder_cache_size)
 
+    def get_dummy_encoder_profile_inputs(
+        self,
+        modality: str | None = None,
+        max_items_per_batch: int | None = None,
+    ) -> list[tuple[str, MultiModalKwargsItem]]:
+        if self.get_encoder_budget() <= 0 or not self.mm_max_toks_per_item:
+            return []
+
+        if modality is None:
+            modality = self.get_modality_with_max_tokens()
+        if max_items_per_batch is None:
+            max_items_per_batch = self.mm_max_items_per_batch[modality]
+
+        # Don't use `max_items_per_batch` here to avoid redundant computation
+        dummy_mm_inputs = self.processor.get_dummy_mm_inputs(
+            mm_counts={modality: 1},
+            cache=self.cache,
+        )
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
+        return [(modality, dummy_mm_item)] * max_items_per_batch
+
     def reset_cache(self) -> None:
         if self.cache is not None:
             self.cache.clear_cache()
-
-
-def get_dummy_encoder_profile_inputs(
-    mm_registry: MultiModalRegistry,
-    budget: MultiModalBudget,
-) -> list[tuple[str, MultiModalKwargsItem]]:
-    if budget.get_encoder_budget() <= 0 or not budget.mm_max_toks_per_item:
-        return []
-
-    modality = budget.get_modality_with_max_tokens()
-    max_items_per_batch = budget.mm_max_items_per_batch[modality]
-    dummy_mm_inputs = mm_registry.get_dummy_mm_inputs(
-        budget.model_config,
-        mm_counts={modality: 1},
-        processor=budget.processor,
-    )
-    dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
-    assert dummy_mm_item is not None, "Dummy item should be generated"
-
-    return [(modality, dummy_mm_item)] * max_items_per_batch

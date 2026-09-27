@@ -5,7 +5,7 @@ ARG VLLM_BRANCH="main"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
-ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
+ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
 ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
@@ -17,8 +17,9 @@ ARG INSTALL_LMCACHE=false
 ARG NIC_BACKEND=all
 # AMD AINIC apt repo settings
 # Users can specify a custom version compatible with their host drivers.
-# The default version has been tested with ioinic-dkms=25.11.1.001
-ARG AINIC_VERSION=1.117.3-hydra
+# The default version has been tested with ionic-dkms=26.03.3.001
+# (libionic1=54.0-187-1), required for MoRI-EP/NIXL on Pollara/AINIC.
+ARG AINIC_VERSION=1.117.5-a-77
 ARG UBUNTU_CODENAME=jammy
 
 # Sccache configuration. Release builds use this today; CI can opt in when a
@@ -322,8 +323,9 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+rocm.csrc.build"
 
 RUN --mount=type=bind,source=pyproject.toml,target=${COMMON_WORKDIR}/vllm/pyproject.toml \
     --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
-    grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
+    { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         cmake/external_projects/triton_kernels.cmake \
+        || echo "WARNING: Dockerfile.rock ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && export CCACHE_BASEDIR="$PWD" \
     && echo "=== ccache stats before ROCm native build ===" \
     && (ccache --show-stats || true) \
@@ -669,8 +671,9 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 
 # Install the packaging helpers before modifying requirements/rocm.txt.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
+    { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         vllm/cmake/external_projects/triton_kernels.cmake \
+        || echo "WARNING: Dockerfile.rock ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && cd vllm \
     && uv pip install --system setuptools_scm regex
 
@@ -874,6 +877,15 @@ RUN mkdir src && mv vllm src/vllm
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
+
+FROM test AS test_smoke
+ARG ROCM_SMOKE_ID
+RUN --network=none \
+    bash /vllm-workspace/.buildkite/scripts/rocm/smoke-test-image.sh --inside \
+    && printf '%s\n' "${ROCM_SMOKE_ID:-local}" > /vllm-smoke-ok
+
+FROM scratch AS export_test_smoke
+COPY --from=test_smoke /vllm-smoke-ok /
 
 # -----------------------
 # Final vLLM image

@@ -449,7 +449,6 @@ def test_online_shorthand_selects_checkpoint_or_online_config(
     tmp_path, quantization, checkpoint_quantization_config, is_config_file
 ) -> None:
     """Online shorthands defer to checkpoint metadata when available."""
-
     if is_config_file:
         (tmp_path / "hf_quant_config.json").write_text(
             '{"quant_method": "mxfp8", "ignored_layers": []}'
@@ -609,14 +608,12 @@ def test_online_quantization(
     dist_init,
     workspace_init,
 ) -> None:
-    """
-    Tests that online quantization frontend configuration works -
+    """Tests that online quantization frontend configuration works -
     selecting quant schemes, overriding quant schemes by type, ignoring
     layers.
 
     Does not test performance, peak memory usage, etc.
     """
-
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
     if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):

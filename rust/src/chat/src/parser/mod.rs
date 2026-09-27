@@ -12,6 +12,10 @@ use std::str::FromStr;
 
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 
+use self::reasoning::ReasoningParserFactory;
+use self::tool::ToolParserFactory;
+use self::unified::UnifiedParserFactory;
+
 /// Specify which reasoning or tool-call parser implementation to use.
 #[derive(Debug, Clone, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
 pub enum ParserSelection {
@@ -27,6 +31,126 @@ pub enum ParserSelection {
 impl ParserSelection {
     pub const AUTO_LITERAL: &str = "auto";
     pub const NONE_LITERAL: &str = "none";
+
+    /// Resolve a reasoning parser name, preferring a matching unified parser.
+    pub fn resolve_reasoning_name(&self, model_id: &str) -> Option<&str> {
+        self.resolve_name(model_id, ReasoningParserFactory::global())
+    }
+
+    /// Resolve a tool parser name, preferring a matching unified parser.
+    pub fn resolve_tool_name(&self, model_id: &str) -> Option<&str> {
+        self.resolve_name(model_id, ToolParserFactory::global())
+    }
+
+    fn resolve_name<'a, C>(
+        &'a self,
+        model_id: &str,
+        factory: &'a ParserFactory<C>,
+    ) -> Option<&'a str> {
+        match self {
+            Self::Auto => UnifiedParserFactory::global()
+                .resolve_name_for_model(model_id)
+                .or_else(|| factory.resolve_name_for_model(model_id)),
+            Self::None => None,
+            Self::Explicit(name) => Some(name),
+        }
+    }
+}
+
+/// Server-side floor for tool-call structural tags (`--tool-strict-level`).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    DeserializeFromStr,
+    SerializeDisplay,
+)]
+pub enum ToolStrictLevel {
+    /// Derive tool constraints from the request's tool choice and per-tool strictness.
+    #[default]
+    Auto,
+    /// Constrain the tool-call envelope for every request with tools.
+    Function,
+    /// Additionally pin argument schemas, as if every tool were `strict: true`.
+    Parameter,
+}
+
+impl ToolStrictLevel {
+    pub const AUTO_LITERAL: &str = "auto";
+    pub const FUNCTION_LITERAL: &str = "function";
+    pub const PARAMETER_LITERAL: &str = "parameter";
+}
+
+impl FromStr for ToolStrictLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+            Ok(Self::Auto)
+        } else if value.eq_ignore_ascii_case(Self::FUNCTION_LITERAL) {
+            Ok(Self::Function)
+        } else if value.eq_ignore_ascii_case(Self::PARAMETER_LITERAL) {
+            Ok(Self::Parameter)
+        } else {
+            Err(format!(
+                "unknown tool strict level {value:?}; expected one of {}, {}, {}",
+                Self::AUTO_LITERAL,
+                Self::FUNCTION_LITERAL,
+                Self::PARAMETER_LITERAL
+            ))
+        }
+    }
+}
+
+impl fmt::Display for ToolStrictLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Auto => Self::AUTO_LITERAL,
+            Self::Function => Self::FUNCTION_LITERAL,
+            Self::Parameter => Self::PARAMETER_LITERAL,
+        })
+    }
+}
+
+/// Validate explicit parser override names without starting request processing.
+pub fn validate_parser_overrides(
+    tool_call_parser: &ParserSelection,
+    reasoning_parser: &ParserSelection,
+) -> crate::Result<()> {
+    validate_selection(tool_call_parser, "tool", ToolParserFactory::global())?;
+    validate_selection(
+        reasoning_parser,
+        "reasoning",
+        ReasoningParserFactory::global(),
+    )
+}
+
+fn validate_selection<C>(
+    selection: &ParserSelection,
+    kind: &'static str,
+    factory: &ParserFactory<C>,
+) -> crate::Result<()> {
+    let unified = UnifiedParserFactory::global();
+    if let ParserSelection::Explicit(name) = selection
+        && !factory.contains(name)
+        && !unified.contains(name)
+    {
+        let mut available_names = factory.list();
+        available_names.extend(unified.list());
+        available_names.sort_unstable();
+        available_names.dedup();
+        return Err(crate::Error::ParserUnavailableByName {
+            kind,
+            name: name.clone(),
+            available_names,
+        });
+    }
+    Ok(())
 }
 
 impl FromStr for ParserSelection {

@@ -136,8 +136,8 @@ class RoutedExpertsCapturer:
         Args:
             layer_id: The layer index.
             topk_ids: Tensor of shape (batch_size, num_routed_experts).
-        """
 
+        """
         ctx = get_forward_context()
         if ctx.dp_metadata is None:  # single dp
             start_loc = 0
@@ -241,6 +241,7 @@ class RoutedExpertsCapturer:
             slot_mappings: Per-KV-cache-group slot mappings for this step,
                 shape ``(num_kv_cache_groups, max_num_batched_tokens)``.
             num_tokens: Total number of tokens scheduled in this step.
+
         """
         return RoutedExpertsTensors(
             routing_data=self.device_buffer[:num_tokens].clone(),
@@ -417,6 +418,7 @@ class RoutedExpertsManager:
         Returns:
             Array of shape (num_tokens - token_start, num_layers,
             num_experts_per_tok).
+
         """
         bs = self.block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)

@@ -541,6 +541,25 @@ def _mock_config_for_cudagraph_sizes(
     return config
 
 
+@pytest.mark.parametrize("max_num_seqs", [100, 101])
+def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
+    max_num_seqs: int,
+) -> None:
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert max_num_seqs in compilation_config.cudagraph_capture_sizes
+
+
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
     [

@@ -65,9 +65,9 @@ steps:
   - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
   mirror:
     amd:
-      label: ":amd: (MI300) Distributed DP Basic"
+      label: ":amd: (MI355) Distributed DP Basic"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -105,6 +105,29 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed Compile + RPC"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 65
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/worker/worker_base.py
+      - vllm/v1/engine/
+      - vllm/v1/worker/
+      - tests/compile/test_wrapper.py
+      - tests/entrypoints/llm/test_collective_rpc.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s entrypoints/llm/test_collective_rpc.py
+      - pytest -v -s ./compile/test_wrapper.py
 
 - label: ":nvidia: (L4) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
@@ -186,6 +209,9 @@ steps:
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_utils
+  - tests/distributed/test_engram_dp_shard.py
+  - vllm/config/engram.py
+  - vllm/models/deepseek_v41/
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -197,6 +223,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
+  - pytest -v -s distributed/test_engram_dp_shard.py
 
 - label: ":nvidia: (L4) Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
@@ -272,6 +299,57 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
+  mirror:
+    amd:
+      label: ':amd: (MI355) Distributed Features'
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 90
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/v1/distributed/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/v1/distributed/test_dbo.py
+      - tests/distributed/test_context_parallel.py
+      - examples/features/data_parallel/data_parallel_offline.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - csrc/custom_quickreduce.cu
+      - csrc/ops.h
+      - csrc/torch_bindings.cpp
+      - vllm/model_executor/layers/
+      - vllm/entrypoints/llm.py
+      - vllm/config/parallel.py
+      - vllm/v1/engine/
+      - vllm/v1/executor/
+      - vllm/v1/worker/
+      - vllm/_custom_ops.py
+      - vllm/envs.py
+      - tests/distributed/test_rocm_aiter_custom_ar.py
+      - tests/distributed/test_rocm_quick_reduce.py
+      - tests/distributed/test_quick_all_reduce.py
+      - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
+      - tests/utils.py
+      - examples/rl/rlhf_async_new_apis.py
+      - tests/distributed/test_weight_transfer.py
+      - tests/distributed/test_packed_tensor.py
+      commands:
+      - pytest -v -s tests/distributed/test_context_parallel.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
+      - pytest -v -s tests/v1/distributed/test_dbo.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
+      - pytest -v -s tests/distributed/test_packed_tensor.py
+      - pytest -v -s tests/distributed/test_rocm_aiter_custom_ar.py
+      - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
+      - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
+      - pytest -v -s tests/distributed/test_quick_all_reduce.py
 
 - label: ":nvidia: (B200) Distributed"
   key: distributed-tests-2xb200
@@ -335,6 +413,26 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) Pipeline + Context Parallelism"
+      dind: false
+      device: mi250_4
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus

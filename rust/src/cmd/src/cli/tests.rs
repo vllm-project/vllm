@@ -36,6 +36,8 @@ fn render_args_build_config_without_tls() {
         "vllm-rs",
         "render",
         "Qwen/Qwen2.5-0.5B-Instruct",
+        "--revision",
+        "release",
         "--port",
         "8080",
         "--max-model-len",
@@ -55,15 +57,28 @@ fn render_args_build_config_without_tls() {
     let config = args.into_config();
 
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.revision.as_deref(), Some("release"));
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
-    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
     assert!(config.tls.is_none());
+}
+
+#[test]
+fn render_args_allow_omitted_max_model_len() {
+    let cli = Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen2.5-0.5B-Instruct"]).unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.max_model_len, None);
 }
 
 #[test]
@@ -161,10 +176,15 @@ fn serve_args_forward_python_flags_with_separator() {
                     uds: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        revision: None,
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -179,6 +199,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        enable_scale_out: false,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -399,6 +420,21 @@ fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
         ]
     "#]]
     .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "moonshotai/Kimi-K3"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "kimi_k3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555).python_args);
 }
 
 #[test]
@@ -876,7 +912,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -980,10 +1016,15 @@ fn frontend_args_accept_json() {
                     data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        revision: None,
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -998,6 +1039,7 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        enable_scale_out: false,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1087,6 +1129,73 @@ fn frontend_args_json_ignores_engine_owned_max_model_len() {
 }
 
 #[test]
+fn hf_overrides_preserve_merge_patch_in_cli_and_python_bootstrap() {
+    let patch = r#"{"text_config":{"rope_parameters":{"factor":4}},"sliding_window":null}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides",
+        patch,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    let expected: serde_json::Value = serde_json::from_str(patch).unwrap();
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        expected
+    );
+    let engine = args.to_managed_engine_config(1234);
+    let index = engine.python_args.iter().position(|arg| arg == "--hf-overrides").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
+        expected
+    );
+    assert!(!engine.python_args.iter().any(|arg| arg == "--hf-config-path"));
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    assert_eq!(serde_json::to_value(config.hf_overrides).unwrap(), expected);
+
+    let payload = serde_json::json!({"model_tag":"Qwen/Qwen3-0.6B", "hf_overrides":expected});
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        &payload.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args")
+    };
+    assert_eq!(
+        serde_json::to_value(args.into_config().hf_overrides).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn hf_overrides_reject_non_object_inputs() {
+    for patch in ["null", "[]", "1", r#""callable""#] {
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--hf-overrides",
+            patch,
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+}
+
+#[test]
 fn frontend_args_json_accepts_supported_non_default_fields() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1098,7 +1207,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -1106,6 +1215,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
+    assert_eq!(args.runtime.revision.as_deref(), Some("release"));
     assert_eq!(args.runtime.generation_config, GenerationConfigMode::Vllm);
     assert_eq!(
         args.runtime.tool_call_parser,
@@ -1577,10 +1687,15 @@ fn serve_args_accept_handshake_aliases() {
                     uds: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        revision: None,
+                        hf_overrides: HfOverrides(
+                            {},
+                        ),
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1595,6 +1710,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        enable_scale_out: false,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1725,6 +1841,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
             generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
@@ -1733,6 +1853,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1745,6 +1866,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+                enable_scale_out: false,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1812,6 +1934,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
             generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
@@ -1820,6 +1946,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1832,6 +1959,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+                enable_scale_out: false,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1921,6 +2049,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 address: "tcp://127.0.0.1:7000",
             },
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
+            hf_overrides: HfOverrides(
+                {},
+            ),
             generation_config: Auto,
             served_model_name: [],
             listener_mode: InheritedFd {
@@ -1928,6 +2060,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             tool_call_parser: None,
             reasoning_parser: None,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1940,6 +2073,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+                enable_scale_out: false,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -2059,4 +2193,19 @@ fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
     assert_eq!(args.runtime.profiler(), None);
     let config = args.into_config();
     assert_eq!(config.profiler, None);
+}
+
+#[test]
+fn serve_revision_reaches_frontend_and_managed_engine() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "test/model", "--revision", "release"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.to_frontend_config("tcp://localhost:1234".into()).revision.as_deref(),
+        Some("release")
+    );
+    let engine = args.to_managed_engine_config(1234);
+    assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
 }

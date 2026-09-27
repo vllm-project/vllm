@@ -74,6 +74,18 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
+#### Release only KV cache memory
+
+`LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
+
+Use the default `cumem` backend with managed allocations: `enable_cumem_allocator=True` on CUDA/ROCm (also enabled by `enable_sleep_mode=True`), or `enable_sleep_mode=True` on XPU. Other backends must implement selective discard; CPU and unmanaged allocations are unsupported.
+
+```python
+llm.sleep(level=0, mode="keep")  # Wait for the pause to complete.
+llm.release_kv_cache_memory()
+llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
+```
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
@@ -107,9 +119,18 @@ curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: applicatio
 curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
+To release only KV cache memory, wait for the level 0 pause to complete before calling the release endpoint. The same resident-memory and backend requirements as the Python API apply.
+
+```bash
+curl -X POST 'http://localhost:8000/sleep?level=0&mode=keep'
+curl -X POST 'http://localhost:8000/release_kv_cache_memory'
+curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
+```
+
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
+- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.

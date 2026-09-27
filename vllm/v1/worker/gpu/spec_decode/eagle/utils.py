@@ -8,11 +8,11 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     """Share when the draft has no own copy, or its copy matches the target."""
-
     if not getattr(eagle, flag, False) or draft is None:
         return True
     if target is None:
@@ -103,6 +103,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 backend=speculative_config.attention_backend,
             ),
         )
+    draft_load_config = get_pp_safe_draft_load_config(vllm_config.load_config)
+    if draft_load_config is not vllm_config.load_config:
+        vllm_config = replace(vllm_config, load_config=draft_load_config)
     with set_model_tag("eagle_head"):
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
