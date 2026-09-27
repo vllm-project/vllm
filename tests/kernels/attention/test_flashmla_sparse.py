@@ -4,6 +4,123 @@ import pytest
 import torch
 
 
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v41_prefill_main_kv_reuse_refreshes_swa_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v41.nvidia import flashmla as flashmla_mod
+
+    cache = flashmla_mod.PrefillMainKVGatherCache(1, torch.device("cpu"))
+    main = torch.tensor([10], dtype=torch.bfloat16)
+    swa = torch.tensor([1], dtype=torch.bfloat16)
+    main_gathers = 0
+    observed_kv = []
+
+    def fake_gather(out, k_cache, *, offset, **kwargs):
+        nonlocal main_gathers
+        if offset == 0:
+            main_gathers += 1
+        out[:, offset : offset + 2].fill_(k_cache.item())
+
+    def fake_sparse_fwd(*, kv, out, **kwargs):
+        observed_kv.append(kv.clone())
+        out.fill_(kv[0, 0, 0] + kv[2, 0, 0])
+
+    def fake_combine(*args, **kwargs):
+        return (
+            torch.zeros((1, 1), dtype=torch.int32),
+            torch.ones(1, dtype=torch.int32),
+        )
+
+    class FakeWorkspaceManager:
+        def get_simultaneous(self, *specs):
+            return [torch.empty(shape, dtype=dtype) for shape, dtype in specs]
+
+    monkeypatch.setattr(flashmla_mod, "dequantize_and_gather_k_cache", fake_gather)
+    monkeypatch.setattr(flashmla_mod, "flash_mla_sparse_fwd", fake_sparse_fwd)
+    monkeypatch.setattr(flashmla_mod, "combine_topk_swa_indices", fake_combine)
+    monkeypatch.setattr(flashmla_mod, "current_workspace_manager", FakeWorkspaceManager)
+
+    seq_lens = torch.tensor([2], dtype=torch.int32)
+    query_start_loc_cpu = torch.tensor([0, 1], dtype=torch.int32)
+    source_metadata = SimpleNamespace(
+        block_size=1, block_table=torch.tensor([[0, 1]], dtype=torch.int32)
+    )
+    swa_metadata = SimpleNamespace(
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefill_tokens=1,
+        prefill_seq_lens=seq_lens,
+        prefill_gather_lens=torch.tensor([2], dtype=torch.int32),
+        block_size=1,
+        query_start_loc_cpu=query_start_loc_cpu,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        prefill_left_visible=None,
+        prefill_right_visible=None,
+        get_prefill_chunk_plan=lambda **kwargs: [(0, 1, 2, 4)],
+    )
+
+    def run_layer(swa_value: int, *, reuse: bool) -> torch.Tensor:
+        swa.fill_(swa_value)
+        layer = object.__new__(flashmla_mod.DeepseekV4FlashMLAAttention)
+        torch.nn.Module.__init__(layer)
+        layer.compress_ratio = 1
+        layer.prefill_main_kv_cache = cache if reuse else None
+        layer.prefill_main_kv_group_id = 24
+        layer.compressed_cache_prefix = "source20"
+        layer.topk_indices_buffer = torch.zeros((1, 1), dtype=torch.int32)
+        layer.max_num_batched_tokens = 1
+        layer.window_size = 2
+        layer.max_image_tokens = 0
+        layer.scale = 1.0
+        layer.attn_sink = torch.nn.Parameter(torch.zeros(1))
+        q = torch.zeros((1, 1, 4), dtype=torch.bfloat16)
+        out = torch.empty_like(q)
+        layer._forward_prefill(
+            q=q,
+            positions=torch.zeros(1, dtype=torch.int32),
+            compressed_k_cache=main,
+            swa_k_cache=swa,
+            output=out,
+            attn_metadata=source_metadata,
+            swa_metadata=swa_metadata,
+        )
+        return out.clone()
+
+    first = run_layer(1, reuse=True)
+    follower = run_layer(3, reuse=True)
+    assert main_gathers == 1
+    assert observed_kv[0][:2].equal(observed_kv[1][:2])
+    assert observed_kv[0][2:].ne(observed_kv[1][2:]).all()
+
+    baseline = run_layer(3, reuse=False)
+    torch.testing.assert_close(follower, baseline, rtol=0, atol=0)
+    assert first[0, 0, 0] == 11
+
+    main.fill_(20)
+    source_metadata = SimpleNamespace(
+        block_size=1, block_table=torch.tensor([[1, 2]], dtype=torch.int32)
+    )
+    new_source = run_layer(3, reuse=True)
+    assert new_source[0, 0, 0] == 23
+    assert main_gathers == 3
+
+    cache.reset()
+    main.fill_(30)
+    next_forward = run_layer(3, reuse=True)
+    assert next_forward[0, 0, 0] == 33
+    assert main_gathers == 4
+
+    cache.storage = torch.empty(2, dtype=torch.bfloat16)
+    main.fill_(40)
+    over_budget = run_layer(3, reuse=True)
+    assert over_budget[0, 0, 0] == 43
+    assert main_gathers == 5
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
