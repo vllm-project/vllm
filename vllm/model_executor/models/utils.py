@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
     from vllm.config.model import ModelConfig
@@ -78,10 +78,14 @@ class WeightsMapper:
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
 
-    def _map_name(self, key: str) -> str | None:
-        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+    def map_name(self, key: str) -> str | None:
+        """Map a weight name; returns ``None`` if the weight should be ignored."""
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
+
+    def _map_name(self, key: str) -> str | None:
+        """Backward-compatible alias for :meth:`map_name`."""
+        return self.map_name(key)
 
     def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
         """Map a weight name and extract any shard_id metadata.
@@ -606,7 +610,7 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: "PretrainedConfig | None" = None,
+    hf_config: "PreTrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """Helper function to initialize an inner model registered to vLLM,
