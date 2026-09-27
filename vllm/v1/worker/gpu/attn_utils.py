@@ -328,6 +328,40 @@ def get_query_lens_mismatch_unsupported_backend(
     return None
 
 
+def get_varlen_cudagraph_unsupported_backend(
+    attn_groups: list[list[AttentionGroup]],
+    vllm_config: VllmConfig,
+    max_query_len: int,
+    checked_layer_names: set[str] | None = None,
+) -> tuple[str, int | None] | None:
+    """Name the first backend whose FULL cudagraphs cannot replay decode batches
+    of 1 to max_query_len tokens per request, with its bound, if any.
+
+    ALWAYS builders replay any batch; the others need a bound of at least
+    max_query_len. See AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len().
+    """
+    for groups in attn_groups:
+        for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
+            builder = group.get_metadata_builder(0)
+            spec = group.kv_cache_spec
+            support = builder.get_cudagraph_support(vllm_config, spec)
+            if support == AttentionCGSupport.ALWAYS:
+                continue
+            bound = (
+                # NEVER means never, whatever an inherited override says.
+                None
+                if support == AttentionCGSupport.NEVER
+                else builder.get_varlen_cudagraph_max_query_len(vllm_config, spec)
+            )
+            if bound is None or bound < max_query_len:
+                return group.backend.__name__, bound
+    return None
+
+
 def init_kv_cache(
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,

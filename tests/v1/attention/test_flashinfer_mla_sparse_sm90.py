@@ -20,6 +20,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Builder,
     FlashInferMLASparseSM90Impl,
 )
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # isort: on
 
 BLOCK_SIZE = 64
@@ -311,6 +312,59 @@ def test_kv_lens_host_empty():
     )
     num_rows, lens = builder._kv_lens_host(cam)
     assert num_rows == 0 and lens.numel() == 0
+
+
+_NO_KPOOL = object()
+
+
+@pytest.mark.parametrize(
+    "index_kpool,prefill_lens",
+    [
+        (4, [2048, 2049, 2050, 2051]),
+        (None, [2048] * 4),
+        (_NO_KPOOL, [2048] * 4),
+    ],
+    ids=["kpool4", "kpool_none", "no_kpool_attr"],
+)
+def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens):
+    """The builder took kpool from the KV cache spec, whose tokens_per_state is
+    1, so the tail pool was never read."""
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "__init__",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(sm90_mod, "_SM90State", lambda *_args, **_kwargs: None)
+    impl, _ = make_impl(64)
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    assert spec.tokens_per_state == 1
+    hf_config = SimpleNamespace(index_topk=2048)
+    if index_kpool is not _NO_KPOOL:
+        hf_config.index_kpool = index_kpool
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"attn": SimpleNamespace(impl=impl)}
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=64, async_scheduling=False
+        ),
+        model_config=SimpleNamespace(hf_text_config=hf_config),
+    )
+    builder = FlashInferMLASparseSM90Builder(
+        spec, ["attn"], vllm_config, torch.device("cpu")
+    )
+    # req0: prefill chunk ending at context 42295; req1: context <= topk.
+    cam = SimpleNamespace(
+        num_reqs=2,
+        query_start_loc_cpu=torch.tensor([0, 4, 6], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([42295, 100], dtype=torch.int32),
+        positions=None,
+    )
+    num_rows, lens = builder._kv_lens_host(cam)
+    assert num_rows == 6
+    assert lens.tolist() == prefill_lens + [99, 100]
 
 
 def test_supports_combination_gates(monkeypatch, default_vllm_config):
