@@ -3,11 +3,18 @@
 
 import asyncio
 import time
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
+from mistral_common.exceptions import InvalidToolMessageException
+from mistral_common.protocol.instruct.converters import convert_openai_messages
+from mistral_common.protocol.instruct.validator import (
+    MistralRequestValidatorV13,
+    ValidationMode,
+)
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -88,6 +95,21 @@ def test_adapt_tool_images_for_pre_v15_mistral():
         },
         {"role": "tool", "tool_call_id": "def456UVW", "content": "result B"},
     ]
+
+    image_only = cast(list[dict[str, Any]], deepcopy(messages))
+    image_only[2]["content"] = [
+        part for part in image_only[2]["content"] if part["type"] == "image_url"
+    ]
+    validator = MistralRequestValidatorV13(mode=ValidationMode.serving)
+    with pytest.raises(InvalidToolMessageException):
+        validator.validate_messages(convert_openai_messages(image_only), False)
+
+    adapted_image_only = _adapt_tool_images_for_mistral(
+        image_only, tokenizer_version=13
+    )
+    validator.validate_messages(convert_openai_messages(adapted_image_only), False)
+    assert adapted_image_only[2]["content"] == []
+    assert adapted_image_only[-1]["content"] == image_only[2]["content"]
 
     result = _adapt_tool_images_for_mistral(messages, tokenizer_version=13)
 
