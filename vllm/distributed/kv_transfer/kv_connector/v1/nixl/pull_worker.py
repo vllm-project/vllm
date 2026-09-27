@@ -363,6 +363,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                # DCP slices were already paired by logical position above.
+                num_tokens=None if dcp_active else meta.remote.num_tokens,
             ):
                 return
 
@@ -401,6 +403,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        num_tokens: int | None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -418,14 +421,25 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
-        if block_size_ratio > 1:
+        # Equal kernel blocks under different logical block sizes leave
+        # different padding at the end of each list: pair them the same way.
+        if block_size_ratio > 1 or (
+            num_tokens is not None
+            and not read_spec.block_ids_by_region
+            and remote_info.remote_physical_blocks_per_logical
+            != self._physical_blocks_per_logical_kv_block
+        ):
             if read_spec.block_ids_by_region:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
                 )
             local_block_ids, remote_block_ids = (
                 self._map_block_ids_for_block_size_ratio(
-                    local_block_ids, remote_block_ids, block_size_ratio
+                    local_block_ids,
+                    remote_block_ids,
+                    block_size_ratio,
+                    num_tokens,
+                    remote_info.remote_physical_blocks_per_logical,
                 )
             )
         # NOTE(rob): having the staging blocks be on the READER side is
