@@ -1308,6 +1308,7 @@ def minimax_m3_index_decode(
     max_decode_query_len: int,
     out: torch.Tensor | None = None,
     *,
+    precomputed_score: torch.Tensor | None = None,
     attention_block_table: torch.Tensor | None = None,
     sparse_block_table_out: torch.Tensor | None = None,
     sparse_context_lens_out: torch.Tensor | None = None,
@@ -1319,6 +1320,9 @@ def minimax_m3_index_decode(
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
     When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
     ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
+    When ``precomputed_score`` ([num_kv_heads, total_q, >=max_block]) is given,
+    block scoring is skipped and top-k runs on the provided scores (context-
+    parallel indexer after a cross-rank allreduce).
     The optional sparse-table arguments fuse current-layer table construction
     into the selector. They must be provided together. ``completion_counter``
     provides stable per-query synchronization storage for CUDA graphs. It must
@@ -1440,95 +1444,110 @@ def minimax_m3_index_decode(
 
     # Keep score strides 16-divisible to avoid Triton recompiles.
     score_block_stride = round_up(max_block, 16)
-    score = torch.empty(
-        (num_idx_heads, total_q, score_block_stride),
-        dtype=torch.float32,
-        device=idx_q.device,
-    )
-    # Use the configured max decode length to avoid Triton recompiles when
-    # switching between qlen=1 and spec-decode verification batches.
-    BLOCK_SIZE_Q = triton.next_power_of_2(max_decode_query_len)
-    num_reqs = seq_lens.shape[0]
-    score_program_budget = _decode_score_program_budget(
-        num_reqs,
-        head_dim,
-        idx_q.dtype,
-        index_kv_cache.dtype,
-        is_gfx950=is_gfx950,
-    )
-    grid_score: tuple[int, ...]
-    if score_program_budget is not None:
-        grid_score = (score_program_budget + num_reqs - 1,)
-        _decode_index_score_balanced_kernel[grid_score](
-            idx_q,
-            index_kv_cache,
-            score,
-            block_table,
-            seq_lens,
-            num_idx_heads,
-            head_dim,
-            init_blocks,
-            local_blocks,
-            num_reqs,
-            score_program_budget,
-            decode_query_len,
-            idx_q.stride(0),
-            idx_q.stride(1),
-            idx_q.stride(2),
-            index_kv_cache.stride(0),
-            index_kv_cache.stride(1),
-            index_kv_cache.stride(2),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            block_table.stride(0),
-            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
-            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-            num_warps=2,
-            num_stages=1,
-        )
+    if precomputed_score is not None:
+        if (
+            precomputed_score.ndim != 3
+            or precomputed_score.shape[0] != num_idx_heads
+            or precomputed_score.shape[1] < total_q
+            or precomputed_score.shape[2] < max_block
+            or precomputed_score.dtype != torch.float32
+            or precomputed_score.device != idx_q.device
+        ):
+            raise ValueError(
+                "precomputed_score must be fp32 "
+                "[num_idx_heads, >=total_q, >=max_block] on the query device"
+            )
+        score = precomputed_score
     else:
-        # Increase independent work for the measured high-batch gfx950 decode
-        # range while preserving the deployed split for every other shape.
-        num_kv_chunks, use_high_batch_config = _decode_score_split_launch_policy(
+        score = torch.empty(
+            (num_idx_heads, total_q, score_block_stride),
+            dtype=torch.float32,
+            device=idx_q.device,
+        )
+        # Use the configured max decode length to avoid Triton recompiles when
+        # switching between qlen=1 and spec-decode verification batches.
+        BLOCK_SIZE_Q = triton.next_power_of_2(max_decode_query_len)
+        num_reqs = seq_lens.shape[0]
+        score_program_budget = _decode_score_program_budget(
             num_reqs,
             head_dim,
             idx_q.dtype,
             index_kv_cache.dtype,
             is_gfx950=is_gfx950,
         )
-        if use_high_batch_config and not (
-            num_idx_heads > 1 and max_decode_query_len > 1
-        ):
-            score_kwargs.update({"num_warps": 2, "num_stages": 1})
-        grid_score = (num_reqs, num_kv_chunks)
-        _decode_index_score_kernel[grid_score](
-            idx_q,
-            index_kv_cache,
-            score,
-            block_table,
-            seq_lens,
-            num_idx_heads,
-            head_dim,
-            init_blocks,
-            local_blocks,
-            decode_query_len,
-            idx_q.stride(0),
-            idx_q.stride(1),
-            idx_q.stride(2),
-            index_kv_cache.stride(0),
-            index_kv_cache.stride(1),
-            index_kv_cache.stride(2),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            block_table.stride(0),
-            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
-            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-            num_kv_chunks=num_kv_chunks,
-            USE_PDL=use_pdl,
-            **score_kwargs,
-        )
+        grid_score: tuple[int, ...]
+        if score_program_budget is not None:
+            grid_score = (score_program_budget + num_reqs - 1,)
+            _decode_index_score_balanced_kernel[grid_score](
+                idx_q,
+                index_kv_cache,
+                score,
+                block_table,
+                seq_lens,
+                num_idx_heads,
+                head_dim,
+                init_blocks,
+                local_blocks,
+                num_reqs,
+                score_program_budget,
+                decode_query_len,
+                idx_q.stride(0),
+                idx_q.stride(1),
+                idx_q.stride(2),
+                index_kv_cache.stride(0),
+                index_kv_cache.stride(1),
+                index_kv_cache.stride(2),
+                score.stride(0),
+                score.stride(1),
+                score.stride(2),
+                block_table.stride(0),
+                BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                num_warps=2,
+                num_stages=1,
+            )
+        else:
+            # Increase independent work for the measured high-batch gfx950 decode
+            # range while preserving the deployed split for every other shape.
+            num_kv_chunks, use_high_batch_config = _decode_score_split_launch_policy(
+                num_reqs,
+                head_dim,
+                idx_q.dtype,
+                index_kv_cache.dtype,
+                is_gfx950=is_gfx950,
+            )
+            if use_high_batch_config and not (
+                num_idx_heads > 1 and max_decode_query_len > 1
+            ):
+                score_kwargs.update({"num_warps": 2, "num_stages": 1})
+            grid_score = (num_reqs, num_kv_chunks)
+            _decode_index_score_kernel[grid_score](
+                idx_q,
+                index_kv_cache,
+                score,
+                block_table,
+                seq_lens,
+                num_idx_heads,
+                head_dim,
+                init_blocks,
+                local_blocks,
+                decode_query_len,
+                idx_q.stride(0),
+                idx_q.stride(1),
+                idx_q.stride(2),
+                index_kv_cache.stride(0),
+                index_kv_cache.stride(1),
+                index_kv_cache.stride(2),
+                score.stride(0),
+                score.stride(1),
+                score.stride(2),
+                block_table.stride(0),
+                BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                num_kv_chunks=num_kv_chunks,
+                USE_PDL=use_pdl,
+                **score_kwargs,
+            )
 
     if out is not None:
         topk_idx = out[:, :total_q, :]

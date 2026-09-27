@@ -20,6 +20,7 @@ from typing import ClassVar
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.attention import IndexerKVDType
 from vllm.config.cache import CacheDType
@@ -91,7 +92,9 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec=None,
+    ) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -535,6 +538,23 @@ def select_indexer_impl_cls(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."
         )
+    # Context-parallel Triton indexer for ROCm TP>1 (opt-in via env var).
+    if (
+        current_platform.is_rocm()
+        and get_tensor_model_parallel_world_size() > 1
+        and envs.VLLM_ROCM_MINIMAX_INDEXER_CP
+    ):
+        from vllm.models.minimax_m3.amd.indexer_context_parallel import (
+            MiniMaxM3IndexerTritonCPImpl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected Triton CP (context-parallel, ROCm) "
+            "[topk_blocks=%d, tp=%d]",
+            topk_blocks,
+            get_tensor_model_parallel_world_size(),
+        )
+        return MiniMaxM3IndexerTritonCPImpl
     logger.info_once(
         "MiniMax M3 indexer: selected Triton (no fmha_sm100) "
         "[topk_blocks=%d, indexer_kv_dtype=%s, sm100=%s]",

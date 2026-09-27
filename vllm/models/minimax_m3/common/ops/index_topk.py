@@ -869,6 +869,7 @@ def minimax_m3_index_decode(
     max_decode_query_len: int,
     out: torch.Tensor | None = None,
     score_out: torch.Tensor | None = None,
+    precomputed_score: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode index block-score + top-k, both split-K (cudagraph-safe).
 
@@ -879,6 +880,9 @@ def minimax_m3_index_decode(
     scores are written into it (read back by the top-k) instead of a fresh
     tensor -- used to share a unified score buffer with the prefill side. Reads
     via strides, so a transposed view of a block-major buffer is accepted.
+    When ``precomputed_score`` ([num_kv_heads, total_q, >=max_block]) is given,
+    block scoring is skipped entirely and the top-k runs directly on the provided
+    scores -- used by the context-parallel indexer after a cross-rank allreduce.
     """
     total_q, num_idx_heads, _ = idx_q.shape
     batch = total_q
@@ -887,19 +891,22 @@ def minimax_m3_index_decode(
     pdl_kwargs: dict[str, bool | int] = {}
     if use_pdl:
         pdl_kwargs.update({"launch_pdl": True})
-    score = minimax_m3_index_decode_score(
-        idx_q,
-        index_kv_cache,
-        block_table,
-        seq_lens,
-        max_seq_len,
-        init_blocks,
-        local_blocks,
-        num_kv_heads,
-        decode_query_len,
-        max_decode_query_len,
-        score_out=score_out,
-    )
+    if precomputed_score is not None:
+        score = precomputed_score
+    else:
+        score = minimax_m3_index_decode_score(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            seq_lens,
+            max_seq_len,
+            init_blocks,
+            local_blocks,
+            num_kv_heads,
+            decode_query_len,
+            max_decode_query_len,
+            score_out=score_out,
+        )
 
     if out is not None:
         topk_idx = out[:, :total_q, :]
