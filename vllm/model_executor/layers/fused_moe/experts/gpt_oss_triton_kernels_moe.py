@@ -846,8 +846,9 @@ def make_routing_data(
     # whether or not those rows are in range. A 512-row tile therefore pays for
     # padding rows at every batch size, and collapses the grid to a single
     # workgroup for anything up to 512 tokens. A 32-row tile, matching
-    # `BLOCK_SIZE_K`, keeps the tile small and the grid wide.
-    BLOCK_SIZE_M = 32
+    # `BLOCK_SIZE_K`, keeps the tile small and the grid wide. It has only been
+    # measured on ROCm, so other platforms keep the 512-row tile.
+    BLOCK_SIZE_M = 32 if current_platform.is_rocm() else 512
     BLOCK_SIZE_K = 32
 
     bm_cols = triton.cdiv(num_local_experts, BLOCK_SIZE_K)  # n_bitpacks
