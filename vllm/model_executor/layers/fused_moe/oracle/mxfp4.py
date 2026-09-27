@@ -1382,6 +1382,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
+    use_separated_a4w4: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1627,10 +1628,20 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
+        # DeepSeek V4/V4.1 a4w4 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4): match
+        # ATOM's SEPARATED gate/up weight layout instead of the default
+        # GateMode.INTERLEAVE shuffle. AITER's INTERLEAVE + fp4x2 activation
+        # combination has no tuned kernel config and produces degenerate
+        # output end-to-end (confirmed via real-model GSM8K); SEPARATED +
+        # fp4x2 is the combination ATOM validates on this same checkpoint, so
+        # rocm_aiter_fused_experts selects GateMode.SEPARATED to match
+        # whenever this shuffle is used (see rocm_aiter_moe.py).
+        is_guinterleave = not use_separated_a4w4
+
         w13_weight = torch.nn.Parameter(
             _shuf_w(
                 w13_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=True,
+                is_guinterleave=is_guinterleave,
                 gate_up=True,
             ),
             requires_grad=False,
@@ -1638,14 +1649,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         shuffled_w13_scale = _shuf_s(
             w13_weight_scale.reshape(-1, w13_weight_scale.shape[-1]),
             num_experts,
-            True,
+            is_guinterleave,
             True,
         )
 
         w2_weight = torch.nn.Parameter(
             _shuf_w(
                 w2_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=True,
+                is_guinterleave=is_guinterleave,
                 gate_up=False,
             ),
             requires_grad=False,
@@ -1654,7 +1665,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         shuffled_w2_scale = _shuf_s(
             w2_weight_scale.reshape(-1, w2_weight_scale.shape[-1]),
             num_experts,
-            True,
+            is_guinterleave,
             False,
         )
 

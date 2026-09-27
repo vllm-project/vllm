@@ -1317,6 +1317,11 @@ class FusedMoEConfig:
     tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
+    # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4/V4.1 on
+    # ROCm/AITER. Resolved once here (construction time, when
+    # get_current_vllm_config() is reliably available) rather than in the
+    # fused-experts forward path, where the vLLM config context is not set.
+    use_mxfp4_w4a4_dsv4: bool = False
 
     def __post_init__(self):
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1347,6 +1352,13 @@ class FusedMoEConfig:
             self.aiter_fmoe_shared_expert_enabled = (
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
+
+        if self.rocm_aiter_fmoe_enabled:
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+                _use_mxfp4_w4a4_moe_activation,
+            )
+
+            self.use_mxfp4_w4a4_dsv4 = _use_mxfp4_w4a4_moe_activation()
 
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
