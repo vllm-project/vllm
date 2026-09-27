@@ -95,6 +95,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     kv_cache_dtype: torch.dtype | None,
     block_size: int,
     seq_threshold_3D: int,
+    quant_query: bool = False,
 ) -> None:
     head_size_qk, head_size_v = head_sizes
 
@@ -132,16 +133,20 @@ def test_triton_unified_attn_diffkv_vs_reference(
     )
     key_cache = kv_cache[..., :head_size_qk]
     value_cache = kv_cache[..., head_size_qk:]
-    k_descale = v_descale = None
+    q_descale = k_descale = v_descale = None
     if kv_cache_dtype is not None:
-        # Non-unit scales so the K/V descales are exercised.
-        k_descale = torch.tensor(0.5, dtype=torch.float32)
-        v_descale = torch.tensor(0.25, dtype=torch.float32)
+        # Non-power-of-two scales exercise descale rounding.
+        k_descale = torch.tensor(0.3, dtype=torch.float32)
+        v_descale = torch.tensor(0.7, dtype=torch.float32)
         kv_cache = torch.cat(
             [key_cache / k_descale, value_cache / v_descale], dim=-1
         ).to(kv_cache_dtype)
         key_cache = kv_cache[..., :head_size_qk]
         value_cache = kv_cache[..., head_size_qk:]
+
+    if quant_query:
+        q_descale = torch.tensor(0.2, dtype=torch.float32)
+        query = (query / q_descale).to(kv_cache_dtype)
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
@@ -160,8 +165,11 @@ def test_triton_unified_attn_diffkv_vs_reference(
             ref_key_cache *= k_descale
             ref_value_cache *= v_descale
         # FP32 also keeps the helper's in-place scaling off the kernel input.
+        ref_query = query.float()
+        if quant_query:
+            ref_query *= q_descale
         ref_out = ref_paged_attn(
-            query.float(),
+            ref_query,
             ref_key_cache,
             ref_value_cache,
             query_lens,
@@ -220,8 +228,32 @@ def test_triton_unified_attn_diffkv_vs_reference(
         softmax_segm_output=segm_output,
         softmax_segm_max=segm_max,
         softmax_segm_expsum=segm_expsum,
+        q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
     )
 
     torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 query requires CUDA SM89+",
+)
+@pytest.mark.parametrize(
+    "seq_lens,seq_threshold_3D",
+    [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8)],
+)
+def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
+    test_triton_unified_attn_diffkv_vs_reference(
+        seq_lens=seq_lens,
+        num_heads=(8, 2),
+        head_sizes=(192, 128),
+        sliding_window=None,
+        soft_cap=None,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=current_platform.fp8_dtype(),
+        block_size=16,
+        seq_threshold_3D=seq_threshold_3D,
+        quant_query=True,
+    )

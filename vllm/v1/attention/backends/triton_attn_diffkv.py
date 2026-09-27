@@ -111,8 +111,6 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # The DiffKV kernel has no FP8-query path.
-        self.supports_quant_query_input = False
         if (
             is_quantized_kv_cache(self.kv_cache_dtype)
             and self.kv_cache_dtype
@@ -207,6 +205,9 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             cu_seqlens_q=attn_metadata.query_start_loc,
             seqused_k=attn_metadata.seq_lens,
             softmax_scale=self.scale,
+            q_descale=(
+                layer._q_scale if quantized and query.dtype == self.fp8_dtype else None
+            ),
             k_descale=layer._k_scale if quantized else None,
             v_descale=layer._v_scale if quantized else None,
             causal=True,
