@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import ToolChoice
@@ -202,6 +203,82 @@ class TestToolChoice_Plus_ResponseFormat:
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
+
+    def test_auto_with_xgrammar_unsupported_schema(self):
+        """Conrer case based on Vadim's feedback in PR #56086
+        https://github.com/vllm-project/vllm/pull/56086#pullrequestreview-5329203459
+        """
+        tools = self._tools(strict=True)
+        request = self._setup_request(
+            tools=tools,
+            tool_choice="auto",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "integer", "multipleOf": 2},
+                },
+            },
+        )
+        parser = self._setup_qwen_parser(tools)
+
+        with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
+            out = parser.adjust_request(request)
+
+        assert out.response_format is not None
+        assert out.structured_outputs is None
+        mock_warn.assert_called_once()
+
+    def test_auto_with_xgrammar_unsupported_nested_schema(self):
+        """Conrer case based on Vadim's feedback in PR #56086
+        https://github.com/vllm-project/vllm/pull/56086#pullrequestreview-5329203459
+        """
+        tools = self._tools(strict=True)
+        request = self._setup_request(
+            tools=tools,
+            tool_choice="auto",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"value": {"type": "number", "multipleOf": 0.5}},
+                        "required": ["value"],
+                    },
+                },
+            },
+        )
+        parser = self._setup_qwen_parser(tools)
+
+        with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
+            out = parser.adjust_request(request)
+
+        assert out.response_format is not None
+        assert out.structured_outputs is None
+        mock_warn.assert_called_once()
+
+    def test_auto_with_lark_grammar(self):
+        """Conrer case based on Vadim's feedback in PR #56086
+        https://github.com/vllm-project/vllm/pull/56086#pullrequestreview-5329203459
+        Lark grammars are converted to EBNF before being merged into the tag.
+        """
+        tools = self._tools(strict=True)
+        request = ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=tools,
+            tool_choice="auto",
+            structured_outputs=StructuredOutputsParams(grammar='start: "ok"'),
+        )
+        parser = self._setup_qwen_parser(tools)
+        out = parser.adjust_request(request)
+
+        assert out.structured_outputs is not None
+        grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
+        assert _is_grammar_accept_string(grammar, "ok")
+        assert not _is_grammar_accept_string(grammar, "bad")
+        assert _is_grammar_accept_string(grammar, self._qwen_tool_call())
 
     # ================================
     # Test cases

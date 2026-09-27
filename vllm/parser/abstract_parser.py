@@ -5,11 +5,11 @@ import contextlib
 import json
 from abc import abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
-from xgrammar import StructuralTag
+from xgrammar import Grammar, StructuralTag
 from xgrammar.structural_tag import (
     ConstStringFormat,
     Format,
@@ -36,11 +36,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
@@ -264,7 +265,17 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
             elements=[ConstStringFormat(value=choice) for choice in params.choice]
         )
     if params.grammar is not None:
-        return GrammarFormat(grammar=params.grammar)
+        from vllm.v1.structured_output.utils import grammar_is_likely_lark
+
+        grammar = params.grammar
+        # IMPORTANT(arpera):
+        # GrammarFormat only accepts EBNF.
+        if grammar_is_likely_lark(grammar):
+            try:
+                grammar = str(Grammar.from_lark(grammar))
+            except Exception as e:
+                raise VLLMValidationError("Invalid grammar specification.") from e
+        return GrammarFormat(grammar=grammar)
     if params.structural_tag is not None:
         s_tag = json.loads(params.structural_tag)
         if "structures" in s_tag:
@@ -283,6 +294,20 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
         # StructuralTagResponseFormat
         return StructuralTag.model_validate(s_tag).format
     return None
+
+
+def _xgrammar_supports(structured_outputs: StructuredOutputsParams) -> bool:
+    """Whether the constraint passes xgrammar validation on its own."""
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    try:
+        # validate_xgrammar_grammar rewrites `choice` into `grammar` in place.
+        validate_xgrammar_grammar(
+            SamplingParams(structured_outputs=replace(structured_outputs))
+        )
+    except (TypeError, ValueError, VLLMValidationError):
+        return False
+    return True
 
 
 class DelegatingParser(Parser):
@@ -473,6 +498,15 @@ class DelegatingParser(Parser):
 
         output_format = None
         if resolved_tools and is_auto and structured_outputs:
+            if not _xgrammar_supports(structured_outputs):
+                logger.warning_once(
+                    "Tool calls are not constrained for tool_choice=auto with "
+                    "structured outputs because xgrammar does not support the "
+                    "structured output constraint; the structured output "
+                    "constraint applies.",
+                    scope="local",
+                )
+                return request
             output_format = structured_outputs_to_format(structured_outputs)
 
         if resolved_tools is not None:
