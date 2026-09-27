@@ -84,7 +84,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+            req_id, meta = self._ready_requests.get_nowait()
+            assert meta.remote is not None
+            if meta.remote.engine_id not in self._remote_agents:
+                # The engine was released after its handshake completed, so
+                # handshake again. This fails if the engine is gone.
+                self._background_nixl_handshake(req_id, meta.remote.engine_id, meta)
+                continue
+            self._read_blocks_for_req(req_id, meta)
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -388,9 +395,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                             remote_agent_name=agent,
                         )
                         self.xfer_stats.record_failed_notification()
-
-        if not meta.awaiting_kvs and not any(meta.local_block_ids):
-            self._recving_metadata.pop(req_id, None)
 
     def _read_blocks(
         self,

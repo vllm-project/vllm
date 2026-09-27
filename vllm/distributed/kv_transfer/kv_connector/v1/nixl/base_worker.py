@@ -839,6 +839,7 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
+        # Map of pull peer (host, port) -> engine_id currently serving it.
         self._engine_by_address: dict[tuple[str, int], EngineId] = {}
 
         self.model_config = vllm_config.model_config
@@ -3551,24 +3552,35 @@ class NixlBaseConnectorWorker:
         # TODO: Also handle push mode, which handshakes in both directions.
         if self._TRANSFER_MODE != "pull":
             return
+        previous = self._engine_by_address.get((host, port))
         self._engine_by_address[(host, port)] = engine_id
+        if previous is None or previous == engine_id:
+            return
+        logger.info(
+            "Remote engine at %s:%d changed from %s to %s.",
+            host,
+            port,
+            previous,
+            engine_id,
+        )
 
     def _cleanup_replaced_remote_engines(self) -> None:
         """Release replaced pull peers once requests and handshakes have drained."""
         if self._TRANSFER_MODE != "pull":
             return
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+            replaced = self._remote_agents.keys() - self._engine_by_address.values()
+        if not replaced:
+            return
+        # _recving_metadata is only accessed from this (main) thread.
         busy = {
             meta.remote.engine_id
             for meta in self._recving_metadata.values()
             if meta.remote is not None
         }
-        with self._handshake_lock:
-            if len(self._handshake_futures) > 0:
-                return
-            current = set(self._engine_by_address.values())
-            keep = current | busy
-            replaced = self._remote_agents.keys() - keep
-        for engine_id in replaced:
+        for engine_id in replaced - busy:
             self._cleanup_remote_engine(engine_id, log_eviction=False)
             logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
 

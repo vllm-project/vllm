@@ -2813,9 +2813,8 @@ class TestPeerReplacement:
         assert self.transport.release_xfer_handle.call_count == (2 if failed else 1)
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
-    @pytest.mark.parametrize("awaiting_kvs", [False, True])
-    def test_waits_for_queued_notification(self, awaiting_kvs):
-        metadata = self._request("old", blocks=(), awaiting_kvs=awaiting_kvs)
+    def test_waits_for_queued_notification(self):
+        metadata = self._request("old", blocks=())
         self.worker._recving_metadata.update(metadata.reqs_to_recv)
         self.worker._background_nixl_handshake(
             "old-req", "old", metadata.reqs_to_recv["old-req"]
@@ -2829,7 +2828,7 @@ class TestPeerReplacement:
             "old", notif_msg=b"old-prefill:1"
         )
         result = self.worker.get_transfer_results()
-        assert result.finished_recving == ({"old-req"} if awaiting_kvs else set())
+        assert result.finished_recving == {"old-req"}
         assert result.failed_recving == set()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
@@ -2842,6 +2841,19 @@ class TestPeerReplacement:
         self._connect("other", host="other-host")
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    def test_rehandshakes_queued_request_for_released_engine(self):
+        # A request queued after its engine's handshake, but drained only after
+        # that engine was replaced and released, must not read from it.
+        metadata = self._request("old", blocks=(), awaiting_kvs=False)
+        self.worker._ready_requests.put(("old-req", metadata.reqs_to_recv["old-req"]))
+        self._connect()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert "old" in self.worker._handshake_futures
+        self.transport.send_notif.assert_not_called()
 
 
 def test_transfer_topology_unregister():
