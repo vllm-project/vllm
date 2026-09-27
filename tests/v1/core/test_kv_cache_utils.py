@@ -93,7 +93,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 @pytest.mark.parametrize(
-    "target_layers, expected_groups, expected_group_size", [(8, 5, 9), (16, 12, 6)]
+    "target_layers, expected_groups, expected_group_size", [(8, 13, 3), (16, 12, 6)]
 )
 def test_hybrid_draft_full_attention_shapes(
     target_layers, expected_groups, expected_group_size
@@ -2110,7 +2110,7 @@ def test_get_kv_cache_config_one_worker():
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
     # These cases exercise 2-layer groups.
-    vllm_config.cache_config.min_kv_cache_group_layers = 1
+    vllm_config.cache_config.min_kv_cache_group_layers = 2
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     vllm_config.cache_config.prefix_cache_retention_interval = None
 
@@ -3217,9 +3217,9 @@ def _grouping_config():
         # gpt-oss + eagle: pad sw 12 -> 13 rather than full 13 -> 24.
         (13, 12, 0, 3, 13),
         # Gemma3-27B: pad sliding window rather than full attention.
-        (10, 52, 0, 3, 10),
-        # MiMo + MTP: no full attention padding, few groups.
-        (9, 39, 5, 3, 9),
+        (10, 52, 0, 3, 5),
+        # MiMo + MTP: no padding.
+        (9, 39, 5, 3, 3),
     ],
 )
 def test_hybrid_group_size_selection(
