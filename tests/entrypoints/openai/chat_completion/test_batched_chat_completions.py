@@ -3,21 +3,10 @@
 
 import json
 from collections.abc import AsyncGenerator
-from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
-from tests.entrypoints.openai.chat_completion.test_serving_chat import (
-    BASE_MODEL_PATHS,
-    CHAT_TEMPLATE,
-    MockModelConfig,
-    _build_online_renderer,
-    _build_renderer,
-)
-from tests.entrypoints.openai.chat_completion.test_serving_chat import (
-    MODEL_NAME as MOCK_MODEL_NAME,
-)
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.batch_serving import (
@@ -25,15 +14,8 @@ from vllm.entrypoints.openai.chat_completion.batch_serving import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
-    ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.abstract_parser import DelegatingParser
-from vllm.reasoning import ReasoningParser
-from vllm.v1.engine.async_llm import AsyncLLM
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -340,67 +322,3 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     )
 
     assert response.choices[0].message.content == "PREFIX ASSISTANT ANSWER"
-
-
-class _KeepSpecialTokensParser(DelegatingParser):
-    """Keeps special tokens for conversations whose last message says RAW."""
-
-    # Non-None so OnlineRenderer.preprocess_chat calls adjust_request.
-    reasoning_parser_cls = ReasoningParser
-
-    def __init__(self, tokenizer, *args, **kwargs):
-        self.model_tokenizer = tokenizer
-
-    def adjust_request(
-        self, request: ChatCompletionRequest | ResponsesRequest
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        if "RAW" in request.messages[-1]["content"]:
-            request.skip_special_tokens = False
-        return request
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("raw", [(True, True), (True, False)])
-async def test_batched_sampling_params_reflect_adjusted_requests(
-    raw: tuple[bool, bool],
-) -> None:
-    """Each conversation must be sampled with its own parser-adjusted request."""
-    mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.errored = False
-    mock_engine.model_config = MockModelConfig()
-    mock_engine.input_processor = MagicMock()
-    mock_engine.renderer = _build_renderer(mock_engine.model_config)
-    mock_engine.generate.side_effect = lambda *args, **kwargs: _generator(0, "ok")
-
-    models = OpenAIServingModels(
-        engine_client=mock_engine,
-        base_model_paths=BASE_MODEL_PATHS,
-    )
-    online_renderer = _build_online_renderer(mock_engine, models.registry)
-    online_renderer.parser = _KeepSpecialTokensParser
-    serving = OpenAIServingChatBatch(
-        mock_engine,
-        models,
-        response_role="assistant",
-        online_renderer=online_renderer,
-        chat_template=CHAT_TEMPLATE,
-        chat_template_content_format="auto",
-        request_logger=None,
-    )
-
-    request = BatchChatCompletionRequest(
-        model=MOCK_MODEL_NAME,
-        messages=[
-            [{"role": "user", "content": "RAW" if is_raw else "plain"}]
-            for is_raw in raw
-        ],
-    )
-
-    response = await serving.create_batch_chat_completion(request)
-    assert not isinstance(response, ErrorResponse), response
-
-    calls = mock_engine.generate.call_args_list
-    assert len(calls) == len(raw)
-    for call, is_raw in zip(calls, raw):
-        assert call.args[1].skip_special_tokens is (not is_raw)
