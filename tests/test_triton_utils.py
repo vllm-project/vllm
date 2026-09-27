@@ -10,10 +10,13 @@ from vllm.triton_utils import importing as triton_importing
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
 
-def _has_triton_for_backends(**drivers: bool) -> bool:
+def _has_triton_for_backends(*, vllm_version: str = "0.0.0", **drivers: bool) -> bool:
     """Re-evaluate ``HAS_TRITON`` against a synthetic ``triton.backends`` map.
 
     ``drivers`` maps backend name to whether its driver reports itself active.
+    ``vllm_version`` selects the build type: importing.py takes its Triton-CPU
+    branch only when "cpu" is in the installed vLLM version, so pin it rather
+    than depending on the real install (the CPU CI image is a "+cpu" build).
     """
     backends = {}
     for name, is_active in drivers.items():
@@ -34,6 +37,7 @@ def _has_triton_for_backends(**drivers: bool) -> bool:
         with (
             mock.patch.dict(sys.modules, patched_modules),
             mock.patch.dict("os.environ", {}, clear=True),
+            mock.patch("importlib.metadata.version", return_value=vllm_version),
         ):
             return importlib.reload(triton_importing).HAS_TRITON
     finally:
@@ -127,6 +131,14 @@ def test_multiple_active_gpu_backends_disable_triton():
 
 def test_cpu_backend_alone_disables_triton():
     assert _has_triton_for_backends(cpu=True) is False
+
+
+def test_cpu_build_with_cpu_backend_keeps_triton():
+    assert _has_triton_for_backends(vllm_version="0.0.0+cpu", cpu=True) is True
+
+
+def test_cpu_build_without_cpu_backend_disables_triton():
+    assert _has_triton_for_backends(vllm_version="0.0.0+cpu", amd=True) is False
 
 
 def test_no_triton_fallback():
