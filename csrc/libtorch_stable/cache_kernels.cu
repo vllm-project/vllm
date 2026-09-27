@@ -512,6 +512,128 @@ __global__ void concat_and_cache_mla_grouped_kernel(
   copy(k_pe_layer, k_pe_token_stride, pe_dim, kv_lora_rank);
 }
 
+// Vectorized variants of the two MLA cache writers above for large launches.
+// The kernels above copy one element per thread with one block per token,
+// which is at the launch floor for small token counts but latency-bound for
+// prefill-sized launches. From mla_cache_vec_min_tokens<kv_dt>() tokens the
+// launchers below switch to one 32-lane group per token,
+// kMlaCacheVecTokensPerBlock tokens per block, and 16-byte vector loads and
+// stores through vectorize_with_alignment, which falls back to scalar accesses
+// for rows that are not 16-byte aligned or not a multiple of the vector size.
+// Both layouts apply the same per-element conversion, so the cache bytes are
+// identical. The threshold is per cache dtype: the plain copy is faster on the
+// vector layout from a few hundred tokens, and the original 512-thread blocks
+// spill into a second wave past 528 tokens on an H100, while the fp8 path
+// pays per-lane converts and only wins from 1024 tokens.
+constexpr int kMlaCacheVecMinTokensAuto = 512;
+constexpr int kMlaCacheVecMinTokensFp8 = 1024;
+constexpr int kMlaCacheVecLanes = 32;
+constexpr int kMlaCacheVecTokensPerBlock = 4;
+constexpr int kMlaCacheVecThreads =
+    kMlaCacheVecLanes * kMlaCacheVecTokensPerBlock;
+
+template <Fp8KVCacheDataType kv_dt>
+constexpr int mla_cache_vec_min_tokens() {
+  return kv_dt == Fp8KVCacheDataType::kAuto ? kMlaCacheVecMinTokensAuto
+                                            : kMlaCacheVecMinTokensFp8;
+}
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__device__ __forceinline__ void concat_and_cache_mla_vec_token(
+    const scalar_t* __restrict__ kv_c_row,  // [kv_lora_rank]
+    const scalar_t* __restrict__ k_pe_row,  // [pe_dim]
+    cache_t* __restrict__ dst,              // [kv_lora_rank + pe_dim]
+    const int kv_lora_rank, const int pe_dim, const float scale,
+    const int lane) {
+  constexpr int VEC_SIZE = 16 / sizeof(scalar_t);
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> op{scale};
+  vectorize_with_alignment<VEC_SIZE>(kv_c_row, dst, kv_lora_rank, lane,
+                                     kMlaCacheVecLanes, op);
+  vectorize_with_alignment<VEC_SIZE>(k_pe_row, dst + kv_lora_rank, pe_dim, lane,
+                                     kMlaCacheVecLanes, op);
+}
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void concat_and_cache_mla_vec_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
+    cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, (kv_lora_rank
+                                     // + pe_dim)]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int num_tokens, const int block_stride, const int entry_stride,
+    const int kv_c_stride, const int k_pe_stride, const int kv_lora_rank,
+    const int pe_dim, const int block_size, const float* scale) {
+  const int lane = threadIdx.x % kMlaCacheVecLanes;
+  const int64_t token_idx =
+      static_cast<int64_t>(blockIdx.x) * kMlaCacheVecTokensPerBlock +
+      threadIdx.x / kMlaCacheVecLanes;
+  if (token_idx >= num_tokens) {
+    return;
+  }
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+
+  const float scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *scale;
+  concat_and_cache_mla_vec_token<scalar_t, cache_t, kv_dt>(
+      kv_c + token_idx * kv_c_stride, k_pe + token_idx * k_pe_stride,
+      kv_cache + block_idx * block_stride + block_offset * entry_stride,
+      kv_lora_rank, pe_dim, scale_val, lane);
+}
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void concat_and_cache_mla_grouped_vec_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_layers, num_tokens,
+                                        // kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_layers, num_tokens, pe_dim]
+    const int64_t* __restrict__ kv_cache_ptrs,  // [num_layers]
+    const float* __restrict__ kv_scales,        // [num_layers] or nullptr
+    const int64_t* __restrict__ slot_mapping,   // [num_layers, num_tokens]
+    const int64_t kv_c_layer_stride, const int64_t kv_c_token_stride,
+    const int64_t k_pe_layer_stride, const int64_t k_pe_token_stride,
+    const int64_t slot_layer_stride, const int64_t block_stride,
+    const int64_t entry_stride, const int num_tokens, const int kv_lora_rank,
+    const int pe_dim, const int block_size) {
+  const int lane = threadIdx.x % kMlaCacheVecLanes;
+  const int64_t token_idx =
+      static_cast<int64_t>(blockIdx.x) * kMlaCacheVecTokensPerBlock +
+      threadIdx.x / kMlaCacheVecLanes;
+  if (token_idx >= num_tokens) {
+    return;
+  }
+  const int64_t layer_idx = blockIdx.y;
+  const int64_t slot_idx =
+      slot_mapping[layer_idx * slot_layer_stride + token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+
+  cache_t* __restrict__ kv_cache =
+      reinterpret_cast<cache_t*>(kv_cache_ptrs[layer_idx]);
+  float scale = 0.0f;
+  if constexpr (kv_dt != Fp8KVCacheDataType::kAuto) {
+    scale = kv_scales[layer_idx];
+  }
+
+  concat_and_cache_mla_vec_token<scalar_t, cache_t, kv_dt>(
+      kv_c + layer_idx * kv_c_layer_stride + token_idx * kv_c_token_stride,
+      k_pe + layer_idx * k_pe_layer_stride + token_idx * k_pe_token_stride,
+      kv_cache + block_idx * block_stride + block_offset * entry_stride,
+      kv_lora_rank, pe_dim, scale, lane);
+}
+
+inline dim3 mla_cache_vec_grid(int num_tokens, int num_layers) {
+  return dim3(cuda_utils::ceil_div(num_tokens, kMlaCacheVecTokensPerBlock),
+              num_layers);
+}
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_ds_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
@@ -892,15 +1014,27 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                    \
-  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                  \
-      <<<grid, block, 0, stream>>>(                                           \
-          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                           \
-          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                           \
-          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
-          slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
-          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
-          reinterpret_cast<const float*>(scale.data_ptr()));
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                     \
+  if (num_tokens < vllm::mla_cache_vec_min_tokens<KV_DTYPE>()) {               \
+    vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                 \
+        <<<grid, block, 0, stream>>>(                                          \
+            reinterpret_cast<KV_T*>(kv_c.data_ptr()),                          \
+            reinterpret_cast<KV_T*>(k_pe.data_ptr()),                          \
+            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+            slot_mapping.const_data_ptr<int64_t>(), block_stride,              \
+            entry_stride, kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim,      \
+            block_size, reinterpret_cast<const float*>(scale.data_ptr()));     \
+  } else {                                                                     \
+    vllm::concat_and_cache_mla_vec_kernel<KV_T, CACHE_T, KV_DTYPE>             \
+        <<<vllm::mla_cache_vec_grid(num_tokens, 1), vllm::kMlaCacheVecThreads, \
+           0, stream>>>(reinterpret_cast<KV_T*>(kv_c.data_ptr()),              \
+                        reinterpret_cast<KV_T*>(k_pe.data_ptr()),              \
+                        reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),       \
+                        slot_mapping.const_data_ptr<int64_t>(), num_tokens,    \
+                        block_stride, entry_stride, kv_c_stride, k_pe_stride,  \
+                        kv_lora_rank, pe_dim, block_size,                      \
+                        reinterpret_cast<const float*>(scale.data_ptr()));     \
+  }
 
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
@@ -1084,37 +1218,38 @@ void concat_and_cache_mla_grouped(
   const dim3 grid(num_tokens, num_layers);
   const dim3 block(std::min(kv_lora_rank, 512));
 
+#define LAUNCH_GROUPED(KV_T, CACHE_T, KV_DTYPE)                            \
+  if (num_tokens < vllm::mla_cache_vec_min_tokens<KV_DTYPE>()) {           \
+    vllm::concat_and_cache_mla_grouped_kernel<KV_T, CACHE_T, KV_DTYPE>     \
+        <<<grid, block, 0, stream>>>(                                      \
+            reinterpret_cast<const KV_T*>(kv_c.data_ptr()),                \
+            reinterpret_cast<const KV_T*>(k_pe.data_ptr()),                \
+            kv_cache_ptrs.const_data_ptr<int64_t>(), kv_scales_ptr,        \
+            slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,     \
+            kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,       \
+            slot_layer_stride, block_stride, entry_stride, kv_lora_rank,   \
+            pe_dim, block_size);                                           \
+  } else {                                                                 \
+    vllm::concat_and_cache_mla_grouped_vec_kernel<KV_T, CACHE_T, KV_DTYPE> \
+        <<<vllm::mla_cache_vec_grid(num_tokens, num_layers),               \
+           vllm::kMlaCacheVecThreads, 0, stream>>>(                        \
+            reinterpret_cast<const KV_T*>(kv_c.data_ptr()),                \
+            reinterpret_cast<const KV_T*>(k_pe.data_ptr()),                \
+            kv_cache_ptrs.const_data_ptr<int64_t>(), kv_scales_ptr,        \
+            slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,     \
+            kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,       \
+            slot_layer_stride, block_stride, entry_stride, num_tokens,     \
+            kv_lora_rank, pe_dim, block_size);                             \
+  }
+
   if (!use_fp8) {
-    vllm::concat_and_cache_mla_grouped_kernel<uint16_t, uint16_t,
-                                              vllm::Fp8KVCacheDataType::kAuto>
-        <<<grid, block, 0, stream>>>(
-            reinterpret_cast<const uint16_t*>(kv_c.data_ptr()),
-            reinterpret_cast<const uint16_t*>(k_pe.data_ptr()),
-            kv_cache_ptrs.const_data_ptr<int64_t>(), nullptr,
-            slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,
-            kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,
-            slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim,
-            block_size);
-    return;
-  }
-
-#define LAUNCH_GROUPED_FP8(KV_DTYPE)                                           \
-  vllm::concat_and_cache_mla_grouped_kernel<__nv_bfloat16, uint8_t, KV_DTYPE>  \
-      <<<grid, block, 0, stream>>>(                                            \
-          reinterpret_cast<const __nv_bfloat16*>(kv_c.data_ptr()),             \
-          reinterpret_cast<const __nv_bfloat16*>(k_pe.data_ptr()),             \
-          kv_cache_ptrs.const_data_ptr<int64_t>(), kv_scales_ptr,              \
-          slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,           \
-          kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,             \
-          slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim, \
-          block_size)
-
-  if (kv_cache_dtype == "fp8_e5m2") {
-    LAUNCH_GROUPED_FP8(vllm::Fp8KVCacheDataType::kFp8E5M2);
+    LAUNCH_GROUPED(uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);
+  } else if (kv_cache_dtype == "fp8_e5m2") {
+    LAUNCH_GROUPED(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);
   } else {
-    LAUNCH_GROUPED_FP8(vllm::Fp8KVCacheDataType::kFp8E4M3);
+    LAUNCH_GROUPED(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
   }
-#undef LAUNCH_GROUPED_FP8
+#undef LAUNCH_GROUPED
 }
 
 namespace vllm {
