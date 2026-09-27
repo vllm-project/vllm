@@ -90,12 +90,18 @@ def _get_quantized_weight_byte_size(
         return default_byte_size
 
     quant_method = cfg.get_name()
-    if quant_method in ("auto_gptq", "auto_awq"):
-        return cast("AutoGPTQConfig | AutoAWQConfig", cfg).weight_bits / 8
-    if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
-        return _QUANT_WEIGHT_BYTE_SIZE[quant_method]
     byte_sizes: set[float] = set()
-    if quant_method == "gpt_oss_mxfp4":
+    if quant_method == "auto_gptq":
+        gptq_cfg = cast("AutoGPTQConfig", cfg)
+        if not gptq_cfg.dynamic and not gptq_cfg.modules_in_block_to_quantize:
+            return gptq_cfg.weight_bits / 8
+    elif quant_method == "auto_awq":
+        awq_cfg = cast("AutoAWQConfig", cfg)
+        if not awq_cfg.modules_to_not_convert:
+            return awq_cfg.weight_bits / 8
+    elif quant_method in _QUANT_WEIGHT_BYTE_SIZE:
+        return _QUANT_WEIGHT_BYTE_SIZE[quant_method]
+    elif quant_method == "gpt_oss_mxfp4":
         byte_sizes = {
             0.5 if kind == "moe" else default_byte_size for kind in layer_kinds
         }

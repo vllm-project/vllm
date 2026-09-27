@@ -1038,7 +1038,11 @@ def test_quantized_model_metrics_keep_transformer_components(
 ):
     """Resolved quantization names must not silently remove attention or FFN."""
     quant_config = SimpleNamespace(
-        get_name=lambda: quant_method, weight_bits=weight_bits
+        get_name=lambda: quant_method,
+        weight_bits=weight_bits,
+        dynamic={},
+        modules_in_block_to_quantize=[],
+        modules_to_not_convert=[],
     )
     config = create_mock_vllm_config(Qwen3Config(), quant_config=quant_config)
     metrics = ModelMetrics(config)
@@ -1051,6 +1055,44 @@ def test_quantized_model_metrics_keep_transformer_components(
     unquantized = ModelMetrics(create_mock_vllm_config(Qwen3Config()))
     assert metrics.get_num_flops(ctx) == unquantized.get_num_flops(ctx)
     assert 0 < metrics.get_read_bytes(ctx) < unquantized.get_read_bytes(ctx)
+
+
+@pytest.mark.parametrize(
+    "quant_method,overrides",
+    [
+        ("gptq", {"dynamic": {".*q_proj": {"bits": 8}}}),
+        ("gptq", {"dynamic": {"-:.*q_proj": {}}}),
+        ("gptq", {"modules_in_block_to_quantize": ["q_proj"]}),
+        ("awq", {"modules_to_not_convert": ["q_proj"]}),
+    ],
+)
+def test_checkpoint_layer_overrides_use_warned_dtype_fallback(
+    quant_method, overrides, caplog, monkeypatch
+):
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+    from vllm.v1.metrics.perf import logger
+
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    # Deduplication is tested separately; each override must reach the warning.
+    monkeypatch.setattr(logger, "warning_once", logger.warning)
+    config_cls = AutoGPTQConfig if quant_method == "gptq" else AutoAWQConfig
+    quant_config = config_cls.from_config(
+        {
+            "bits": 4,
+            "group_size": 128,
+            "desc_act": False,
+            "sym": True,
+            "zero_point": True,
+            **overrides,
+        }
+    )
+    config = create_mock_vllm_config(Qwen3Config(), quant_config=quant_config)
+    metrics = ModelMetrics(config)
+    components = {m.component_type(): m for m in metrics.metrics}
+    assert set(components) == {"attn", "ffn", "unembed"}
+    assert all(m.weight_byte_size == 2 for m in components.values())
+    assert "model dtype" in caplog.text
 
 
 @pytest.mark.parametrize(
