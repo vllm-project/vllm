@@ -466,7 +466,7 @@ def build_attn_metadata(
     # Mamba groups with the same spec and builder differ only in their state
     # indices, so later groups re-gather those from the first group's metadata.
     # Also at capture, so FULL graphs share the batch-level buffers.
-    mamba_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
+    cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
         if not attn_groups[i]:
@@ -524,9 +524,9 @@ def build_attn_metadata(
                 attn_group.kv_cache_spec, MambaSpec
             ):
                 reuse_key = (attn_group.kv_cache_spec, type(attn_metadata_builder))
-            if reuse_key in mamba_metadata:
+            if reuse_key in cached_metadata:
                 metadata = attn_metadata_builder.update_block_table(
-                    mamba_metadata[reuse_key], block_table, slot_mapping
+                    cached_metadata[reuse_key], block_table, slot_mapping
                 )
             elif for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
@@ -547,7 +547,7 @@ def build_attn_metadata(
                     **attn_metadata_extra_kwargs,
                 )
             if reuse_key is not None:
-                mamba_metadata.setdefault(reuse_key, metadata)
+                cached_metadata.setdefault(reuse_key, metadata)
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
         token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
