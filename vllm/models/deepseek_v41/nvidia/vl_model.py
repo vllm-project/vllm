@@ -45,7 +45,6 @@ from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4ViT,
     run_dp_sharded_vision_tower,
 )
-from vllm.models.deepseek_v4.common.vl_model import stream_language_model_first
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -341,21 +340,20 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The child finalizes in load_weights, so its weights must reach it as
-        # one contiguous group.
-        mapped = stream_language_model_first(self.hf_to_vllm_mapper.apply(weights))
+        # Map HF names into this wrapper's namespace up front and sort, so
+        # the "language_model." group reaches the child loader as one
+        # contiguous block (AutoWeightsLoader delegates per contiguous group,
+        # while the child loader only writes parameters.  Finalization is
+        # deferred until the complete load, which is also required by bucketed
+        # weight-transfer refits.
+        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        # The child's load_weights already ran its post-load finalization.
-        self._weights_finalized = True
-        return loaded_params
+        return loader.load_weights(mapped)
 
     def process_weights_after_loading(self) -> None:
-        # Model-level post-load hook (called by the loader after any load
-        # format). Under DummyModelLoader the child's load_weights — and
-        # hence its finalize step — is bypassed, so run it here instead.
-        if getattr(self, "_weights_finalized", False):
-            return
+        # Model-level post-load hook.  It is intentionally the only place that
+        # finalizes the child: load_weights() can be called repeatedly while a
+        # weight-transfer update is still receiving buckets.
         self.language_model.process_weights_after_loading()
 
     def get_mm_mapping(self) -> MultiModelKeys:
