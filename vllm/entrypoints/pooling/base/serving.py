@@ -18,7 +18,10 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.engine.serving import (
+    BaseServing,
+    resolve_cache_salt_header,
+)
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
@@ -125,6 +128,7 @@ class PoolingBaseServing(ABC, BaseServing):
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
         priorities = getattr(request, "priority", 0)
+        resolve_cache_salt_header(request, raw_request)
         prompt_extras = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")

@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.serving import resolve_cache_salt_header
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -111,6 +112,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
+
+        # Resolved on the batch request so every sub-request inherits the salt.
+        resolve_cache_salt_header(request, raw_request)
+
         single_requests = [
             request.to_chat_completion_request(messages)
             for messages in request.messages

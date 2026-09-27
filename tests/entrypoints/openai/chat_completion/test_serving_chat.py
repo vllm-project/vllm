@@ -42,6 +42,7 @@ from vllm.entrypoints.openai.models.serving import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.serving import CACHE_SALT_HEADER
 from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.logprobs import Logprob
@@ -1770,6 +1771,83 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
     assert len(captured_inputs) == 1
     assert captured_inputs[0]["cache_salt"] == "test_salt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("header_salt", "body_salt", "expected_salt"),
+    [
+        ("header-salt", None, "header-salt"),
+        ("header-salt", "body-salt", "header-salt"),
+        (None, "body-salt", "body-salt"),
+        (None, None, None),
+    ],
+)
+async def test_serving_chat_cache_salt_header(header_salt, body_salt, expected_salt):
+    """The X-Cache-Salt header supplies the salt and wins over the body field,
+    so a trusted proxy can pin a request to a cache partition."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    orig_render_chat_request = serving_chat.render_chat_request
+    captured_inputs = []
+
+    async def render_chat_request(request):
+        result = await orig_render_chat_request(request)
+        assert isinstance(result, tuple)
+        _, engine_inputs = result
+        captured_inputs.extend(engine_inputs)
+        return result
+
+    serving_chat.render_chat_request = render_chat_request
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        cache_salt=body_salt,
+    )
+
+    mock_raw_request = MagicMock()
+    mock_raw_request.headers = (
+        {} if header_salt is None else {CACHE_SALT_HEADER: header_salt}
+    )
+    mock_raw_request.state = MagicMock()
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req, mock_raw_request)
+
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0].get("cache_salt") == expected_salt
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_rejects_invalid_cache_salt_header():
+    """An unusable header salt is a client error rather than being silently
+    dropped, which would leak the request into the unsalted cache."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    mock_raw_request = MagicMock()
+    mock_raw_request.headers = {CACHE_SALT_HEADER: "bad/salt"}
+    mock_raw_request.state = MagicMock()
+
+    with pytest.raises(VLLMValidationError, match="cache_salt"):
+        await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
 @pytest.mark.asyncio

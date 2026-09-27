@@ -97,6 +97,8 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 }
 ```
 
+The salt may also be sent as the `X-Cache-Salt` HTTP header, which takes precedence over the body parameter so that a trusted proxy can enforce the boundary. See [Cache Salting](../usage/security.md#cache-salting) for deployment guidance.
+
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
 ## Data Structure

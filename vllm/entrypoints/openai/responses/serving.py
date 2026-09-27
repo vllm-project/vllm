@@ -71,6 +71,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_tool_types,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.serving import resolve_cache_salt_header
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
@@ -355,6 +356,8 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
+
+        resolve_cache_salt_header(request, raw_request)
 
         render_result = await self._render_resolved_response_inputs(
             request,
