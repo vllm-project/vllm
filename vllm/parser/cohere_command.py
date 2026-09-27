@@ -563,6 +563,15 @@ class CohereCommandParser(DelegatingParser):
                 request.response_format = None
         return request
 
+    def _apply_structural_tag(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        # Note(arpera):
+        # No need to go through _apply_structural_tag in abstract_parser.py
+        # since we have already go through _apply_structural_tags here
+        # So, override this method to return request as is
+        return request
+
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         count = 0
         depth = 0
