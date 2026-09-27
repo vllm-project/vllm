@@ -10,7 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import prometheus_client
 import torch
@@ -20,6 +20,8 @@ from typing_extensions import Self
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import FP4_DTYPE
+from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_dtype_size,
@@ -27,6 +29,13 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.utils import create_metric_per_engine
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -44,9 +53,8 @@ class InvalidComponent(Exception):
 # FfnQuantizationConfigParser to determine the weight_byte_size for
 # flops/memory estimation.
 #
-# NOTE: Methods like GPTQ support variable bit-widths
-# (e.g., 4-bit and 8-bit). We default to 4-bit (0.5 bytes) since this
-# is by far the most common configuration.
+# Legacy GPTQ aliases default to 4-bit (0.5 bytes). Resolved AutoGPTQ
+# and AutoAWQ configs use their configured bit widths below.
 _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     # FP8 methods (1 byte per weight)
     "fp8": 1,
@@ -70,6 +78,66 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "inc": 0.5,
     "experts_int8": 1,
 }
+
+
+def _get_quantized_weight_byte_size(
+    vllm_config: VllmConfig,
+    default_byte_size: float,
+    layer_kinds: tuple[Literal["linear", "moe"], ...] = ("linear",),
+) -> float:
+    cfg = vllm_config.quant_config
+    if cfg is None:
+        return default_byte_size
+
+    quant_method = cfg.get_name()
+    if quant_method in ("auto_gptq", "auto_awq"):
+        return cast("AutoGPTQConfig | AutoAWQConfig", cfg).weight_bits / 8
+    if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
+        return _QUANT_WEIGHT_BYTE_SIZE[quant_method]
+    byte_sizes: set[float] = set()
+    if quant_method == "gpt_oss_mxfp4":
+        byte_sizes = {
+            0.5 if kind == "moe" else default_byte_size for kind in layer_kinds
+        }
+    elif quant_method == "deepseek_v4_fp8":
+        expert_dtype = getattr(
+            vllm_config.model_config.hf_text_config, "expert_dtype", "fp4"
+        )
+        if expert_dtype in ("fp4", "fp8"):
+            byte_sizes = {
+                0.5 if kind == "moe" and expert_dtype == "fp4" else 1
+                for kind in layer_kinds
+            }
+    elif quant_method == "online":
+        quant_args = cast("OnlineQuantizationConfig", cfg).args
+        # A component has one weight size, so per-layer overrides cannot be
+        # represented by the current estimator.
+        if not quant_args.targets and not quant_args.ignore:
+            for kind in layer_kinds:
+                spec = getattr(quant_args, kind)
+                if spec is None or spec.weight is None:
+                    byte_sizes.add(default_byte_size)
+                else:
+                    dtype = spec.weight.dtype
+                    if isinstance(dtype, ScalarType):
+                        byte_sizes.add(dtype.size_bits / 8)
+                    elif dtype == FP4_DTYPE:
+                        # FP4 storage packs two logical weights into one uint8.
+                        byte_sizes.add(0.5)
+                    else:
+                        byte_sizes.add(get_dtype_size(dtype))
+    if len(byte_sizes) == 1:
+        return byte_sizes.pop()
+
+    logger.warning_once(
+        "Cannot determine a uniform weight size for quantization method %s "
+        "(%s). Using model dtype (%s bytes) for the MFU/MBU estimate; "
+        "memory traffic may be overestimated.",
+        quant_method,
+        "/".join(layer_kinds),
+        default_byte_size,
+    )
+    return default_byte_size
 
 
 #### Basic Data Types ####
@@ -460,19 +528,9 @@ class AttentionQuantizationConfigParser(Parser):
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         """Override weight_byte_size based on the active quantization method."""
-        cfg = vllm_config.quant_config
-
-        if cfg is None:
-            return args
-
-        quant_method = cfg.get_name()
-        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
-            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
-        else:
-            raise InvalidComponent(
-                f"Unsupported quantization method for attention metrics: {quant_method}"
-            )
-
+        args.weight_byte_size = _get_quantized_weight_byte_size(
+            vllm_config, args.weight_byte_size
+        )
         return args
 
 
@@ -1117,19 +1175,14 @@ class FfnQuantizationConfigParser(Parser):
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         """Override weight_byte_size based on the active FFN quantization method."""
-        cfg = vllm_config.quant_config
-
-        if cfg is None:
-            return args
-
-        quant_method = cfg.get_name()
-        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
-            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
-        else:
-            raise InvalidComponent(
-                f"Unsupported quantization method for FFN metrics: {quant_method}"
-            )
-
+        layer_kinds: tuple[Literal["linear", "moe"], ...] = ("linear",)
+        if args.num_moe_layers > 0:
+            layer_kinds = ("moe",)
+            if args.num_moe_layers < args.num_hidden_layers or args.num_shared_experts:
+                layer_kinds = ("linear", "moe")
+        args.weight_byte_size = _get_quantized_weight_byte_size(
+            vllm_config, args.weight_byte_size, layer_kinds
+        )
         return args
 
 
