@@ -327,7 +327,18 @@ _TOOL_CALL_SAMPLES = [
 def _tool_suppression_expectations(
     sample, think_end: str, tool_start: str, *, include_tool_block: bool
 ) -> tuple[str, str]:
-    """Expected (reasoning, content) when tool calls are not extracted.
+    reasoning, content = _raw_tool_suppression_expectations(
+        sample, think_end, tool_start, include_tool_block=include_tool_block
+    )
+    if sample.content_lstrip:
+        content = content.lstrip(sample.content_lstrip)
+    return reasoning, content
+
+
+def _raw_tool_suppression_expectations(
+    sample, think_end: str, tool_start: str, *, include_tool_block: bool
+) -> tuple[str, str]:
+    """Expected (reasoning, content) from the raw token text.
 
     With ``include_tool_block=True`` (skip_tool_parsing / reasoning
     adapter first pass), tool terminal text is preserved as content so
