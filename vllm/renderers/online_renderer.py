@@ -126,7 +126,7 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
         raise VLLMValidationError(
             "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
             "of non-negative integers.",
-            parameter="kv_transfer_params",
+            parameter="kv_transfer_params.prompt_token_ids",
         )
     return ids
 

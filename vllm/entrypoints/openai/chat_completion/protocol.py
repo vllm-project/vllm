@@ -1180,7 +1180,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "Batch chat completions do not support "
                 "`kv_transfer_params['prompt_token_ids']`: one pre-tokenized "
                 "prompt cannot serve several conversations.",
-                parameter="kv_transfer_params",
+                parameter="kv_transfer_params.prompt_token_ids",
             )
         response_format = data.get("response_format")
         if response_format is not None:

@@ -328,7 +328,9 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
 @pytest.mark.skip_global_cleanup
 def test_batch_rejects_kv_transfer_prompt_token_ids():
     """One pre-tokenized prompt cannot stand in for every conversation."""
-    with pytest.raises(VLLMValidationError, match="parameter=kv_transfer_params"):
+    with pytest.raises(
+        VLLMValidationError, match=r"parameter=kv_transfer_params\.prompt_token_ids"
+    ):
         BatchChatCompletionRequest(
             model="test-model",
             messages=[
