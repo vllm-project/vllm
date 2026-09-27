@@ -556,9 +556,7 @@ impl Usage {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: cached_tokens.map(|c| PromptTokenUsageInfo { cached_tokens: c }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -627,6 +625,20 @@ mod usage_tests {
             usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
             Some(3)
         );
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 8,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            true,
+        );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
     }
 
     #[test]
