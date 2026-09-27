@@ -1628,7 +1628,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
-        # DeepSeek V4.1 a4w4 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4): match
+        # DeepSeek V4/V4.1 a4w4 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4): match
         # ATOM's SEPARATED gate/up weight layout instead of the default
         # GateMode.INTERLEAVE shuffle. AITER's INTERLEAVE + fp4x2 activation
         # combination has no tuned kernel config and produces degenerate

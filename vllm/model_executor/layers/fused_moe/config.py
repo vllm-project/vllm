@@ -1317,7 +1317,7 @@ class FusedMoEConfig:
     tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
-    # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
+    # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4/V4.1 on
     # ROCm/AITER. Resolved once here (construction time, when
     # get_current_vllm_config() is reliably available) rather than in the
     # fused-experts forward path, where the vLLM config context is not set.
