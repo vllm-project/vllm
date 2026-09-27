@@ -23,6 +23,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import round_up_to
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
     ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
@@ -347,17 +348,17 @@ class EncoderCudaGraphManager:
     def _find_smallest_fitting_budget_given_tokens(
         self, total_tokens: int, budgets: list[int] | None = None
     ) -> int | None:
-        """Find smallest budget >= total_tokens.
-
-        Returns:
-            Token budget if found, None if no fitting budget.
-
-        """
+        """Find smallest budget >= total_tokens, or None if none fits."""
         budgets = budgets if budgets is not None else self.token_budgets
-        for budget in budgets:
-            if budget >= total_tokens:
-                return budget
-        return None
+        return round_up_to(budgets, total_tokens)
+
+    def _path_fitting_budget(self, path: str, tokens: int) -> int | None:
+        """Smallest captured budget on a path; 0 when idle, None if oversized."""
+        if tokens == 0:
+            return 0
+        return self._find_smallest_fitting_budget_given_tokens(
+            tokens, self.path_token_budgets[path]
+        )
 
     def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         """Get item specs from the model."""
@@ -479,13 +480,7 @@ class EncoderCudaGraphManager:
             if not current_batch:
                 return
             path_budgets = {
-                path: (
-                    0
-                    if current_tokens[path] == 0
-                    else self._find_smallest_fitting_budget_given_tokens(
-                        current_tokens[path], self.path_token_budgets[path]
-                    )
-                )
+                path: self._path_fitting_budget(path, current_tokens[path])
                 for path in paths
             }
             batches.append((list(current_batch), path_budgets))
@@ -494,23 +489,18 @@ class EncoderCudaGraphManager:
             """Defer the item if closing the current batch strictly reduces
             the summed token budgets on any path the item has tokens for."""
             for path in paths:
-                if item_tokens[path] == 0:
+                item = item_tokens[path]
+                if item == 0:
                     continue
-                budgets = self.path_token_budgets[path]
                 cur = current_tokens[path]
-                b_cur = (
-                    0
-                    if cur == 0
-                    else self._find_smallest_fitting_budget_given_tokens(cur, budgets)
+                b_cur = self._path_fitting_budget(path, cur)
+                b_alone = self._path_fitting_budget(path, item)
+                b_merged = self._path_fitting_budget(path, cur + item)
+                # Only called when the item fits, so every lookup lands
+                # on a captured budget.
+                assert (
+                    b_cur is not None and b_alone is not None and b_merged is not None
                 )
-                b_merged = self._find_smallest_fitting_budget_given_tokens(
-                    cur + item_tokens[path], budgets
-                )
-                b_alone = self._find_smallest_fitting_budget_given_tokens(
-                    item_tokens[path], budgets
-                )
-                if b_cur is None or b_merged is None or b_alone is None:
-                    continue
                 if b_cur + b_alone < b_merged:
                     return True
             return False
