@@ -211,6 +211,7 @@ steps:
     - vllm/utils/
     - vllm/v1/
     - tests/v1
+    - tests/watermarking
   device: cpu-small
   commands:
     # split the test to avoid interference
@@ -222,6 +223,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
+    - pytest -v -s watermarking
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
@@ -493,6 +495,7 @@ steps:
   source_file_dependencies: &cpu-async-engine-deps
   - vllm/assets/
   - vllm/config/
+  - vllm/device_allocator/
   - vllm/engine/arg_utils.py
   - vllm/entrypoints/chat_utils.py
   - vllm/entrypoints/mcp/
@@ -534,9 +537,11 @@ steps:
   - tests/parser
   - tests/transformers_utils
   - tests/config
+  - tests/device_allocator
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s device_allocator
   - pytest -v -s test_envs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pcp_dp.py
