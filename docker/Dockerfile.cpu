@@ -405,6 +405,8 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+# cmake/ is needed by tests/test_cmake_utils.py, which includes cmake/utils.cmake.
+ADD ./cmake/ ./cmake/
 # tools/ carries repo-tooling code that a few tests exercise directly
 # (e.g. tests/tools/test_check_test_tethering.py imports
 # tools.pre_commit.check_test_tethering).
