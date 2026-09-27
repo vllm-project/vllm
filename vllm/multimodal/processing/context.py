@@ -26,14 +26,14 @@ from vllm.utils.jsontree import JSONTree, json_map_leaves
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
-    from transformers.configuration_utils import PretrainedConfig
+    from transformers.configuration_utils import PreTrainedConfig
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.config import ModelConfig
     from vllm.renderers import TokenizeParams
 else:
-    PretrainedConfig = object
+    PreTrainedConfig = object
     BatchFeature = object
     ProcessorMixin = object
 
@@ -123,7 +123,7 @@ class TimingContext:
 
 
 _T = TypeVar("_T")
-_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
+_C = TypeVar("_C", bound=PreTrainedConfig, default=PreTrainedConfig)
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
@@ -148,7 +148,7 @@ class InputProcessingContext:
         return self.tokenizer
 
     @overload
-    def get_hf_config(self, /) -> PretrainedConfig: ...
+    def get_hf_config(self, /) -> PreTrainedConfig: ...
 
     @overload
     def get_hf_config(
@@ -163,7 +163,7 @@ class InputProcessingContext:
         /,
     ) -> Any:
         """Get the HuggingFace configuration
-        (`transformers.PretrainedConfig`) of the model,
+        (`transformers.PreTrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
@@ -171,9 +171,9 @@ class InputProcessingContext:
 
         """
         if typ is None:
-            from transformers.configuration_utils import PretrainedConfig
+            from transformers.configuration_utils import PreTrainedConfig
 
-            typ = PretrainedConfig
+            typ = PreTrainedConfig
 
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
@@ -371,7 +371,7 @@ class BaseProcessingInfo:
     def get_tokenizer(self) -> TokenizerLike:
         return self.ctx.get_tokenizer()
 
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> PreTrainedConfig:
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:

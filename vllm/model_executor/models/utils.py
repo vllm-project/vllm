@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
     from vllm.config.model import ModelConfig
@@ -610,7 +610,7 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: "PretrainedConfig | None" = None,
+    hf_config: "PreTrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """Helper function to initialize an inner model registered to vLLM,

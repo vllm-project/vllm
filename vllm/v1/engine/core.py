@@ -28,7 +28,7 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
 from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import (
@@ -1350,6 +1350,10 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+        vllm_config: VllmConfig = kwargs["vllm_config"]
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
@@ -1357,7 +1361,6 @@ class EngineCoreProc(EngineCore):
         signal_callback: SignalCallback | None = None
         clean_shutdown = False
         try:
-            vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
@@ -2473,6 +2476,9 @@ class EngineCoreActorMixin:
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Initialize tracer for distributed tracing if configured.
         maybe_init_worker_tracer(
             instrumenting_module_name="vllm.engine_core",
