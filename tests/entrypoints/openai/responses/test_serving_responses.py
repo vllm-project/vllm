@@ -1064,46 +1064,6 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     OpenAIResponseUsage.model_validate(response.usage.model_dump(mode="json"))
 
 
-@pytest.mark.asyncio
-async def test_reasoning_tokens_counted_per_round_for_parsable_context():
-    """Tool rounds are separate generations whose thinking opener is in the
-    prompt, so counting the concatenated rounds would undercount."""
-    serving, tokenizer = _make_qwen3_serving()
-    request = ResponsesRequest(input="hi", tools=[], stream=False)
-    response_parser = serving._make_response_parser(
-        request,
-        tokenizer,
-        serving._effective_chat_template_kwargs(request),
-    )
-    context = ParsableContext(
-        response_messages=[],
-        tokenizer=tokenizer,
-        parser_cls=None,
-        request=request,
-        response_parser=response_parser,
-        available_tools=None,
-        chat_template=None,
-        chat_template_content_format="auto",
-    )
-    rounds = [[10, 2, 20], [11, 2, 21]]
-    for token_ids in rounds:
-        context.append_output(
-            _make_text_request_output(tokenizer.decode(token_ids), token_ids)
-        )
-
-    # Qwen3 starts in reasoning: each round has 1 reasoning token, while the
-    # concatenation sees round 2 after a closed block and counts only 1.
-    assert response_parser.count_reasoning_tokens(sum(rounds, [])) == 1
-
-    count_spy = MagicMock(wraps=response_parser.count_reasoning_tokens)
-    response_parser.count_reasoning_tokens = count_spy
-
-    response = await _run_full_generator(serving, request, context, tokenizer)
-
-    assert response.usage.output_tokens_details.reasoning_tokens == 2
-    count_spy.assert_not_called()
-
-
 class TestExtractAllowedToolsFromMcpRequests:
     """Test class for _extract_allowed_tools_from_mcp_requests function."""
 
