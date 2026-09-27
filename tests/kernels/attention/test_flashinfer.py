@@ -159,15 +159,6 @@ def _make_cg_decode_wrapper(
 _TEST_KV_LAYOUTS = {"NHD": KVCacheLayout.LBNHC, "HND": KVCacheLayout.LBHNC}
 
 
-def _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, name: str):
-    """Pin the layout FlashInferImpl reads from the cache config."""
-    monkeypatch.setattr(
-        flashinfer_backend.FlashInferImpl,
-        "kv_cache_layout",
-        property(lambda self: _TEST_KV_LAYOUTS[name]),
-    )
-
-
 def _storage_offsets(tensor: torch.Tensor) -> set[int]:
     return {
         tensor.storage_offset()
@@ -176,8 +167,10 @@ def _storage_offsets(tensor: torch.Tensor) -> set[int]:
     }
 
 
-def _make_nvfp4_impl(flashinfer_backend, monkeypatch, *, trtllm, writer):
-    """FlashInferImpl for nvfp4 KV with trtllm-gen availability faked per phase."""
+def _make_impl(
+    flashinfer_backend, monkeypatch, *, trtllm, writer, kv_cache_dtype="nvfp4"
+):
+    """FlashInferImpl with trtllm-gen availability faked per phase."""
     # The impl looks the writer up with getattr(..., None); None means absent.
     monkeypatch.setattr(
         flashinfer_backend.flashinfer,
@@ -203,7 +196,7 @@ def _make_nvfp4_impl(flashinfer_backend, monkeypatch, *, trtllm, writer):
         num_kv_heads=1,
         alibi_slopes=None,
         sliding_window=None,
-        kv_cache_dtype="nvfp4",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
@@ -351,7 +344,7 @@ def test_flashinfer_nvfp4_native_update_needs_trtllm_in_both_phases(
     def writer(*args, **kwargs):
         pass
 
-    impl = _make_nvfp4_impl(
+    impl = _make_impl(
         flashinfer_backend,
         monkeypatch,
         trtllm={True: prefill_ok, False: decode_ok},
@@ -367,7 +360,7 @@ def test_flashinfer_nvfp4_requires_slot_writer_without_trtllm(monkeypatch):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
     with pytest.raises(RuntimeError, match="NVFP4 slot-mapping KV cache update"):
-        _make_nvfp4_impl(
+        _make_impl(
             flashinfer_backend,
             monkeypatch,
             trtllm={True: False, False: False},
@@ -376,12 +369,10 @@ def test_flashinfer_nvfp4_requires_slot_writer_without_trtllm(monkeypatch):
 
 
 @pytest.mark.parametrize("layout", ["NHD", "HND"])
-def test_flashinfer_nvfp4_kv_cache_views_cover_page_and_follow_rebinding(
-    monkeypatch, layout
-):
+def test_flashinfer_nvfp4_kv_cache_views_and_slot_writer(layout):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
-    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, layout)
+    kv_cache_layout = _TEST_KV_LAYOUTS[layout]
     num_kv_heads, head_size = 3, 128
     logical = (2, 2 * num_kv_heads, 16, nvfp4_kv_cache_full_dim(head_size))
     order = (0, 2, 1, 3) if layout == "NHD" else (0, 1, 2, 3)
@@ -395,19 +386,76 @@ def test_flashinfer_nvfp4_kv_cache_views_cover_page_and_follow_rebinding(
     impl.head_size = head_size
     impl.num_kv_heads = num_kv_heads
     impl.kv_cache_dtype = "nvfp4"
+    impl.is_kvcache_nvfp4 = True
+    impl.kv_sharing_target_layer_name = None
     impl.use_native_nvfp4_kv_cache_update = False
     impl._nvfp4_kv_cache_view_key = None
     impl._nvfp4_kv_cache_views = None
+    writes = []
+
+    def writer(*args, **kwargs):
+        writes.append((args, kwargs))
+
+    impl._nvfp4_slot_writer = writer
 
     physical, kv_cache = make_cache()
-    views = impl._get_nvfp4_kv_cache_views(kv_cache)
+    views = impl._get_nvfp4_kv_cache_views(kv_cache, kv_cache_layout)
 
     offsets = [_storage_offsets(t) for t in (*views.data, *views.block_scales)]
     assert len(set().union(*offsets)) == sum(map(len, offsets)) == physical.numel()
-    assert impl._get_nvfp4_kv_cache_views(kv_cache) is views
+    assert impl._get_nvfp4_kv_cache_views(kv_cache, kv_cache_layout) is views
+
+    # No attention metadata reaches the writer (dummy runs, DFlash context KV).
+    layer = SimpleNamespace(_k_scale=None, _v_scale=None)
+    impl.do_kv_cache_update(layer, None, None, kv_cache, None)
+    ((args, kwargs),) = writes
+    assert kwargs["kv_layout"] == layout
+    assert args[3] is views.data and args[4] is views.block_scales
+
     _, rebound = make_cache()
-    rebound_views = impl._get_nvfp4_kv_cache_views(rebound)
+    rebound_views = impl._get_nvfp4_kv_cache_views(rebound, kv_cache_layout)
     assert rebound_views.data[0].data_ptr() == rebound.data_ptr()
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "nvfp4"])
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
+def test_flashinfer_forward_reads_kv_cache_layout_from_metadata(
+    monkeypatch, kv_cache_dtype, layout
+):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    def writer(*args, **kwargs):
+        pass
+
+    impl = _make_impl(
+        flashinfer_backend,
+        monkeypatch,
+        trtllm={True: False, False: False},
+        writer=writer,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    if kv_cache_dtype == "nvfp4":
+        logical, dtype = (2, 2, 16, nvfp4_kv_cache_full_dim(128)), torch.uint8
+    else:
+        logical, dtype = (2, 1, 16, 2 * 128), torch.bfloat16
+    order = (0, 2, 1, 3) if layout == "NHD" else (0, 1, 2, 3)
+    inverse = tuple(order.index(i) for i in range(4))
+    kv_cache = torch.zeros([logical[i] for i in order], dtype=dtype).permute(*inverse)
+    # A zero-token step runs the KV view setup and nothing after it.
+    metadata = SimpleNamespace(
+        kv_cache_layout=_TEST_KV_LAYOUTS[layout],
+        num_actual_tokens=0,
+        use_cascade=False,
+        num_decode_tokens=0,
+        num_prefill_tokens=0,
+        prefill=None,
+        decode=None,
+    )
+    layer = SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0, _v_scale_float=1.0)
+    query = torch.empty((0, 1, 128), dtype=torch.bfloat16)
+    impl.forward(layer, query, None, None, kv_cache, metadata, torch.empty_like(query))
+    if kv_cache_dtype == "nvfp4":
+        assert impl._nvfp4_kv_cache_view_key.stride_order == order
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
@@ -442,7 +490,6 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
     pages_per_req = [(s + page_size - 1) // page_size for s in seq_lens]
     num_pages = sum(pages_per_req)
 
-    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, "NHD")
     monkeypatch.setattr(
         flashinfer_backend,
         "can_use_trtllm_attention",
@@ -497,7 +544,7 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
     impl.do_kv_cache_update(layer, raw_key, raw_value, kv_cache, slot_mapping)
     assert physical.any(), "slot-mapping writer stored nothing"
 
-    views = impl._get_nvfp4_kv_cache_views(kv_cache)
+    views = impl._get_nvfp4_kv_cache_views(kv_cache, KVCacheLayout.LBNHC)
 
     # Reference KV: what the writer actually stored, dequantized.
     deq_k = torch.empty(
