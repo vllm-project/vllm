@@ -185,12 +185,16 @@ def _make_builder(vllm_config) -> FlashInferMetadataBuilder:
             per_layer_parameters,
         ),
     ):
-        return FlashInferMetadataBuilder(
+        builder = FlashInferMetadataBuilder(
             create_standard_kv_cache_spec(vllm_config),
             ["model.layers.0.self_attn.attn"],
             vllm_config,
             torch.device("cuda"),
         )
+    # The bounds in these tests count drafts, as with speculative decoding.
+    # Without it the builder takes the upper bound as exact.
+    builder._num_speculative_tokens = NUM_SPEC
+    return builder
 
 
 @pytest.mark.parametrize(
