@@ -791,18 +791,71 @@ def test_concat_and_cache_mla(
 
     ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale)
 
+    # The kernel converts each element with the same scaled fp8 cast as
+    # convert_fp8, so the cache bytes must match exactly in both modes.
+    assert torch.equal(kv_cache, ref_kv_cache)
+
+
+@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
+@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
+@pytest.mark.parametrize("num_tokens", [1, 42, 1000, 4096])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_concat_and_cache_mla_strided_input(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    num_tokens: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    device: str,
+) -> None:
+    """Strided and unaligned rows must produce the same cache bytes as
+    contiguous rows: k_pe is passed as the rope slice of the latent
+    projection (the layout the MLA layer uses), and kv_c as an odd-offset
+    column slice so its rows are not 16-byte aligned."""
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    block_size = 16
+    num_blocks = (num_tokens + block_size - 1) // block_size + 2
+    total_slots = num_blocks * block_size
+    slot_mapping = torch.tensor(
+        random.sample(range(total_slots), num_tokens), dtype=torch.long
+    )
+    if num_tokens > 1:
+        slot_mapping[-1] = -1
+    entry_size = kv_lora_rank + qk_rope_head_dim
+    scale = torch.tensor(0.1, dtype=torch.float32)
+
+    latent = torch.randn(num_tokens, entry_size, dtype=dtype)
+    k_pe = latent[:, kv_lora_rank:]
+    kv_c = torch.randn(num_tokens, kv_lora_rank + 1, dtype=dtype)[:, 1:]
+    if num_tokens > 1:
+        assert not k_pe.is_contiguous() and not kv_c.is_contiguous()
+
+    caches = []
+    for a, b in ((kv_c.contiguous(), k_pe.contiguous()), (kv_c, k_pe)):
+        kv_cache = _create_mla_cache(
+            num_blocks, block_size, entry_size, dtype, kv_cache_dtype, device
+        )
+        ops.concat_and_cache_mla(a, b, kv_cache, slot_mapping, kv_cache_dtype, scale)
+        caches.append(kv_cache)
+    assert torch.equal(caches[0], caches[1])
+
+    ref_temp = torch.zeros(num_blocks, block_size, entry_size, dtype=dtype)
+    valid = slot_mapping >= 0
+    ref_temp.view(-1, entry_size)[slot_mapping[valid]] = torch.cat(
+        [kv_c[valid], k_pe[valid]], dim=1
+    )
     if kv_cache_dtype == "fp8":
-        result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
-        ops.convert_fp8(
-            result_temp, kv_cache.contiguous(), scale.item(), kv_dtype=kv_cache_dtype
-        )
-        expected_temp = torch.empty_like(ref_kv_cache, dtype=torch.float16)
-        ops.convert_fp8(
-            expected_temp, ref_kv_cache, scale.item(), kv_dtype=kv_cache_dtype
-        )
-        torch.testing.assert_close(result_temp, expected_temp, atol=0.001, rtol=0.1)
+        ref_kv_cache = torch.empty_like(ref_temp, dtype=caches[0].dtype)
+        ops.convert_fp8(ref_kv_cache, ref_temp, scale.item(), kv_dtype=kv_cache_dtype)
     else:
-        torch.testing.assert_close(kv_cache, ref_kv_cache)
+        ref_kv_cache = ref_temp
+    assert torch.equal(caches[0], ref_kv_cache)
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
