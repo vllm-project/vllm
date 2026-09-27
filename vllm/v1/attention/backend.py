@@ -573,6 +573,26 @@ class AttentionCGSupport(Enum):
     """NO cudagraph support"""
 
 
+def max_decode_query_len(vllm_config: "VllmConfig") -> int:
+    """Widest request a spec-as-decode builder treats as a decode.
+
+    On model runner V2 this is a verification request, 1 +
+    num_speculative_tokens: no V2 speculator builds a wider query. The reorder
+    threshold and the code that mirrors the builders' decode/prefill split all
+    read this, so they cannot drift apart.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is None or speculative_config.num_speculative_tokens is None:
+        return 1
+    num_speculative_tokens = speculative_config.num_speculative_tokens
+    max_query_len = 1 + num_speculative_tokens
+    if speculative_config.parallel_drafting and not vllm_config.use_v2_model_runner:
+        # Model runner V1 only; remove with it. Its parallel drafter appends up
+        # to num_speculative_tokens mask slots to each verified request.
+        max_query_len += num_speculative_tokens
+    return max_query_len
+
+
 class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
@@ -616,6 +636,30 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        """Get the largest per-request query length L of the variable-length
+        decode batches a FULL cudagraph of this builder class can replay.
+
+        The graph must replay any decode batch in which every real request has
+        between 1 and L query tokens and every padding request has 0. Lengths
+        come from the device query_start_loc; host metadata carries only the
+        token count and an upper bound on the per-request length. Batches with
+        a prefill never replay these graphs. Whether host metadata may
+        understate device query lengths at all is a separate backend question;
+        see supports_device_cpu_query_lens_mismatch().
+
+        Returns:
+            L, or None for builders reporting ALWAYS, which replay any batch,
+            and for builders that cannot replay variable-length batches.
+
+        """
+        return None
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
@@ -632,14 +676,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                max_num_queries_for_spec = (
-                    1
-                    + (2 if speculative_config.parallel_drafting else 1)
-                    * speculative_config.num_speculative_tokens
-                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    max_num_queries_for_spec,
+                    max_decode_query_len(self.vllm_config),
                 )
 
         if (
@@ -831,15 +870,14 @@ class AttentionImplBase(ABC, Generic[T]):
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
-        try:
-            from vllm.distributed.parallel_state import get_dcp_group
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.distributed.parallel_state import get_dcp_world_size_and_rank
 
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
+        # Replicated drafts run at DCP=1 inside a DCP target's process group.
+        config = get_current_vllm_config_or_none()
+        self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
+            config is None or config.parallel_config.decode_context_parallel_size > 1
+        )
         try:
             from vllm.distributed.parallel_state import get_pcp_group
 
