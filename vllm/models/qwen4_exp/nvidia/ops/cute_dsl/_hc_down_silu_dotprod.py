@@ -40,7 +40,6 @@ class HcDownSiluDotprod:
         tail_vec_width: int = 4,
         use_pdl: bool = False,
         prefetch_pdl_weights: bool = False,
-        prefetch_tiles: int | None = None,
         rank: int = 320,
         hc: int = 4,
     ):
@@ -53,9 +52,7 @@ class HcDownSiluDotprod:
         self.hc = hc
         self.num_warps = bs // cute.arch.WARP_SIZE
         self._init_k_tiles(k)
-        self.main_prefetch_tiles = (
-            min(self.main_tiles, 8) if prefetch_tiles is None else prefetch_tiles
-        )
+        self.main_prefetch_tiles = min(self.main_tiles, 8)
 
     def _vectorized_elems(self, k_extent: int, vec_width: int) -> int:
         vector_tile = vec_width * self.bs

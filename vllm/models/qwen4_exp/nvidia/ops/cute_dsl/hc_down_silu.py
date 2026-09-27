@@ -10,8 +10,8 @@ are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
 The GEMM keeps ll_bf16's dispatch (dotprod backend for M <= 4, split-K
-beyond, both with PDL) and is bit-identical to the unfused production chain
-``hc_silu(bf16(ll_bf16_gemm))`` on the computed columns. Measured
+beyond, both with PDL) and is bit-identical to the unfused
+``hc_silu(bf16(ll_bf16_gemm))`` reference on the computed columns. Measured
 1.19-1.36x vs the unfused chain at M <= 48 on GB300 (SM103); the ll_bf16
 base GEMM falls behind cuBLAS past M ~ 64, so dispatch is gated to M <= 48
 with an F.linear + hc_silu fallback.
@@ -20,7 +20,6 @@ with an F.linear + hc_silu fallback.
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
@@ -30,7 +29,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..hc import hc_silu
 
@@ -49,11 +47,11 @@ _MAX_FUSED_M = 48
 
 _DEFAULT_DOTPROD_MAX_M = 4
 # bs=256 is ~0.1-0.35 us faster on this shape but changes the shuffle
-# reduction tree, which breaks bit-identity with the production chain
+# reduction tree, which breaks bit-identity with the ll_bf16 reference
 # (1-ulp flips observed at M=4 on GB300). bs=128 stays.
 _DEFAULT_DOTPROD_BS = 128
 # (split_k, num_stages, tile_n); tile_n=16 and (6, 4) are the ll_bf16
-# defaults. split_k=6 keeps the production K-reduction order and is the only
+# defaults. split_k=6 keeps the ll_bf16 K-reduction order and is the only
 # split that stays bit-identical; num_stages/tile_n only affect pipelining
 # and N-tiling.
 _DEFAULT_SPLITK_CONFIG = (6, 4, 16)
@@ -207,12 +205,11 @@ class HcDownSiluGemm:
         from ._hc_down_silu_dotprod import HcDownSiluDotprod
 
         N = cute.sym_int()
-        stride_divisibility = math.gcd(8, compile_key.K)
         hidden_states, router_weight, output = self._fake_gemm_tensors(
             M=compile_key.M,
             K=compile_key.K,
             N=N,
-            divisibility=stride_divisibility,
+            divisibility=8,
         )
         gemm = HcDownSiluDotprod(
             k=compile_key.K,
@@ -325,8 +322,7 @@ class HcDownSiluGemm:
 
         M, K = hidden_states.shape
         N = router_weight.shape[0]
-        n_compute = min(N, _N_COMPUTE)
-        w_gemm = router_weight[:n_compute]
+        w_gemm = router_weight[:_N_COMPUTE]
         compile_key = self.dispatch(M)
         self.compile(compile_key)
         if compile_key.backend == "splitk":
@@ -340,11 +336,11 @@ class HcDownSiluGemm:
 
         stream = _stream()
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
-        out_gemm = output[:, :n_compute] if n_compute < N else output
+        out_gemm = output[:, :_N_COMPUTE]
         if compile_key.backend == "splitk":
             kernel(hidden_states, w_gemm, out_gemm, stream, 1.0)
         else:
-            kernel(hidden_states, w_gemm, out_gemm, n_compute, stream)
+            kernel(hidden_states, w_gemm, out_gemm, _N_COMPUTE, stream)
         return output
 
 
@@ -352,10 +348,12 @@ _hc_down_silu_gemm_kernel = HcDownSiluGemm()
 _hc_down_silu_gemm_m1_pdl_kernel = HcDownSiluGemm(prefetch_pdl_weights=True)
 
 
-def is_fused_eligible(weight: torch.Tensor) -> bool:
-    """Static (shape/dtype/platform) eligibility of a down+inject weight."""
+def is_fused_eligible(weight: torch.Tensor, lora_rank: int, hc_count: int) -> bool:
+    """Check the supported down+inject configuration and platform."""
     return (
-        weight.shape == (_WEIGHT_N, _WEIGHT_K)
+        lora_rank == _RANK
+        and hc_count == _HC
+        and weight.shape == (_WEIGHT_N, _WEIGHT_K)
         and weight.dtype == torch.bfloat16
         and current_platform.is_cuda()
         and current_platform.has_device_capability(90)
@@ -363,21 +361,28 @@ def is_fused_eligible(weight: torch.Tensor) -> bool:
     )
 
 
-def _hc_down_silu(
+def hc_down_silu(
     x: torch.Tensor,
     weight: torch.Tensor,
-    lora_rank: int,
-    hc_count: int,
 ) -> torch.Tensor:
+    """Qwen4Exp HC down projection + SiLU, with an unfused fallback.
+
+    Args:
+        x: Normalized hyper-hidden input, [M, 10240].
+        weight: Merged down+inject weight, [336, 10240].
+
+    Returns:
+        [M, weight.shape[0]] bf16 tensor; pad columns are uninitialized when
+        the fused kernel runs (production discards them).
+
+    """
     if (
         not envs.VLLM_BATCH_INVARIANT
         and x.shape[0] <= _MAX_FUSED_M
-        and lora_rank == _RANK
-        and hc_count == _HC
         and x.dtype == torch.bfloat16
         and x.is_contiguous()
         and weight.is_contiguous()
-        and is_fused_eligible(weight)
+        and is_fused_eligible(weight, _RANK, _HC)
     ):
         kernel = (
             _hc_down_silu_gemm_m1_pdl_kernel
@@ -386,46 +391,8 @@ def _hc_down_silu(
         )
         return kernel(x, weight)
     down = torch.nn.functional.linear(x, weight)
-    lora = hc_silu(down[:, :lora_rank], hc_count)
-    return torch.cat([lora, down[:, lora_rank:]], dim=1)
-
-
-def _hc_down_silu_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    lora_rank: int,
-    hc_count: int,
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0], weight.shape[0]))
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_hc_down_silu",
-    op_func=_hc_down_silu,
-    fake_impl=_hc_down_silu_fake,
-)
-
-
-def hc_down_silu(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    lora_rank: int,
-    hc_count: int,
-) -> torch.Tensor:
-    """Fused HC down projection + SiLU, with an unfused in-op fallback.
-
-    Args:
-        x: Normalized hyper-hidden input, [M, hc_count * hidden_size].
-        weight: Merged down+inject weight, [lora_rank + hc_count + pad, K].
-        lora_rank: Number of SiLU-gated columns.
-        hc_count: Number of passthrough injection-logit columns.
-
-    Returns:
-        [M, weight.shape[0]] bf16 tensor; pad columns are uninitialized when
-        the fused kernel runs (production discards them).
-
-    """
-    return torch.ops.vllm.qwen4_exp_hc_down_silu(x, weight, lora_rank, hc_count)
+    lora = hc_silu(down[:, :_RANK], _HC)
+    return torch.cat([lora, down[:, _RANK:]], dim=1)
 
 
 def request_hc_down_silu_warmup(m_values: Iterable[int]) -> None:

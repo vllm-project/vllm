@@ -59,9 +59,9 @@ class GatedResidual(nn.Module):
     injection.
 
     Weights: the norm owns the grouped GemmaRMSNorm affine; the projections
-    are vLLM Linear modules (merged replicated linear for down+inject), so
-    GEMM dispatch (e.g. the low-latency skinny GEMM) applies through the
-    standard quant_method mechanism.
+    are vLLM Linear modules (merged replicated linear for down+inject).
+    Eligible down+inject projections use the fused SiLU GEMM; other projections
+    use their Linear module's GEMM dispatch.
     """
 
     def __init__(
@@ -106,10 +106,10 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
-            # Static half of the fused down+SiLU dispatch; the op itself
-            # gates on the runtime token count.
             self._use_hc_down_silu = is_fused_eligible(
-                self.input_mix_weight_down_block_inject.weight
+                self.input_mix_weight_down_block_inject.weight,
+                self.lora_rank,
+                self.hc_count,
             )
         else:
             self.input_mix_weight_down = ReplicatedLinear(
@@ -136,17 +136,12 @@ class GatedResidual(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Down projection + SiLU; also returns injection logits if combined."""
         if not self.use_combine:
-            # TODO: extend hc_down_silu to the final-mixer (320, 10240) shape.
             return hc_silu(self.input_mix_weight_down(xn), self.hc_count), None
 
         if self._use_hc_down_silu:
-            # The op applies the SiLU epilogue itself (fused kernel at small
-            # M, F.linear + hc_silu otherwise).
             down_and_injection = hc_down_silu(
                 xn,
                 self.input_mix_weight_down_block_inject.weight,
-                self.lora_rank,
-                self.hc_count,
             )
         else:
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
@@ -166,7 +161,6 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        # produce injection logits for combine
         lora, injection = self._down_and_inject(xn)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
@@ -195,7 +189,6 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        # produce injection logits for combine
         lora, injection = self._down_and_inject(xn)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)

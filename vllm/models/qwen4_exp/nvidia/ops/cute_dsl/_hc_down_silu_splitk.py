@@ -67,7 +67,6 @@ class HcDownSiluSplitK:
         self,
         ab_dtype=cutlass.BFloat16,
         acc_dtype=cutlass.Float32,
-        out_dtype=cutlass.BFloat16,
         tile_n: int = 16,
         tile_k: int = 256,
         num_stages: int = 2,
@@ -79,7 +78,6 @@ class HcDownSiluSplitK:
     ):
         self.ab_dtype = ab_dtype
         self.acc_dtype = acc_dtype
-        self.out_dtype = out_dtype
         self.rank = rank
         self.hc = hc
         self.tile_m = 16

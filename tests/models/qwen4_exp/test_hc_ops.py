@@ -142,7 +142,7 @@ def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
 @requires_cute_dsl
 @pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 48])
 def test_hc_down_silu_fused(num_tokens: int) -> None:
-    # The fused op must stay bit-identical to the unfused production chain
+    # The fused op must stay bit-identical to the unfused ll_bf16 reference
     # hc_silu(bf16(ll_bf16_gemm)) on the computed (non-pad) columns.
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
 
@@ -150,7 +150,7 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
     x = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(DOWN_N, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
 
-    actual = hc_down_silu(x, weight, LORA_RANK, HC)
+    actual = hc_down_silu(x, weight)
 
     down = ll_bf16_gemm(x, weight).to(torch.bfloat16)
     expected = torch.cat([hc_silu(down[:, :LORA_RANK], HC), down[:, LORA_RANK:]], dim=1)
@@ -160,13 +160,13 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
 
 @requires_cute_dsl
 def test_hc_down_silu_fallback() -> None:
-    # M=64 exceeds the fused dispatch limit; the op must fall back to
+    # M=64 exceeds the fused dispatch limit; the function falls back to
     # F.linear + hc_silu.
     torch.manual_seed(0)
     x = torch.randn(64, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(DOWN_N, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
 
-    actual = hc_down_silu(x, weight, LORA_RANK, HC)
+    actual = hc_down_silu(x, weight)
 
     down = torch.nn.functional.linear(x, weight)
     expected = torch.cat([hc_silu(down[:, :LORA_RANK], HC), down[:, LORA_RANK:]], dim=1)
