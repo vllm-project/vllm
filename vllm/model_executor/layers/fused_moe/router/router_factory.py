@@ -188,7 +188,6 @@ def create_fused_moe_router(
                 renormalize=renormalize,
                 num_expert_group=groups,
                 has_e_score_bias=e_score_correction_bias is not None,
-                routed_scaling_factor=routed_scaling_factor,
             )
 
         routing_method_preserved = advertised_routing_method(

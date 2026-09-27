@@ -118,7 +118,7 @@ class RoutingMethodType(IntEnum):
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
     SigmoidRenorm = (6,)
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
-    # (routeScale=1.0, epsilon=1e-20)
+    # (routeScale=routed_scaling_factor, epsilon=1e-20)
     MiniMax2 = (7,)
     # Sigmoid: Sigmoid -> TopK (no renormalization)
     Sigmoid = (8,)
@@ -137,7 +137,6 @@ def get_routing_method_type(
     renormalize: bool,
     num_expert_group: int | None,
     has_e_score_bias: bool,
-    routed_scaling_factor: float | None = 1.0,
 ) -> RoutingMethodType:
     if scoring_func == "sqrtsoftplus":
         # DeepSeek V4 uses sqrtsoftplus routing with optional routing bias
@@ -153,9 +152,7 @@ def get_routing_method_type(
                 return RoutingMethodType.Unspecified
             if (num_expert_group or 0) > 0:
                 return RoutingMethodType.DeepSeekV3
-            if routed_scaling_factor in (None, 1.0):
-                return RoutingMethodType.MiniMax2
-            return RoutingMethodType.Unspecified
+            return RoutingMethodType.MiniMax2
         else:
             return RoutingMethodType.Unspecified
 
