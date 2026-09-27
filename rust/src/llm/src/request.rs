@@ -130,6 +130,41 @@ impl GenerateRequest {
 }
 
 impl PreparedGenerateRequest {
+    /// Read the prefiller's cache hits for response usage.
+    pub fn remote_prefill_cached_tokens(&self) -> Option<usize> {
+        let params = self
+            .engine_request
+            .sampling_params
+            .as_ref()?
+            .extra_args
+            .as_ref()?
+            .get("kv_transfer_params")?;
+        // Python-compatible JSON truthiness for do_remote_prefill.
+        let do_remote_prefill = match params.get("do_remote_prefill")? {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(value) => *value,
+            serde_json::Value::Number(value) => value.as_f64().is_some_and(|n| n != 0.0),
+            serde_json::Value::String(value) => !value.is_empty(),
+            serde_json::Value::Array(value) => !value.is_empty(),
+            serde_json::Value::Object(value) => !value.is_empty(),
+        };
+        if !do_remote_prefill {
+            return None;
+        }
+        let cached = params.get("remote_prefill_cached_tokens")?;
+        let cached = if let Some(value) = cached.as_u64() {
+            value
+        } else if let Some(value) = cached.as_i64() {
+            value.max(0) as u64
+        } else if let Some(value) = cached.as_bool() {
+            // Python accepts bool through isinstance(cached, int).
+            u64::from(value)
+        } else {
+            return None;
+        };
+        usize::try_from(cached).ok()
+    }
+
     /// Return the original prompt token IDs copied into the raw engine request.
     pub fn prompt_token_ids(&self) -> &[u32] {
         self.engine_request
@@ -256,5 +291,77 @@ mod tests {
         let prepared = request.prepare(false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    /// Read the prepared remote-prefill cache count for an 8-token prompt.
+    fn remote_cached_tokens(params: serde_json::Value) -> Option<usize> {
+        let mut request = sample_request();
+        request.prompt_token_ids = (1..=8).collect();
+        if !params.is_null() {
+            request.sampling_params.extra_args =
+                Some([("kv_transfer_params".to_string(), params)].into());
+        }
+        request.prepare(false).unwrap().remote_prefill_cached_tokens()
+    }
+
+    #[test]
+    fn remote_prefill_cached_tokens_reads_metadata() {
+        let remote = |cached| {
+            serde_json::json!({
+                "do_remote_prefill": true,
+                "remote_prefill_cached_tokens": cached,
+            })
+        };
+        let cases = [
+            ("positive", remote(serde_json::json!(5)), Some(5)),
+            ("zero", remote(serde_json::json!(0)), Some(0)),
+            (
+                "missing_count",
+                serde_json::json!({"do_remote_prefill": true}),
+                None,
+            ),
+            (
+                "missing_flag",
+                serde_json::json!({"remote_prefill_cached_tokens": 5}),
+                None,
+            ),
+            (
+                "false_flag",
+                serde_json::json!({"do_remote_prefill": false, "remote_prefill_cached_tokens": 5}),
+                None,
+            ),
+            ("null_count", remote(serde_json::json!(null)), None),
+            ("string_count", remote(serde_json::json!("5")), None),
+            ("float_count", remote(serde_json::json!(5.0)), None),
+            ("true_count", remote(serde_json::json!(true)), Some(1)),
+            ("false_count", remote(serde_json::json!(false)), Some(0)),
+            ("object_count", remote(serde_json::json!({})), None),
+            ("array_count", remote(serde_json::json!([])), None),
+            (
+                "truthy_flag",
+                serde_json::json!({"do_remote_prefill": 1, "remote_prefill_cached_tokens": 5}),
+                Some(5),
+            ),
+            (
+                "falsey_flag",
+                serde_json::json!({"do_remote_prefill": 0, "remote_prefill_cached_tokens": 5}),
+                None,
+            ),
+            ("malformed_params", serde_json::json!([]), None),
+            ("negative", remote(serde_json::json!(-5)), Some(0)),
+            ("above_prompt", remote(serde_json::json!(9999)), Some(9999)),
+            (
+                "unsigned_max",
+                remote(serde_json::json!(u64::MAX)),
+                usize::try_from(u64::MAX).ok(),
+            ),
+            ("local_cache", serde_json::Value::Null, None),
+        ];
+        let results: Vec<_> = cases
+            .iter()
+            .map(|(name, params, _)| (*name, remote_cached_tokens(params.clone())))
+            .collect();
+        let expected: Vec<_> = cases.iter().map(|(name, _, expected)| (*name, *expected)).collect();
+        assert_eq!(results, expected);
     }
 }
