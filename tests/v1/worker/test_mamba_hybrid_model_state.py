@@ -118,6 +118,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         num_draft_tokens_per_req=np.array([k, k, 0], dtype=np.int32),
         max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
+        seq_lens_cpu_lower_bound=None,
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         is_prefilling_np=np.array(is_prefilling),
         prefill_runs_as_decode_np=np.array([False, True, False]),
