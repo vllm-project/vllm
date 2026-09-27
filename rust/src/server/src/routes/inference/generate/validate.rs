@@ -23,6 +23,10 @@ pub(crate) fn validate_request_compat(
         );
     }
 
+    if request.sampling_params.n.unwrap_or(1) != 1 {
+        bail_invalid_request!(param = "n", "Only n=1 is supported.");
+    }
+
     if request.token_ids.is_empty() {
         bail_invalid_request!(
             param = "token_ids",
@@ -30,14 +34,14 @@ pub(crate) fn validate_request_compat(
         );
     }
 
-    if request.sampling_params.max_tokens == Some(0) {
+    if request.sampling_params.inner.max_tokens == Some(0) {
         bail_invalid_request!(
             param = "sampling_params",
             "max_tokens must be greater than 0."
         );
     }
 
-    if let Some(prompt_logprobs) = request.sampling_params.prompt_logprobs {
+    if let Some(prompt_logprobs) = request.sampling_params.inner.prompt_logprobs {
         if prompt_logprobs < 0 && prompt_logprobs != -1 {
             bail_invalid_request!(
                 param = "sampling_params",
@@ -96,6 +100,28 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_parallel_sampling() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"n": 4}
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_explicit_n_one() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"n": 1}
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
     }
 
     #[test]

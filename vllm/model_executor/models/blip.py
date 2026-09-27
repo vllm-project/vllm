@@ -82,7 +82,7 @@ class BlipVisionEmbeddings(nn.Module):
 
 
 class BlipAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -140,8 +140,7 @@ class BlipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel"""
-
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -220,12 +219,12 @@ class BlipEncoderLayer(nn.Module):
 
 
 class BlipEncoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self
+    """Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`BlipEncoderLayer`].
 
     Args:
         config: BlipConfig
+
     """
 
     def __init__(
@@ -313,6 +312,9 @@ class BlipVisionModel(nn.Module, SupportsQuant):
             )
         else:
             self.post_layernorm = None
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"post_layernorm.": None}
+            )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embeddings(pixel_values)
@@ -324,10 +326,7 @@ class BlipVisionModel(nn.Module, SupportsQuant):
         return self.post_layernorm(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes: list[str] = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         # omit layers when num_hidden_layers_override is set
         def _filter(ws):

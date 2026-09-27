@@ -1,6 +1,6 @@
 # Endpoint Plugins
 
-Endpoint plugins let out-of-tree packages add HTTP routes to the OpenAI compatible API server without editing `vllm/entrypoints/openai/api_server.py`. Their scope is
+Endpoint plugins let out-of-tree packages add HTTP routes to the OpenAI compatible API server. Their scope is
 the **HTTP surface only** registering routes and optionally per app state used by those routes. A plugin reaches the engine the same way an in-tree serving handler does, through the `EngineClient` it is handed at startup (e.g. `engine_client.collective_rpc(...)`). No new engine access path is introduced.
 
 !!! warning "Security"

@@ -77,19 +77,13 @@ class EPLBController:
         assert speculative_config is not None
         assert speculative_config.draft_model_config is not None
         assert self.state is not None
-        self.state.add_model(
-            draft_moe_model,
-            speculative_config.draft_model_config,
-        )
+        self.state.add_model(draft_moe_model, speculative_config.draft_model_config)
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True
 
     def maybe_register_model(
-        self,
-        model: nn.Module,
-        model_config: Any,
-        load_dummy_weights: bool,
+        self, model: nn.Module, model_config: Any, load_dummy_weights: bool
     ) -> bool:
         if not self.parallel_config.enable_eplb or load_dummy_weights:
             return False
@@ -110,11 +104,7 @@ class EPLBController:
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
-    def step(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-    ) -> None:
+    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
@@ -123,11 +113,8 @@ class EPLBController:
         ):
             return
 
-        self.state.step(
-            is_dummy,
-            is_profile,
-            log_stats=self.parallel_config.eplb_config.log_balancedness,
-        )
+        log_stats = self.parallel_config.eplb_config.log_balancedness
+        self.state.step(is_dummy, is_profile, log_stats=log_stats)
 
     def prepare_forward(
         self,
@@ -144,7 +131,6 @@ class EPLBController:
         model: nn.Module,
         model_config: Any,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
         moe_model = get_mixture_of_experts_model(model)
         assert moe_model is not None
@@ -155,6 +141,5 @@ class EPLBController:
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
         )
         self._has_registered_models = True
