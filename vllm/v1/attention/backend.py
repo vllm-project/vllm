@@ -30,12 +30,7 @@ if TYPE_CHECKING:
         KVQuantMode,
     )
 
-from vllm.v1.kv_cache_interface import (
-    KVCacheLayout,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    get_kv_quant_mode,
-)
+from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -70,6 +65,7 @@ class AttentionBackend(ABC):
         "bfloat16",
     ]
     requires_kv_cache_zeroing: ClassVar[bool] = False
+    """Whether recycled KV cache blocks must be zeroed before reuse."""
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
@@ -153,10 +149,6 @@ class AttentionBackend(ABC):
         """
         if not cls.requires_kv_cache_zeroing:
             return spec
-        assert isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)), (
-            f"{cls.__name__} requires KV cache zeroing but received "
-            f"unsupported spec type {type(spec).__name__}"
-        )
         return replace(spec, requires_kv_cache_zeroing=True)
 
     @classmethod

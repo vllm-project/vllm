@@ -60,6 +60,7 @@ from vllm.v1.hisparse.layout import (
     get_hisparse_gpu_memory_usage,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
@@ -3201,20 +3202,30 @@ def new_swa_mla_spec(head_size=576, sliding_window=128, model_version=None):
 
 @pytest.mark.parametrize(
     "spec",
-    [new_mla_spec(), new_swa_mla_spec()],
-    ids=["full-mla", "sliding-window-mla"],
+    [
+        new_kv_cache_spec(),
+        new_sliding_window_spec(),
+        new_mla_spec(),
+        new_swa_mla_spec(),
+    ],
+    ids=["full-attention", "sliding-window", "mla", "sliding-window-mla"],
 )
 @pytest.mark.parametrize("wrap_uniform", [False, True])
 @pytest.mark.parametrize("requires_zeroing", [False, True])
-def test_mla_kv_cache_zeroing_follows_backend_requirement(
-    spec: MLAAttentionSpec | SlidingWindowMLASpec,
+@pytest.mark.skip_global_cleanup
+def test_attention_kv_cache_zeroing_follows_backend_requirement(
+    spec: AttentionSpec,
     wrap_uniform: bool,
     requires_zeroing: bool,
 ) -> None:
-    spec = replace(spec, requires_kv_cache_zeroing=requires_zeroing)
+    spec = spec.merge([spec, replace(spec, requires_kv_cache_zeroing=requires_zeroing)])
     group_spec = (
         UniformTypeKVCacheSpecs(
-            block_size=spec.block_size, kv_cache_specs={"layer": spec}
+            block_size=spec.block_size,
+            kv_cache_specs={
+                "unmarked": replace(spec, requires_kv_cache_zeroing=False),
+                "layer": spec,
+            },
         )
         if wrap_uniform
         else spec
@@ -3222,13 +3233,20 @@ def test_mla_kv_cache_zeroing_follows_backend_requirement(
     worker_config = KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], group_spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                list(group_spec.kv_cache_specs)
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else ["layer"],
+                group_spec,
+            )
+        ],
     )
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
 
-    assert worker_config.has_mla_layers_requiring_zeroing is requires_zeroing
+    assert worker_config.has_attention_layers_requiring_zeroing is requires_zeroing
     assert worker_config.needs_kv_cache_zeroing is requires_zeroing
-    assert scheduler_config.has_mla_layers_requiring_zeroing is requires_zeroing
+    assert scheduler_config.has_attention_layers_requiring_zeroing is requires_zeroing
     assert scheduler_config.needs_kv_cache_zeroing is requires_zeroing
 
 

@@ -1092,6 +1092,7 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
     assert backend.supports_non_causal_dcp()
 
 
+@pytest.mark.skip_global_cleanup
 def test_only_flashinfer_mla_backends_require_kv_cache_zeroing():
     flashinfer_mla_module = pytest.importorskip(
         "vllm.v1.attention.backends.mla.flashinfer_mla"

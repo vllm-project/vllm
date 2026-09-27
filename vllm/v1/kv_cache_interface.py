@@ -487,6 +487,8 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    requires_kv_cache_zeroing: bool = field(default=False, compare=False)
+    """Whether the selected backend requires clean pages before cache reuse."""
     head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
@@ -505,6 +507,19 @@ class AttentionSpec(KVCacheSpec):
         super().__post_init__()
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        if not all(spec == specs[0] for spec in specs[1:]):
+            raise AssertionError(
+                "All layers in the same KV cache group must be the same."
+            )
+        return replace(
+            specs[0],
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
+        )
 
     @property
     def num_heads(self) -> int:
@@ -622,6 +637,9 @@ class FullAttentionSpec(AttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             tokens_per_state=specs[0].tokens_per_state,
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -630,6 +648,8 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if f.name == "requires_kv_cache_zeroing":
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -656,8 +676,6 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
-    requires_kv_cache_zeroing: bool = False
-    """Whether the selected backend requires clean pages before cache reuse."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
@@ -726,6 +744,8 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if f.name == "requires_kv_cache_zeroing":
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -777,6 +797,7 @@ class RSWASpec(FullAttentionSpec):
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
             tokens_per_state=base.tokens_per_state,
+            requires_kv_cache_zeroing=base.requires_kv_cache_zeroing,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -928,8 +949,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     """Sliding window attention with MLA cache format."""
 
     cache_dtype_str: str | None = None
-    requires_kv_cache_zeroing: bool = False
-    """Whether the selected backend requires clean pages before cache reuse."""
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
@@ -1210,12 +1229,17 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if f.name == "requires_kv_cache_zeroing":
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1570,10 +1594,9 @@ class KVCacheConfig:
         )
 
     @property
-    def has_mla_layers_requiring_zeroing(self) -> bool:
+    def has_attention_layers_requiring_zeroing(self) -> bool:
         return any(
-            isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
-            and spec.requires_kv_cache_zeroing
+            isinstance(spec, AttentionSpec) and spec.requires_kv_cache_zeroing
             for group in self.kv_cache_groups
             for spec in iter_layer_specs(group.kv_cache_spec)
         )
@@ -1604,6 +1627,6 @@ class KVCacheConfig:
         """
         return (
             self.has_mamba_layers
-            or self.has_mla_layers_requiring_zeroing
+            or self.has_attention_layers_requiring_zeroing
             or self.has_mixed_precision_kv_cache
         )
