@@ -11,15 +11,16 @@ and consumer instances read/write KV to/from the store independently,
 enabling prefix caching via hash-based deduplication.
 """
 
-from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
+    AllBlocksCleared,
     BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -48,7 +49,13 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .data import BoundaryStoreStats, MooncakeStoreConnectorMetadata
+from .data import (
+    BlockKey,
+    BoundaryStoreStats,
+    MooncakeStoreConnectorMetadata,
+    StoreResidency,
+    store_block_key,
+)
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
@@ -56,54 +63,183 @@ from .worker import MooncakeStoreWorker
 logger = init_logger(__name__)
 
 
-class MooncakeStoreKVEvents(KVConnectorKVEvents):
-    """KV event aggregation for MooncakeStoreConnector."""
+@dataclass
+class _PendingResidency:
+    """One logical block waiting for its group's lookup namespaces to report."""
 
-    def __init__(
-        self,
-        num_workers: int,
-        group_tp_replication_factors: Sequence[int] = (1,),
-    ) -> None:
+    event: BlockStored
+    covered: set[str]
+
+
+class MooncakeStoreKVEvents(KVConnectorKVEvents):
+    """Cross-rank aggregation of Mooncake Store residency events.
+
+    A ``BlockStored`` from this connector claims the Store holds a complete copy
+    of one logical block for one cache group. Complete means every rank namespace
+    a later lookup probes for that group holds it, which is the prefix set
+    ``MooncakeStoreWorker._lookup_key_prefixes`` builds from the group's TP
+    replication factor and the engine's PCP/DCP/PP layout. Each rank therefore
+    reports the namespaces its committed Store objects cover, and a block is
+    released once their union spans its group's probe set.
+
+    Coverage accumulates across engine steps and is retained until the block is
+    released, so stores that land in different steps still announce the block
+    once, after the last namespace reports. Repeated reports of a block add
+    coverage only: the payload announced is the first one seen, and the block is
+    announced once per residency epoch, which ``AllBlocksCleared`` ends.
+
+    An instance is reached by one thread at a time: a worker fills a container of
+    its own per poll, and the engine's aggregation and the scheduler's step run
+    the containers they own serially.
+    """
+
+    def __init__(self, num_workers: int = 1) -> None:
         if num_workers <= 0:
             raise ValueError("num_workers must be greater than zero.")
-        if any(factor <= 0 for factor in group_tp_replication_factors):
-            raise ValueError("TP replication factors must be greater than zero.")
-        self._event_counter: Counter[KVCacheEvent] = Counter()
+        # Bookkeeping for the connector framework: a block is released on the
+        # namespaces that cover it, never on a count of reporting workers.
         self._num_workers = num_workers
-        self._group_tp_replication_factors = tuple(group_tp_replication_factors)
+        # Blocks whose coverage is still short of their group's probe set.
+        self._pending: dict[BlockKey, _PendingResidency] = {}
+        # Blocks released in this residency epoch, drained or not.
+        self._released: set[BlockKey] = set()
+        # Released blocks and clear events awaiting the publisher.
+        self._ready: list[KVCacheEvent] = []
+        # Per group, the namespaces a later lookup probes.
+        self._required: dict[int, frozenset[str]] = {}
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
+        """Record events that carry no cross-rank coverage contract.
+
+        ``AllBlocksCleared`` is the one event that qualifies: it ends the
+        residency epoch, dropping what was learned before the Store was wiped so
+        the same block is announced again once it is stored into the fresh Store.
+        A ``BlockStored`` is released on the namespaces its rank committed, which
+        a bare event cannot express; ranks report blocks through
+        :meth:`add_residency`.
+        """
         if not isinstance(events, list):
             raise TypeError("events must be a list of KVCacheEvent.")
-        self._event_counter.update(events)
+        for event in events:
+            if not isinstance(event, AllBlocksCleared):
+                raise ValueError(
+                    f"{type(event).__name__} must carry the Store namespaces "
+                    f"that cover it; report blocks through add_residency()"
+                )
+            self._retire_epoch()
+            self._ready.append(event)
 
-    def _replication_factor(self, event: KVCacheEvent) -> int:
-        if not isinstance(event, BlockStored) or event.group_idx is None:
-            return 1
-        return self._group_tp_replication_factors[event.group_idx]
+    def add_residency(
+        self,
+        residency: StoreResidency,
+        required: Mapping[int, frozenset[str]],
+    ) -> None:
+        """Record the blocks one rank committed, and the namespaces covering them.
 
-    def _is_common_event(self, event: KVCacheEvent, count: int) -> bool:
-        return count * self._replication_factor(event) >= self._num_workers
+        Args:
+            residency: The blocks this rank finished writing, and per block the
+                Store key namespaces its own objects occupy.
+            required: Per cache group, the namespaces a later lookup probes.
 
-    def aggregate(self) -> "MooncakeStoreKVEvents":
-        common_events = self.pop_common_events()
-        self._event_counter.clear()
-        self._event_counter.update(common_events)
-        self._num_workers = 1
+        """
+        self._merge_required(required)
+        for event in residency.events:
+            key = store_block_key(event)
+            namespaces = residency.covered.get(key)
+            if namespaces is None:
+                raise ValueError(
+                    f"residency for group {key[0]} block {key[1]} reports no "
+                    f"covered Store namespaces"
+                )
+            self._record(key, event, namespaces)
+
+    def merge(self, other: "KVConnectorKVEvents") -> "MooncakeStoreKVEvents":
+        """Fold another container's contributions into this one."""
+        if not isinstance(other, MooncakeStoreKVEvents):
+            raise TypeError(
+                f"cannot merge {type(other).__name__} into MooncakeStoreKVEvents"
+            )
+        self._merge_required(other._required)
+        # `other` queues the blocks it released before it retired its own epoch
+        # ahead of the clear itself, so replaying them in order keeps pre-clear
+        # releases ahead of the clear while the coverage it accumulated
+        # afterwards lands in the new epoch.
+        for event in other._ready:
+            if isinstance(event, AllBlocksCleared):
+                self._retire_epoch()
+                self._ready.append(event)
+                continue
+            self._release(store_block_key(event), event)
+        self._released |= other._released
+        for key, pending in other._pending.items():
+            self._record(key, pending.event, frozenset(pending.covered))
         return self
 
-    def pop_common_events(self) -> list[KVCacheEvent]:
-        common_events = [
-            event
-            for event, count in self._event_counter.items()
-            if self._is_common_event(event, count)
-        ]
-        for event in common_events:
-            del self._event_counter[event]
-        return common_events
+    def _merge_required(self, required: Mapping[int, frozenset[str]]) -> None:
+        for group_idx, namespaces in required.items():
+            known = self._required.get(group_idx)
+            if known is not None and known != namespaces:
+                raise ValueError(
+                    f"cache group {group_idx} lookup namespaces differ between "
+                    f"ranks: {sorted(known)} != {sorted(namespaces)}"
+                )
+            self._required[group_idx] = namespaces
 
-    def has_events(self) -> bool:
-        return bool(self._event_counter)
+    def _record(
+        self,
+        key: BlockKey,
+        event: BlockStored,
+        namespaces: frozenset[str],
+    ) -> None:
+        """Fold one rank's coverage of one logical block into the pending state."""
+        if key in self._released:
+            # Already announced this epoch; a late report adds nothing.
+            return
+        probe_set = self._required.get(key[0])
+        if probe_set is None:
+            raise ValueError(f"no lookup namespaces reported for cache group {key[0]}")
+        unknown = namespaces - probe_set
+        if unknown:
+            raise ValueError(
+                f"residency for group {key[0]} covers {sorted(unknown)}, which a "
+                f"lookup for that group never probes"
+            )
+        pending = self._pending.get(key)
+        if pending is None:
+            pending = _PendingResidency(event, set())
+            self._pending[key] = pending
+        pending.covered |= namespaces
+        if probe_set <= pending.covered:
+            del self._pending[key]
+            self._release(key, pending.event)
+
+    def _release(self, key: BlockKey, event: BlockStored) -> None:
+        """Announce one block for the rest of this residency epoch."""
+        if key in self._released:
+            return
+        self._released.add(key)
+        self._pending.pop(key, None)
+        self._ready.append(event)
+
+    def _retire_epoch(self) -> None:
+        """Forget everything learned before the current residency epoch ended.
+
+        Pending coverage goes, so a store that was still incomplete when the
+        Store was wiped is not announced afterwards, and the released ledger
+        goes, so a block stored into the fresh Store is announced again.
+        """
+        self._pending.clear()
+        self._released.clear()
+
+    def pop_ready_events(self) -> list[KVCacheEvent]:
+        """Remove and return the events ready for the publisher."""
+        events = self._ready
+        self._ready = []
+        return events
+
+    def aggregate(self) -> "MooncakeStoreKVEvents":
+        """Return self; a block is released as soon as its coverage is complete."""
+        return self
 
     def increment_workers(self, count: int = 1) -> None:
         if count <= 0:
@@ -111,17 +247,24 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         self._num_workers += count
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        return list(self._event_counter.elements())
+        events: list[KVCacheEvent] = [p.event for p in self._pending.values()]
+        events.extend(self._ready)
+        return events
 
     def get_number_of_workers(self) -> int:
         return self._num_workers
 
     def clear_events(self) -> None:
-        self._event_counter.clear()
-        self._num_workers = 1
+        """Retire the residency epoch and drop every queued event."""
+        self._retire_epoch()
+        self._ready.clear()
 
     def __repr__(self) -> str:
-        return f"<MooncakeStoreKVEvents events={self.get_all_events()}>"
+        return (
+            f"<MooncakeStoreKVEvents workers={self._num_workers} "
+            f"pending={len(self._pending)} released={len(self._released)} "
+            f"ready={len(self._ready)}>"
+        )
 
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
@@ -293,8 +436,15 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_scheduler is not None
             # Clear local references to keys we're about to wipe.
             self.connector_scheduler.load_specs.clear()
-            self._kv_cache_events = None
-            return self.connector_scheduler.reset_store()
+            reset_ok = self.connector_scheduler.reset_store()
+            if reset_ok:
+                # A wiped Store opens a new residency epoch: coverage that was
+                # still pending when it was wiped must not be announced, and a
+                # block stored again afterwards is announced again. A failed
+                # reset leaves the accumulator alone, since the Store still
+                # holds what it announced.
+                self._kv_cache_events = None
+            return reset_ok
         return None
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -308,16 +458,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if self._kv_cache_events is None:
-            self._kv_cache_events = kv_cache_events
-        else:
-            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
+            # The accumulator outlives the step that first feeds it: a block's
+            # coverage is only complete once every rank namespace has reported,
+            # which can take several engine steps.
+            self._kv_cache_events = MooncakeStoreKVEvents()
+        self._kv_cache_events.merge(kv_cache_events)
 
     def take_events(self) -> Iterable[KVCacheEvent]:
-        if self._kv_cache_events is not None:
-            events = self._kv_cache_events.pop_common_events()
-            if not self._kv_cache_events.has_events():
-                self._kv_cache_events = None
-            yield from events
+        """Drain the Store blocks whose cross-rank coverage is complete."""
+        if self._kv_cache_events is None:
+            return ()
+        return self._kv_cache_events.pop_ready_events()
 
     def get_boundary_store_stats(self) -> BoundaryStoreStats | None:
         """Return a snapshot of the mamba boundary hand-off counters."""
@@ -399,15 +550,19 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             or self.connector_worker.kv_send_thread is None
         ):
             return None
-        events = self.connector_worker.get_kv_events()
-        # Empty containers still count this worker toward the poll's quorum.
-        kv_events = MooncakeStoreKVEvents(
-            num_workers=1,
-            group_tp_replication_factors=(
-                self.connector_worker.group_tp_replication_factors
-            ),
+        # A worker with nothing to report still polls an empty container: with
+        # coverage, a step that contributes no namespace neither completes nor
+        # resets another rank's contribution.
+        kv_events = MooncakeStoreKVEvents(num_workers=1)
+        kv_events.add_residency(
+            self.connector_worker.drain_residency(),
+            {
+                group_idx: frozenset(prefixes)
+                for group_idx, prefixes in enumerate(
+                    self.connector_worker.lookup_key_prefixes
+                )
+            },
         )
-        kv_events.add_events(events)
         return kv_events
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:

@@ -44,6 +44,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
+    BlockKey,
     ChunkedTokenDatabase,
     KeyMetadata,
     LBHNCStoreLayout,
@@ -53,9 +54,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeStoreWorkerMetadata,
     PoolKey,
     ReqMeta,
+    StoreResidency,
     StoreShardId,
     TailKeyBoundary,
     TPShardedStoreLayout,
+    store_block_key,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -357,45 +360,39 @@ class StoreBlock(NamedTuple):
 
 def _select_objects(
     blocks: Sequence[StoreBlock], keep: Callable[[int], bool]
-) -> list[StoreBlock]:
+) -> tuple[list[StoreBlock], list[int]]:
     """Restrict each block to the objects whose flat index satisfies ``keep``.
 
-    A block that keeps no object drops out, which is how both a dedup hit and a
-    failed key take a block out of the write and out of the announcement.
+    A block that keeps no object drops out: every object of it is already
+    resident, so it needs no put. Returns the blocks as prepared for the write
+    and the original flat index of each kept object, which is how a failed key
+    is mapped back to the block it belongs to.
     """
     selected: list[StoreBlock] = []
+    original_indices: list[int] = []
     index = 0
     for block in blocks:
-        objects = tuple(
-            obj for offset, obj in enumerate(block.objects) if keep(index + offset)
-        )
+        objects: list[StoreObject] = []
+        for offset, obj in enumerate(block.objects):
+            if not keep(index + offset):
+                continue
+            objects.append(obj)
+            original_indices.append(index + offset)
         index += len(block.objects)
         if len(objects) == len(block.objects):
             selected.append(block)
         elif objects:
-            selected.append(block._replace(objects=objects))
-    return selected
-
-
-def _committed_blocks(
-    blocks: Sequence[StoreBlock], failed: set[int]
-) -> list[StoreBlock]:
-    """Blocks whose every Store object committed, i.e. the now-resident ones."""
-    committed: list[StoreBlock] = []
-    index = 0
-    for block in blocks:
-        count = len(block.objects)
-        if not any(index + offset in failed for offset in range(count)):
-            committed.append(block)
-        index += count
-    return committed
+            selected.append(block._replace(objects=tuple(objects)))
+    return selected, original_indices
 
 
 class StoreResidencyEvents:
     """Residency events for the blocks this rank commits to the Store.
 
     The single place this connector builds a ``BlockStored`` event, so a write
-    path cannot end up persisting blocks without announcing them.
+    path cannot end up persisting blocks without announcing them. Each event
+    carries the Store key namespaces its block's objects occupy, which is what
+    the scheduler-side accumulator checks a block's reuse coverage against.
     """
 
     def __init__(self, group_specs: Sequence[KVCacheSpec]) -> None:
@@ -410,45 +407,88 @@ class StoreResidencyEvents:
         )
         self._lock = threading.Lock()
         self._events: list[BlockStored] = []
+        self._covered: dict[BlockKey, frozenset[str]] = {}
 
-    def record(self, blocks: Sequence[StoreBlock], req_meta: ReqMeta) -> None:
-        """Announce the blocks of a write that became resident.
+    def record(
+        self,
+        blocks: Sequence[StoreBlock],
+        req_meta: ReqMeta,
+        failed: set[int],
+    ) -> None:
+        """Announce the blocks of this write that are resident in the Store.
+
+        A block is announced once every one of its Store objects is there,
+        whether this call wrote that object or found it already present; a block
+        with a failed object reports nothing, not even the objects that
+        committed. Coverage is taken from the block's full object set, so the
+        objects dedup found count for the namespaces they occupy.
 
         The payload is built here rather than by the producers, so a write that
         turns out not to be announced also does not pay for slicing token ids.
+
+        Args:
+            blocks: Blocks this call set out to persist, each with its full
+                object set.
+            req_meta: Job the blocks belong to; supplies the token payload.
+            failed: Flat indices of ``blocks``' objects whose put did not
+                commit.
+
         """
         if not blocks:
             return
         events: list[BlockStored] = []
+        block_coverage: dict[BlockKey, frozenset[str]] = {}
+        index = 0
         for block in blocks:
+            count = len(block.objects)
+            block_failed = any(index + offset in failed for offset in range(count))
+            index += count
+            if block_failed:
+                continue
             start, end = block.token_span
             kind, sliding_window = self._group_metadata[block.group_idx]
-            events.append(
-                BlockStored(
-                    block_hashes=[maybe_convert_block_hash(block.block_hash)],
-                    parent_block_hash=(
-                        maybe_convert_block_hash(block.parent_hash)
-                        if block.parent_hash is not None
-                        else None
-                    ),
-                    token_ids=list(_event_token_ids(req_meta, start, end)),
-                    block_size=end - start,
-                    lora_id=None,
-                    medium=STORE_MEDIUM,
-                    lora_name=None,
-                    group_idx=block.group_idx,
-                    kv_cache_spec_kind=kind,
-                    kv_cache_spec_sliding_window=sliding_window,
-                )
+            event = BlockStored(
+                block_hashes=[maybe_convert_block_hash(block.block_hash)],
+                parent_block_hash=(
+                    maybe_convert_block_hash(block.parent_hash)
+                    if block.parent_hash is not None
+                    else None
+                ),
+                token_ids=list(_event_token_ids(req_meta, start, end)),
+                block_size=end - start,
+                lora_id=None,
+                medium=STORE_MEDIUM,
+                lora_name=None,
+                group_idx=block.group_idx,
+                kv_cache_spec_kind=kind,
+                kv_cache_spec_sliding_window=sliding_window,
+            )
+            events.append(event)
+            block_coverage[store_block_key(event)] = frozenset(
+                obj.key.rsplit("@", 1)[0] for obj in block.objects
             )
         with self._lock:
             self._events.extend(events)
+            self._covered.update(block_coverage)
 
-    def drain(self) -> list[BlockStored]:
+    def retire(self) -> None:
+        """Drop buffered reports for objects the Store no longer holds.
+
+        A report buffered before the Store was wiped describes objects that are
+        gone; carrying it into the next poll would announce residency of a block
+        the fresh Store does not hold.
+        """
+        with self._lock:
+            self._events = []
+            self._covered = {}
+
+    def drain(self) -> StoreResidency:
         with self._lock:
             events = self._events
+            covered = self._covered
             self._events = []
-        return events
+            self._covered = {}
+        return StoreResidency(events, covered)
 
 
 # ============================================================
@@ -962,11 +1002,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         missing = {index for index, value in enumerate(exists) if value != 1}
         if not missing:
+            # Every object is resident, so this batch is a complete report of
+            # the namespaces those blocks occupy -- the report a lookup for
+            # another rank's shards needs in order to complete the block.
+            if self.enable_kv_event:
+                self.residency_events.record(blocks, req_meta, set())
             return True
 
         # Objects already in the Store are satisfied; only the missing ones of
         # each block are written, and the block is announced once they all are.
-        pending = _select_objects(blocks, lambda index: index in missing)
+        pending, original_indices = _select_objects(
+            blocks, lambda index: index in missing
+        )
 
         keys = [obj.key for block in pending for obj in block.objects]
         addrs = [obj.addr for block in pending for obj in block.objects]
@@ -1036,7 +1083,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
 
         if self.enable_kv_event:
-            self.residency_events.record(_committed_blocks(pending, failed), req_meta)
+            # Failures are indexed against the objects this call put; map them
+            # back so a block whose other objects were already resident is still
+            # announced when its own put committed.
+            self.residency_events.record(
+                blocks,
+                req_meta,
+                {original_indices[index] for index in failed},
+            )
 
         if failed:
             return False
@@ -1052,9 +1106,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         blocks = self._handoff_blocks(req_meta)
         return self._write(blocks, req_meta)
 
-    def get_kv_events(self) -> list[BlockStored]:
-        """Drain the residency events of the blocks this rank has written."""
+    def drain_residency(self) -> StoreResidency:
+        """Drain the residency of the blocks this rank has written."""
         return self.residency_events.drain()
+
+    def retire_residency(self) -> None:
+        """Drop buffered reports for objects the Store no longer holds."""
+        self.residency_events.retire()
 
     def _positional_blocks(
         self,
@@ -2437,14 +2495,20 @@ class MooncakeStoreWorker:
             boundaries.append(TailKeyBoundary(group_id, boundary_tokens))
         return tuple(boundaries)
 
-    def get_kv_events(self) -> list[BlockStored]:
-        if self.enable_kv_events and self.kv_send_thread is not None:
-            return self.kv_send_thread.get_kv_events()
-        return []
+    def drain_residency(self) -> StoreResidency:
+        """Take the Store blocks this rank committed since the last poll."""
+        assert self.kv_send_thread is not None
+        return self.kv_send_thread.drain_residency()
+
+    def retire_residency(self) -> None:
+        """Drop reports buffered for objects the Store no longer holds."""
+        if self.kv_send_thread is not None:
+            self.kv_send_thread.retire_residency()
 
     @property
-    def group_tp_replication_factors(self) -> tuple[int, ...]:
-        return self._group_tp_replication_factors
+    def lookup_key_prefixes(self) -> tuple[tuple[str, ...], ...]:
+        """Per group, every rank namespace a lookup for it probes."""
+        return self._lookup_key_prefixes
 
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
@@ -2525,19 +2589,7 @@ class LookupKeyServer:
                     self.socket.send(encode_lookup_response(result))
 
                 elif msg_type == RESET_MSG:
-                    try:
-                        # Drain in-flight puts before wiping the master;
-                        # otherwise stale puts can repopulate it post-reset.
-                        # Safe across HMA: store.remove_all wipes the underlying
-                        # flat key space, clearing every (group_id, hash) entry.
-                        if self.store_worker.kv_send_thread is not None:
-                            self.store_worker.kv_send_thread.request_queue.join()
-                        self.store_worker.store.remove_all(force=True)
-                        logger.info("Mooncake store reset via remove_all succeeded.")
-                        self.socket.send(RESP_OK)
-                    except Exception as e:
-                        logger.error("Mooncake remove_all failed: %s", e)
-                        self.socket.send(RESP_ERR)
+                    self.socket.send(self._reset_store())
 
                 else:
                     logger.warning(
@@ -2548,6 +2600,26 @@ class LookupKeyServer:
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
+
+    def _reset_store(self) -> bytes:
+        """Drain in-flight puts, wipe the master, and drop stale reports."""
+        try:
+            # Drain in-flight puts before wiping the master; otherwise stale
+            # puts can repopulate it post-reset. Safe across HMA:
+            # store.remove_all wipes the underlying flat key space, clearing
+            # every (group_id, hash) entry.
+            if self.store_worker.kv_send_thread is not None:
+                self.store_worker.kv_send_thread.request_queue.join()
+            self.store_worker.store.remove_all(force=True)
+            # A job that finished after this rank's last event poll left its
+            # report buffered for objects the wipe just removed; reporting it
+            # into the fresh Store would announce a block that is not there.
+            self.store_worker.retire_residency()
+            logger.info("Mooncake store reset via remove_all succeeded.")
+            return RESP_OK
+        except Exception as e:
+            logger.error("Mooncake remove_all failed: %s", e)
+            return RESP_ERR
 
     def close(self):
         self.socket.close(linger=0)

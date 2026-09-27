@@ -12,6 +12,7 @@ from typing import cast
 import numpy as np
 import torch
 
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -22,6 +23,7 @@ from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,
+    ExternalBlockHash,
 )
 
 logger = init_logger(__name__)
@@ -828,6 +830,35 @@ class ReqMeta:
             token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
         )
+
+
+BlockKey = tuple[int, ExternalBlockHash]
+"""Identity of one logical Store block: its cache group and its block hash."""
+
+
+def store_block_key(event: BlockStored) -> BlockKey:
+    """Identity of the logical block a Store residency event names."""
+    assert event.group_idx is not None, "Store residency events name their group"
+    assert len(event.block_hashes) == 1, (
+        "Store residency events announce exactly one logical block"
+    )
+    return event.group_idx, event.block_hashes[0]
+
+
+@dataclass
+class StoreResidency:
+    """The Store objects one rank committed, and the namespaces they cover.
+
+    ``events`` announces the logical blocks this rank finished writing, one per
+    ``BlockKey``. ``covered`` maps each of them to the Store key namespaces this
+    rank's objects for it occupy, whether this write created them or found them
+    already present. A block is reusable once the union of the reporting ranks'
+    coverage spans the namespaces a lookup probes for its group, which is
+    ``MooncakeStoreWorker._lookup_key_prefixes``.
+    """
+
+    events: list[BlockStored]
+    covered: dict[BlockKey, frozenset[str]]
 
 
 @dataclass
