@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import safe_open, save_file
 
 from vllm.model_executor.parameter import ModelWeightParameter, PackedvLLMParameter
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import copy_weight_, replace_parameter
 
 
 @pytest.fixture
@@ -281,3 +283,65 @@ def test_replace_parameter_attributes_from_the_layers_own_parameter(
     if param_kind != "plain":
         for public_name in ("output_dim", "input_dim", "packed_dim", "packed_factor"):
             assert getattr(layer.weight, public_name, None) is None
+
+
+@pytest.fixture
+def prefault_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the integrated-GPU path of `copy_weight_` without a GPU."""
+    monkeypatch.setattr(
+        "vllm.model_executor.utils._is_integrated_gpu", lambda device: True
+    )
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        torch.tensor(0.5),
+        torch.empty(0, 8),
+        torch.randn(64, 1024).to(torch.bfloat16),
+        torch.randint(0, 256, (64, 1024), dtype=torch.uint8).view(torch.float8_e4m3fn),
+        torch.randn(64, 1024).narrow(1, 512, 512),
+    ],
+    ids=["0d", "empty", "bf16", "fp8", "dim1_narrow"],
+)
+def test_copy_weight_prefault_copies_exact_bytes(
+    prefault_on: None, src: torch.Tensor
+) -> None:
+    """The touch only runs on integrated GPUs, which CI doesn't have. It must
+    accept the shapes and dtypes weight loaders pass and leave the copy
+    unchanged.
+    """
+    dst = torch.empty_like(src, memory_format=torch.contiguous_format)
+    copy_weight_(dst, src)
+    assert torch.equal(
+        dst.reshape(-1).view(torch.uint8), src.reshape(-1).view(torch.uint8)
+    )
+
+
+def test_copy_weight_prefault_maps_the_mmap_view(
+    prefault_on: None, tmp_path: Path
+) -> None:
+    """Every page of the safetensors view must be mapped before the copy: a
+    host-to-device copy that takes those faults itself is the slow path on
+    integrated GPUs (#58726). The meta destination keeps the copy itself from
+    reading the source.
+    """
+    path = str((tmp_path / "w.safetensors").resolve())
+    save_file({"w": torch.randn(1 << 20)}, path)
+
+    def mapped_bytes() -> int:
+        total, in_file = 0, False
+        with open("/proc/self/smaps") as smaps:
+            for line in smaps:
+                fields = line.split()
+                if ":" not in fields[0]:
+                    in_file = fields[-1] == path
+                elif in_file and fields[0] == "Rss:":
+                    total += int(fields[1]) * 1024
+        return total
+
+    with safe_open(path, framework="pt") as f:
+        src = f.get_tensor("w")
+        assert mapped_bytes() < src.nbytes
+        copy_weight_(torch.empty_like(src, device="meta"), src)
+        assert mapped_bytes() >= src.nbytes
