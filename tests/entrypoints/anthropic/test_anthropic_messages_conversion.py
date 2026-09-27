@@ -1383,6 +1383,11 @@ Q35_TEMPLATE = (
     "{%- endfor %}"
 )
 
+PERMISSIVE_TEMPLATE = (
+    "{%- for message in messages %}{{- message.role }}: {{ message.content }}\n"
+    "{%- endfor %}"
+)
+
 
 class TestDetectMergeInlineSystem:
     """Verify _detect_merge_inline_system auto-detection.
@@ -1402,17 +1407,45 @@ class TestDetectMergeInlineSystem:
     def test_no_restriction_no_merge(self):
         """Template without restriction accepts mid-conversation system."""
         assert (
-            AnthropicServingMessages._detect_merge_inline_system(
-                "{%- for message in messages %}"
-                "{{- message.role }}: {{ message.content }}\n"
-                "{%- endfor %}"
-            )
+            AnthropicServingMessages._detect_merge_inline_system(PERMISSIVE_TEMPLATE)
             is False
         )
 
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+    @pytest.mark.parametrize(
+        ("resolved", "expected"),
+        [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
+    )
+    def test_probes_resolved_template_without_cli_override(
+        self, monkeypatch, resolved, expected
+    ):
+        """Without --chat-template, probe the tokenizer's template (#58727).
+
+        Merging defeats prefix caching, so it is warned about at startup.
+        """
+        import vllm.entrypoints.anthropic.serving as serving_mod
+        from vllm.renderers.hf import HfRenderer
+
+        monkeypatch.setattr(
+            serving_mod, "resolve_chat_template", lambda *a, **kw: resolved
+        )
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = MagicMock(spec=HfRenderer)
+        renderer.tokenizer = MagicMock()
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            model_config=None,
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is expected
+        )
+        assert mock_logger.warning.called is expected
 
 
 # ======================================================================
@@ -1802,6 +1835,28 @@ class TestThinkingConfig:
                 max_tokens=4096,
                 messages=[{"role": "user", "content": "Hello"}],
                 thinking=thinking,
+            )
+
+    def test_pd_prefill_leg_skips_budget_check(self):
+        """P/D sidecars resend the request to the prefill node with
+        max_tokens=1; the budget is enforced on the decode leg instead."""
+        thinking = {"type": "enabled", "budget_tokens": 1024}
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking=thinking,
+            kv_transfer_params={"do_remote_decode": True},
+        )
+
+        assert _convert(request).thinking_token_budget == 1024
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+                kv_transfer_params={"do_remote_decode": False},
             )
 
     def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):

@@ -1176,23 +1176,3 @@ def build_samples(model: str) -> tuple[Sample, ...]:
     builder = _BUILDERS[model]
     scenarios = _KIMI_K2_SCENARIOS if model == "kimi_k2" else SCENARIOS
     return tuple(s for s in (builder(sc) for sc in scenarios) if s is not None)
-
-
-def build_sample(model: str, scenario: Scenario) -> Sample | None:
-    """Build a single sample for one model + scenario."""
-    return _BUILDERS[model](scenario)
-
-
-def build_scaling_sample(
-    model: str, token_count: int, validate: bool = False
-) -> Sample:
-    """Build a sample with approximately *token_count* tokens."""
-    sentence = "The quick brown fox jumps over the lazy dog. "
-    text = sentence * (token_count // 10 + 1)
-    scenario = Scenario(
-        id=f"scaling-{token_count}",
-        description=f"Scaling test with ~{token_count} tokens",
-        reasoning=text,
-        tool_calls=[_READ_TOOL],
-    )
-    return _BUILDERS[model](scenario, validate=validate)
