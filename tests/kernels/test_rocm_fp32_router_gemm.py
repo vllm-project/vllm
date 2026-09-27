@@ -21,6 +21,8 @@ SHAPES = [
     (6144, 256),
 ]
 MAX_TOKENS = 32
+BF16W_SHAPE = (7168, 896)
+BF16W_MAX_TOKENS = 9
 ATOL = 5e-4
 RTOL = 0.0
 
@@ -226,3 +228,65 @@ def test_rocm_fp32_router_gemm_dynamic_compile_dispatch() -> None:
         )
         output = compiled_dispatch(x)
         torch.testing.assert_close(output, _reference(x, weight), atol=ATOL, rtol=RTOL)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("num_tokens", range(BF16W_MAX_TOKENS + 1))
+@torch.inference_mode()
+def test_rocm_bf16_weight_router_gemm_matches_reference(
+    num_tokens: int, dtype: torch.dtype
+) -> None:
+    torch.manual_seed(6100 + num_tokens)
+    device = torch.device("cuda")
+    hidden_size, num_experts = BF16W_SHAPE
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(num_experts, hidden_size, dtype=torch.bfloat16, device=device)
+
+    output = rocm_fp32_router_gemm(x, weight)
+
+    assert output.shape == (num_tokens, num_experts)
+    assert output.dtype == torch.float32
+    torch.testing.assert_close(
+        output, _reference(x, weight.float()), atol=ATOL, rtol=RTOL
+    )
+
+
+@torch.inference_mode()
+def test_rocm_bf16_weight_router_gemm_rejects_invalid_inputs() -> None:
+    device = torch.device("cuda")
+    hidden_size, num_experts = BF16W_SHAPE
+    weight = torch.randn(num_experts, hidden_size, dtype=torch.bfloat16, device=device)
+
+    with pytest.raises(ValueError, match="num_tokens"):
+        rocm_fp32_router_gemm(
+            torch.randn(
+                BF16W_MAX_TOKENS + 1, hidden_size, dtype=torch.bfloat16, device=device
+            ),
+            weight,
+        )
+
+    with pytest.raises(ValueError, match="shape"):
+        rocm_fp32_router_gemm(
+            torch.randn(4, 4096, dtype=torch.bfloat16, device=device),
+            torch.randn(192, 4096, dtype=torch.bfloat16, device=device),
+        )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 8, 9, 10, 32, 33])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_rocm_bf16_weight_router_gemm_custom_op_dispatch(
+    num_tokens: int, dtype: torch.dtype
+) -> None:
+    torch.manual_seed(7100 + num_tokens)
+    device = torch.device("cuda")
+    hidden_size, num_experts = BF16W_SHAPE
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(num_experts, hidden_size, dtype=torch.bfloat16, device=device)
+
+    output = torch.ops.vllm.fp32_router_gemm_dispatch(x, weight, False)
+
+    assert output.dtype == torch.float32
+    torch.testing.assert_close(
+        output, _reference(x, weight.float()), atol=ATOL, rtol=RTOL
+    )
