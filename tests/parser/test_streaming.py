@@ -663,6 +663,34 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     assert len(tool_calls) == 0
 
 
+@pytest.mark.parametrize(
+    "text_chunks",
+    [
+        # A trailing "<" that the engine holds back (it may start a tag).
+        ["<think>let me think</think>a <", "x> b"],
+        # Whitespace after "</think>" in the same delta as the marker.
+        ["<think>let me think</think>\n\n", "<b>bold</b> done"],
+        # The delta that ends reasoning carries only held-back text.
+        ["<think>let me think", "</think><", "b>bold</b> done"],
+    ],
+)
+def test_engine_reasoning_no_tool_batched_holdback_not_dropped(
+    tokenizer, request_obj, text_chunks
+):
+    """Text the engine buffers when reasoning ends inside a batched delta is
+    returned by finish_streaming(); with no tool parser it must still be
+    emitted as content, not dropped."""
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    chunks = [tokenizer.encode(t, add_special_tokens=False) for t in text_chunks]
+
+    results = stream_chunks(parser, tokenizer, chunks, request_obj)
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == "let me think"
+    assert content == "".join(text_chunks).split("</think>", 1)[1]
+    assert len(tool_calls) == 0
+
+
 def _decode_stream_deltas(tokenizer, groups):
     """Decode token-ID groups into ``(delta_text, group)`` pairs via the real
     incremental ``DecodeStream``.
