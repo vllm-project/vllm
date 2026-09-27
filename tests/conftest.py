@@ -317,14 +317,6 @@ def example_system_message() -> str:
         return f.read()
 
 
-class DecoderPromptType(Enum):
-    """For encoder/decoder models only."""
-
-    CUSTOM = 1
-    NONE = 2
-    EMPTY_STR = 3
-
-
 @pytest.fixture
 def example_long_prompts() -> list[str]:
     return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
@@ -928,7 +920,7 @@ class HfRunner:
             # shutdown. This is helpful in cases where the HfRunner is
             # initialized after significant GPU memory is already occupied,
             # e.g. in
-            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # tests/basic_correctness/models/test_basic_correctness.py::test_models_distributed
             # where vllm worker processes are still alive and holding GPU
             # memory when hf_runner.__exit__ is called.
             from tests.utils import record_gpu_memory_usage_stats
