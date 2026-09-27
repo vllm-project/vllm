@@ -1259,12 +1259,25 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
 
 
 @pytest.mark.cpu_test
-def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
+@pytest.mark.parametrize(
+    ("mamba", "remote_dcp_size", "page_divisor"),
+    [
+        # Equal kernel block sizes (ratio 1), but a half-sized per-token page.
+        (True, 1, 2),
+        # Pure MLA under DCP with different logical block sizes (12 vs 8).
+        (False, 2, 1),
+    ],
+)
+def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid(
+    mamba, remote_dcp_size, page_divisor
+):
     """The MLA per-token page is TP-independent, so kernel block lengths
     differing by anything other than the block-size ratio must fail the
-    handshake loudly rather than transfer at mismatched geometry."""
+    handshake loudly rather than transfer at mismatched geometry. So must
+    DCP, which shards tokens at the logical block size, across different
+    logical block sizes."""
     worker = _make_mla_hybrid_worker(
-        local_block_size=12, kernel_block_size=4, num_logical_blocks=8
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8, mamba=mamba
     )
     meta_r = _make_remote_meta(
         worker,
@@ -1273,10 +1286,11 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         remote_num_logical=12,
         remote_ssm_sizes=(24, 32),
     )
-    # Equal kernel block sizes (ratio 1), but a half-sized per-token page.
-    meta_r.block_lens = [x // 2 for x in worker.block_len_per_layer]
+    meta_r.block_lens = [x // page_divisor for x in worker.block_len_per_layer]
     with pytest.raises((AssertionError, RuntimeError)):
-        worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
+        worker.add_remote_agent(
+            meta_r, remote_tp_rank=0, remote_tp_size=2, remote_dcp_size=remote_dcp_size
+        )
 
 
 def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):

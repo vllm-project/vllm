@@ -2522,6 +2522,13 @@ class NixlBaseConnectorWorker:
             raise NotImplementedError(
                 "DCP region pulls require matching logical and physical block sizes"
             )
+        # DCP shards tokens across ranks at the logical block size, and reads
+        # pair blocks by logical position.
+        if (self.dcp_size > 1 or remote_dcp_size > 1) and (
+            self.block_size * self._physical_blocks_per_logical_kv_block
+            != nixl_agent_meta.block_size * remote_physical_per_logical
+        ):
+            raise NotImplementedError("DCP requires matching P/D logical block sizes")
         if (
             self._has_mamba
             and remote_physical_per_logical
