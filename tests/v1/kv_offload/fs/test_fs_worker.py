@@ -6,15 +6,15 @@ import numpy as np
 
 from vllm.v1.kv_offload.base import DevicePointers, make_offload_key
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.fs.worker import FSOffloadingWorker
+from vllm.v1.kv_offload.fs.worker import ThreadPoolFSWorker
 
 
 def _keys(n: int):
     return [make_offload_key(f"k{i}".encode().ljust(8, b"\0"), 0) for i in range(n)]
 
 
-class RecordingFSWorker(FSOffloadingWorker):
-    """Concrete FSOffloadingWorker that records I/O ops instead of doing I/O."""
+class RecordingFSWorker(ThreadPoolFSWorker):
+    """Concrete ThreadPoolFSWorker that records I/O ops instead of doing I/O."""
 
     def __init__(self, block_size_factor: int):
         mapper = FileMapper(
