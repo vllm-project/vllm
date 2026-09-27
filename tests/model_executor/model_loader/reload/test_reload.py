@@ -20,6 +20,9 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    is_fp4_marlin_supported,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -1100,6 +1103,9 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
 
     if "FP8" in base_model and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
+
+    if "NVFP4" in base_model and not is_fp4_marlin_supported():
+        pytest.skip(reason="Requires Marlin FP4 support")
 
     with vllm_runner(
         model_name=base_model,

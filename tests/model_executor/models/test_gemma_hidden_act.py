@@ -12,6 +12,7 @@ from vllm.model_executor.layers.activation import (
 )
 from vllm.model_executor.models.gemma3 import Gemma3MLP
 from vllm.model_executor.models.gemma4 import Gemma4MLP
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
@@ -50,11 +51,13 @@ def test_gemma_mlp_supports_hidden_act_variants(
     default_vllm_config,
     dist_init,
 ) -> None:
-    mlp = mlp_cls(
-        hidden_size=16,
-        intermediate_size=32,
-        hidden_activation=activation_name,
-    )
+    # Build on the accelerator: ROCm's unquantized GEMM op has no CPU kernel.
+    with torch.device(current_platform.device_type):
+        mlp = mlp_cls(
+            hidden_size=16,
+            intermediate_size=32,
+            hidden_activation=activation_name,
+        )
 
-    assert isinstance(mlp.act_fn, expected_type)
-    assert mlp(torch.randn(3, 16)).shape == (3, 16)
+        assert isinstance(mlp.act_fn, expected_type)
+        assert mlp(torch.randn(3, 16)).shape == (3, 16)

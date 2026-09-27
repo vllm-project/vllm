@@ -19,9 +19,9 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/
-  - tests/model_executor/model_loader/test_sharded_state_loader.py
+  - tests/model_executor/model_loader/sharded_state
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m "not slow_test"'
+      pytest -v -s model_executor/model_loader/sharded_state -m "distributed(num_gpus=2)"'
