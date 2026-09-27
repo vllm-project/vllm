@@ -39,7 +39,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -80,7 +80,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class FlashConfig(PretrainedConfig):
+class FlashConfig(PreTrainedConfig):
     """Flash model configuration."""
 
     moe_intermediate_size: int

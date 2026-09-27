@@ -5,10 +5,16 @@
 # The model architecture and weights are fully compatible with InternVLChatModel,
 # only the config model_type / architectures strings differ.
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
@@ -30,14 +36,14 @@ class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        kwargs.setdefault("image_size", vision_config.image_size)
-        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
-        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
-        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
-        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        merged_kwargs.setdefault("image_size", vision_config.image_size)
+        merged_kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        merged_kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        merged_kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        merged_kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        image_processor = InternVLImageProcessor(**kwargs)
+        image_processor = InternVLImageProcessor(**merged_kwargs)
         image_size = image_processor.image_size
         patch_size = vision_config.patch_size
         downsample_ratio = config.downsample_ratio
@@ -67,11 +73,16 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
     """
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ) -> None:
         super()._patch_quant_config(config, quant_config)
         # ignore vit layers to preserve model performance
-        if isinstance(quant_config, Fp8Config):
+        if isinstance(quant_config, Fp8Config) or (
+            isinstance(quant_config, OnlineQuantizationConfig)
+            and quant_config.args.linear is not None
+            and quant_config.args.linear.weight
+            in (kFp8StaticTensorSym, kFp8Static128BlockSym, kFp8StaticChannelSym)
+        ):
             _FP8_IGNORED_LAYERS = [
                 *(
                     layer
@@ -87,6 +98,7 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
                 "mlp1.1",
                 "mlp1.3",
             ]
+            quant_config.ignored_layers = list(quant_config.ignored_layers)
             for layer in _FP8_IGNORED_LAYERS:
                 if layer not in quant_config.ignored_layers:
                     quant_config.ignored_layers.append(layer)
