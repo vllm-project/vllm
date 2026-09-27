@@ -427,6 +427,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
             )
 
             self.draft_tokens[:num_reqs, step] = draft_tokens

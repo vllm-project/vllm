@@ -404,9 +404,22 @@ class DraftModelSpeculator(BaseSpeculator):
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
+        spec_step_idx: int | None = None,
     ) -> torch.Tensor:
-        if draft_logits is not None:
+        # Multi-module MTP passes spec_step_idx so that each draft step uses
+        # its own module's LM head.
+        if draft_logits is None and self.use_local_argmax_reduction:
+            if spec_step_idx is None:
+                return self.model.get_top_tokens(hidden_states)
+            return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
+
+        if spec_step_idx is None:
             logits = self.model.compute_logits(hidden_states)
+        else:
+            logits = self.model.compute_logits(
+                hidden_states, spec_step_idx=spec_step_idx
+            )
+        if draft_logits is not None:
             sampled = gumbel_sample(
                 logits,
                 idx_mapping,
@@ -423,10 +436,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 sampled = self.draft_watermarker.sample(
                     logits, sampled, idx_mapping, temperature
                 )
-        elif self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
         else:
-            logits = self.model.compute_logits(hidden_states)
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
