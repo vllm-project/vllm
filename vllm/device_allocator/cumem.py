@@ -328,7 +328,7 @@ class CuMemAllocator:
                 "already-asleep allocations; the existing policy was kept."
             )
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> int:
         """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
@@ -338,10 +338,15 @@ class CuMemAllocator:
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
 
+        Returns:
+            Bytes restored from pinned host backups. Zero when nothing was
+            backed up on the host, e.g. after a level-2 sleep.
+
         """
         gc.collect()
         torch.accelerator.empty_cache()
 
+        restored_bytes = 0
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
@@ -349,15 +354,16 @@ class CuMemAllocator:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
-                if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+                cpu_backup_tensor = data.cpu_backup_tensor
+                if cpu_backup_tensor is not None:
+                    size_in_bytes = (
+                        cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
+                    )
+                    cpu_ptr = cpu_backup_tensor.data_ptr()
+                    libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                    data.cpu_backup_tensor = None
+                    restored_bytes += size_in_bytes
+        return restored_bytes
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
