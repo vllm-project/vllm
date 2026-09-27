@@ -224,7 +224,10 @@ def validate_structural_tag_response_format(
 
 def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
     from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+    from vllm.v1.structured_output.backend_xgrammar import (
+        XgrammarUnsupportedJsonFeaturesError,
+        validate_xgrammar_grammar,
+    )
 
     if isinstance(payload, str) and not payload:
         raise VLLMValidationError(
@@ -238,6 +241,11 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
             )
         )
+    except XgrammarUnsupportedJsonFeaturesError:
+        # The tag is well-formed; only its nested JSON schemas use features
+        # xgrammar does not support. Report that directly instead of
+        # mislabeling the tag as an invalid specification.
+        raise
     except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",

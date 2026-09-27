@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Request-time validation of structured output requests."""
 
+import json
+
 import pytest
 
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.structured_output.backend_xgrammar import (
+    XgrammarUnsupportedJsonFeaturesError,
+    _structural_tag_json_schemas,
+    validate_xgrammar_grammar,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -104,8 +111,6 @@ def test_regex_with_nul_byte_rejected(regex):
 
     # The xgrammar backend also rejects it directly (defense in depth), before
     # the pattern reaches the native from_regex call.
-    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
-
     with pytest.raises(ValueError, match="NUL"):
         validate_xgrammar_grammar(params)
 
@@ -185,3 +190,174 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         tokenizer=object(),
     )
     assert params.structured_outputs._backend == expected_backend
+
+
+SCHEMA_WITH_MULTIPLE_OF = {
+    "type": "object",
+    "properties": {"value": {"type": "number", "multipleOf": 0.5}},
+    "required": ["value"],
+}
+
+SCHEMA_CLEAN = {
+    "type": "object",
+    "properties": {"value": {"type": "number"}},
+    "required": ["value"],
+}
+
+
+def _new_style_structural_tag(schema):
+    return json.dumps(
+        {
+            "type": "structural_tag",
+            "format": {
+                "type": "sequence",
+                "elements": [
+                    {"type": "const_string", "value": "Answer: "},
+                    {"type": "json_schema", "json_schema": schema},
+                ],
+            },
+        }
+    )
+
+
+def _legacy_structural_tag(schema):
+    return json.dumps(
+        {
+            "type": "structural_tag",
+            "structures": [{"begin": "Answer: ", "schema": schema, "end": ""}],
+            "triggers": ["Answer: "],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "make_tag",
+    [_new_style_structural_tag, _legacy_structural_tag],
+    ids=["new-style", "legacy"],
+)
+def test_structural_tag_with_unsupported_json_features_rejected(make_tag):
+    """JSON schemas nested in a structural tag get the same xgrammar
+    unsupported-feature check as plain `json` constraints. Without it the tag
+    compiles (xgrammar silently drops e.g. multipleOf) and backend="auto"
+    never falls back, so the model can emit schema-violating output (#58930).
+    """
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=make_tag(SCHEMA_WITH_MULTIPLE_OF)
+        )
+    )
+    with pytest.raises(
+        XgrammarUnsupportedJsonFeaturesError, match="not supported by xgrammar"
+    ):
+        validate_xgrammar_grammar(params)
+
+
+@pytest.mark.parametrize(
+    "make_tag",
+    [_new_style_structural_tag, _legacy_structural_tag],
+    ids=["new-style", "legacy"],
+)
+def test_structural_tag_without_unsupported_features_passes(make_tag):
+    """A structural tag whose nested schemas xgrammar fully supports still
+    validates cleanly: the new check must not introduce false positives."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=make_tag(SCHEMA_CLEAN)
+        )
+    )
+    validate_xgrammar_grammar(params)  # must not raise
+
+
+def test_auto_backend_falls_back_for_structural_tag_unsupported_features():
+    """In `auto` mode the rejection above routes the request to the guidance
+    backend, like it already does for plain `json` schemas with unsupported
+    features."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=_legacy_structural_tag(SCHEMA_WITH_MULTIPLE_OF)
+        )
+    )
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto"),
+        tokenizer=object(),
+    )
+    assert params.structured_outputs._backend == "guidance"
+
+
+def test_auto_backend_rejects_new_style_structural_tag_unsupported_features():
+    """New-style structural tags with xgrammar-unsupported features cannot
+    fall back: the guidance backend only supports the legacy
+    structures/triggers shape, so the request is rejected instead of being
+    served with a silently wrong xgrammar grammar."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=_new_style_structural_tag(SCHEMA_WITH_MULTIPLE_OF)
+        )
+    )
+    with pytest.raises(VLLMValidationError):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend="auto"),
+            tokenizer=object(),
+        )
+
+
+def test_structural_tag_json_schemas_extraction():
+    """_structural_tag_json_schemas finds json_schema nodes nested anywhere
+    in the new-style format, and schemas under structures in the legacy
+    shape; malformed payloads yield an empty list."""
+    nested = {
+        "type": "structural_tag",
+        "format": {
+            "type": "alternation",
+            "alternatives": [
+                {
+                    "type": "sequence",
+                    "elements": [
+                        {"type": "json_schema", "json_schema": SCHEMA_CLEAN},
+                    ],
+                },
+                {"type": "const_string", "value": "none"},
+            ],
+        },
+    }
+    assert _structural_tag_json_schemas(nested) == [SCHEMA_CLEAN]
+
+    legacy = {
+        "type": "structural_tag",
+        "structures": [
+            {"begin": "Answer: ", "schema": SCHEMA_WITH_MULTIPLE_OF, "end": ""}
+        ],
+        "triggers": ["Answer: "],
+    }
+    assert _structural_tag_json_schemas(legacy) == [SCHEMA_WITH_MULTIPLE_OF]
+
+    assert _structural_tag_json_schemas({"type": "structural_tag"}) == []
+    assert _structural_tag_json_schemas(["not", "a", "dict"]) == []
+
+
+@pytest.mark.parametrize(
+    "make_tag",
+    [_new_style_structural_tag, _legacy_structural_tag],
+    ids=["new-style", "legacy"],
+)
+def test_structural_tag_payload_validation_reports_unsupported_features(make_tag):
+    """Request-level structural_tag validation reports xgrammar-unsupported
+    features with the informative error (not "Invalid ... specification"),
+    so the caller learns the tag is well-formed but needs another backend."""
+    from vllm.entrypoints.generate.base.protocol import validate_structural_tag_payload
+
+    with pytest.raises(
+        XgrammarUnsupportedJsonFeaturesError, match="not supported by xgrammar"
+    ):
+        validate_structural_tag_payload(
+            make_tag(SCHEMA_WITH_MULTIPLE_OF), parameter="response_format"
+        )
+
+    # Malformed tags are still rejected as bad requests.
+    with pytest.raises(
+        VLLMValidationError,
+        match="Invalid response_format structural_tag specification",
+    ):
+        validate_structural_tag_payload('{"nope": 1}', parameter="response_format")

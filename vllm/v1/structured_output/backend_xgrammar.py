@@ -32,6 +32,15 @@ else:
 logger = init_logger(__name__)
 
 
+class XgrammarUnsupportedJsonFeaturesError(VLLMValidationError):
+    """A JSON schema uses features the xgrammar backend does not support.
+
+    Unlike a malformed schema, the request itself is valid: in `auto` backend
+    mode the engine falls back to another structured-output backend instead
+    of rejecting it.
+    """
+
+
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
@@ -342,6 +351,52 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     return check_object(schema)
 
 
+def _structural_tag_json_schemas(s_tag: Any) -> list[dict[str, Any]]:
+    """Extract the JSON schemas embedded in a structural tag payload.
+
+    Handles both the new shape ({"type": "structural_tag", "format": ...}),
+    where schemas appear as {"type": "json_schema", "json_schema": {...}}
+    nodes nested anywhere inside "format", and the legacy shape
+    ({"structures": [{"begin", "schema", "end"}], "triggers": [...]}).
+
+    Args:
+        s_tag: The parsed structural tag payload.
+
+    Returns:
+        The embedded JSON schemas. Malformed payloads yield an empty list;
+        payload validity is checked separately by the grammar compilation.
+
+    """
+    schemas: list[dict[str, Any]] = []
+    if not isinstance(s_tag, dict):
+        return schemas
+
+    if "structures" in s_tag:
+        structures = s_tag["structures"]
+        if isinstance(structures, list):
+            for structure in structures:
+                if isinstance(structure, dict):
+                    schema = structure.get("schema")
+                    if isinstance(schema, dict):
+                        schemas.append(schema)
+        return schemas
+
+    def _collect(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "json_schema":
+                json_schema = node.get("json_schema")
+                if isinstance(json_schema, dict):
+                    schemas.append(json_schema)
+            for value in node.values():
+                _collect(value)
+        elif isinstance(node, list):
+            for item in node:
+                _collect(item)
+
+    _collect(s_tag.get("format"))
+    return schemas
+
+
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
@@ -393,7 +448,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             schema = so_params.json
 
         if has_xgrammar_unsupported_json_features(schema):
-            raise VLLMValidationError(
+            raise XgrammarUnsupportedJsonFeaturesError(
                 "The provided JSON schema contains features not supported by xgrammar."
             )
 
@@ -420,7 +475,23 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
+        except Exception as e:
+            raise VLLMValidationError("Invalid structural tag specification.") from e
 
+        # xgrammar silently ignores some JSON-schema keywords (e.g.
+        # multipleOf) when it compiles a structural tag, so a nested schema
+        # with unsupported features would validate successfully while its
+        # constraint is dropped from the compiled grammar. Mirror the
+        # plain-`json` branch: reject up front so backend="auto" falls back
+        # to guidance/outlines instead of serving the wrong grammar.
+        for schema in _structural_tag_json_schemas(s_tag):
+            if has_xgrammar_unsupported_json_features(schema):
+                raise XgrammarUnsupportedJsonFeaturesError(
+                    "The provided JSON schema contains features not supported "
+                    "by xgrammar."
+                )
+
+        try:
             # Using the deprecated method of compiling structural tag
             if "structures" in s_tag:
                 tags = [
