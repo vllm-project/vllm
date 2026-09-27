@@ -1292,11 +1292,9 @@ def test_file_gather_rejects_shards_that_cannot_serve_every_row_from_a_file(
 
 
 @pytest.mark.parametrize("fp8", [False, True])
-def test_file_gather_binds_zero_copy_shards_through_loader_hook(
-    monkeypatch, tmp_path, fp8
-) -> None:
-    """Fails if safetensors stops returning zero-copy views of the file."""
-    module, table = _make_file_gather_embedding(monkeypatch, tmp_path, fp8=fp8)
+def test_file_gather_bind_releases_the_loader_views(monkeypatch, tmp_path, fp8) -> None:
+    """Fails if the shard views (and their file mapping) survive bind."""
+    module, _ = _make_file_gather_embedding(monkeypatch, tmp_path, fp8=fp8)
     embedding = module.ngram_embedding
 
     loaded = _load_file_shards(module, tmp_path / "model.safetensors")
@@ -1307,8 +1305,8 @@ def test_file_gather_binds_zero_copy_shards_through_loader_hook(
         {"ngram_embedding.weight_scale"} if fp8 else set()
     )
     assert embedding._bound
-    stored = torch.cat([embedding._shards[index] for index in range(4)])
-    assert torch.equal(stored, table.view(torch.uint8))
+    real = os.path.realpath(tmp_path / "model.safetensors")
+    assert real not in Path("/proc/self/maps").read_text()
 
 
 def test_file_gather_binds_shards_opened_through_a_symlink(
@@ -1331,17 +1329,15 @@ def test_file_gather_rejects_reload_and_stays_poisoned(monkeypatch, tmp_path) ->
 
     with pytest.raises(RuntimeError, match="does not support weight reload"):
         module.load_weights([("ngram_embedding.shard_0.weight", table[:6])])
+    with pytest.raises(RuntimeError, match="does not support weight reload"):
+        module.ngram_embedding.bind_file_shards()
     with pytest.raises(RuntimeError, match="unbound or was reloaded"):
         module.ngram_embedding.stage_rows(1)
 
 
-@pytest.mark.parametrize(
-    ("bad_id", "error"),
-    [(21, IndexError), (24, IndexError), (-1, RuntimeError)],
-    ids=["past_last_shard_rows", "past_last_shard", "negative"],
-)
+@pytest.mark.parametrize("bad_id", [21, 24, -1])
 def test_file_gather_out_of_range_id_keeps_previous_staged_rows(
-    monkeypatch, tmp_path, bad_id, error
+    monkeypatch, tmp_path, bad_id
 ) -> None:
     """Out-of-range ids fail before the H2D copy, so no wrong row is served."""
     module, table = _make_file_gather_embedding(monkeypatch, tmp_path, bind=True)
@@ -1365,10 +1361,28 @@ def test_file_gather_out_of_range_id_keeps_previous_staged_rows(
     embedding.stage_rows(11)
     embedding._host_ids[5, 1] = bad_id
 
-    with pytest.raises(error):
+    with pytest.raises(IndexError):
         embedding.stage_rows(11)
 
     assert torch.equal(embedding._staging[:11], table[ids])
+
+
+def test_file_gather_short_read_raises_and_keeps_previous_staged_rows(
+    monkeypatch, tmp_path
+) -> None:
+    """A truncated shard file raises before any row reaches the staging buffer."""
+    module, table = _make_file_gather_embedding(monkeypatch, tmp_path, bind=True)
+    embedding = module.ngram_embedding
+    ids = torch.arange(1, 21).reshape(10, 2)
+    embedding._host_ids[:10] = ids
+    embedding.stage_rows(10)
+    path = tmp_path / "model.safetensors"
+    os.truncate(path, path.stat().st_size - 4)
+
+    with pytest.raises(ValueError, match="truncated at offset"):
+        embedding.stage_rows(10)
+
+    assert torch.equal(embedding._staging[:10], table[ids])
 
 
 def test_file_gather_reads_ahead_the_coalesced_pages_of_staged_rows(
