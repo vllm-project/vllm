@@ -368,19 +368,21 @@ def test_flashinfer_nvfp4_requires_slot_writer_without_trtllm(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("layout", ["NHD", "HND"])
+@pytest.mark.parametrize("layout", ["LBNHC", "LBHNC", "BLNHC", "BLHNC"])
 def test_flashinfer_nvfp4_kv_cache_views_and_slot_writer(layout):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
-    kv_cache_layout = _TEST_KV_LAYOUTS[layout]
+    kv_cache_layout = KVCacheLayout[layout]
     num_kv_heads, head_size = 3, 128
-    logical = (2, 2 * num_kv_heads, 16, nvfp4_kv_cache_full_dim(head_size))
-    order = (0, 2, 1, 3) if layout == "NHD" else (0, 1, 2, 3)
-    inverse = tuple(order.index(i) for i in range(4))
+    # Two layers in logical [L, B, H, N, C], stored in the layout's axis order.
+    logical = (2, 2, 2 * num_kv_heads, 16, nvfp4_kv_cache_full_dim(head_size))
+    order = kv_cache_layout.stride_order
+    inverse = tuple(order.index(i) for i in range(5))
 
-    def make_cache() -> tuple[torch.Tensor, torch.Tensor]:
+    def make_cache() -> torch.Tensor:
         physical = torch.empty([logical[i] for i in order], dtype=torch.uint8)
-        return physical, physical.permute(*inverse)
+        # The second layer: a nonzero offset, and pages two apart when block-outer.
+        return physical.permute(*inverse)[1]
 
     impl = flashinfer_backend.FlashInferImpl.__new__(flashinfer_backend.FlashInferImpl)
     impl.head_size = head_size
@@ -398,21 +400,25 @@ def test_flashinfer_nvfp4_kv_cache_views_and_slot_writer(layout):
 
     impl._nvfp4_slot_writer = writer
 
-    physical, kv_cache = make_cache()
+    kv_cache = make_cache()
+    assert kv_cache.storage_offset() > 0
     views = impl._get_nvfp4_kv_cache_views(kv_cache, kv_cache_layout)
 
-    offsets = [_storage_offsets(t) for t in (*views.data, *views.block_scales)]
-    assert len(set().union(*offsets)) == sum(map(len, offsets)) == physical.numel()
+    tensors = (*views.data, *views.block_scales)
+    offsets = [_storage_offsets(t) for t in tensors]
+    assert set().union(*offsets) == _storage_offsets(kv_cache)
+    assert sum(map(len, offsets)) == kv_cache.numel()
+    assert {t.stride(0) for t in tensors} == {kv_cache.stride(0)}
     assert impl._get_nvfp4_kv_cache_views(kv_cache, kv_cache_layout) is views
 
     # No attention metadata reaches the writer (dummy runs, DFlash context KV).
     layer = SimpleNamespace(_k_scale=None, _v_scale=None)
     impl.do_kv_cache_update(layer, None, None, kv_cache, None)
     ((args, kwargs),) = writes
-    assert kwargs["kv_layout"] == layout
+    assert kwargs["kv_layout"] == ("NHD" if layout.endswith("NHC") else "HND")
     assert args[3] is views.data and args[4] is views.block_scales
 
-    _, rebound = make_cache()
+    rebound = make_cache()
     rebound_views = impl._get_nvfp4_kv_cache_views(rebound, kv_cache_layout)
     assert rebound_views.data[0].data_ptr() == rebound.data_ptr()
 
@@ -459,8 +465,9 @@ def test_flashinfer_forward_reads_kv_cache_layout_from_metadata(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
 def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
-    monkeypatch,
+    monkeypatch, layout
 ) -> None:
     """Drive the SM8x NVFP4 contract end to end.
 
@@ -509,12 +516,12 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
 
     # Production allocation: 2 * num_kv_heads head slots of packed fp4 + scales.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
+    logical = (num_pages, 2 * num_kv_heads, page_size, full_dim)
+    order = (0, 2, 1, 3) if layout == "NHD" else (0, 1, 2, 3)
     physical = torch.zeros(
-        (num_pages, page_size, 2 * num_kv_heads, full_dim),
-        dtype=torch.uint8,
-        device="cuda",
+        [logical[i] for i in order], dtype=torch.uint8, device="cuda"
     )
-    kv_cache = physical.permute(0, 2, 1, 3)
+    kv_cache = physical.permute(*(order.index(i) for i in range(4)))
 
     block_tables = torch.arange(num_pages, dtype=torch.int32, device="cuda").reshape(
         num_reqs, max(pages_per_req)
@@ -544,7 +551,10 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
     impl.do_kv_cache_update(layer, raw_key, raw_value, kv_cache, slot_mapping)
     assert physical.any(), "slot-mapping writer stored nothing"
 
-    views = impl._get_nvfp4_kv_cache_views(kv_cache, KVCacheLayout.LBNHC)
+    # The writer took its layout from the cache; the reads below use its views.
+    written_views = impl._nvfp4_kv_cache_views
+    views = impl._get_nvfp4_kv_cache_views(kv_cache, _TEST_KV_LAYOUTS[layout])
+    assert views is written_views
 
     # Reference KV: what the writer actually stored, dequantized.
     deq_k = torch.empty(
@@ -560,7 +570,7 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
         one,
         deq_k,
         deq_v,
-        kv_layout="NHD",
+        kv_layout=layout,
     )
 
     query = (
@@ -570,7 +580,7 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
         * 0.2
     )
     workspace = torch.empty(64 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, "NHD")
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, layout)
     wrapper.plan(
         torch.tensor([0, query_lens[0]], dtype=torch.int32),
         torch.tensor([0, pages_per_req[0]], dtype=torch.int32),
