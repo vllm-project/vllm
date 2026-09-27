@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the analytic estimators in metrics/flops.py."""
 
+import logging
 import types
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 
 from vllm.config.model import ModelConfig, get_hf_text_config
+from vllm.config.quantization import resolve_quantization_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
@@ -26,7 +28,6 @@ from vllm.v1.metrics.perf import (
     BaseConfigParser,
     ExecutionContext,
     FfnMetrics,
-    InvalidComponent,
     MLAAttentionMetrics,
     ModelMetrics,
     ParsedArgs,
@@ -1024,26 +1025,173 @@ def test_quantization_config_parser_fp8_methods(quant_method):
     )
 
 
-def test_quantization_config_parser_unknown_method():
-    """Test that an unrecognized quant method raises InvalidComponent."""
-
-    class MockQuantConfig:
-        def get_name(self):
-            return "unknown_quant_method"
-
-    hf_config = Qwen3Config(
-        hidden_size=2048,
-        num_attention_heads=16,
-        intermediate_size=8192,
-        num_hidden_layers=1,
+@pytest.mark.parametrize(
+    "quant_method,weight_bits,expected_bytes",
+    [
+        ("auto_gptq", 4, 0.5),
+        ("auto_gptq", 8, 1),
+        ("auto_awq", 4, 0.5),
+    ],
+)
+def test_quantized_model_metrics_keep_transformer_components(
+    quant_method, weight_bits, expected_bytes
+):
+    """Resolved quantization names must not silently remove attention or FFN."""
+    quant_config = SimpleNamespace(
+        get_name=lambda: quant_method, weight_bits=weight_bits
     )
-    vllm_config = create_mock_vllm_config(hf_config, quant_config=MockQuantConfig())
+    config = create_mock_vllm_config(Qwen3Config(), quant_config=quant_config)
+    metrics = ModelMetrics(config)
+    components = {m.component_type(): m for m in metrics.metrics}
+    assert set(components) == {"attn", "ffn", "unembed"}
+    for name in ("attn", "ffn"):
+        assert components[name].weight_byte_size == expected_bytes
 
-    with pytest.raises(InvalidComponent):
-        AttentionMetrics.get_parser().parse(vllm_config)
+    ctx = ExecutionContext.from_single_request(1, 1024, is_prefill=False)
+    unquantized = ModelMetrics(create_mock_vllm_config(Qwen3Config()))
+    assert metrics.get_num_flops(ctx) == unquantized.get_num_flops(ctx)
+    assert 0 < metrics.get_read_bytes(ctx) < unquantized.get_read_bytes(ctx)
 
-    with pytest.raises(InvalidComponent):
-        FfnMetrics.get_parser().parse(vllm_config)
+
+@pytest.mark.parametrize(
+    "quant_method,expert_dtype,attention_bytes,ffn_bytes",
+    [
+        ("gpt_oss_mxfp4", None, 2, 0.5),
+        ("deepseek_v4_fp8", None, 1, 0.5),
+        ("deepseek_v4_fp8", "fp4", 1, 0.5),
+        ("deepseek_v4_fp8", "fp8", 1, 1),
+    ],
+)
+def test_checkpoint_quantization_respects_linear_and_expert_precision(
+    quant_method, expert_dtype, attention_bytes, ffn_bytes
+):
+    """The checkpoint method's name does not determine every layer's precision."""
+    hf_config = Qwen3MoeConfig()
+    if expert_dtype is not None:
+        hf_config.expert_dtype = expert_dtype
+    config = create_mock_vllm_config(
+        hf_config, quant_config=SimpleNamespace(get_name=lambda: quant_method)
+    )
+    metrics = ModelMetrics(config)
+    components = {m.component_type(): m for m in metrics.metrics}
+    assert set(components) == {"attn", "ffn", "unembed"}
+    assert components["attn"].weight_byte_size == attention_bytes
+    assert components["ffn"].weight_byte_size == ffn_bytes
+
+
+@pytest.mark.parametrize("quant_method", ["gpt_oss_mxfp4", "deepseek_v4_fp8"])
+def test_mixed_checkpoint_ffn_precision_falls_back(quant_method):
+    hf_config = Qwen3MoeConfig()
+    hf_config.n_shared_experts = 1
+    config = create_mock_vllm_config(
+        hf_config, quant_config=SimpleNamespace(get_name=lambda: quant_method)
+    )
+    assert FfnMetrics.from_vllm_config(config).weight_byte_size == 2
+
+
+@pytest.mark.parametrize(
+    "quant_method", ["unknown_quant_method", "humming", "modelopt_mixed"]
+)
+@pytest.mark.parametrize(
+    "model_dtype,expected_bytes", [("bfloat16", 2), ("float32", 4)]
+)
+def test_quantization_config_parser_unknown_method(
+    quant_method, model_dtype, expected_bytes, caplog, monkeypatch
+):
+    """Unsupported sizing keeps all components and warns about the estimate."""
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    quant_config = SimpleNamespace(get_name=lambda: quant_method)
+    config = create_mock_vllm_config(
+        Qwen3Config(), model_dtype=model_dtype, quant_config=quant_config
+    )
+    metrics = ModelMetrics(config)
+    components = {m.component_type(): m for m in metrics.metrics}
+    assert set(components) == {"attn", "ffn", "unembed"}
+    assert all(m.weight_byte_size == expected_bytes for m in components.values())
+    assert quant_method in caplog.text
+    assert "model dtype" in caplog.text
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+    ctx = ExecutionContext.from_single_request(1, 1024, is_prefill=False)
+    unquantized = ModelMetrics(
+        create_mock_vllm_config(Qwen3Config(), model_dtype=model_dtype)
+    )
+    assert metrics.get_num_flops(ctx) == unquantized.get_num_flops(ctx)
+    assert metrics.get_read_bytes(ctx) == unquantized.get_read_bytes(ctx)
+
+
+@pytest.mark.parametrize(
+    "shorthand,expected_bytes",
+    [
+        ("fp8_per_tensor", 1),
+        ("fp8_per_block", 1),
+        ("fp8_per_channel", 1),
+        ("mxfp8", 1),
+        ("mxfp4", 0.5),
+    ],
+)
+def test_online_quantization_metrics_use_resolved_weight_precision(
+    shorthand, expected_bytes
+):
+    """Online FP4 storage packs two weights per byte; it is not FP8."""
+    quant_config = SimpleNamespace(
+        get_name=lambda: "online",
+        args=resolve_quantization_config(shorthand, {}),
+    )
+    config = create_mock_vllm_config(Qwen3Config(), quant_config=quant_config)
+    for component in (AttentionMetrics, FfnMetrics):
+        assert component.from_vllm_config(config).weight_byte_size == expected_bytes
+
+
+@pytest.mark.parametrize(
+    "shorthand,expected_bytes",
+    [("int8_per_channel_weight_only", 1), ("nvfp4_per_token", 0.5)],
+)
+def test_online_moe_only_quantization_preserves_linear_precision(
+    shorthand, expected_bytes
+):
+    quant_config = SimpleNamespace(
+        get_name=lambda: "online",
+        args=resolve_quantization_config(shorthand, None),
+    )
+    config = create_mock_vllm_config(Qwen3MoeConfig(), quant_config=quant_config)
+    assert AttentionMetrics.from_vllm_config(config).weight_byte_size == 2
+    assert FfnMetrics.from_vllm_config(config).weight_byte_size == expected_bytes
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"targets": {"*.q_proj": "fp8_per_tensor"}},
+        {"linear": "fp8_per_tensor", "ignore": ["*.q_proj"]},
+    ],
+)
+def test_online_layer_overrides_keep_components_with_dtype_fallback(overrides):
+    quant_config = SimpleNamespace(
+        get_name=lambda: "online",
+        args=resolve_quantization_config("online", overrides),
+    )
+    config = create_mock_vllm_config(Qwen3Config(), quant_config=quant_config)
+    metrics = ModelMetrics(config)
+    assert {m.component_type() for m in metrics.metrics} == {"attn", "ffn", "unembed"}
+    assert all(m.weight_byte_size == 2 for m in metrics.metrics)
+
+
+def test_online_mixed_dense_and_moe_precision_falls_back(caplog, monkeypatch):
+    """A single FFN weight size cannot describe differently quantized layers."""
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    quant_config = SimpleNamespace(
+        get_name=lambda: "online",
+        args=resolve_quantization_config("int8_per_channel_weight_only", None),
+    )
+    hf_config = Qwen3MoeConfig()
+    hf_config.interleave_moe_layer_step = 2
+    config = create_mock_vllm_config(hf_config, quant_config=quant_config)
+    metrics = FfnMetrics.from_vllm_config(config)
+    assert metrics.num_moe_layers == hf_config.num_hidden_layers // 2
+    assert metrics.weight_byte_size == 2
+    assert "model dtype" in caplog.text
 
 
 def test_quantized_model_metrics_aggregation():
