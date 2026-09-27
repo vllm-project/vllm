@@ -26,12 +26,11 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
 
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
-                              torch::Tensor b_g_idx, bool use_v2_format);
+                              bool use_v2_format);
 
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
-                                   torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx, bool use_v2_format);
+                                   torch::Tensor b_scales, bool use_v2_format);
 
 void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,

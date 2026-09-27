@@ -31,6 +31,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    worker_init_payload,
     worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -112,8 +113,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class SparseNCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, SparseNCCLWeightTransferUpdateInfo]
 ):
-    """
-    Sparse weight transfer engine using NCCL.
+    """Sparse weight transfer engine using NCCL.
 
     Receives checkpoint-coordinate patches broadcast from the trainer and applies
     them through the model's native weight loader. Sparse updates modify initialized
@@ -256,7 +256,8 @@ class SparseNCCLTrainerWeightTransferEngine(
         # open the trainer endpoint (rank 0); both sides must rendezvous together.
         with ThreadPoolExecutor(max_workers=1) as exe:
             future = exe.submit(
-                engine.client.init_weight_transfer_engine, asdict(worker_init_info)
+                engine.client.init_weight_transfer_engine,
+                worker_init_payload(worker_init_info),
             )
             # Open the trainer endpoint as NCCL rank 0 on the current device
             # (the init info satisfies the helper's rendezvous protocol).

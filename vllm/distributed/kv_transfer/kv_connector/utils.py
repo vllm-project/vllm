@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-KV cache helper for store.
-"""
+"""KV cache helper for store."""
 
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -60,6 +58,7 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
+        self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
 
     @classmethod
@@ -156,6 +155,10 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
+            self._failed_recving_pending |= kv_output.failed_recving
+
+        failed_recving = self._failed_recving_pending & finished_recving
+        self._failed_recving_pending -= failed_recving
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -168,6 +171,7 @@ class KVOutputAggregator:
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
+            failed_recving=failed_recving,
             expected_finished_count=self._expected_finished_count,
         )
 
@@ -227,11 +231,10 @@ def copy_kv_blocks(
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache blocks to the local block_size.
+    """Transforms the layout of received KV cache blocks to the local block_size.
     (Only works for local blocksize > remote blocksize)
 
-    example:
+    Example:
     local blocksize = 16 tokens, remote blocksize = 4 tokens
     local block[0] = remote block[0, 1, 2, 3]
     remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
@@ -240,6 +243,7 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
     1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
     2. permute => (H, nblocks, remoteN, D)
     3. flatten => (H, localN, D)
+
     """
     blocks_to_update = cache.index_select(0, indices)
     # use physical order
@@ -287,8 +291,7 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache to the local block_size and LBHNC.
+    """Transforms the layout of received KV cache to the local block_size and LBHNC.
     (Only works for local blocksize > remote blocksize)
 
     prefill is LBHNC, smaller block_size
@@ -311,9 +314,9 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
 def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
-    """
-    Yields:
-        (req_id, new_block_id_groups, preempted)
+    """Yields:
+    (req_id, new_block_id_groups, preempted)
+
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
@@ -340,6 +343,7 @@ def get_current_attn_backends(
 
     Returns:
         Deduplicated list of attention backend classes.
+
     """
     layer_type = cast(type[Any], AttentionLayerBase)
     layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
@@ -404,6 +408,9 @@ class EngineTransferInfo:
     end_layer: int = 0
     """Exclusive global index after the last layer owned by this PP rank."""
 
+    remote_dcp_size: int = 1
+    """Remote decode context parallel size."""
+
 
 # ---- Transfer topology ----
 
@@ -420,6 +427,7 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
+    dcp_size: int = 1
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
@@ -460,6 +468,15 @@ class TransferTopology:
         # Remove all pp_rank entries for the remote engine.
         for key in [k for k in self._engines if k[0] == remote_engine_id]:
             del self._engines[key]
+
+    @property
+    def dcp_rank(self) -> int:
+        """This rank's DCP coverage rank.
+
+        with ``dcp_size in (1, tp_size)`` enforced at the connector boundary, a
+        rank's DCP identity is always exactly ``tp_rank % dcp_size``.
+        """
+        return self.tp_rank % self.dcp_size
 
     # ============================================================
     # Common methods
@@ -514,17 +531,69 @@ class TransferTopology:
         """Whether the local engine's KV cache is replicated."""
         return self.is_mla or self.tp_size > self.total_num_kv_heads
 
-    def handshake_target_ranks(self, remote_tp_size: int) -> list[int]:
+    def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
+        """Remote ranks whose DCP slice overlaps mine (MLA, ``remote_dcp_size > 1``).
+
+        Shared by ``handshake_target_ranks`` (who to query metadata from) and
+        ``compute_tp_mapping`` (who to actually read from) — for MLA the two
+        questions have the identical answer, since DCP sharding is the only
+        thing keeping a remote rank from being interchangeable with any other.
+        """
+        local_dcp_size = self.dcp_size
+        local_dcp_rank = self.dcp_rank
+        if local_dcp_size <= remote_dcp_size:
+            # Keep every remote rank whose slice sits inside mine. When
+            # local_dcp_size == 1 (replicated locally), local_dcp_rank == 0 reduces to
+            # every remote rank, since no single one holds the whole sequence.
+            return [
+                r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
+            ]
+        # Local finer-grained: exactly one remote rank covers my whole slice
+        return [local_dcp_rank % remote_dcp_size]
+
+    def handshake_target_ranks(
+        self, remote_tp_size: int, remote_dcp_size: int = 1
+    ) -> list[int]:
         """Pre-registration: compute which remote TP ranks to handshake with.
 
-        Pure math based on local/remote TP sizes — does not require
-        the remote engine to be registered yet.
+        Pure math based on local/remote TP (and DCP, when the remote shards
+        its KV cache) sizes — does not require the remote engine to be
+        registered yet.
+
+        DCP support is scoped to ``dcp_size in (1, tp_size)`` on each side
+        and DCP sizes that divide one another: neither side ever has a
+        partially-duplicated, partially-sharded KV cache. When the
+        remote is not sharded (``remote_dcp_size == 1``) this reduces
+        exactly to the DTP>=PTP case, since a sharded local side
+        already has ``tp_size == dcp_size``.
         """
+        if remote_dcp_size > 1:
+            return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
+
         tp_ratio = self.tp_ratio(remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+
+    def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
+        """How many local ranks (in aggregate) read from a given remote rank.
+
+        Used by the producer side to know how many reader notifications to
+        wait for before freeing a request's blocks. Reuses ``tp_ratio``
+        whenever the remote isn't sharded — a sharded local side already
+        has ``tp_size == dcp_size``, so the existing TP-ratio formula is
+        already correct there unmodified.
+        """
+        if remote_dcp_size > 1:
+            if self.dcp_size == 1:
+                # Replicated locally: every local rank reads every shard.
+                return self.tp_size
+            # Both sharded, different degrees.
+            return max(1, self.dcp_size // remote_dcp_size)
+        # Remote replicated: `tp_ratio` local ranks share each remote rank
+        # when local_tp >= remote_tp, else each remote rank has one reader.
+        return max(1, self.tp_ratio(remote_tp_size))
 
     def target_remote_ranks(
         self, remote_engine_id: EngineId, remote_pp_rank: int = 0
@@ -551,6 +620,8 @@ class TransferTopology:
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"remote_pp={remote_pp_rank}, "
+            f"local_dcp={self.dcp_size}, "
+            f"remote_dcp={info.remote_dcp_size}, "
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )

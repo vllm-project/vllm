@@ -133,7 +133,8 @@ class LLBf16Gemm:
         split_k: int = 0
         num_stages: int = 0
 
-    def __init__(self) -> None:
+    def __init__(self, *, prefetch_pdl_weights: bool = False) -> None:
+        self._prefetch_pdl_weights = prefetch_pdl_weights
         # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
         self._compiled_cache: dict[tuple[int, int, int], Any] = {}
         # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
@@ -217,7 +218,12 @@ class LLBf16Gemm:
             N=N,
             divisibility=stride_divisibility,
         )
-        gemm = LLBf16Dotprod(k=compile_key.K, bs=compile_key.bs, use_pdl=_use_pdl())
+        gemm = LLBf16Dotprod(
+            k=compile_key.K,
+            bs=compile_key.bs,
+            use_pdl=_use_pdl(),
+            prefetch_pdl_weights=self._prefetch_pdl_weights,
+        )
         compiled = cute.compile(
             gemm,
             hidden_states,
@@ -324,6 +330,7 @@ class LLBf16Gemm:
 
 
 ll_bf16_gemm_kernel = LLBf16Gemm()
+ll_bf16_gemm_c1_pdl_kernel = LLBf16Gemm(prefetch_pdl_weights=True)
 
 
 def ll_bf16_gemm(
@@ -331,4 +338,9 @@ def ll_bf16_gemm(
     router_weight: torch.Tensor,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    return ll_bf16_gemm_kernel(hidden_states, router_weight, output_dtype)
+    kernel = (
+        ll_bf16_gemm_c1_pdl_kernel
+        if hidden_states.shape[0] == 1
+        else ll_bf16_gemm_kernel
+    )
+    return kernel(hidden_states, router_weight, output_dtype)

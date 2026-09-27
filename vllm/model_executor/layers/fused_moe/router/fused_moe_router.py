@@ -10,14 +10,17 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 
 class FusedMoERouter(ABC):
-    """
-    FusedMoERouter is an abstract class that provides a 'select_experts'
+    """FusedMoERouter is an abstract class that provides a 'select_experts'
     method that is used for routing hidden states based on router logits.
     """
 
     def __init__(self, eplb_state: EplbLayerState | None = None):
         self._routing_replay_out: torch.Tensor | None = None
         self.eplb_state = eplb_state
+        # Deepseek V4.1 vision checkpoints carry a second per-expert routing
+        # bias for image sentinel tokens; attached by model code when present.
+        self.bias_vl: torch.Tensor | None = None
+        self.image_sentinel_lo: int = 0
 
     @abstractmethod
     def set_capture_fn(
@@ -50,8 +53,7 @@ class FusedMoERouter(ABC):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Route the input hidden states to the top-k experts based on the
+        """Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
@@ -62,8 +64,8 @@ class FusedMoERouter(ABC):
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
             plain MoE implementations without redundant experts.
-        """
 
+        """
         topk_weights, topk_ids = self._select_experts(
             hidden_states,
             router_logits,

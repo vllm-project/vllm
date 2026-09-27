@@ -14,10 +14,10 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.gemma4 import Gemma4Parser
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────
@@ -1616,3 +1616,36 @@ class TestCommaInStringValueRegression:
         assert result.tools_called is True
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
+
+
+class TestGemma4IsReasoningEnd:
+    @staticmethod
+    def _parser(thinking: bool):
+        return Gemma4Parser(
+            _make_tokenizer(_PLAIN_ANSWER_TOKENS),
+            chat_template_kwargs={"enable_thinking": thinking},
+        )
+
+    @pytest.mark.parametrize(
+        ("ids", "thinking", "ended"),
+        [
+            ([CHANNEL_START_ID, 3000, CHANNEL_END_ID], True, True),
+            ([CHANNEL_START_ID, 3000, TOOL_CALL_START_ID], True, True),
+            ([CHANNEL_START_ID, 3000], True, False),
+            ([NEW_TURN_ID, 9100], True, False),
+            ([CHANNEL_END_ID, NEW_TURN_ID, 9100], True, False),
+            ([NEW_TURN_ID, 9100], False, True),
+            # The bundled template's thinking-off prompt: closed channel.
+            ([NEW_TURN_ID, 9100, CHANNEL_START_ID, 3000, CHANNEL_END_ID], False, True),
+            # A marker still wins with thinking off: the grammar honours it.
+            ([CHANNEL_START_ID, 3000], False, False),
+            # A tool-call opener after the channel closed: still ended.
+            (
+                [CHANNEL_START_ID, 3000, CHANNEL_END_ID, TOOL_CALL_START_ID, 9200],
+                True,
+                True,
+            ),
+        ],
+    )
+    def test_is_reasoning_end(self, ids, thinking, ended):
+        assert self._parser(thinking).is_reasoning_end(ids) is ended

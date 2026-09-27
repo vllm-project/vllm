@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Vision tower implementation for Kimi-K2.5 model.
+"""Vision tower implementation for Kimi-K2.5 model.
 
 This module provides the vision encoder components for Kimi-K2.5,
 including 3D patch embedding, RoPE position embedding, and
@@ -22,6 +21,7 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -37,6 +37,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 
@@ -194,7 +195,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         )
         self.patch_size = patch_size
 
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             in_dim,
             out_dim,
             kernel_size=patch_size,
@@ -220,25 +221,12 @@ class MoonVision3dPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self._proj(x).view(x.size(0), -1)
+        # forward_native dispatches this non-overlapping patch projection to GEMM.
+        x = self.proj.forward_native(x).view(x.size(0), self.proj.out_channels)
         if pos_embeds is not None:
             return x + pos_embeds
         assert grid_thws is not None
         return self.pos_emb(x, grid_thws)
-
-    def _proj(self, x: torch.Tensor) -> torch.Tensor:
-        # MIOpen conv2d intermittently fails under load on ROCm; use aiter Triton.
-        if current_platform.is_rocm() and x.dtype in (torch.float16, torch.bfloat16):
-            from aiter.ops.triton.conv.conv2d import conv2d
-
-            return conv2d(
-                x,
-                self.proj.weight,
-                self.proj.bias,
-                stride=self.patch_size,
-                layout="nchw",
-            )
-        return self.proj(x)
 
 
 class Rope2DPosEmbRepeated(nn.Module):
@@ -283,12 +271,12 @@ class Rope2DPosEmbRepeated(nn.Module):
     def get_freqs_cis(
         self, grid_thws: torch.Tensor | list[list[int]], device: torch.device
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             grid_thws (torch.Tensor): grid time, height and width
 
         Returns:
             freqs_cis: tensor of shape (sum(t * height * width), dim//2)
+
         """
         if not hasattr(self, "freqs_cis"):
             self.register_buffer(
@@ -448,6 +436,10 @@ class MoonViTEncoderLayer(nn.Module):
         Args:
             x (torch.Tensor): (seqlen, hidden_dim)
             cu_seqlens (torch.Tensor): cumulative sequence lengths
+            rope_freqs_cis (torch.Tensor): rotary embedding frequencies
+            max_seqlen (torch.Tensor | None): longest sequence in the batch
+            sequence_lengths (torch.Tensor | None): per-sequence lengths
+
         """
         seq_length = x.size(0)
         xqkv, _ = self.wqkv(x)
@@ -752,13 +744,13 @@ class MoonViT3dPretrainedModel(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             pixel_values (torch.Tensor): The input pixel values.
             grid_thws (torch.Tensor): Temporal, height and width.
 
         Returns:
             torch.Tensor: The output tokens.
+
         """
         if encoder_metadata is not None and "pos_embeds" in encoder_metadata:
             hidden_states = self.patch_embed(
@@ -821,9 +813,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         merge_gather_idx = build_image_merge_gather_idx(
             grid_thw_list, self.merge_kernel_size
         )
-        metadata["merge_gather_idx"] = torch.from_numpy(merge_gather_idx).to(
-            device=device, non_blocking=True
-        )
+        metadata["merge_gather_idx"] = async_tensor_h2d(merge_gather_idx, device=device)
         return metadata
 
 

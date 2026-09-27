@@ -304,7 +304,7 @@ class TritonAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @classmethod
@@ -322,6 +322,10 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_ATTN"
+
+    @classmethod
+    def supports_rswa(cls) -> bool:
+        return True
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -553,14 +557,21 @@ class TritonAttentionImpl(AttentionImpl):
         """Forward pass with Paged Attention impl. in Triton.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(
@@ -720,6 +731,7 @@ class TritonAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+
         """
         # Quantized KV cache is not supported for encoder attention.
         if is_quantized_kv_cache(self.kv_cache_dtype):

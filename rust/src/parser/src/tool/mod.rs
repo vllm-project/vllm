@@ -8,9 +8,10 @@ pub(crate) mod error;
 mod deepseek_dsml;
 pub(crate) mod deepseek_json;
 mod glm_xml;
-mod hy_v3;
+mod hy;
 pub(crate) mod json;
 mod kimi_k2;
+mod mimo;
 mod minimax_m2;
 mod minimax_m3;
 mod parameters;
@@ -20,16 +21,17 @@ mod seed_oss;
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
 
-pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
+pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser, DeepSeekV41ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub(crate) use hy_v3::{HyV3ToolMarkers, HyV3ToolParser};
+pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
     MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
+pub use mimo::MiMoToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
@@ -37,7 +39,9 @@ pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
+use xgrammar_structural_tag::format::Format;
 
+use crate::output_grammar::{self, OutputGrammarContext};
 use crate::utils;
 
 /// One function-style tool made available to the model.
@@ -187,7 +191,23 @@ pub trait ToolParser: Send {
         false
     }
 
+    /// Build the language of everything the model may emit after reasoning
+    /// ends: visible text plus tool calls. `None` means no tool grammar applies.
+    ///
+    /// The default forwards to [`Self::structural_tag_builder`] with reasoning
+    /// disabled, which is exactly today's strict-tool-calling grammar.
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)
+    }
+
     /// Return the xgrammar structural-tag builder used for strict tool calling.
+    ///
+    /// To be deprecated: this only exists to back the default
+    /// [`Self::build_visible_format`]. New parsers should override that method
+    /// directly instead of exposing a builder.
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
