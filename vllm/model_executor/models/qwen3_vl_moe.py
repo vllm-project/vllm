@@ -25,6 +25,7 @@
 """Inference-only Qwen3-VL-MoE model compatible with HuggingFace weights."""
 
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
@@ -176,6 +177,9 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 
 class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+    language_model: Qwen3MoeLLMForCausalLM
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -223,7 +227,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
 class Qwen3VLMoeForConditionalGeneration(
     Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
 ):
-    is_3d_moe_weight: bool = True
+    is_3d_moe_weight: ClassVar[bool] = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -236,7 +240,7 @@ class Qwen3VLMoeForConditionalGeneration(
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -293,8 +297,8 @@ class Qwen3VLMoeForConditionalGeneration(
             )
 
         # Whether to include the gate_up_proj mapping is determined by
-        # the language model.
-        self.packed_modules_mapping = (
+        # the language model. Keep this override local to the instance.
+        self.packed_modules_mapping = (  # type: ignore[misc]
             self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
 
