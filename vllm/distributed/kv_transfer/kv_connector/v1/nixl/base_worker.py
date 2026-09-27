@@ -839,6 +839,8 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
+        # Map of pull peer (host, port) -> engine_id currently serving it.
+        self._engine_by_address: dict[tuple[str, int], EngineId] = {}
 
         self.model_config = vllm_config.model_config
 
@@ -1300,6 +1302,7 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
+                        self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -2953,6 +2956,7 @@ class NixlBaseConnectorWorker:
         # Handle timeout to avoid stranding blocks on remote.
         self._reap_expired_send_leases(done_sending)
 
+        self._cleanup_replaced_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -3541,14 +3545,53 @@ class NixlBaseConnectorWorker:
             and meta.remote is not None
         }
 
+    def _track_remote_engine_replacement(
+        self, engine_id: EngineId, host: str, port: int
+    ) -> None:
+        """Record the engine currently serving a pull peer address."""
+        # TODO: Also handle push mode, which handshakes in both directions.
+        if self._TRANSFER_MODE != "pull":
+            return
+        previous = self._engine_by_address.get((host, port))
+        self._engine_by_address[(host, port)] = engine_id
+        if previous is None or previous == engine_id:
+            return
+        logger.info(
+            "Remote engine at %s:%d changed from %s to %s.",
+            host,
+            port,
+            previous,
+            engine_id,
+        )
+
+    def _cleanup_replaced_remote_engines(self) -> None:
+        """Release replaced pull peers once requests and handshakes have drained."""
+        if self._TRANSFER_MODE != "pull":
+            return
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+            replaced = self._remote_agents.keys() - self._engine_by_address.values()
+        if not replaced:
+            return
+        # _recving_metadata is only accessed from this (main) thread.
+        busy = {
+            meta.remote.engine_id
+            for meta in self._recving_metadata.values()
+            if meta.remote is not None
+        }
+        for engine_id in replaced - busy:
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
+
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
         """Remove all state for a single remote engine.
 
         Releases NIXL resources (dlist handles, remote agents) and clears
-        all per-engine data structures. Used by both TTL eviction and
-        shutdown.
+        all per-engine data structures. Used by TTL eviction, replaced peer
+        cleanup and shutdown.
         """
         assert engine_id in self._remote_agents
 
@@ -3558,6 +3601,9 @@ class NixlBaseConnectorWorker:
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
+            for address, eid in list(self._engine_by_address.items()):
+                if eid == engine_id:
+                    del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
