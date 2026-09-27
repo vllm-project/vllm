@@ -829,7 +829,6 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
 
 - label: ":nvidia: (B200) GPQA Eval (GPT-OSS)"
@@ -843,7 +842,6 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
   mirror:
     amd:
@@ -865,7 +863,6 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
-      - uv pip install --system 'gpt-oss[eval]==0.0.5'
       - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 - label: ":nvidia: (B200) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
@@ -940,7 +937,6 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
 
 - label: ":nvidia: (H200 MIG 35GB) LM Eval KV-Offload"

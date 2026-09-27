@@ -76,7 +76,9 @@ black==24.10.0
 blake3==1.0.9
     # via -r requirements/test/../common.txt
 blobfile==3.0.0
-    # via -r requirements/test/cuda.in
+    # via
+    #   -r requirements/test/cuda.in
+    #   gpt-oss
 bm25s==0.2.13
     # via mteb
 boto3==1.35.57
@@ -111,7 +113,7 @@ chardet==5.2.0
     # via mbstrdecoder
 charset-normalizer==3.4.0
     # via requests
-chz==0.3.0
+chz==0.4.0
     # via gpt-oss
 click==8.4.2
     # via
@@ -190,7 +192,7 @@ distro==1.9.0
     #   openai
 dnspython==2.7.0
     # via email-validator
-docker==7.1.0
+docker==7.2.0
     # via gpt-oss
 docopt==0.6.2
     # via num2words
@@ -291,7 +293,7 @@ googleapis-common-protos==1.70.0
     #   google-api-core
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-gpt-oss==0.0.8
+gpt-oss==0.0.9
     # via -r requirements/test/cuda.in
 graphql-core==3.2.6
     # via hypothesis-graphql
@@ -402,6 +404,7 @@ jinja2==3.1.6
     #   datamodel-code-generator
     #   fastapi
     #   genai-perf
+    #   gpt-oss
     #   lm-eval
     #   torch
 jiter==0.15.0
@@ -433,6 +436,10 @@ jsonschema-specifications==2024.10.1
     # via jsonschema
 junit-xml==1.9
     # via schemathesis
+jupyter-client==8.10.0
+    # via gpt-oss
+jupyter-core==5.9.1
+    # via jupyter-client
 kaldi-native-fbank==1.22.3
     # via -r requirements/test/cuda.in
 kaleido==0.2.1
@@ -549,6 +556,7 @@ numpy==2.2.6
     #   evaluate
     #   fastparquet
     #   genai-perf
+    #   gpt-oss
     #   imagehash
     #   imageio
     #   librosa
@@ -583,8 +591,6 @@ numpy==2.2.6
 open-clip-torch==2.32.0
     # via -r requirements/test/cuda.in
 openai==2.44.0
-    # via -r requirements/test/../common.txt
-openai-harmony==0.0.4
     # via
     #   -r requirements/test/../common.txt
     #   gpt-oss
@@ -641,6 +647,8 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.11.5
     # via genai-perf
+oss-harmony==0.0.11
+    # via -r requirements/test/../common.txt
 outlines-core==0.2.14
     # via -r requirements/test/../common.txt
 packaging==24.2
@@ -672,6 +680,7 @@ pandas==2.2.3
     #   evaluate
     #   fastparquet
     #   genai-perf
+    #   gpt-oss
     #   statsmodels
 partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
@@ -702,6 +711,7 @@ pillow==10.4.0
 platformdirs==4.3.6
     # via
     #   black
+    #   jupyter-core
     #   pooch
     #   virtualenv
 plotly==5.24.1
@@ -794,7 +804,7 @@ pydantic==2.12.0
     #   model-hosting-container-standards
     #   mteb
     #   openai
-    #   openai-harmony
+    #   oss-harmony
     #   pydantic-extra-types
     #   pydantic-settings
     #   ray
@@ -855,6 +865,7 @@ pytest-timeout==2.3.1
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   jupyter-client
     #   matplotlib
     #   pandas
     #   typepy
@@ -898,7 +909,9 @@ pyyaml==6.0.2
     #   uvicorn
     #   vocos
 pyzmq==27.1.0
-    # via -r requirements/test/../common.txt
+    # via
+    #   -r requirements/test/../common.txt
+    #   jupyter-client
 rapidfuzz==3.12.1
     # via jiwer
 ray==2.56.1
@@ -1077,7 +1090,7 @@ starlette-testclient==0.4.1
     # via schemathesis
 statsmodels==0.14.4
     # via genai-perf
-structlog==25.4.0
+structlog==26.1.0
     # via gpt-oss
 supervisor==4.3.0
     # via model-hosting-container-standards
@@ -1101,7 +1114,7 @@ tenacity==9.1.2
     #   schemathesis
 tensorizer==2.10.1
     # via -r requirements/test/cuda.in
-termcolor==3.1.0
+termcolor==3.3.0
     # via gpt-oss
 threadpoolctl==3.5.0
     # via scikit-learn
@@ -1157,11 +1170,14 @@ torchvision==0.28.0+cpu
     #   open-clip-torch
     #   segmentation-models-pytorch
     #   timm
+tornado==6.5.10
+    # via jupyter-client
 tqdm==4.67.3
     # via
     #   -r requirements/test/../common.txt
     #   datasets
     #   evaluate
+    #   gpt-oss
     #   huggingface-hub
     #   lm-eval
     #   mteb
@@ -1174,6 +1190,10 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
+traitlets==5.16.1
+    # via
+    #   jupyter-client
+    #   jupyter-core
 transformers==5.17.0
     # via
     #   -r requirements/test/../common.txt
@@ -1226,6 +1246,7 @@ typing-extensions==4.15.0
     #   grpcio
     #   httpx2
     #   huggingface-hub
+    #   jupyter-client
     #   librosa
     #   lm-eval
     #   mcp

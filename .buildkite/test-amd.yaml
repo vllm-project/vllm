@@ -1287,7 +1287,6 @@ steps:
   - vllm/platforms/rocm.py
   - tests/evals/gpt_oss/
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
 - label: ":amd: (MI300) LM Eval Small Models Distributed"
@@ -3584,7 +3583,6 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 - label: ":amd: (MI355 DPX) LM Eval Watermarking"
