@@ -78,8 +78,12 @@ def prepare_commit_plan_kernel(
             tl.int32
         )
         final_num_computed = num_computed + commit_len
+        # The committed state belongs to the block holding the last committed
+        # token. A window ending exactly on a boundary stays in that block; the
+        # next block may still be unallocated.
         final_state_col = tl.minimum(
-            final_num_computed // mamba_block_size, block_table_width - 1
+            tl.maximum(final_num_computed - 1, 0) // mamba_block_size,
+            block_table_width - 1,
         )
         final_state_idx = tl.load(
             block_table_ptr

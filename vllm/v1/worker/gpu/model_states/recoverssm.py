@@ -91,10 +91,12 @@ def _postprocess_recoverssm_align_kernel(
         return
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     num_computed = tl.load(num_computed_ptr + batch_idx)
+    # Match the commit plan: the running state lives in the block holding the
+    # last computed token, so the next step migrates it across a boundary.
     tl.store(
         state_idx_ptr + req_state_idx,
         tl.minimum(
-            (num_computed + num_sampled) // MAMBA_BLOCK_SIZE,
+            tl.maximum(num_computed + num_sampled - 1, 0) // MAMBA_BLOCK_SIZE,
             BLOCK_TABLE_WIDTH - 1,
         ),
     )

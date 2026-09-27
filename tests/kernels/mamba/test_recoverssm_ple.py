@@ -124,7 +124,7 @@ def test_ple_commit_align_boundary(num_computed, accepted, crosses):
         mamba_block_size=block_size,
     )
 
-    final_block = nxt if num_computed + accepted >= block_size else src
+    final_block = nxt if num_computed + accepted > block_size else src
     assert torch.equal(view[final_block, :, :STATE_LEN], want_final)
     if crosses:
         assert torch.equal(view[src, :, :STATE_LEN], want_boundary)

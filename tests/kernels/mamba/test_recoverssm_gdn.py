@@ -299,14 +299,15 @@ def test_commit_maps_noncontiguous_requests_in_align_mode():
     for i, r in enumerate(req_rows.tolist()):
         n = min(int(acc[r]), qlens[i])
         c0 = int(nc[r])
-        final_blk = int(bt[r, (c0 + n) // bs])
+        final_blk = int(bt[r, max(c0 + n - 1, 0) // bs])
         tok = int(inp["query_start_loc"][i]) + n - 1
         torch.testing.assert_close(ckpt[final_blk], states[tok], rtol=1e-5, atol=1e-6)
 
 
 # (num_computed, accepted, block size): boundary after 1 / after 2 / ending exactly on
 # it / crossing and continuing / accepted = 1 without crossing / the full window
-# crossing after 3
+# crossing after 3. A window ending exactly on a boundary keeps its state in the block
+# holding its last token: the next block may still be unallocated.
 ALIGN_CASES = [
     (3, 2, 4),
     (2, 3, 4),
@@ -338,7 +339,7 @@ def test_align_boundary_and_final_state_match_native(nc, accepted, bs):
         mamba_block_size=bs,
     )
     next_boundary = (nc // bs + 1) * bs
-    final_blk = int(bt[0, (nc + accepted) // bs])
+    final_blk = int(bt[0, max(nc + accepted - 1, 0) // bs])
     if (
         nc + accepted >= next_boundary
     ):  # crosses: the boundary state goes into the source block
@@ -585,7 +586,7 @@ def test_align_boundary_bf16_state(nc, accepted, bs):
         mamba_block_size=bs,
     )
     next_boundary = (nc // bs + 1) * bs
-    final_blk = int(bt[0, (nc + accepted) // bs])
+    final_blk = int(bt[0, max(nc + accepted - 1, 0) // bs])
     if nc + accepted >= next_boundary:
         torch.testing.assert_close(
             ckpt[int(src)].float(),
