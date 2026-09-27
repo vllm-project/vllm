@@ -258,3 +258,44 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
     assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
         "allow_fp32_router_gemm"
     )
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, None])
+def test_rocm_gfx950_bf16_weight_router_shape_enables_fp32_router_gemm(
+    monkeypatch, out_dtype: torch.dtype | None
+) -> None:
+    gate = _make_gate(
+        monkeypatch,
+        is_rocm=True,
+        out_dtype=out_dtype,
+        input_size=7168,
+        output_size=896,
+        on_gfx950=True,
+    )
+    if out_dtype is None:
+        assert not gate.allow_fp32_router_gemm
+        gate.set_out_dtype(torch.float32)
+    assert gate.allow_fp32_router_gemm
+
+
+@pytest.mark.parametrize(
+    ("bias", "on_gfx950", "out_dtype"),
+    [
+        pytest.param(False, False, torch.float32, id="gfx942"),
+        pytest.param(True, True, torch.float32, id="bias"),
+        pytest.param(False, True, torch.bfloat16, id="bf16-logits"),
+    ],
+)
+def test_rocm_bf16_weight_router_shape_rejects_unsupported_configs(
+    monkeypatch, bias: bool, on_gfx950: bool, out_dtype: torch.dtype
+) -> None:
+    gate = _make_gate(
+        monkeypatch,
+        is_rocm=True,
+        bias=bias,
+        out_dtype=out_dtype,
+        input_size=7168,
+        output_size=896,
+        on_gfx950=on_gfx950,
+    )
+    assert not gate.allow_fp32_router_gemm
