@@ -563,16 +563,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_kv_cache_spec(self):
         kv_cache_spec = get_kv_cache_spec(self.vllm_config)
-        if isinstance(self.speculator, DraftModelSpeculator):
-            self.speculator.adapt_draft_kv_cache_spec(kv_cache_spec, self.model)
-            # A draft running at DCP=1 under a DCP target keeps a replicated cache.
-            if self.speculator.dcp_size == 1 and self.dcp_size > 1:
-                for name in (
-                    self.speculator.draft_attn_layer_names & kv_cache_spec.keys()
-                ):
-                    kv_cache_spec[name] = replace(
-                        kv_cache_spec[name], dcp_sharded=False
-                    )
+        # A draft running at DCP=1 under a DCP target keeps a replicated cache.
+        if (
+            isinstance(self.speculator, DraftModelSpeculator)
+            and self.speculator.dcp_size == 1
+            and self.dcp_size > 1
+        ):
+            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
+                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
         return kv_cache_spec
 
     def initialize_kv_cache(
