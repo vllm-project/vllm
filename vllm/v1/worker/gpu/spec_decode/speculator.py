@@ -395,6 +395,16 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states)
+
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -404,21 +414,12 @@ class DraftModelSpeculator(BaseSpeculator):
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
-        spec_step_idx: int | None = None,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        # Multi-module MTP passes spec_step_idx so that each draft step uses
-        # its own module's LM head.
         if draft_logits is None and self.use_local_argmax_reduction:
-            if spec_step_idx is None:
-                return self.model.get_top_tokens(hidden_states)
-            return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
+            return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
-        if spec_step_idx is None:
-            logits = self.model.compute_logits(hidden_states)
-        else:
-            logits = self.model.compute_logits(
-                hidden_states, spec_step_idx=spec_step_idx
-            )
+        logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
             sampled = gumbel_sample(
                 logits,
