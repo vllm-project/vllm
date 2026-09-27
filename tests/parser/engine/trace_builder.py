@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tests.parser.engine.replay_harness import (
@@ -35,6 +35,7 @@ from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
     Glm47MoeParser,
     GraniteParser,
+    GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
     MinimaxM2Parser,
@@ -594,6 +595,30 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
+    """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
+    content after ``</think>``."""
+    sample = _build_qwen3(
+        scenario,
+        name="granite_thinking_parser",
+        parser_cls=GraniteThinkingParser,
+        strip_trailing_ws=True,
+        validate=False,
+    )
+    sample = replace(
+        sample,
+        expected_content=(
+            sample.expected_content.lstrip("\n")
+            if sample.expected_content
+            else sample.expected_content
+        ),
+        content_lstrip="\n",
+    )
+    if validate:
+        _validate_sample(sample, GraniteThinkingParser)
+    return sample
+
+
 # ── Seed-OSS (Qwen3 XML grammar with Seed wrapper tokens) ────────────
 
 _SEED_OSS_VOCAB: dict[str, int] = {
@@ -1136,6 +1161,7 @@ _BUILDERS: dict[str, Any] = {
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
@@ -1150,23 +1176,3 @@ def build_samples(model: str) -> tuple[Sample, ...]:
     builder = _BUILDERS[model]
     scenarios = _KIMI_K2_SCENARIOS if model == "kimi_k2" else SCENARIOS
     return tuple(s for s in (builder(sc) for sc in scenarios) if s is not None)
-
-
-def build_sample(model: str, scenario: Scenario) -> Sample | None:
-    """Build a single sample for one model + scenario."""
-    return _BUILDERS[model](scenario)
-
-
-def build_scaling_sample(
-    model: str, token_count: int, validate: bool = False
-) -> Sample:
-    """Build a sample with approximately *token_count* tokens."""
-    sentence = "The quick brown fox jumps over the lazy dog. "
-    text = sentence * (token_count // 10 + 1)
-    scenario = Scenario(
-        id=f"scaling-{token_count}",
-        description=f"Scaling test with ~{token_count} tokens",
-        reasoning=text,
-        tool_calls=[_READ_TOOL],
-    )
-    return _BUILDERS[model](scenario, validate=validate)
