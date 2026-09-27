@@ -1800,7 +1800,6 @@ def test_debug_perf_stats_survive_typed_decoder(monkeypatch):
     assert decoded.debug_stats is not None
     assert decoded.debug_stats.context_breakdown is not None
     assert all(
-        isinstance(v, int)
-        for v in decoded.debug_stats.context_breakdown.values()
+        isinstance(v, int) for v in decoded.debug_stats.context_breakdown.values()
     )
     assert "requests" not in decoded.debug_stats.context_breakdown
