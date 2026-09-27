@@ -13,8 +13,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 class MxFp6LinearLayerConfig:
     """Configuration for an MXFP6 linear layer.
 
-    All MXFP6 layers share the same structure: packed uint8 weights (2 FP4 values per
-    byte) and per-block weight scales (group size 32).
+    All MXFP6 layers share the same structure: packed uint8 weights (4 FP6 values
+    per 3 bytes) and per-block weight scales (group size 32).
 
     Attributes:
         weight_quant_key: Identifies the weight quantization format. Can be

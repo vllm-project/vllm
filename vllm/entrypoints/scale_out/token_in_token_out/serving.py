@@ -12,9 +12,13 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
-from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -373,6 +377,11 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        per_request_metrics = None
+        if request.sampling_params.n == 1:
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
         response = GenerateResponse(
             request_id=request_id,
             created=created_time,
@@ -384,6 +393,7 @@ class ServingTokens(GenerateBaseServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             mm_placeholders=request._response_mm_placeholders,
+            metrics=per_request_metrics,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -423,6 +433,7 @@ class ServingTokens(GenerateBaseServing):
         prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        last_res: RequestOutput | None = None
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -430,6 +441,7 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
+                last_res = res
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
@@ -496,10 +508,10 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    # Omit absent prompt metadata (Rust skips None fields).
+                    # Omit fields that are absent from token-bearing chunks.
                     exclude = {
                         name
-                        for name in ("prompt_token_ids", "mm_placeholders")
+                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
                         if getattr(chunk, name) is None
                     }
                     yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
@@ -517,10 +529,18 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
+                per_request_metrics = None
+                if sampling_params.n == 1:
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        per_request_metrics = PerRequestMetrics(
+                            speculative_decoding=spec_stats
+                        )
                 final_chunk = GenerateStreamResponse(
                     request_id=request_id,
                     choices=[],
                     usage=final_usage_info,
+                    metrics=per_request_metrics,
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
@@ -570,7 +590,10 @@ class ServingTokens(GenerateBaseServing):
                                 step_top_logprobs.items()
                             )
                             if num_output_top_logprobs is not None
-                            and i < max(num_output_top_logprobs, 1)
+                            and (
+                                num_output_top_logprobs == -1
+                                or i < max(num_output_top_logprobs, 1)
+                            )
                         ],
                     )
                 )
