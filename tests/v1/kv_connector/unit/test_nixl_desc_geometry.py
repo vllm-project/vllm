@@ -1279,6 +1279,24 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
+@pytest.mark.cpu_test
+def test_dcp_rejects_different_logical_block_sizes():
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8, mamba=False
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=(24, 32),
+    )
+    with pytest.raises(NotImplementedError, match="matching P/D logical block sizes"):
+        worker.add_remote_agent(
+            meta_r, remote_tp_rank=0, remote_tp_size=2, remote_dcp_size=2
+        )
+
+
 def _make_csa_linear_ple_worker(
     scratch_aliases: str = "compressed", ple_page_size: int = 256
 ):
