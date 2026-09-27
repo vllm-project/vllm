@@ -1081,6 +1081,7 @@ def test_quant_method_dispatch_mxfp8_moe_raises(default_vllm_config):
     )
     wk, ak, mcls = config.get_quant_method_target("experts", RoutedExperts)
     assert mcls is QuarkOCP_MX_MoEMethod
+    assert wk is not None
     # The OCP MX MoE constructor should fail loudly for MXFP8.
     fake_moe_config = MagicMock()
     with pytest.raises(ValueError, match="MXFP8 experts are not supported"):

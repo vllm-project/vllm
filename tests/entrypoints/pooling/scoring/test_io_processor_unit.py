@@ -47,7 +47,7 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     )
 
     processor = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
-    processor.model_config = SimpleNamespace(enable_prompt_embeds=False)
+    processor.model_config = SimpleNamespace(enable_prompt_embeds=False)  # type: ignore[assignment]
     processor.tokenizer = TokenizersBackend(
         tokenizer_object=backend,
         unk_token="[UNK]",

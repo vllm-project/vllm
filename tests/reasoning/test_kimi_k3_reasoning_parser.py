@@ -168,7 +168,7 @@ def test_count_reasoning_tokens_is_zero_when_thinking_disabled():
 
 
 def test_count_reasoning_tokens_through_delegating_parser():
-    parser = ReasoningOnlyParser(DummyTokenizer())
+    parser = ReasoningOnlyParser(DummyTokenizer())  # type: ignore[arg-type]
 
     assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS, 11]) == 1
 

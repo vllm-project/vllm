@@ -180,7 +180,7 @@ def test_granite_thinking_reasoning(
     output = tokenizer.tokenize(param_dict["output"])
     model_output = [tokenizer.convert_tokens_to_string([token]) for token in output]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        tokenizer
+        tokenizer  # type: ignore[arg-type]
     )
 
     reasoning, content = run_reasoning_extraction(
@@ -198,7 +198,7 @@ def test_granite_thinking_no_content_after_end_token(
     tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
 
     reasoning, content = run_reasoning_extraction(
         parser,
@@ -219,7 +219,7 @@ def test_granite_thinking_whitespace_only_content(
     streaming: bool,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
 
     reasoning, content = run_reasoning_extraction(
         parser,
@@ -238,7 +238,7 @@ def test_granite_thinking_unterminated_think_block(
     tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -263,7 +263,7 @@ def test_granite_thinking_disabled_moves_into_content(
     tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -294,7 +294,7 @@ def test_granite_thinking_disabled_with_leading_newline(
     # enable_thinking=False output has no template-injected \n, so
     # this is a correctness check, not a realistic scenario.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -319,7 +319,7 @@ def test_granite_thinking_force_nonempty_content_moves_into_content(
     tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -344,7 +344,7 @@ def test_granite_thinking_force_nonempty_no_swap_when_newlines_only(
     # removes them but the swap should NOT fire — content was present,
     # just whitespace. Matches the HF plugin behavior.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -368,7 +368,7 @@ def test_granite_thinking_force_nonempty_swaps_when_content_absent(
     # When </think> IS present but content is truly absent (zero
     # characters after </think>, e.g. max_tokens cut), swap fires.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -390,7 +390,7 @@ def test_granite_thinking_force_nonempty_keeps_real_content(
     tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -415,7 +415,7 @@ def test_granite_thinking_keeps_truncated_reasoning(
     tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -569,7 +569,7 @@ def test_granite_thinking_empty_think_block(
 ):
     # <think></think>\nHello — empty reasoning, content after newline.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
+    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
 
     reasoning, content = run_reasoning_extraction(
         parser,
