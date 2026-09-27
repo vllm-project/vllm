@@ -247,11 +247,21 @@ class OffloadingEventsTracker:
             the underlying :class:`OffloadingEvent` stream.
 
         """
+        removed_keys: set[OffloadKey] = set()
         for event in events:
             if event.removed:
+                if self.self_describing_enabled:
+                    removed_keys.update(event.keys)
                 yield from self._take_removed_event(event)
             else:
                 yield from self._take_stored_event(event)
+
+        # A primary removal can precede a queued secondary store in this batch.
+        # Keep its payload until all stores have registered their residencies.
+        for key in removed_keys:
+            meta = self._pending_event_metadata.get(key)
+            if meta is not None and not meta.active_residencies:
+                self._pending_event_metadata.pop(key)
 
     def reset(self) -> None:
         """Drop all tracked state; pending payloads are stale after a
@@ -407,8 +417,6 @@ class OffloadingEventsTracker:
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
                 meta.active_residencies.discard((event.medium, event.ownership))
-                if not meta.active_residencies:
-                    self._pending_event_metadata.pop(key)
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(
