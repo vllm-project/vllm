@@ -895,6 +895,66 @@ class precompiled_wheel_utils:
         return wheel_url, download_filename
 
     @staticmethod
+    def find_compatible_wheel(
+        base_commit: str, variant: str | None, arch: str
+    ) -> tuple[list[dict], str]:
+        """Find a published wheel whose compiled sources match the working tree."""
+        from urllib.error import HTTPError
+
+        candidates = subprocess.check_output(
+            ["git", "rev-list", "--first-parent", "--max-count=50", base_commit],
+            text=True,
+        ).splitlines()
+        for commit in candidates:
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, variant
+                )
+            except HTTPError as err:
+                if err.code != 404:
+                    raise
+                continue
+            if not any(
+                wheel.get("package_name") == "vllm"
+                and arch in wheel.get("platform_tag", "")
+                for wheel in wheels
+            ):
+                continue
+
+            # Compare against the working tree, including staged/unstaged changes.
+            changed = subprocess.check_output(
+                [
+                    "git",
+                    "diff",
+                    "--name-only",
+                    commit,
+                    "--",
+                    "csrc",
+                    "cmake",
+                    "CMakeLists.txt",
+                    "setup.py",
+                    "pyproject.toml",
+                    "vllm/_custom_ops.py",
+                    "rust",
+                ],
+                text=True,
+            ).strip()
+            if changed:
+                raise ValueError(
+                    f"Precompiled wheel {commit} does not match the compiled "
+                    f"sources in this checkout. Changed files:\n{changed}\n"
+                    "Build vLLM from source (unset VLLM_USE_PRECOMPILED), or "
+                    "rebase onto a commit with a compatible published wheel."
+                )
+            print(f"Using compatible precompiled wheel commit {commit}")
+            return wheels, repo_url
+        raise ValueError(
+            f"No published precompiled wheel for variant {variant} and "
+            f"architecture {arch} within 50 commits of {base_commit}. "
+            "Wait for wheel publication or build vLLM from source."
+        )
+
+    @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
         """Try to determine the precompiled wheel URL or path to use.
         The order of preference is:
@@ -904,8 +964,8 @@ class precompiled_wheel_utils:
            or CUDA variant selected from VLLM_MAIN_CUDA_VERSION, torch, or nvidia-smi
 
         If downloading from the nightly repo, the commit can be specified via
-        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
-        is used.
+        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, local checkouts search backwards
+        from their merge-base with upstream main for a compatible published wheel.
         """
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is not None:
@@ -931,6 +991,25 @@ class precompiled_wheel_utils:
                     ", trying to fetch base commit in main branch"
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+                if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_DOCKER_BUILD_CONTEXT:
+                    if commit == "nightly":
+                        raise ValueError(
+                            "Cannot determine a compatible precompiled wheel without "
+                            "the upstream merge-base. Check your Git history and "
+                            "network connection, or build vLLM from source."
+                        )
+                    wheels, repo_url = precompiled_wheel_utils.find_compatible_wheel(
+                        commit, variant, arch
+                    )
+                    from urllib.parse import urljoin
+
+                    wheel = next(
+                        wheel
+                        for wheel in wheels
+                        if wheel.get("package_name") == "vllm"
+                        and arch in wheel.get("platform_tag", "")
+                    )
+                    return urljoin(repo_url, wheel["path"]), wheel.get("filename")
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
             download_filename = None
             try:
@@ -1147,17 +1226,9 @@ class precompiled_wheel_utils:
                     ["git", "fetch", "https://github.com/vllm-project/vllm", "main"]
                 )
 
-            # Then get the commit hash of the current branch that is the same as
-            # the upstream main commit.
-            current_branch = (
-                subprocess.check_output(["git", "branch", "--show-current"])
-                .decode("utf-8")
-                .strip()
-            )
-
             base_commit = (
                 subprocess.check_output(
-                    ["git", "merge-base", f"{upstream_main_commit}", current_branch]
+                    ["git", "merge-base", upstream_main_commit, "HEAD"]
                 )
                 .decode("utf-8")
                 .strip()

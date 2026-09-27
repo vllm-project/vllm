@@ -528,6 +528,8 @@ steps:
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
+  - tests/standalone_tests/test_precompiled_wheel.py
+  - setup.py
   - tests/reasoning
   - tools/pre_commit/check_test_tethering.py
   - tools/pre_commit/test_tethering_allowlist.txt
@@ -541,6 +543,7 @@ steps:
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
+  - python3 standalone_tests/test_precompiled_wheel.py
   - pytest -v -s device_allocator
   - pytest -v -s test_envs.py
   - pytest -v -s test_outputs.py
