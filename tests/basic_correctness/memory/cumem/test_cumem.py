@@ -398,6 +398,52 @@ def test_wake_up_host_memory_release(monkeypatch, release_host_memory: bool):
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Pinned host memory stats are CUDA-only",
+)
+@pytest.mark.parametrize("release_host_memory", [False, True])
+def test_wake_up_host_memory_release_after_level2_sleep(
+    monkeypatch, release_host_memory: bool
+):
+    """A level-1 weight backup survives a later level-2 sleep: the allocator
+    keeps the backup of an already-asleep allocation. The pinned blocks must
+    still be released when the weights finally wake."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    monkeypatch.setenv(
+        "VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY", "1" if release_host_memory else "0"
+    )
+    envs.disable_envs_cache()
+
+    def pinned_host_bytes() -> int:
+        return torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.ones(64 * MiB_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
+
+    backend = CuMemBackend()
+    baseline = pinned_host_bytes()
+    backend.suspend(level=1)
+    assert pinned_host_bytes() - baseline >= weights.nbytes
+
+    # The KV-only wake leaves the weight backup asleep, and the level-2 sleep
+    # that follows must not forget it.
+    backend.resume(tags=["kv_cache"])
+    assert pinned_host_bytes() - baseline >= weights.nbytes
+    backend.suspend(level=2)
+
+    backend.resume(tags=["weights"])
+    assert torch.all(weights == 1)
+    still_pinned = pinned_host_bytes() - baseline
+    if release_host_memory:
+        assert still_pinned < weights.nbytes
+    else:
+        assert still_pinned >= weights.nbytes
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
     """Discarded weights-tag memory is remapped; ROCm zeroes it over stale pages."""
