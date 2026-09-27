@@ -22,6 +22,18 @@ from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
+# Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
+VLLM_GIT_DESCRIBE_COMMAND = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--abbrev=40",
+    "--match",
+    "v[0-9]*",
+]
+
 
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -512,8 +524,7 @@ class precompiled_wheel_utils:
         *,
         rocm: bool = False,
     ) -> tuple[list[dict], str]:
-        """
-        Fetches metadata for a specific variant of the precompiled wheel.
+        """Fetches metadata for a specific variant of the precompiled wheel.
 
         For non-ROCm, fetches vllm metadata.
 
@@ -591,7 +602,6 @@ class precompiled_wheel_utils:
     @staticmethod
     def detect_system_cuda_variant() -> str:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
-
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
         supported = {12: "cu129", 13: "cu130"}
 
@@ -886,8 +896,7 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
-        """
-        Try to determine the precompiled wheel URL or path to use.
+        """Try to determine the precompiled wheel URL or path to use.
         The order of preference is:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)
@@ -1015,6 +1024,7 @@ class precompiled_wheel_utils:
                             "vllm/_flashmla_extension_C.abi3.so",
                             "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
+                            "vllm/_deepselect_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
@@ -1251,40 +1261,50 @@ def get_vllm_version() -> str:
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
         print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
-        return get_version(write_to="vllm/_version.py")
+        return get_version(
+            write_to="vllm/_version.py",
+            git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+        )
 
-    version = get_version(write_to="vllm/_version.py")
+    version = get_version(
+        write_to="vllm/_version.py",
+        git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+    )
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
-    if _no_device():
-        if envs.VLLM_TARGET_DEVICE == "empty":
-            version += f"{sep}empty"
-    elif _is_cuda():
-        if USE_PRECOMPILED_EXTENSIONS and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
-            version += f"{sep}precompiled"
+    if not envs.VLLM_SKIP_VERSION_SUFFIX:
+        if _no_device():
+            if envs.VLLM_TARGET_DEVICE == "empty":
+                version += f"{sep}empty"
+        elif _is_cuda():
+            if (
+                USE_PRECOMPILED_EXTENSIONS
+                and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX
+            ):
+                version += f"{sep}precompiled"
+            else:
+                cuda_version = str(get_nvcc_cuda_version())
+                if cuda_version != envs.VLLM_MAIN_CUDA_VERSION:
+                    cuda_version_str = cuda_version.replace(".", "")[:3]
+                    # skip this for source tarball, required for pypi
+                    if "sdist" not in sys.argv:
+                        version += f"{sep}cu{cuda_version_str}"
+        elif _is_hip():
+            # Get the Rocm Version
+            rocm_version = get_rocm_version() or torch.version.hip
+            if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
+                version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
+        elif _is_tpu():
+            version += f"{sep}tpu"
+        elif _is_cpu():
+            # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+            # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+            if VLLM_TARGET_DEVICE == "cpu":
+                version += f"{sep}cpu"
+        elif _is_xpu():
+            version += f"{sep}xpu"
         else:
-            cuda_version = str(get_nvcc_cuda_version())
-            if cuda_version != envs.VLLM_MAIN_CUDA_VERSION:
-                cuda_version_str = cuda_version.replace(".", "")[:3]
-                # skip this for source tarball, required for pypi
-                if "sdist" not in sys.argv:
-                    version += f"{sep}cu{cuda_version_str}"
-    elif _is_hip():
-        # Get the Rocm Version
-        rocm_version = get_rocm_version() or torch.version.hip
-        if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
-            version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
-    elif _is_tpu():
-        version += f"{sep}tpu"
-    elif _is_cpu():
-        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
-        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
-        if VLLM_TARGET_DEVICE == "cpu":
-            version += f"{sep}cpu"
-    elif _is_xpu():
-        version += f"{sep}xpu"
-    else:
-        raise RuntimeError("Unknown runtime environment")
+            raise RuntimeError("Unknown runtime environment")
 
     return version
 
@@ -1381,6 +1401,9 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+        # DeepSelect requires CUDA 12.9 or later (SM100a/SM103a only)
+        # Optional since it won't build on unsupported architectures
+        ext_modules.append(CMakeExtension(name="vllm._deepselect_C", optional=True))
     if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
     ):
@@ -1506,7 +1529,7 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.13.0.0"],
+        "zen": ["zentorch==2.13.0.1"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
