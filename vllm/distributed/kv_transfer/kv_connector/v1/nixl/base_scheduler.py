@@ -116,6 +116,9 @@ class NixlBaseConnectorScheduler:
             ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
         ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
+        # Last block saved per group for a partially prefilled request; the
+        # next chunk may write the rest of it, so it is saved again.
+        self._reqs_save_tail: dict[ReqId, tuple[int | None, ...]] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
@@ -444,16 +447,30 @@ class NixlBaseConnectorScheduler:
 
         # NOTE: For the prefill side, there might be a chance that an early added
         # request is a chunked prefill, so we need to check if new blocks are added
-        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
+        for req_id, new_block_id_groups, resumed in yield_req_data(scheduler_output):
             req_to_save = self._reqs_need_save.get(req_id)
-            if req_to_save is None or new_block_id_groups is None:
+            if req_to_save is None:
+                continue
+            # A resumed request re-sends its full block table.
+            tail = None if resumed else self._reqs_save_tail.get(req_id)
+            if new_block_id_groups is None and tail is None:
                 continue
             req = req_to_save
 
             assert req.kv_transfer_params is not None
-            clipped_block_id_groups = self.get_exchange_clipped_blocks(
-                new_block_id_groups, clip_ssm=False
-            )
+            if new_block_id_groups is None:
+                clipped_block_id_groups: BlockIds = tuple([] for _ in tail or ())
+            else:
+                clipped_block_id_groups = self.get_exchange_clipped_blocks(
+                    new_block_id_groups, clip_ssm=False
+                )
+            if tail is not None:
+                # A chunk boundary that is not block aligned leaves the previous
+                # chunk's last block partly written; this step writes the rest.
+                clipped_block_id_groups = tuple(
+                    [last, *blocks] if last is not None else list(blocks)
+                    for last, blocks in zip(tail, clipped_block_id_groups)
+                )
             meta.add_new_req_to_save(
                 request_id=req_id,
                 local_block_ids=clipped_block_id_groups,
@@ -471,6 +488,11 @@ class NixlBaseConnectorScheduler:
                 # _reqs_need_save until all blocks are scheduled with req_meta.
                 # Therefore, only pop if `not is_partial`.
                 self._reqs_need_save.pop(req_id)
+                self._reqs_save_tail.pop(req_id, None)
+            else:
+                self._reqs_save_tail[req_id] = tuple(
+                    blocks[-1] if blocks else None for blocks in clipped_block_id_groups
+                )
 
     def build_connector_meta(
         self,

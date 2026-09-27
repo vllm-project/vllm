@@ -258,3 +258,50 @@ def test_abort_during_kv_transfer():
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,token_budget,num_new_blocks",
+    [
+        (40, 24, 1),  # chunk 2 = tokens 24..39: rest of b1 plus new b2
+        (20, 18, 0),  # chunk 2 = tokens 18..19: fits in b1, no new block
+    ],
+)
+def test_host_buffer_save_resaves_block_straddling_chunk_boundary(
+    num_tokens: int, token_budget: int, num_new_blocks: int
+):
+    """Host-buffer mode (kv_buffer_device="cpu") copies each prefill step's
+    blocks to host memory. When a chunk boundary is not block aligned, the
+    next chunk writes the rest of the previous chunk's last block, so that
+    block must be copied again."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    (saved1,) = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+    assert request.num_computed_tokens % block_size != 0
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    assert saved2[0] == saved1[-1]
+    assert len(saved2) == 1 + num_new_blocks
+    assert req_id not in connector_scheduler._reqs_need_save
+    assert req_id not in connector_scheduler._reqs_save_tail
