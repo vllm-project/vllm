@@ -135,15 +135,18 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
         else:
+            # The SM90 FlashInfer sparse backend stays behind FlashAttention
+            # sparse for NoPE-512 as well: on H100 it measures 36% slower at
+            # concurrency 1 and 70% slower at concurrency 8 for
+            # GLM-5.3-Flash, with identical MTP acceptance length, so the gap
+            # is the per-step attention kernel itself (#56564). It is still
+            # kept as a fallback for hosts where the FlashAttention sparse
+            # path is unavailable.
             sparse_tail = [
                 AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
             ]
-            flashinfer_sparse = AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90
-            if head_size == 512:
-                sparse_tail.insert(0, flashinfer_sparse)
-            else:
-                sparse_tail.append(flashinfer_sparse)
             return [
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
