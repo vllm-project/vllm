@@ -415,6 +415,15 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
 
+    def initialize_runtime_state_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        if not self.use_marlin:
+            return
+
+        self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+        self.fp8_linear.initialize_runtime_state_after_loading(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,

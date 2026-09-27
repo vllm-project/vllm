@@ -10,6 +10,7 @@ from torch import nn
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -22,6 +23,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     initialize_model,
+    initialize_runtime_state_after_loading,
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -108,7 +110,16 @@ class TensorizerLoader(BaseModelLoader):
         for serializing vLLM models."""
         if is_vllm_tensorized(self.tensorizer_config):
             tensorizer_config = self._patch_tensorizer_config(model_config)
-            deserialize_tensorizer_model(model, tensorizer_config)
+            # Marlin's packed FP8 weights include integer tensors. A global
+            # deserialization dtype would cast them to the model dtype.
+            has_fp8_marlin = any(
+                isinstance(method, Fp8LinearMethod) and method.use_marlin
+                for module in model.modules()
+                if (method := getattr(module, "quant_method", None)) is not None
+            )
+            deserialize_tensorizer_model(
+                model, tensorizer_config, preserve_serialized_dtype=has_fp8_marlin
+            )
         else:
             model.load_weights(self._get_weights_iterator())
 
@@ -134,8 +145,13 @@ class TensorizerLoader(BaseModelLoader):
                     model = init_tensorizer_model(
                         tensorizer_config=tensorizer_config, vllm_config=vllm_config
                     )
+
             self.load_weights(model, model_config)
-            return model
+            initialize_runtime_state_after_loading(
+                model,
+                torch.device(device_config.device),
+            )
+            return model.eval()
         return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
 
     @staticmethod

@@ -90,6 +90,12 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
 
+    def initialize_runtime_state_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        """Restore transient state for weights already in kernel format."""
+        return
+
     @abstractmethod
     def apply_weights(
         self,
