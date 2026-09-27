@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     )
 
 
-def iter_groups(
+def iter_pointer_groups(
     device_ptrs: DevicePointers,
     blocks_per_chunk: int,
 ) -> Iterator[DevicePointerGroupInfo]:
