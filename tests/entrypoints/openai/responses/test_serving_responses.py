@@ -127,14 +127,6 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
 
 
 @pytest.fixture
-def mock_serving_responses():
-    """Create a mock OpenAIServingResponses instance."""
-    serving_responses = MagicMock(spec=OpenAIServingResponses)
-    serving_responses.tool_server = MagicMock(spec=ToolServer)
-    return serving_responses
-
-
-@pytest.fixture
 def mock_context():
     """Create a mock conversation context."""
     return MockConversationContext()
