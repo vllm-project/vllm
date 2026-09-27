@@ -1562,10 +1562,10 @@ def _get_kv_cache_groups_uniform_page_size(
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
     # Pick the group size that wastes the fewest worst-case (max_model_len)
-    # bytes per request on padding layers, from the smallest bucket (bounding
-    # the number of groups; at least min_kv_cache_group_layers so e.g. a
-    # single-layer drafter bucket cannot force per-layer groups) up to the
-    # largest. Ties prefer fewer groups.
+    # bytes per request on padding layers, from min_kv_cache_group_layers
+    # (bounding the number of groups, so e.g. a single-layer drafter bucket
+    # cannot force per-layer groups) up to the largest bucket. Ties prefer
+    # fewer groups.
     bucket_sizes = [len(layers) for layers in layer_buckets]
     min_group_layers = vllm_config.cache_config.min_kv_cache_group_layers
     # Worst-case memory a padding layer holds per request. With a KV connector,
