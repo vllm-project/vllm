@@ -55,6 +55,10 @@ def kimi_vl_chat_template(content: str) -> str:
     )
 
 
+def deepseek_v41_chat_template(content: str) -> str:
+    return f"<｜begin▁of▁sentence｜><｜User｜>{content}<｜Assistant｜></think>"
+
+
 def step3_vl_chat_template(content: str) -> str:
     return (
         "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
@@ -140,7 +144,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<|vision_start|><|video_pad|><|vision_end|>"
             "Describe this video in one sentence."
         ),
-        needs_video_metadata=False,
+        needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
     "kimi_vl": VitCudagraphTestConfig(
@@ -220,6 +224,29 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         vllm_runner_kwargs={"gpu_memory_utilization": 0.80},
         marks=[pytest.mark.core_model],
+    ),
+    "deepseek_v41": VitCudagraphTestConfig(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        modalities=["image"],
+        image_prompt=deepseek_v41_chat_template(
+            "<｜deepseek_image｜>\n\nWhat is in this image?"
+        ),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "attention_backend": (
+                "ROCM_FLASHMLA_SPARSE_DSV4"
+                if current_platform.is_rocm()
+                else "FLASHMLA_SPARSE_DSV41"
+            ),
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="DeepseekV41ForCausalLM",
+                exist_overrides={"vision_n_layers": 1},
+            ),
+        },
     ),
     "step3_vl": VitCudagraphTestConfig(
         model="stepfun-ai/Step3-VL-10B",

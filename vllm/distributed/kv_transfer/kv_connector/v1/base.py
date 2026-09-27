@@ -31,7 +31,7 @@ The class provides the following primitives:
         wait_for_layer_load() - blocks until layer i load is done
 
         save_kv_layer() - starts saving KV for layer i (maybe async)
-        wait_for_save() - blocks until all saves are done
+        wait_for_save() - submits saves and performs required synchronization
 
         get_transfer_results() - returns async send/receive completions and
             receive failures in one snapshot.
@@ -42,6 +42,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -227,6 +228,13 @@ class KVConnectorBase_V1(ABC):
     # Worker-side methods
     # ==============================
 
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a custom KV cache allocation context, if configured.
+
+        Returning None uses the engine's default memory pool.
+        """
+        return None
+
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
 
@@ -356,11 +364,14 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def wait_for_save(self):
-        """Block until all the save operations is done. This is called
-        as the forward context exits to ensure that the async saving
-        from save_kv_layer is complete before finishing the forward.
+        """Submit saves and perform required synchronization.
 
-        This prevents overwrites of paged KV buffer before saving done.
+        Called once per step, including empty steps, after any target and draft
+        forwards. Metadata remains bound during this call. Do nothing if there
+        is no save work.
+
+        Async saves must retain their source blocks until completion is reported
+        to the scheduler. Otherwise, wait for saves to finish before returning.
         """
         pass
 
