@@ -1294,7 +1294,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         or os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower()
         in ("true", "1")
     ),
-    # Override the a4w4 (FP4 activation) default for DeepSeek V4/V4.1's AITER
+    # Override the a4w4 (FP4 activation) default for DeepSeek V4.1's AITER
     # MXFP4 MoE (see _use_mxfp4_w4a4_moe_activation in rocm_aiter_moe.py).
     # Unset (default) auto-detects by hf_config.model_type; "0"/"false" forces
     # the previous a8w4 (FP8 activation) behavior back on as a rollback lever.

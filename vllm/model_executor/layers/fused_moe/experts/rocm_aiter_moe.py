@@ -58,19 +58,23 @@ class ActivationMethod(IntEnum):
     GELU = 1
 
 
-_DEEPSEEK_V4_MODEL_TYPES = (
-    "deepseek_v4",
-    "deepseek_v4_text",
+_DEEPSEEK_V41_MODEL_TYPES = (
     "deepseek_v41",
     "deepseek_v41_text",
 )
 
 
 def _use_mxfp4_w4a4_moe_activation() -> bool:
-    """Force MXFP4 (a4w4) MoE activations for DeepSeek V4/V4.1 on ROCm.
+    """Force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on ROCm.
+
+    Scoped to DeepSeek V4.1 only: this has been validated (GSM8K parity +
+    AgentX perf sweep) on V4.1-Flash. DeepSeek V4 shares the same MoE shape
+    and AITER dispatch path but has not been benchmarked or accuracy-tested
+    with this override yet, so it is intentionally excluded here; see the
+    separate DeepSeek V4 follow-up PR once that validation is done.
 
     AITER's generic ``fused_moe`` heuristic ties activation dtype to
-    ``gate_mode``: DeepSeek V4's MoE weights are gate/up-interleaved
+    ``gate_mode``: DeepSeek V4.1's MoE weights are gate/up-interleaved
     (``quant_config.use_mxfp4_w4a16`` below forces
     ``GateMode.INTERLEAVE``), which routes the heuristic into a BF16-vs-FP8
     branch that never reaches FP4 activations — see
@@ -111,7 +115,7 @@ def _use_mxfp4_w4a4_moe_activation() -> bool:
         )
     except Exception:
         return False
-    return model_type in _DEEPSEEK_V4_MODEL_TYPES
+    return model_type in _DEEPSEEK_V41_MODEL_TYPES
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -439,7 +443,7 @@ def rocm_aiter_fused_experts(
         # which always sets `is_guinterleave=True`.
         # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
         #
-        # DeepSeek V4/V4.1 a4w4 (moe_config.use_mxfp4_w4a4_dsv4) is the one
+        # DeepSeek V4.1 a4w4 (moe_config.use_mxfp4_w4a4_dsv4) is the one
         # exception: `convert_weight_to_mxfp4_moe_kernel_format` shuffles its
         # weights with `is_guinterleave=False` to match ATOM's SEPARATED
         # gate/up layout, since AITER's INTERLEAVE stage1 GEMM has no tuned
