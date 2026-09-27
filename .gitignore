@@ -31,7 +31,6 @@ __pycache__/
 
 # C extensions
 *.so
-*.so.new
 
 # Rust binaries
 vllm/vllm-rs
