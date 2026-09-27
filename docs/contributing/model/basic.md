@@ -102,8 +102,45 @@ Note that all the linear layers above take `linear_method` as an input. vLLM wil
 
 ## 4. Implement the weight loading logic
 
-You now need to implement the `load_weights` method in your `*ForCausalLM` class.
-This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model. Specifically, for `MergedColumnParallelLinear` and `QKVParallelLinear` layers, if the original model has separated weight matrices, you need to load the different parts separately.
+Most models do not need a `load_weights` method. `AutoWeightsLoader` walks your module tree and assigns each checkpoint tensor to the parameter with the matching name, so a model whose module names already line up with the checkpoint loads with no weight loading code at all. [`LlamaForCausalLM`](../../../vllm/model_executor/models/llama.py) is one such model.
+
+### Describe name differences with `hf_to_vllm_mapper`
+
+When the checkpoint names differ from your module names, declare a `WeightsMapper` as a class attribute named `hf_to_vllm_mapper`. It is applied automatically as the loader recurses into your model:
+
+??? code
+
+    ```python
+    from torch import nn
+    from .utils import WeightsMapper
+
+    class MyModel(nn.Module):
+        hf_to_vllm_mapper = WeightsMapper(
+            # Route separated checkpoint weights into a fused vLLM layer
+            orig_to_new_stacked={
+                ".q_proj": (".qkv_proj", "q"),
+                ".k_proj": (".qkv_proj", "k"),
+                ".v_proj": (".qkv_proj", "v"),
+                ".gate_proj": (".gate_up_proj", 0),
+                ".up_proj": (".gate_up_proj", 1),
+            },
+            # Rename
+            orig_to_new_prefix={"transformer.": "model."},
+            # Drop
+            orig_to_new_substr={"attn.masked_bias": None},
+        )
+    ```
+
+`orig_to_new_stacked` is what feeds `QKVParallelLinear` and `MergedColumnParallelLinear`: each entry names the shard a checkpoint weight belongs to, and the layer's own weight loader assembles the fused parameter. Renaming is available as `orig_to_new_prefix`, `orig_to_new_suffix`, `orig_to_new_substr` and `orig_to_new_regex`; mapping a name to `None` in any of them drops that weight, which is how you ignore buffers and unused heads that ship in the checkpoint.
+
+Two things are handled for you and need no rule: weights tied to the input embeddings (typically `lm_head.weight`) are loaded once under the first name traversed, and the unused rotary embedding buffers some checkpoints ship are always dropped.
+
+!!! note
+    `hf_to_vllm_mapper` is distinct from `packed_modules_mapping`, which is consumed by the quantization and LoRA code and still uses the checkpoint's unstacked names.
+
+### When you still need `load_weights`
+
+Implement `load_weights` only when the checkpoint needs preprocessing that renaming cannot express, such as reshaping or repacking a tensor before it reaches the layer. Do the preprocessing, then hand off to `AutoWeightsLoader` rather than assigning parameters by hand. [`BloomModel`](../../../vllm/model_executor/models/bloom.py) is an example: its fused QKV weight is stored in a different head order to the one `QKVParallelLinear` expects, so it has to be repacked first.
 
 ## 5. Register your model
 

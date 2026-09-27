@@ -10,7 +10,6 @@ add the same per-layer sliding window, attention sink and per-layer RoPE support
 as `granite_swa` (see `granite.py`).
 """
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -36,7 +35,7 @@ from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeAttention, GraniteMoeModel, GraniteMoeMoE
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import AutoWeightsLoader, make_layers, maybe_prefix
+from .utils import make_layers, maybe_prefix
 
 
 class GraniteMoeSharedMLP(nn.Module):
@@ -212,7 +211,6 @@ class GraniteMoeSharedModel(nn.Module):
         return hidden_states
 
     hf_to_vllm_mapper = GraniteMoeModel.hf_to_vllm_mapper
-    load_weights = GraniteMoeModel.load_weights
 
 
 class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -287,7 +285,3 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 ),
             }
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
