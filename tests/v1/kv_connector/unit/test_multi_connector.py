@@ -68,6 +68,7 @@ class MockConnector(KVConnectorBase_V1):
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
         mock.get_kv_connector_stats.return_value = None
+        mock.get_mem_pool_context.return_value = None
         return mock
 
     @classmethod
@@ -201,6 +202,36 @@ def mc() -> MultiConnector:
     return mc
 
 
+def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
+    assert mc.get_mem_pool_context() is None
+
+
+def test_multi_connector_forwards_mem_pool_context(mc: MultiConnector):
+    context = MagicMock()
+    provider = MagicMock(spec_set=KVConnectorBase_V1)
+    provider.get_mem_pool_context.return_value = context
+    mc._connectors = [mc._connectors[0], provider]
+
+    assert mc.get_mem_pool_context() is context
+    provider.get_mem_pool_context.assert_called_once_with()
+
+
+def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
+    providers = [
+        MagicMock(spec_set=KVConnectorBase_V1),
+        MagicMock(spec_set=KVConnectorBase_V1),
+    ]
+    for provider in providers:
+        provider.get_mem_pool_context.return_value = MagicMock()
+    mc._connectors = providers
+
+    with pytest.raises(
+        ValueError,
+        match="Multiple connectors provide a KV cache memory pool",
+    ):
+        mc.get_mem_pool_context()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
@@ -320,6 +351,7 @@ def test_multi_example_connector_consistency():
     # First three events are from initialization. Layer hooks run before the
     # deferred load starts after the forward pass.
     expected_worker_prefix = [
+        "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
