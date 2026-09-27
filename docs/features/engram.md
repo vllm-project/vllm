@@ -98,8 +98,8 @@ unavailable.
 
 ## Host file gather (Qwen4Exp)
 
-`host_file_gather` serves Qwen4Exp PLE rows from the loader's own file
-mapping of the safetensors shards instead of allocating the table. Set
+`host_file_gather` serves Qwen4Exp PLE rows by reading them from the
+safetensors shard files instead of allocating the table. Set
 `--engram-config '{"host_file_gather": true}'`. It applies only to Qwen4Exp
 and takes precedence over `cpu_offload`.
 
@@ -107,16 +107,16 @@ Rows stay in the checkpoint dtype: an FP8 table stays FP8 and is dequantized
 on the GPU, and an unquantized table must match `--dtype`. CPU offload
 converts on load; this mode rejects the mismatch at load.
 
-Faulted pages are reclaimable page cache, shared across co-located processes.
-They appear in each process's RSS as file-backed (`RssFile`), and PSS is
-where they are split across processes. A write to the mapping copies that
-page into anonymous RSS. Each step pays a host sync, and every TP rank
-gathers all rows. Co-located ranks share the cache; ranks on different
-machines do not.
+Each step reads its rows from the files with `preadv` and stages them on the
+device, so the table is never mapped into the worker after load and never
+counts toward its RSS. Its pages are plain page cache: shared by co-located
+ranks and reclaimable under memory pressure. Each step pays a host sync, and
+every TP rank reads all rows.
 
 Serving depends on the checkpoint files staying unchanged while the server
-runs: an in-place overwrite serves the new bytes, truncation kills the worker
-with SIGBUS, and deleting or renaming the files is safe.
+runs: an in-place overwrite serves the new bytes, truncation stops the engine
+with an error naming the file and offset, and deleting or renaming the files
+is safe.
 
 The first touch of a row costs a disk read, and a page evicted under memory
 pressure is read again on the next miss. By default no prewarm is needed; for

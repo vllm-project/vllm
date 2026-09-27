@@ -55,7 +55,7 @@ def _maps_entry(ptr: int) -> tuple[str, int]:
 
 
 class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
-    """PLE rows gathered on the host from the loader's file-backed shard views."""
+    """PLE rows read on the host from the checkpoint shard files."""
 
     def __init__(
         self,
@@ -88,6 +88,7 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
         )
         # Step N+1 writes these rows only after its stream sync, so after step N's H2D.
         self._host_rows = torch.empty(shape, dtype=dtype, device="cpu", pin_memory=pin)
+        self._rows = torch.empty_like(self._host_rows).view(torch.uint8).flatten(0, 1)
         self._shards: dict[int, torch.Tensor] | None = {}
         self._shard_size = 0
         self._bound = False
@@ -124,9 +125,10 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
         self._shard_size = shard_size
 
     def bind_file_shards(self) -> None:
-        """Check that file-backed shards cover every row; dummy loads serve zeros."""
-        assert self._shards is not None
-        if not self._dummy:
+        """Record each shard's file and offset and release the loader's views."""
+        if self._shards is None:
+            raise RuntimeError("PLE host file gather does not support weight reload")
+        if not self._dummy and not self._bound:
             rows = sum(shard.shape[0] for shard in self._shards.values())
             if rows != self.org_vocab_size:
                 raise ValueError(
@@ -143,37 +145,44 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
                 if path not in self._fds:
                     self._fds[path] = os.open(path, os.O_RDONLY)
                 self._fds_t[index], self._bases[index] = self._fds[path], offset
+        self._shards = {}
         self._bound = True
 
     def stage_rows(self, num_tokens: int) -> None:
-        """Gather the rows for ``_host_ids[:num_tokens]`` and copy them to staging."""
-        shards = self._shards
-        if shards is None or not self._bound:
+        """Read the rows for ``_host_ids[:num_tokens]`` and copy them to staging."""
+        if self._shards is None or not self._bound:
             raise RuntimeError("PLE host file gather is unbound or was reloaded")
         ids = self._host_ids[:num_tokens].flatten()
         out = self._host_rows[:num_tokens].flatten(0, 1).view(torch.uint8)
-        if not shards:
+        if not self._fds:
             out.zero_()
         else:
-            ids, order = ids.sort()
+            ids, inverse = ids.unique(return_inverse=True)
+            if ids.numel() and not 0 <= ids[0] <= ids[-1] < self.org_vocab_size:
+                raise IndexError(f"PLE id out of range for {self.org_vocab_size} rows")
             shard = ids // self._shard_size
             local = ids - shard * self._shard_size
-            counts = torch.bincount(shard, minlength=len(shards)).tolist()
             page, row_bytes = mmap.PAGESIZE, out.shape[1]
             start = self._bases[shard] + local * row_bytes
             first, last = start // page, (start + row_bytes - 1) // page
             run = torch.ones_like(first, dtype=torch.bool)
             run[1:] = (first[1:] > last[:-1] + 1) | (shard[1:] != shard[:-1])
             fds, lows = self._fds_t[shard[run]].tolist(), first[run].tolist()
-            # Queue every page read before the gather's first serial fault.
+            # Queue every page read before the serial reads.
             for fd, lo, hi in zip(fds, lows, last[run.roll(-1)].tolist()):
                 os.posix_fadvise(
                     fd, lo * page, (hi - lo + 1) * page, os.POSIX_FADV_WILLNEED
                 )
-            groups = zip(order.split(counts), local.split(counts))
-            for index, (rows, rows_local) in enumerate(groups):
-                if rows.numel():
-                    out.index_copy_(0, rows, shards[index].index_select(0, rows_local))
+            rows = self._rows[: ids.numel()]
+            for row, fd, offset in zip(
+                rows.numpy(), self._fds_t[shard].tolist(), start.tolist()
+            ):
+                if os.preadv(fd, [row], offset) != row_bytes:
+                    raise ValueError(
+                        f"PLE shard file {os.readlink(f'/proc/self/fd/{fd}')} is "
+                        f"truncated at offset {offset}"
+                    )
+            torch.index_select(rows, 0, inverse, out=out)
         self._staging[:num_tokens].copy_(
             self._host_rows[:num_tokens], non_blocking=True
         )

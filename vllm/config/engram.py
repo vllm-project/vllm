@@ -39,9 +39,9 @@ class EngramConfig:
     """Store embedding weights in pinned CPU memory for UVA lookup."""
 
     host_file_gather: bool = False
-    """Serve Qwen4Exp PLE rows by gathering them on the CPU from the loader's
-    file-backed checkpoint views and staging them on the device each step,
-    instead of allocating the table; takes precedence over `cpu_offload`."""
+    """Serve Qwen4Exp PLE rows by reading them on the CPU from the checkpoint
+    files and staging them on the device each step, instead of allocating the
+    table; takes precedence over `cpu_offload`."""
 
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
