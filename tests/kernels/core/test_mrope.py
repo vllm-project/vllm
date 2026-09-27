@@ -4,6 +4,8 @@ from typing import NamedTuple
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.mrope import (
@@ -78,6 +80,51 @@ def test_apply_interleaved_rope():
 
     expected = torch.tensor([[0, 11, 22, 3, 4], [5, 16, 27, 8, 9]])
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "head_size, partial_rotary_factor, rope_theta, mrope_section, max_position",
+    [
+        (256, 0.25, 1e7, [11, 11, 10], 262144),  # Qwen3.5
+        (128, 1.0, 1e6, [16, 24, 24], 32768),  # Qwen2-VL
+    ],
+)
+def test_mrope_yarn_matches_transformers(
+    default_vllm_config,
+    head_size: int,
+    partial_rotary_factor: float,
+    rope_theta: float,
+    mrope_section: list[int],
+    max_position: int,
+):
+    """The 4x cache headroom must not shift YaRN's correction range."""
+    rope_parameters = {
+        "rope_type": "yarn",
+        "factor": 2.5,
+        "original_max_position_embeddings": max_position,
+        "rope_theta": rope_theta,
+        "partial_rotary_factor": partial_rotary_factor,
+        "mrope_section": mrope_section,
+    }
+    hf_config = PreTrainedConfig(
+        hidden_size=head_size,
+        num_attention_heads=1,
+        head_dim=head_size,
+        max_position_embeddings=max_position,
+        rope_parameters=dict(rope_parameters),
+    )
+    inv_freq, attention_scaling = ROPE_INIT_FUNCTIONS["yarn"](hf_config, "cpu")
+
+    rope = get_rope(
+        head_size=head_size,
+        max_position=max_position,
+        rope_parameters=dict(rope_parameters),
+        dtype=torch.float32,
+    )
+
+    freqs = torch.outer(torch.arange(4096, dtype=torch.float32), inv_freq)
+    expected = torch.cat((freqs.cos(), freqs.sin()), dim=-1) * attention_scaling
+    torch.testing.assert_close(rope.cos_sin_cache[:4096], expected)
 
 
 @pytest.mark.skipif(
