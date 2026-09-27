@@ -154,15 +154,10 @@ class CuMemBackend(SleepModeBackend):
     are allocated outside the allocator pool).
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._weights_on_host = False
-
     def suspend(self, level: int = 1) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
-        self._weights_on_host = level == 1
         allocator = get_mem_allocator_instance()
         # Runtime state and graph pools are kept at every level; weights only
         # at level 1.
@@ -176,11 +171,9 @@ class CuMemBackend(SleepModeBackend):
 
         self._state = "RESUMING"
         allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
-        if self._weights_on_host and (tags is None or "weights" in tags):
-            self._weights_on_host = False
-            if envs.VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY:
-                _release_host_memory()
+        restored_bytes = allocator.wake_up(tags)
+        if restored_bytes and envs.VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY:
+            _release_host_memory()
         self._state = "RUNNING"
 
     def discard(self, tags: tuple[str, ...]) -> None:
