@@ -11,7 +11,7 @@ import pprint
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import partial
 from typing import Any
@@ -23,6 +23,7 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
+from vllm.compilation.cache_policy import CompileCachePolicy
 from vllm.compilation.codegen import (
     compile_execution_fn,
     generate_execution_code,
@@ -42,6 +43,7 @@ from .compiler_interface import (
     EagerAdaptor,
     InductorAdaptor,
     InductorStandaloneAdaptor,
+    initialize_inductor_cache,
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
@@ -94,8 +96,12 @@ def make_copy_and_call(
     return copy_and_call
 
 
-def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    assert not envs.VLLM_USE_MEGA_AOT_ARTIFACT or envs.VLLM_USE_STANDALONE_COMPILE, (
+def make_compiler(
+    compilation_config: CompilationConfig,
+    cache_policy: CompileCachePolicy | None = None,
+) -> CompilerInterface:
+    cache_policy = cache_policy or CompileCachePolicy.resolve()
+    assert not cache_policy.use_mega_artifact or envs.VLLM_USE_STANDALONE_COMPILE, (
         "VLLM_USE_MEGA_AOT_ARTIFACT=1 requires VLLM_USE_STANDALONE_COMPILE=1"
     )
 
@@ -107,11 +113,11 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
         ):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
-                compilation_config.compile_cache_save_format
+                compilation_config.compile_cache_save_format, cache_policy=cache_policy
             )
         else:
             logger.debug("Using InductorAdaptor")
-            return InductorAdaptor()
+            return InductorAdaptor(cache_policy=cache_policy)
     elif compilation_config.backend == "eager":
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
@@ -136,22 +142,36 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, compilation_config: CompilationConfig) -> None:
+    def __init__(
+        self,
+        compilation_config: CompilationConfig,
+        cache_policy: CompileCachePolicy | None = None,
+    ) -> None:
         self.cache: dict[tuple[Range, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
-        self.compiler = make_compiler(compilation_config)
+        self.cache_policy = cache_policy or CompileCachePolicy.resolve()
+        self.compiler = make_compiler(compilation_config, self.cache_policy)
         self.loaded_artifacts: dict[str, Any] = {}
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        return self.compiler.compute_hash(vllm_config)
+        compiler_hash = self.compiler.compute_hash(vllm_config)
+        if not self.cache_policy.use_vllm_artifact_cache:
+            factors = [compiler_hash, "hf_graph_cache_v1"]
+            return hashlib.sha256(json.dumps(factors).encode()).hexdigest()
+        return compiler_hash
 
     @contextmanager
     def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
-        with pass_context(compile_range):
+        hf_config = (
+            torch._functorch.config.patch(bundled_autograd_cache=False)
+            if not self.cache_policy.use_vllm_artifact_cache
+            else nullcontext()
+        )
+        with pass_context(compile_range), hf_config:
             if self.compilation_config.use_inductor_graph_partition:
                 with inductor_partition_rule_context(
                     self.compilation_config.splitting_ops
@@ -161,7 +181,11 @@ class CompilerManager:
                 yield
 
     def initialize_cache(
-        self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
+        self,
+        cache_dir: str,
+        disable_cache: bool = False,
+        prefix: str = "",
+        base_cache_dir: str | None = None,
     ) -> None:
         """Initialize the cache directory for the compiler.
 
@@ -180,7 +204,11 @@ class CompilerManager:
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
 
-        if not disable_cache and os.path.exists(self.cache_file_path):
+        if (
+            self.cache_policy.use_vllm_artifact_cache
+            and not disable_cache
+            and os.path.exists(self.cache_file_path)
+        ):
             # load the cache from the file
             with open(self.cache_file_path) as f:
                 # we use ast.literal_eval to parse the data
@@ -206,12 +234,18 @@ class CompilerManager:
 
             self.cache = {parse_key(key): value for key, value in cache.items()}
 
+        if not self.cache_policy.use_vllm_artifact_cache and not disable_cache:
+            initialize_inductor_cache(base_cache_dir or cache_dir)
         self.compiler.initialize_cache(
             cache_dir=cache_dir, disable_cache=disable_cache, prefix=prefix
         )
 
     def save_to_file(self) -> None:
-        if self.disable_cache or not self.is_cache_updated:
+        if (
+            self.disable_cache
+            or not self.cache_policy.use_vllm_artifact_cache
+            or not self.is_cache_updated
+        ):
             return
         printer = pprint.PrettyPrinter(indent=4)
         data = printer.pformat(self.cache)
@@ -225,6 +259,8 @@ class CompilerManager:
         graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any] | None:
+        if not self.cache_policy.use_vllm_artifact_cache:
+            return None
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
 
@@ -364,7 +400,11 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
+        if (
+            self.cache_policy.use_vllm_artifact_cache
+            and is_compile_cache_enabled(additional_inductor_config)
+            and handle is not None
+        ):
             self.cache[(compile_range, graph_index, self.compiler.name)] = {
                 "graph_handle": handle,
                 "cache_key": cache_key,
@@ -831,6 +871,7 @@ class VllmBackend:
         vllm_config: VllmConfig,
         prefix: str = "",
         is_encoder: bool = False,
+        cache_policy: CompileCachePolicy | None = None,
     ) -> None:
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -851,9 +892,10 @@ class VllmBackend:
 
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
+        self.cache_policy = cache_policy or CompileCachePolicy.resolve(vllm_config)
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config
+            self.compilation_config, self.cache_policy
         )
 
         # Deepcopy the inductor config to detach the post-grad custom pass
@@ -881,7 +923,7 @@ class VllmBackend:
                   returns_tuple
 
         """
-        if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        if not self.cache_policy.use_mega_artifact:
             return None, None, None
 
         from .caching import StandaloneCompiledArtifacts
@@ -1093,8 +1135,17 @@ class VllmBackend:
             )
 
         self.compiler_manager.initialize_cache(
-            local_cache_dir, disable_cache, self.prefix
+            local_cache_dir,
+            disable_cache,
+            self.prefix,
+            base_cache_dir=os.path.join(cache_dir, f"rank_{rank}_{dp_rank}"),
         )
+        if not self.cache_policy.use_vllm_artifact_cache:
+            logger.info_once(
+                "Transformers backend uses PyTorch graph caching; model AOT, "
+                "mega artifacts and direct artifact loading are disabled. "
+                "VLLM_FORCE_AOT_LOAD does not apply to this backend."
+            )
 
         # Reuses existing cache key
 
@@ -1177,7 +1228,7 @@ class VllmBackend:
         # keep a split_gm copy from BEFORE the interpreter replaces
         # submodules with PiecewiseBackend -- used for serialization
         original_split_gm = None
-        if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        if self.cache_policy.use_mega_artifact:
             original_split_gm = deepcopy(self.split_gm)
 
         from torch._dynamo.utils import lazy_format_graph_code
@@ -1270,7 +1321,7 @@ class VllmBackend:
 
         self._called = True
         graph_to_serialize = (
-            original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
+            original_split_gm if self.cache_policy.use_mega_artifact else self.graph
         )
 
         execution_code, submod_names, consts = generate_execution_code(self.split_gm)

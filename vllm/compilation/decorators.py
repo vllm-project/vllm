@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
+from vllm.compilation.cache_policy import use_compile_cache_policy
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
@@ -292,7 +293,10 @@ def _try_load_aot_compiled_fn(
     Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
     """
     try:
-        with monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder):
+        with (
+            monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder),
+            use_compile_cache_policy(model.vllm_config, model.cache_policy),
+        ):
             with (
                 set_current_vllm_config(model.vllm_config),
                 open(aot_compilation_path, "rb") as f,
@@ -522,7 +526,7 @@ def _support_torch_compile(
         ds_type = self.compilation_config.dynamic_shapes_config.type
         cache_dir = None
         aot_compilation_path = None
-        if envs.VLLM_USE_AOT_COMPILE:
+        if self.cache_policy.use_model_aot:
             """
             When using torch.compile in AOT mode, we store the cache artifacts
             under VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/{hash}
@@ -536,7 +540,9 @@ def _support_torch_compile(
             """
             from .caching import aot_compile_hash_factors
 
-            factors: list[str] = aot_compile_hash_factors(self.vllm_config)
+            factors: list[str] = aot_compile_hash_factors(
+                self.vllm_config, self.cache_policy
+            )
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
@@ -575,7 +581,7 @@ def _support_torch_compile(
 
         if self.compiled:
             assert (
-                not envs.VLLM_USE_AOT_COMPILE
+                not self.cache_policy.use_model_aot
                 or self.vllm_config.compilation_config.backend == "eager"
             )
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
@@ -658,7 +664,7 @@ def _support_torch_compile(
             torch.fx.experimental._config.patch(**fx_config_patches),
             torch._inductor.config.patch(**inductor_config_patches),
         ):
-            use_aot_compile = envs.VLLM_USE_AOT_COMPILE
+            use_aot_compile = self.cache_policy.use_model_aot
             if self.vllm_config.compilation_config.backend == "eager":
                 logger.warning("Detected eager backend, disabling AOT compile.")
                 use_aot_compile = False

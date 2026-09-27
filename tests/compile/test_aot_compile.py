@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import hashlib
+import json
 import os
 import pickle
+import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -60,6 +64,323 @@ def reference_fn_tuple(x: torch.Tensor):
     for _ in range(30):
         x = x + x.shape[0]
     return x, x * 2
+
+
+def _capture_hf_cache_offset(fn):
+    offset = int(os.environ.get("HF_CACHE_TEST_OFFSET", "0"))
+
+    @functools.wraps(fn)
+    def wrapped(self, x):
+        return fn(self, x) + offset
+
+    return wrapped
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0})
+class HfCacheProbe(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    @_capture_hf_cache_offset
+    def forward(self, x):
+        return x * 2 + 1
+
+
+def _run_hf_cache_probe():
+    """Executed in a fresh interpreter, with a fixed source and model config."""
+    import dataclasses
+
+    from torch._inductor.runtime.cache_dir_utils import cache_dir
+
+    from vllm.config import CUDAGraphMode, ModelConfig
+    from vllm.model_executor.model_loader.utils import initialize_model
+
+    requested = os.environ.get("HF_CACHE_TEST_IMPL", "transformers")
+    if requested == "auto":
+        from vllm.model_executor.models.registry import ModelRegistry
+
+        # Simulate a missing native implementation, retaining the real resolver
+        # and the built-in Transformers model class (no fake backend result).
+        ModelRegistry.models.pop("GPT2LMHeadModel", None)
+    # Exercise a default directory populated before vLLM initializes its cache.
+    cache_dir()
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=os.environ["HF_CACHE_TEST_MODEL"],
+            model_impl=requested,
+            dtype="float32",
+            max_model_len=64,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            inductor_compile_config={
+                "force_disable_caches": os.environ.get("HF_CACHE_TEST_TORCH_DISABLE")
+                == "1"
+            },
+        ),
+    )
+    assert config.model_config.using_transformers_backend()
+    x = torch.arange(64, dtype=torch.float32, device="cuda").reshape(8, 8)
+    owner_roundtrip = os.environ.get("HF_CACHE_TEST_OWNER_ROUNDTRIP") == "1"
+    interleave = os.environ.get("HF_CACHE_TEST_INTERLEAVE") == "1" or owner_roundtrip
+    if interleave:
+        if owner_roundtrip:
+            native_config = config
+            native_owner = ModelConfig(
+                model=os.environ["HF_CACHE_TEST_MODEL"],
+                model_impl="vllm",
+                dtype="float32",
+                max_model_len=64,
+            )
+            native = initialize_model(
+                config, model_config=native_owner, model_class=LoaderCompiledMod
+            )
+        else:
+            native_config = make_vllm_config()
+            with use_vllm_config(native_config):
+                native = CompiledMod(vllm_config=native_config)
+    with use_vllm_config(config):
+        mod = HfCacheProbe(vllm_config=config)
+        actual = mod(x)
+        second = mod(x)
+        smaller = mod(x[:4])
+        torch.accelerator.synchronize()
+    expected = x * 2 + 1 + int(os.environ["HF_CACHE_TEST_OFFSET"])
+    native_correct = True
+    if interleave:
+        with use_vllm_config(native_config):
+            native_correct = torch.equal(native(x), reference_fn(x))
+        with use_vllm_config(config):
+            assert torch.equal(mod(x), expected)
+    if owner_roundtrip:
+        torch._dynamo.reset()
+        os.environ["VLLM_FORCE_AOT_LOAD"] = "1"
+        disable_envs_cache()
+        loaded = initialize_model(
+            config, model_config=native_owner, model_class=LoaderCompiledMod
+        )
+        with use_vllm_config(config):
+            assert torch.equal(loaded(x), reference_fn(x))
+    result = {
+        "requested_impl": requested,
+        "resolved_hf": config.model_config.using_transformers_backend(),
+        "native_correct": native_correct,
+        "correct": (
+            torch.equal(actual, expected)
+            and torch.equal(second, expected)
+            and torch.equal(smaller, expected[:4])
+        ),
+        "first_value": actual.flatten()[0].item(),
+        "cache_dir": config.compilation_config.cache_dir,
+        "inductor_dir": cache_dir(),
+        "triton_dir": os.environ.get("TRITON_CACHE_DIR"),
+        "counters": dataclasses.asdict(compilation_counter),
+        "torch_counters": {k: dict(v) for k, v in torch._dynamo.utils.counters.items()},
+    }
+    Path(os.environ["HF_CACHE_TEST_RESULT"]).write_text(json.dumps(result))
+
+
+@pytest.fixture
+def hf_cache_probe(tmp_path):
+    """Only the vLLM root is shared; fallback cache directories change per run."""
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gpt2",
+                "architectures": ["GPT2LMHeadModel"],
+                "n_embd": 16,
+                "n_head": 2,
+                "n_layer": 1,
+                "n_positions": 128,
+                "vocab_size": 32,
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+            }
+        )
+    )
+    run_index = 0
+
+    def run(
+        offset,
+        *,
+        hook="0",
+        standalone="1",
+        root_name="shared",
+        aot="0",
+        mega="0",
+        force="0",
+        interleave=False,
+        owner_roundtrip=False,
+        disable="0",
+        torch_disable="0",
+        requested="transformers",
+    ):
+        nonlocal run_index
+        private = tmp_path / f"process-{run_index}"
+        run_index += 1
+        private.mkdir()
+        env = os.environ.copy()
+        for key in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
+            env.pop(key, None)
+        for key in ("HOME", "TMPDIR", "XDG_CACHE_HOME"):
+            directory = private / key.lower()
+            directory.mkdir()
+            env[key] = str(directory)
+        result_file = private / "result.json"
+        env.update(
+            {
+                "VLLM_CACHE_ROOT": str(tmp_path / root_name),
+                "VLLM_USE_AOT_COMPILE": aot,
+                "VLLM_USE_MEGA_AOT_ARTIFACT": mega,
+                "VLLM_USE_STANDALONE_COMPILE": standalone,
+                "VLLM_USE_BYTECODE_HOOK": hook,
+                "VLLM_FORCE_AOT_LOAD": force,
+                "VLLM_DISABLE_COMPILE_CACHE": disable,
+                "HF_CACHE_TEST_TORCH_DISABLE": torch_disable,
+                "HF_CACHE_TEST_OWNER_ROUNDTRIP": str(int(owner_roundtrip)),
+                "HF_CACHE_TEST_IMPL": requested,
+                "HF_CACHE_TEST_INTERLEAVE": str(int(interleave)),
+                "HF_CACHE_TEST_OFFSET": str(offset),
+                "HF_CACHE_TEST_MODEL": str(model),
+                "HF_CACHE_TEST_RESULT": str(result_file),
+                "TORCHINDUCTOR_FX_GRAPH_REMOTE_CACHE": "0",
+                "TORCHINDUCTOR_AUTOGRAD_REMOTE_CACHE": "0",
+            }
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from tests.compile.test_aot_compile import "
+                "_run_hf_cache_probe; _run_hf_cache_probe()",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return json.loads(result_file.read_text())
+
+    return run
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("hook", ["0", "1"])
+def test_hf_cache_retraces_changed_closure_across_processes(hf_cache_probe, hook):
+    cold = hf_cache_probe(0, hook=hook)
+    warm = hf_cache_probe(0, hook=hook)
+    changed = hf_cache_probe(7, hook=hook)
+    assert cold["correct"] and warm["correct"]
+    assert cold["cache_dir"] == warm["cache_dir"] == changed["cache_dir"]
+    assert changed["correct"], changed
+    assert hf_cache_probe(7, hook=hook)["correct"]
+    assert hf_cache_probe(7, hook=hook, root_name="fresh")["correct"]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("standalone", ["0", "1"])
+def test_hf_warm_start_hits_torch_graph_cache(hf_cache_probe, standalone):
+    cold = hf_cache_probe(0, standalone=standalone)
+    assert cold["correct"]
+    assert Path(cold["inductor_dir"]).is_relative_to(cold["cache_dir"]), cold
+    assert Path(cold["triton_dir"]).is_relative_to(cold["cache_dir"]), cold
+    warm = hf_cache_probe(0, standalone=standalone)
+    assert warm["correct"] and cold["inductor_dir"] == warm["inductor_dir"]
+    assert warm["torch_counters"]["inductor"].get("fxgraph_cache_hit", 0) > 0
+    if standalone == "1":
+        assert warm["torch_counters"]["aot_autograd"].get("autograd_cache_hit", 0) > 0
+    for result in (cold, warm):
+        counters = result["counters"]
+        assert counters["num_aot_compiles"] == 0
+        assert counters["num_aot_artifacts_saved"] == 0
+        assert counters["num_aot_artifacts_loaded"] == 0
+        assert counters["num_compiled_artifacts_loaded"] == 0
+        assert counters["num_compiled_artifacts_saved"] == 0
+        assert counters["num_cache_entries_updated"] == 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("standalone", ["0", "1"])
+def test_hf_requested_aot_and_mega_use_graph_cache(hf_cache_probe, standalone):
+    for _ in range(2):
+        result = hf_cache_probe(0, standalone=standalone, aot="1", mega="1", force="1")
+        assert result["correct"]
+        assert result["counters"]["num_aot_compiles"] == 0
+        assert result["counters"]["num_aot_artifacts_loaded"] == 0
+        assert result["counters"]["num_compiled_artifacts_saved"] == 0
+    assert result["torch_counters"]["inductor"].get("fxgraph_cache_hit", 0) > 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_hf_cache_policy_preserves_delayed_native_aot_compile(hf_cache_probe):
+    result = hf_cache_probe(0, aot="1", mega="1", interleave=True)
+    assert result["correct"] and result["native_correct"]
+    assert result["counters"]["num_aot_compiles"] == 1
+    assert result["counters"]["num_aot_artifacts_saved"] == 1
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_hf_target_native_loader_owner_aot_roundtrip(hf_cache_probe):
+    result = hf_cache_probe(0, aot="1", mega="1", owner_roundtrip=True)
+    assert result["correct"] and result["native_correct"]
+    assert result["counters"]["num_aot_compiles"] == 1
+    assert result["counters"]["num_aot_artifacts_saved"] == 1
+    assert result["counters"]["num_aot_artifacts_loaded"] == 1
+    assert result["counters"]["num_compiled_artifacts_loaded"] == 1
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("opt_out", ["vllm", "torch"])
+def test_hf_actual_compile_respects_cache_opt_out(hf_cache_probe, opt_out):
+    assert hf_cache_probe(0)["correct"]
+    assert hf_cache_probe(0)["torch_counters"]["inductor"]["fxgraph_cache_hit"] > 0
+    for _ in range(2):
+        result = hf_cache_probe(
+            7,
+            aot="1",
+            mega="1",
+            disable="1" if opt_out == "vllm" else "0",
+            torch_disable="1" if opt_out == "torch" else "0",
+        )
+        assert result["correct"]
+        assert result["counters"]["num_backend_compilations"] > 0
+        assert result["counters"]["num_aot_compiles"] == 0
+        assert result["counters"]["num_compiled_artifacts_saved"] == 0
+        assert not Path(result["inductor_dir"]).is_relative_to(result["cache_dir"])
+        assert (
+            result["torch_counters"].get("inductor", {}).get("fxgraph_cache_hit", 0)
+            == 0
+        )
+        assert (
+            result["torch_counters"]
+            .get("aot_autograd", {})
+            .get("autograd_cache_hit", 0)
+            == 0
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_auto_resolves_hf_and_compiles_with_graph_cache(hf_cache_probe):
+    for _ in range(2):
+        result = hf_cache_probe(0, requested="auto", aot="1", mega="1")
+        assert result["requested_impl"] == "auto"
+        assert result["resolved_hf"] and result["correct"]
+        assert result["counters"]["num_aot_compiles"] == 0
+        assert result["counters"]["num_compiled_artifacts_saved"] == 0
+    assert result["torch_counters"]["aot_autograd"]["autograd_cache_hit"] > 0
+
+
+@support_torch_compile
+class LoaderCompiledMod(torch.nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor):
+        return reference_fn(x)
 
 
 @support_torch_compile

@@ -16,6 +16,7 @@ from torch.fx._graph_pickler import GraphPickler, Options
 from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
+from vllm.compilation.cache_policy import CompileCachePolicy
 from vllm.compilation.codegen import compile_execution_fn
 from vllm.compilation.compiler_interface import get_inductor_factors
 from vllm.compilation.counter import compilation_counter
@@ -323,7 +324,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         else:
             functorch_ctx = contextlib.nullcontext()
 
-        if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        if CompileCachePolicy.resolve(get_current_vllm_config()).use_mega_artifact:
             assert standalone_compile_artifacts is not None
             submod_names = standalone_compile_artifacts.submodule_names()
             num_submods = len(submod_names)
@@ -569,7 +570,10 @@ def reconstruct_serializable_fn_from_mega_artifact(
     return fn
 
 
-def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
+def aot_compile_hash_factors(
+    vllm_config: VllmConfig, cache_policy: CompileCachePolicy | None = None
+) -> list[str]:
+    cache_policy = cache_policy or CompileCachePolicy.resolve(vllm_config)
     factors = []
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
@@ -582,8 +586,8 @@ def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
     factors.append(config_hash)
 
     # 2. inductor factors if applicable
-    if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-        factors.extend(get_inductor_factors())
+    if cache_policy.use_mega_artifact:
+        factors.extend(get_inductor_factors(cache_policy.use_mega_artifact))
 
     return factors
 
