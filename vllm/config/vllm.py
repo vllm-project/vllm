@@ -1718,6 +1718,26 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
+        # TODO: This is a stopgap that turns sequence parallelism / async TP
+        # off under batch invariance. Make the sequence-parallel reduce-scatter
+        # path batch-invariant instead so they can stay enabled (#56370).
+        # Sequence parallelism / async TP rewrite all_reduce + rms_norm into a
+        # reduce-scatter whose reduction order depends on the batch, so they
+        # are not batch-invariant. Decide this before the breakable-CUDA-graph
+        # default below, which declines to auto-enable when they are on.
+        pass_config = self.compilation_config.pass_config
+        if envs.VLLM_BATCH_INVARIANT and (
+            pass_config.enable_sp or pass_config.fuse_gemm_comms
+        ):
+            logger.warning_once(
+                "Disabling sequence parallelism and async TP "
+                "(pass_config.enable_sp / fuse_gemm_comms) when "
+                "VLLM_BATCH_INVARIANT is enabled: the reduce-scatter path "
+                "is not batch-invariant (see vllm-project/vllm#56370)."
+            )
+            pass_config.enable_sp = False
+            pass_config.fuse_gemm_comms = False
+
         breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
 
         if not breakable_cudagraph_enabled and (
