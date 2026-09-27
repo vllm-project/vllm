@@ -41,6 +41,87 @@ from .utils import _flatten_embeddings
 
 logger = init_logger(__name__)
 
+# WhisperCausalEncoder conv1 stride 1 times conv2 stride 2.
+_CAUSAL_CONV_STRIDE = 2
+
+
+def realtime_pooled_rows(
+    num_samples: int,
+    *,
+    hop_length: int,
+    window_size: int,
+    pool_size: int,
+    conv_stride: int = _CAUSAL_CONV_STRIDE,
+) -> int:
+    """Pooled encoder rows for one waveform, or 0 if it cannot be encoded.
+
+    Centered whisper STFT rejects waveforms that are not longer than
+    ``window_size // 2``. Longer clips are trimmed to an even mel length and
+    then to a multiple of ``pool_size`` after the conv stride. A non-positive
+    result is the shape that previously emptied the encoder tensor.
+    """
+    if (
+        num_samples <= window_size // 2
+        or hop_length <= 0
+        or window_size <= 0
+        or pool_size <= 0
+        or conv_stride <= 0
+    ):
+        return 0
+    mel_frames = num_samples // hop_length
+    if mel_frames % 2:
+        mel_frames -= 1
+    if mel_frames <= 0:
+        return 0
+    conv_rows = mel_frames // conv_stride
+    return conv_rows - (conv_rows % pool_size)
+
+
+def minimum_realtime_audio_samples(
+    *,
+    hop_length: int,
+    window_size: int,
+    pool_size: int,
+    conv_stride: int = _CAUSAL_CONV_STRIDE,
+) -> int:
+    """Smallest sample count that still produces a pooled encoder row."""
+    min_even_mel = pool_size * conv_stride
+    if min_even_mel % 2:
+        min_even_mel += 1
+    return max(min_even_mel * hop_length, window_size // 2 + 1)
+
+
+def validate_realtime_audio_length(
+    num_samples: int,
+    *,
+    hop_length: int,
+    window_size: int,
+    pool_size: int,
+    conv_stride: int = _CAUSAL_CONV_STRIDE,
+) -> None:
+    """Reject clips that cannot survive realtime encoder truncation."""
+    if (
+        realtime_pooled_rows(
+            num_samples,
+            hop_length=hop_length,
+            window_size=window_size,
+            pool_size=pool_size,
+            conv_stride=conv_stride,
+        )
+        > 0
+    ):
+        return
+    minimum = minimum_realtime_audio_samples(
+        hop_length=hop_length,
+        window_size=window_size,
+        pool_size=pool_size,
+        conv_stride=conv_stride,
+    )
+    raise ValueError(
+        f"Audio is too short to encode ({num_samples} samples). "
+        f"Voxtral Realtime needs at least {minimum} samples."
+    )
+
 
 class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
     def _cached_apply_hf_processor(
@@ -66,10 +147,17 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
         assert len(audios) == 1, (
             f"Expected only one audio input for realtime, got {mm_kwargs=}"
         )
+        num_audio_samples = int(audios[0]["audio_arrays"].data.shape[0])
+        hf_audio = self.info.get_hf_config().audio_config
+        validate_realtime_audio_length(
+            num_audio_samples,
+            hop_length=int(hf_audio.hop_length),
+            window_size=int(hf_audio.window_size),
+            pool_size=int(hf_audio.block_pool_size),
+        )
+
         tokenizer = self.info.get_tokenizer()
         audio_config = tokenizer.instruct.audio_encoder.audio_config
-
-        num_audio_samples = audios[0]["audio_arrays"].data.shape[0]
         length = audio_config.num_audio_tokens(num_audio_samples)
 
         features_info = PlaceholderFeaturesInfo(
@@ -392,6 +480,27 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             logger.warning(
                 "Realtime model received no audio inputs in "
                 "embed_multimodal. Returning empty embeddings."
+            )
+            return []
+
+        audio_cfg = self.config.audio_config
+        conv_stride = int(self.whisper_encoder.whisper_encoder.total_stride)
+        sample_lengths = [int(audio.shape[-1]) for audio in audio_inputs]
+        if any(
+            realtime_pooled_rows(
+                length,
+                hop_length=int(audio_cfg.hop_length),
+                window_size=int(audio_cfg.window_size),
+                pool_size=int(audio_cfg.block_pool_size),
+                conv_stride=conv_stride,
+            )
+            <= 0
+            for length in sample_lengths
+        ):
+            logger.warning(
+                "Realtime audio is too short to encode (%s samples). "
+                "Returning empty embeddings to avoid an engine crash.",
+                sample_lengths,
             )
             return []
 
