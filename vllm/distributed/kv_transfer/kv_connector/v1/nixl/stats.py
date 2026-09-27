@@ -41,6 +41,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_failed_notifications": [],
             "num_failed_handshakes": [],
             "num_kv_expired_reqs": [],
+            "num_unrecognized_reqs": [],
         }
 
     def record_transfer(self, res: "nixlXferTelemetry"):
@@ -66,6 +67,10 @@ class NixlKVConnectorStats(KVConnectorStats):
         """Record a request that had its KV blocks expire."""
         self.data["num_kv_expired_reqs"].append(1)
 
+    def record_unrecognized_req(self):
+        """Record a completion notification for an unrecognized request."""
+        self.data["num_unrecognized_reqs"].append(1)
+
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
         self.reset()
@@ -79,6 +84,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_failed_notifications"]) == 0
             and len(self.data["num_failed_handshakes"]) == 0
             and len(self.data["num_kv_expired_reqs"]) == 0
+            and len(self.data["num_unrecognized_reqs"]) == 0
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -262,6 +268,18 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
+        counter_nixl_num_unrecognized_reqs = self._counter_cls(
+            name="vllm:nixl_num_unrecognized_reqs",
+            documentation="Number of completion notifications for requests the "
+            "prefiller no longer tracks, whose KV blocks may have been freed "
+            "before the read finished. NOTE: This metric is tracked on the P "
+            "instance.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_unrecognized_reqs = create_metric_per_engine(
+            counter_nixl_num_unrecognized_reqs, self.per_engine_labelvalues
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
@@ -284,6 +302,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_failed_transfers,
                 self.counter_nixl_num_failed_notifications,
                 self.counter_nixl_num_kv_expired_reqs,
+                self.counter_nixl_num_unrecognized_reqs,
             ],
             [
                 # Transfer, handshake and notification failures are grouped:
@@ -297,6 +316,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 ),
                 ("num_failed_notifications",),
                 ("num_kv_expired_reqs",),
+                ("num_unrecognized_reqs",),
             ],
         ):
             for counter_item_key in counter_item_keys:

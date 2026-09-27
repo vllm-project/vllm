@@ -653,6 +653,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
+                    self.xfer_stats.record_unrecognized_req()
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "
