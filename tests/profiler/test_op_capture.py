@@ -10,6 +10,9 @@ import torch
 import vllm.model_executor.layers.attention.attention  # noqa: F401
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.meta_loader import MetaModelLoader
 from vllm.model_executor.models.qwen2 import Qwen2MLP
@@ -427,6 +430,19 @@ def test_meta_triton_launch_is_recorded_not_run():
     ):
         fill_kernel[(1,)](out, n=8)
     assert skipped == [(fill_kernel.__qualname__, (out,), {"n": 8})]
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not installed")
+def test_gather_initial_states_is_recorded_on_meta():
+    """The KDA and Kimi GDN prefill gather accepts meta state and is recorded."""
+    state = torch.empty(4, 2, 8, device="meta")
+    indices = torch.empty(3, dtype=torch.int32, device="meta")
+    has_initial_state = torch.empty(3, dtype=torch.bool, device="meta")
+    skipped = []
+    with meta_ops.skip_meta_triton_launches(lambda name, *_: skipped.append(name)):
+        output = gather_initial_states(state, indices, has_initial_state)
+    assert output.shape == (3, 2, 8) and output.is_meta
+    assert skipped == ["_gather_initial_states_kernel"]
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton is not installed")
