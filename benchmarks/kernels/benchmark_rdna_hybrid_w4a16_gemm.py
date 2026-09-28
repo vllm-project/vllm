@@ -61,10 +61,8 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
     Returns (w_q_skinny, w_s_skinny, w_fp16, w_zp). The triton path derives
     its int32 view from w_q_skinny, so no separate int32 buffer is returned.
 
-    The weights go through ``pack_skinny_int4``, the same packer the layer
-    uses, so the benchmark sees the production row stride — including the
-    gfx11 cliff padding. Building the buffer directly would always produce a
-    dense stride and silently measure a layout no model actually runs.
+    Weights go through ``pack_skinny_int4``, the packer the layer uses, so the
+    benchmark sees the production row stride rather than an always-dense one.
     """
     num_groups = K // group_size
 
@@ -108,6 +106,13 @@ PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
     )
 )
 def benchmark(batch_size, provider, N, K, group_size, weights):
+    """Time one GEMM.
+
+    ``do_bench`` rather than ``do_bench_cudagraph``: it zeroes a 256 MB buffer
+    between reps, so the weight is read from DRAM as it would be in a model.
+    With a cudagraph replay the weight stays resident in the 32 MB MALL, which
+    flatters wide-BLOCK_N tiles and hides row-stride effects entirely.
+    """
     M = batch_size
     device = "cuda"
     dtype = torch.float16
@@ -117,7 +122,7 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
 
     if provider == "torch-fp16":
         w_fp16 = weights["w_fp16"]
-        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
+        ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: torch.nn.functional.linear(a, w_fp16),
             quantiles=quantiles,
         )
@@ -144,7 +149,7 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
                 group_size,
             )
 
-        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
+        ms, min_ms, max_ms = triton.testing.do_bench(
             run,
             quantiles=quantiles,
         )

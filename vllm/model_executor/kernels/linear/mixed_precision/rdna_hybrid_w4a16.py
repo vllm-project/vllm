@@ -378,21 +378,26 @@ def pack_int4_exllama_shuffle(w_uint4: torch.Tensor) -> torch.Tensor:
 
 # gfx11 row strides alias in the vector caches when they land on a power-of-two
 # multiple.
-_STRIDE_CLIFF_BYTES = 1024  # packed weight row, K/2 B
+_WEIGHT_CLIFF_BYTES = 1024  # packed weight row, K/2 B
 _ACT_CLIFF_BYTES = 2048  # activation row, K*2 B
 _STRIDE_PAD_BYTES = 128  # one cache line
 
 
-def _cliff_pad_bytes(row_bytes: int) -> int:
+def _weight_pad_bytes(row_bytes: int) -> int:
     """Bytes to add to a packed weight row stride to move it off the cliff.
 
-    Only strides that are a multiple of ``_STRIDE_CLIFF_BYTES`` are moved, and
-    only by one cache line. Padding is not free: it costs ``pad / row_bytes`` of
-    weight memory, which on an APU comes straight out of KV-cache space, and
-    measurements show it is a real loss on strides that are already off the
-    cliff (-14% at M=1 on a 4864 B row).
+    Only strides that are a multiple of ``_WEIGHT_CLIFF_BYTES`` are moved, and
+    only by one cache line; padding a stride that is already off the cliff
+    costs memory and measures slower.
     """
-    if row_bytes % _STRIDE_CLIFF_BYTES:
+    if row_bytes % _WEIGHT_CLIFF_BYTES:
+        return 0
+    return _STRIDE_PAD_BYTES
+
+
+def _act_pad_bytes(row_bytes: int) -> int:
+    """Bytes to add to an activation row stride to move it off the cliff."""
+    if row_bytes % _ACT_CLIFF_BYTES:
         return 0
     return _STRIDE_PAD_BYTES
 
@@ -400,13 +405,12 @@ def _cliff_pad_bytes(row_bytes: int) -> int:
 def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
     """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
 
-    Single source of truth for the skinny weight memory layout: ExLlama shuffle
-    to [N, K//8] int32, viewed as int8 [N, K//2], with the row stride nudged
-    off the gfx11 cliff (see ``_cliff_pad_bytes``) where it lands on one.
+    ExLlama shuffle to [N, K//8] int32, viewed as int8 [N, K//2]. On gfx1151
+    the row stride is nudged off the cliff (see ``_weight_pad_bytes``).
     """
     shuffled = pack_int4_exllama_shuffle(unpacked)
     n_rows, k8 = shuffled.shape
-    pad_int32 = _cliff_pad_bytes(k8 * 4) // 4
+    pad_int32 = _weight_pad_bytes(k8 * 4) // 4
     if not (pad_int32 and _on_gfx1151()):
         return shuffled.contiguous().view(torch.int8)
     padded = torch.empty(
@@ -427,15 +431,12 @@ def _pad_activation_rows(x_2d: torch.Tensor) -> torch.Tensor:
     """Copy ``x_2d`` into a row-padded buffer when its row stride is on the cliff.
 
     The packed weight is padded once at load time, but activations are produced
-    fresh every step, so this materialises a padded copy. Only the Triton
-    prefill path calls it: the skinny decode kernel derives the activation row
-    stride from K, and at M <= 5 the row stride cannot alias anything anyway.
+    fresh every step, so this materialises a padded copy.
     """
-    row_bytes = x_2d.shape[1] * x_2d.element_size()
-    on_cliff = _ACT_CLIFF_BYTES and row_bytes % _ACT_CLIFF_BYTES == 0
-    if not (on_cliff and _on_gfx1151()):
+    pad_bytes = _act_pad_bytes(x_2d.shape[1] * x_2d.element_size())
+    if not (pad_bytes and _on_gfx1151()):
         return x_2d
-    pad_elems = _STRIDE_PAD_BYTES // x_2d.element_size()
+    pad_elems = pad_bytes // x_2d.element_size()
     buf = torch.empty(
         (x_2d.shape[0], x_2d.shape[1] + pad_elems),
         dtype=x_2d.dtype,

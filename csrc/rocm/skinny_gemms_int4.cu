@@ -656,6 +656,10 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
+  const int64_t expected_weight_bytes = M_in * K_in / 2;
+  const int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
+  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
+              "Weight tensor must contain M*K/2 bytes for int4 packing");
   const int64_t b_row_stride_bytes = in_a.stride(0) * in_a.element_size();
   TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "Weight row stride (",
               b_row_stride_bytes, " bytes) must hold at least K/2=", K_in / 2,

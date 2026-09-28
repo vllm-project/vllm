@@ -565,30 +565,81 @@ def test_wvsplitk_int4_g_rejects_unpacked_zero_points():
         ops.wvSplitK_int4_g(w, a, scales, num_compute_units(), G, zp_unpacked, None)
 
 
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(
+    not hasattr(torch.ops, "_rocm_C")
+    or not hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"),
+    reason="wvSplitK_int4_g not built",
+)
+def test_wvsplitk_int4_g_rejects_undersized_weight_view():
+    """A sufficient row stride does not prove the row holds K/2 packed bytes.
+
+    Row padding makes stride(0) > K/2 legitimate, but the logical size still
+    has to be checked: this view has a valid stride and half the required
+    bytes, and without the size check the kernel reads past it.
+    """
+    import vllm._custom_ops as ops
+    from vllm.utils.platform_utils import num_compute_units
+
+    K, N, G, M = 512, 256, 128, 1
+    a = torch.randn((M, K), device=device, dtype=torch.float16)
+    # Full-size backing allocation, so a missing check misreads rather than
+    # running off the end of the buffer.
+    backing = torch.randint(0, 255, (N, K // 2), device=device, dtype=torch.uint8).view(
+        torch.int8
+    )
+    undersized = backing[:, : K // 4]
+    assert undersized.stride(0) == K // 2
+    scales = torch.rand((N, K // G), device=device, dtype=torch.float16)
+
+    with pytest.raises(RuntimeError, match=r"must contain M\*K/2 bytes"):
+        ops.wvSplitK_int4_g(undersized, a, scales, num_compute_units(), G, None, None)
+
+
 # ---------------------------------------------------------------------------
 # gfx11 weight row-stride padding
 # ---------------------------------------------------------------------------
 
-_cliff_pad_bytes = hybrid_module._cliff_pad_bytes
-_STRIDE_CLIFF_BYTES = hybrid_module._STRIDE_CLIFF_BYTES
+_weight_pad_bytes = hybrid_module._weight_pad_bytes
+_act_pad_bytes = hybrid_module._act_pad_bytes
+_WEIGHT_CLIFF_BYTES = hybrid_module._WEIGHT_CLIFF_BYTES
+_ACT_CLIFF_BYTES = hybrid_module._ACT_CLIFF_BYTES
 _STRIDE_PAD_BYTES = hybrid_module._STRIDE_PAD_BYTES
 
 
-def test_cliff_pad_bytes_only_moves_strides_on_the_cliff():
+def test_weight_pad_bytes_only_moves_strides_on_the_cliff():
     """Pad 1024 B multiples, leave everything else dense."""
     # On the cliff (K % 2048 == 0): 1024 B multiples.
     for row_bytes in (1024, 2048, 4096, 5120, 6144, 7168, 8192):
-        assert _cliff_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
+        assert _weight_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
 
     # Off it, including strides that are 512 B multiples but not 1024 B ones:
-    # padding those measured as a real loss (-14% at M=1 on a 4864 B row).
+    # padding those measured as a real loss on gfx1151 (-14% at M=1 on a
+    # 4864 B row).
     for row_bytes in (1280, 1536, 2560, 4864, 9472, 12800):
-        assert _cliff_pad_bytes(row_bytes) == 0
+        assert _weight_pad_bytes(row_bytes) == 0
 
     # The padded stride is never back on the cliff.
     for row_bytes in range(16, 16384, 16):
-        padded = row_bytes + _cliff_pad_bytes(row_bytes)
-        assert padded % _STRIDE_CLIFF_BYTES != 0 or row_bytes % _STRIDE_CLIFF_BYTES
+        padded = row_bytes + _weight_pad_bytes(row_bytes)
+        assert padded % _WEIGHT_CLIFF_BYTES != 0 or row_bytes % _WEIGHT_CLIFF_BYTES
+
+
+def test_act_pad_bytes_only_moves_strides_on_the_cliff():
+    """Activations sit on a wider cliff than the packed weight: 2048 B."""
+    # On the cliff (K % 1024 == 0 for a 2-byte dtype): 2048 B multiples.
+    for row_bytes in (2048, 4096, 8192, 16384, 20480, 24576, 43008):
+        assert _act_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
+
+    # Off it, including 1024 B multiples that are not 2048 B ones -- the
+    # weight cliff must not be applied to activations.
+    for row_bytes in (1024, 3072, 5120, 10752, 19456, 37888):
+        assert _act_pad_bytes(row_bytes) == 0
+
+    # The padded stride is never back on the cliff.
+    for row_bytes in range(16, 65536, 16):
+        padded = row_bytes + _act_pad_bytes(row_bytes)
+        assert padded % _ACT_CLIFF_BYTES != 0 or row_bytes % _ACT_CLIFF_BYTES
 
 
 def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
