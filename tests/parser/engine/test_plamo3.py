@@ -51,7 +51,6 @@ def _tool_call(name, arguments):
 
 @pytest.fixture
 def mock_tokenizer():
-    # Wrapper markers span several IDs; only the atomic pieces are in vocab.
     special = [*sorted(PLAMO_MARKER_TOKENS), EOT, "<|plamo:bos|>"]
     atoms = [*special, "<|plamo:constrain|>", "<|plamo:msg|>"]
     vocab = {token: 100 + i for i, token in enumerate(atoms)}
