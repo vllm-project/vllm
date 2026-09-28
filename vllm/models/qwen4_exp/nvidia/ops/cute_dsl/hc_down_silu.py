@@ -12,8 +12,6 @@ The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
 both with PDL. The model uses its Linear module above M=48.
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
