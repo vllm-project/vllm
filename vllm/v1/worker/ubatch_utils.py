@@ -43,8 +43,7 @@ class SMControlContextManager:
         set_comm_sms: Callable[[int], None],
         set_compute_sms: Callable[[int], None],
     ):
-        """
-        Context manager for controlling SM (Streaming Multiprocessor)
+        """Context manager for controlling SM (Streaming Multiprocessor)
         allocation. Upon entering the context, it sets the number of SMs
         allocated for communication and computation to comm_sms and
         total_sms - comm_sms respectively. Upon exiting, it restores the
@@ -57,8 +56,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for communication.
             set_compute_sms (Callable[[int], None]):
                 A function that sets the number of SMs for computation.
-        """
 
+        """
         assert current_platform.is_cuda() or current_platform.is_rocm(), (
             "SM/CU control is supported on CUDA and ROCm platforms"
         )
@@ -221,8 +220,7 @@ def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
 ) -> torch.Tensor:
-    """
-    Creates a new query_start_loc that corresponds to the requests in
+    """Creates a new query_start_loc that corresponds to the requests in
     request_slice.
 
     Note: This function creates a new tensor to hold the new query_start_locs.
@@ -237,11 +235,9 @@ def slice_query_start_locs(
 def _make_metadata_with_slice(
     ubatch_slice: UBatchSlice, attn_metadata: CommonAttentionMetadata
 ) -> CommonAttentionMetadata:
-    """
-    This function creates a new CommonAttentionMetadata that corresponds to
+    """This function creates a new CommonAttentionMetadata that corresponds to
     the requests included in ubatch_slice
     """
-
     assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
 
     request_slice = ubatch_slice.request_slice
@@ -280,23 +276,11 @@ def _make_metadata_with_slice(
         query_start_loc[1:] -= tokens_skipped
         query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
-    # Read raw fields to avoid triggering the deprecated D2H-syncing properties.
-    seq_lens_cpu = (
-        attn_metadata._seq_lens_cpu[request_slice]
-        if attn_metadata._seq_lens_cpu is not None
-        else None
-    )
     seq_lens_cpu_upper_bound = (
         attn_metadata.seq_lens_cpu_upper_bound[request_slice]
         if attn_metadata.seq_lens_cpu_upper_bound is not None
         else None
     )
-    num_computed_tokens_cpu = (
-        attn_metadata._num_computed_tokens_cpu[request_slice]
-        if attn_metadata._num_computed_tokens_cpu is not None
-        else None
-    )
-
     if splits_last_request:
         # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
         # the tokens skipped because query_start_loc_cpu might have been modified
@@ -309,9 +293,6 @@ def _make_metadata_with_slice(
         #  (not cudagraph compatible)
         seq_lens = seq_lens.clone()
         seq_lens[-1] -= tokens_skipped
-        if seq_lens_cpu is not None:
-            seq_lens_cpu = seq_lens_cpu.clone()
-            seq_lens_cpu[-1] -= tokens_skipped
         if seq_lens_cpu_upper_bound is not None:
             seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound.clone()
             seq_lens_cpu_upper_bound[-1] -= tokens_skipped
@@ -346,8 +327,6 @@ def _make_metadata_with_slice(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )
 
 
@@ -355,8 +334,7 @@ def split_attn_metadata(
     ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
-    """
-    Creates a new CommonAttentionMetadata instance that corresponds to the
+    """Creates a new CommonAttentionMetadata instance that corresponds to the
     requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata

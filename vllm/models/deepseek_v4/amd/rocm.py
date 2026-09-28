@@ -7,6 +7,8 @@ from typing import cast
 
 import torch
 
+from vllm import envs
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -23,7 +25,9 @@ from vllm.models.deepseek_v4.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -33,12 +37,57 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
+    """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
+
+    E8M0 is an unsigned exponent-only scale format with bias 127. A finite
+    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
+    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
+    Microscaling Formats (MX) Specification, section 5.4.1:
+    https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+
+    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    or decode it to a floating-point power of two. Floating-point inputs are
+    accepted only when the original E8M0 byte can be recovered losslessly.
+    This function does not quantize or round arbitrary scales.
+    """
+    if scale.dtype == torch.float8_e8m0fnu:
+        # Reinterpret the native E8M0 storage. ``to(uint8)`` would perform a
+        # numeric conversion instead of preserving the encoded exponent byte.
+        return scale.view(torch.uint8).contiguous()
+    if scale.dtype == torch.uint8:
+        # The checkpoint loader already exposed the E8M0 wire representation.
+        return scale.contiguous()
+    if not scale.dtype.is_floating_point:
+        return None
+
+    scale_f32 = scale.detach().float()
+    if not bool(torch.isfinite(scale_f32).all()) or bool((scale_f32 <= 0).any()):
+        return None
+
+    # With no mantissa, E8M0 can represent only exact powers of two. Rebuild
+    # the value before encoding so this adapter never silently quantizes a
+    # general floating-point checkpoint scale.
+    exponent = torch.round(torch.log2(scale_f32))
+    if not torch.equal(torch.exp2(exponent), scale_f32):
+        return None
+
+    encoded = exponent.to(torch.int32) + 127
+    # 0xFF is NaN in OCP E8M0, not a finite exponent.
+    if int(encoded.min()) < 0 or int(encoded.max()) > 254:
+        return None
+    return encoded.to(torch.uint8).contiguous()
 
 
 def _trust_dsv4_extra_cache_nan_free(
@@ -106,13 +155,18 @@ def _combine_topk_swa_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     gather_lens_ptr,
+    left_visible_ptr,
+    right_visible_ptr,
     M,
     N,
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
+    SWA_WIDTH: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    PADDED_SWA_WIDTH: tl.constexpr,
+    HAS_IMAGE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -131,7 +185,20 @@ def _combine_topk_swa_indices_kernel(
         token_idx_in_query = token_idx - query_start
         pos = start_pos + token_idx_in_query
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        if HAS_IMAGE:
+            left = tl.load(left_visible_ptr + token_idx)
+            right = tl.load(right_visible_ptr + token_idx)
+        else:
+            left = 0
+            right = 0
+        left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
+        # Prefix caching can resume inside an image span. Do not generate
+        # indices outside the SWA rows present in the gathered workspace.
+        swa_start = tl.maximum(
+            tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0), gather_start
+        )
+        swa_end = tl.minimum(pos + right + 1, seq_len)
+        swa_len = tl.maximum(swa_end - swa_start, 0)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -149,14 +216,14 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        swa_offset = tl.arange(0, WINDOW_SIZE)
+        swa_offset = tl.arange(0, PADDED_SWA_WIDTH)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
             + topk_len
             + swa_offset,
-            M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-            mask=swa_offset < swa_len,
+            M * batch_idx + N + swa_offset + swa_start - gather_start,
+            mask=(swa_offset < swa_len) & (swa_offset < SWA_WIDTH),
         )
 
         tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
@@ -172,12 +239,21 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    max_image_tokens: int = 0,
+    left_visible: torch.Tensor | None = None,
+    right_visible: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (left_visible is None) != (right_visible is None):
+        raise ValueError("left_visible and right_visible must be provided together")
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
+    has_image = left_visible is not None
+    # Keep the row shape fixed for a vision model even when a particular batch
+    # has no image.
+    swa_width = window_size + max_image_tokens
     combined_topk = (
-        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + swa_width + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -201,13 +277,18 @@ def combine_topk_swa_indices(
         query_start_loc,
         seq_lens,
         gather_lens,
+        left_visible if left_visible is not None else topk_indices,
+        right_visible if right_visible is not None else topk_indices,
         M,
         N,
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
+        SWA_WIDTH=swa_width,
         TOPK_WIDTH=topk_indices.shape[-1],
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+        PADDED_SWA_WIDTH=triton.next_power_of_2(swa_width),
+        HAS_IMAGE=has_image,
     )
     return combined_indices, combined_lens
 
@@ -368,6 +449,20 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # All per-token metadata is built from device query boundaries into
+            # persistent buffers, so adaptive verification can replay varlen
+            # FULL decode graphs after reallocating drafts across requests.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -435,6 +530,20 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # SWA indices, lengths, and token-to-request mappings are built from
+            # device boundaries into persistent buffers, so adaptive verification
+            # can replay varlen FULL decode graphs safely.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
     # also refreshes the ROCm-specific ragged SWA indices and indptrs.
     supports_draft_decode_metadata_update = False
@@ -462,11 +571,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
             fast_build=fast_build,
+            replay_start=replay_start,
         )
 
         ragged_indices = None
@@ -520,9 +631,232 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._wo_a_fp8_weight: torch.Tensor | None = None
+        self._wo_a_e8m0_scale: torch.Tensor | None = None
+        self._wo_a_cos_cache: torch.Tensor | None = None
+        self._wo_a_sin_cache: torch.Tensor | None = None
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
+
+        if self.indexer is None:
+            # Dense layers have no compressor work to overlap; HCA layers
+            # (compressor, no indexer) keep the streams for the dual-stream
+            # fork below.
+            if self.compressor is None:
+                self.aux_stream_list = None
+        else:
+            # Disable indexer inner overlap.
+            self.indexer.aux_stream = None
+
+    def _enable_multi_stream_overlap(self) -> bool:
+        """ROCm multi-stream gates: streams and capture region.
+
+        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
+        the attention inputs on the owning stream. Forking side streams
+        there would rely on runtime HIP event sync, which is unreliable in
+        this overlap on ROCm (event waits can hang), so multi-stream only
+        runs where the fork/join becomes static graph edges: inside capture,
+        or with non-dict metadata (full cudagraph or the profile run), which
+        has no eager breaks. Covers both the HCA and CSA forks.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        return self.aux_stream_list is not None and (
+            torch.cuda.is_current_stream_capturing()
+            or not isinstance(attn_metadata, dict)
+        )
+
+    def _run_sequential_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Disable ROCm streams when the current execution region cannot overlap."""
+        aux_streams = self.aux_stream_list
+        self.aux_stream_list = None
+        try:
+            qr_kv, kv_score, indexer_kv_score, indexer_weights = (
+                self._run_parallel_input_projections(hidden_states)
+            )
+            qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+            self._prepare_and_attn_fn(
+                hidden_states,
+                qr,
+                kv,
+                qr_scale,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                o_padded,
+            )
+        finally:
+            self.aux_stream_list = aux_streams
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Pre-allocate attention output with FlashMLA-padded head count.
+        # The op writes into `o_padded`; we slice to n_local_heads after.
+        num_tokens = hidden_states.shape[0]
+        o_padded = torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        if self._enable_multi_stream_overlap():
+            # The ROCm override consumes these sentinels inside the capture
+            # boundary, moving the stream fan-out ahead of the projections.
+            self._prepare_and_attn_fn(
+                hidden_states,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                positions,
+                o_padded,
+            )
+        else:
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+
+        o = o_padded[:, : self.n_local_heads, :]
+
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
+
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor | None,
+        kv: torch.Tensor | None,
+        qr_scale: torch.Tensor | None,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Run the ROCm fork/join (HCA or CSA) inside the capture boundary."""
+        aux_streams = self.aux_stream_list
+        # The sequential pipeline disables aux_stream_list before calling
+        # back with real projection inputs; aux_streams is None ends that
+        # recursion here.
+        if aux_streams is None:
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                super()._prepare_and_attn(
+                    hidden_states,
+                    cast(torch.Tensor, qr),
+                    cast(torch.Tensor, kv),
+                    qr_scale,
+                    cast(torch.Tensor, kv_score),
+                    cast(torch.Tensor, indexer_kv_score),
+                    cast(torch.Tensor, indexer_weights),
+                    positions,
+                    o_padded,
+                )
+            finally:
+                self.aux_stream_list = saved_streams
+            return
+
+        # Re-check: forward's gate ran inside a captured segment that
+        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
+        if not self._enable_multi_stream_overlap():
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+            return
+
+        indexer = self.indexer
+        compressor = self.compressor
+        assert compressor is not None
+
+        def default_chain():
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr_out, qr_scale_out, kv_out = self._split_qkv_and_norm(qr_kv)
+            q = self._wq_b_proj(qr_out, qr_scale_out).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            attn_metadata = get_forward_context().attn_metadata
+            q = self._fused_qnorm_rope_kv_insert(q, kv_out, positions, attn_metadata)
+            return q, qr_out, qr_scale_out, kv_out
+
+        def main_compressor_chain() -> None:
+            score = torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            compressor(score, positions, self.rotary_emb)
+
+        if indexer is None:
+            # HCA dual-stream: the main compressor runs on aux stream 0 while
+            # the default stream produces q and inserts KV into the SWA cache.
+            # Both branches only read hidden_states, so the join merely has to
+            # precede the sparse attention that consumes the compressed KV.
+            (q, _qr_out, _qr_scale_out, kv_out), _ = execute_in_parallel(
+                default_chain,
+                [main_compressor_chain],
+                self.ln_events[0],
+                [self.ln_events[1]],
+                aux_streams[:1],
+                enable=True,
+            )
+            self._sparse_indexer_and_attn(
+                hidden_states, None, None, None, q, kv_out, positions, o_padded
+            )
+            return
+
+        def indexer_compressor_chain() -> None:
+            score = torch.mm(
+                hidden_states,
+                indexer.compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            indexer.compressor(score, positions, self.indexer_rotary_emb)
+
+        # CSA three-stream: the main and indexer compressors run on aux
+        # streams 0 and 1 while the default stream produces q and inserts KV
+        # into the SWA cache. Every branch only reads hidden_states plus its
+        # own state, so the join merely has to precede the indexer op and the
+        # sparse attention, which consume the compressed KV caches.
+        (q, qr_out, qr_scale_out, kv_out), _ = execute_in_parallel(
+            default_chain,
+            [main_compressor_chain, indexer_compressor_chain],
+            self.ln_events[0],
+            self.ln_events[1:3],
+            aux_streams[:2],
+            enable=True,
+        )
+
+        indexer_weights_out, _ = indexer.weights_proj(hidden_states)
+        # The indexer compressor already ran on aux stream 1; build queries only.
+        index_q, index_q_scale, weights = indexer(
+            hidden_states,
+            qr_out,
+            None,
+            indexer_weights_out,
+            positions,
+            self.indexer_rotary_emb,
+            qr_scale_out,
+            skip_compressor=True,
+        )
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            weights,
+            q,
+            kv_out,
+            positions,
+            o_padded,
+        )
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -561,6 +895,93 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
+        if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
+            self._prepare_fp8_wo_a()
+
+    def _prepare_fp8_wo_a(self) -> None:
+        try:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale as mxscale_op,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant as inverse_quant_op,
+            )
+        except ImportError:
+            logger.warning_once(
+                "The DeepSeek V4 FP8 WO_A path requires AITER >= 0.1.20; "
+                "falling back to BF16 WO_A."
+            )
+            return
+        del mxscale_op, inverse_quant_op
+
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_fp8_block_weight_scale,
+            is_fp8,
+        )
+
+        weight = getattr(self.wo_a, "weight", None)
+        scale = get_fp8_block_weight_scale(self.wo_a)
+        if scale is None:
+            # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+            # historical ``_inv`` suffix.
+            scale = getattr(self.wo_a, "weight_scale", None)
+        if weight is None or scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a block-scaled FP8 wo_a weight; "
+                "the layer exposes no weight/weight scale. Falling back to "
+                "BF16 WO_A."
+            )
+            return
+        if weight.dim() != 2 or scale.dim() != 2 or not is_fp8(weight.dtype):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a 2-D FP8 wo_a weight with a 2-D "
+                "block scale, got weight %s%s and scale %s. Falling back to "
+                "BF16 WO_A.",
+                weight.dtype,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
+            return
+
+        groups = self.n_local_groups
+        out_per_group = self.o_lora_rank
+        out_features, in_features = weight.shape
+        if (
+            out_features != groups * out_per_group
+            or out_per_group % 128 != 0
+            or in_features % 128 != 0
+            or scale.shape != (out_features // 128, in_features // 128)
+        ):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs group-128 blocks for %d groups of "
+                "%d outputs, got weight %s and scale %s. Falling back to BF16 "
+                "WO_A.",
+                groups,
+                out_per_group,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
+            return
+
+        e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
+        if e8m0_scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A could not losslessly encode the %s wo_a "
+                "block scale as OCP E8M0. Falling back to BF16 WO_A.",
+                scale.dtype,
+            )
+            return
+
+        self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
+        self._wo_a_e8m0_scale = e8m0_scale.view(
+            groups, out_per_group // 128, in_features // 128
+        )
+        cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
+        if cache is None:
+            cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
+        cos_cache, sin_cache = cache.chunk(2, dim=-1)
+        self._wo_a_cos_cache = cos_cache.contiguous()
+        self._wo_a_sin_cache = sin_cache.contiguous()
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -719,17 +1140,45 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
-        z = rocm_inv_rope_einsum(
-            self.rotary_emb,
-            o,
-            positions,
-            self.rope_head_dim,
-            self.n_local_groups,
-            self.o_lora_rank,
-            self.wo_a,
-        )
-        zf = z.flatten(1)
+        if self._wo_a_fp8_weight is not None:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant,
+            )
+
+            assert self._wo_a_cos_cache is not None
+            assert self._wo_a_sin_cache is not None
+            o_fp8, o_scale = inverse_rope_group_quant(
+                o.view(o.shape[0], self.n_local_heads, self.head_dim),
+                positions.to(torch.int64),
+                self._wo_a_cos_cache,
+                self._wo_a_sin_cache,
+                num_groups=self.n_local_groups,
+                quant_group_size=128,
+            )
+            assert self._wo_a_e8m0_scale is not None
+            zf = batched_gemm_a8w8_mxscale(
+                o_fp8,
+                self._wo_a_fp8_weight,
+                o_scale,
+                self._wo_a_e8m0_scale,
+                dtype=o.dtype,
+            ).flatten(1)
+        else:
+            # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+            z = rocm_inv_rope_einsum(
+                self.rotary_emb,
+                o,
+                positions,
+                self.rope_head_dim,
+                self.n_local_groups,
+                self.o_lora_rank,
+                self.wo_a,
+                inverse_rope=False,
+            )
+            zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
             return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
         return self.wo_b(zf)
@@ -798,9 +1247,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
+        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
+        # the rotation into the decode reduce would apply it twice. Only the
+        # BF16 einsum path hands its rotation off to the decode.
+        fuse_inv_rope = self._wo_a_fp8_weight is None
+        rotated = 0
         if num_decodes > 0:
-            self._forward_decode(
+            rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
+                positions=positions[:num_decode_tokens] if fuse_inv_rope else None,
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,
@@ -814,17 +1269,31 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     and rocm_metadata.for_cudagraph_capture
                 ),
             )
+        if fuse_inv_rope:
+            # Only the decode reduce rotates its own rows, and only the leading
+            # `rotated` of them; prefill rows and any decode path that did not
+            # fuse still owe the standalone pass. Settle that here rather than
+            # in _o_proj: the split is batch-dependent and _o_proj runs
+            # compiled, where such a value freezes at its trace-time value.
+            rocm_inverse_rope_rows_(
+                output[rotated:, : self.n_local_heads, :],
+                positions[rotated:],
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+            )
 
     def _forward_decode(
         self,
         q: torch.Tensor,
+        positions: torch.Tensor | None,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
         adaptive_splits: bool,
-    ) -> None:
+    ) -> int:
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -856,7 +1325,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        rocm_sparse_attn_decode(
+        return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
@@ -876,6 +1345,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             rope_head_dim=self.rope_head_dim,
             output=output,
             adaptive_splits=adaptive_splits,
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
@@ -910,6 +1381,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         assert query_start_loc_cpu is not None
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
+        left_visible = swa_metadata.prefill_left_visible
+        right_visible = swa_metadata.prefill_right_visible
+        if left_visible is not None:
+            left_visible = left_visible[num_decode_tokens:]
+            assert right_visible is not None
+            right_visible = right_visible[num_decode_tokens:]
 
         if not swa_only:
             if self.compress_ratio == 4:
@@ -988,6 +1465,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 top_k,
                 M,
                 N,
+                max_image_tokens=self.max_image_tokens,
+                left_visible=(
+                    left_visible[query_start:query_end]
+                    if left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    right_visible[query_start:query_end]
+                    if right_visible is not None
+                    else None
+                ),
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],

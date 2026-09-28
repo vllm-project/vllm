@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 import uuid
+
+import pytest
+import torch
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
@@ -8,6 +12,11 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+)
 
 _N, _BS, _HID, _ES = 16, 64, 32, 2
 
@@ -18,10 +27,12 @@ class _Pos:
 
 
 class _Feature:
-    def __init__(self, mm_hash, length=1):
+    def __init__(self, mm_hash, length=1, data=None):
         self.mm_hash = mm_hash
         self.identifier = mm_hash
         self.mm_position = _Pos(0, length)
+        self.data = data
+        self.modality = "image"
 
 
 class _Request:
@@ -94,6 +105,7 @@ def _consumer_sched(monkeypatch):
     # directly since this helper builds gate-off then flips fields on.
     s._hidden_dim = _HID
     s._element_size = _ES
+    s._metadata_resolver._cache["image"] = {"image_grid_thw"}
     return s
 
 
@@ -150,13 +162,17 @@ def test_new_remote_read_defers_then_completes(monkeypatch):
     s.shutdown()
 
 
-def test_no_params_is_ready(monkeypatch):
+@pytest.mark.parametrize("params", [None, {"x": 123}])
+def test_no_remote_announcement_is_ready(monkeypatch, params):
     s = _consumer_sched(monkeypatch)
-    assert s.ensure_cache_available(_Request([_Feature("x")], params=None), 0) is True
+    assert s.ensure_cache_available(_Request([_Feature("x")], params=params), 0)
+    assert s.take_unavailable_requests() == set()
     s.shutdown()
 
 
-def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
+@pytest.mark.parametrize("payload", [None, "metadata", "pixels", "embeds", "shm"])
+def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload):
+    """A remote miss is fatal only when local model input is unavailable."""
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
@@ -167,26 +183,71 @@ def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
         return True
 
     monkeypatch.setattr(s, "_start_xfer", _fake_start)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    fields = {
+        "metadata": {"image_grid_thw": torch.tensor([1, 2, 2])},
+        "pixels": {"pixel_values": torch.ones(1, 3)},
+        "embeds": {"image_embeds": torch.ones(1, _HID)},
+        "shm": {"address": 123, "monotonic_id": 1},
+    }
+    data = (
+        MultiModalKwargsItem(
+            {
+                key: MultiModalFieldElem(value, MultiModalSharedField(batch_size=1))
+                for key, value in fields[payload].items()
+            }
+        )
+        if payload is not None
+        else None
+    )
+    req = _Request([_Feature("h1", 1, data)], params=_params("h1", 1))
 
     # Step 1: start the read.
     assert s.ensure_cache_available(req, 0) is False
     s.build_connector_meta(scheduler_output=None)
 
-    # Producer rejected the read -> tombstoned.
     fake._results.tombstoned.add("h1")
     s._sessions[("h", 1)] = fake
 
-    # Step 2: poll discards the entry and records a tombstone; the tombstone
-    # is consumed by admit so the request proceeds to local compute.
-    assert s.ensure_cache_available(req, 0) is True
+    can_fallback = payload in ("pixels", "embeds", "shm")
+    assert s.ensure_cache_available(req, 0) is can_fallback
     assert s._cache.get("h1") is None
     assert "h1" not in s._in_flight
-    s.build_connector_meta(scheduler_output=None)
+    assert s.take_unavailable_requests() == (set() if can_fallback else {"r1"})
+    # Drained by the read, so the scheduler cannot abort it twice.
+    assert s.take_unavailable_requests() == set()
+    if can_fallback:
+        # A later scheduling step must not retry the failed remote source.
+        s.build_connector_meta(scheduler_output=None)
+        assert s.ensure_cache_available(req, 0)
+        assert fake.started == ["h1"]
+    s.shutdown()
 
-    # Step 3: tombstone was consumed, so a fresh transfer starts again.
-    assert s.ensure_cache_available(req, 0) is False
-    assert "h1" in s._in_flight
+
+@pytest.mark.parametrize("retry", [False, True], ids=["in-flight", "retryable"])
+def test_remote_wait_budget_survives_retries_and_long_steps(monkeypatch, retry):
+    """Neither retries nor delayed scheduling may restart the request budget."""
+    s = _consumer_sched(monkeypatch)
+    fake = _FakeSession()
+    s._sessions[("h", 1)] = fake
+
+    def start(mm_hash, info, size):
+        assert s._cache.alloc(mm_hash, 1) is not None
+        fake.started.append(mm_hash)
+        return True
+
+    monkeypatch.setattr(s, "_start_xfer", start)
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    req = _Request([_Feature("h1")], params=_params("h1", 1))
+    assert not s.ensure_cache_available(req, 0)
+    for elapsed in (20, 40, 121):
+        now[0] = 1000.0 + elapsed
+        if retry:
+            fake._results.retryable.add("h1")
+        s.build_connector_meta(scheduler_output=None)
+        assert not s.ensure_cache_available(req, 0)
+        assert s.take_unavailable_requests() == ({"r1"} if elapsed > 60 else set())
+    assert len(fake.started) == (3 if retry else 1)
     s.shutdown()
 
 
@@ -225,14 +286,47 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
     s.shutdown()
 
 
-def test_size_mismatch_skips_transfer(monkeypatch):
+@pytest.mark.parametrize(
+    "size_fields",
+    [{"size_bytes": 999}, {"size_bytes": None}, {"size_bytes": "big"}, {}],
+    ids=["mismatch", "null-size", "text-size", "no-size"],
+)
+def test_invalid_remote_size_fails_the_request(monkeypatch, size_fields):
+    """Invalid remote sizes fail the request without raising in the scheduler."""
     s = _consumer_sched(monkeypatch)
-    # Advertised size disagrees with pos.length * hidden_dim * element_size.
-    bad = {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}
-    req = _Request([_Feature("h1", 1)], params=bad)
-    assert s.ensure_cache_available(req, 0) is True
+    announced = {"peer_host": "h", "peer_port": 1, **size_fields}
+    req = _Request([_Feature("h1", 1)], params={"h1": announced})
+    assert s.ensure_cache_available(req, 0) is False
+    assert s.take_unavailable_requests() == {"r1"}
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None
+    s.shutdown()
+
+
+def test_deferral_budget_is_per_request(monkeypatch):
+    """Shared hashes have independent wait budgets and cancellation cleanup."""
+    s = _consumer_sched(monkeypatch)
+    monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
+    params = _params("h1", 1)
+    old = _Request([_Feature("h1", 1)], params=params, req_id="old")
+    new = _Request([_Feature("h1", 1)], params=params, req_id="new")
+
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    assert s.ensure_cache_available(old, 0) is False
+    now[0] += sched_mod._ADMIT_DEFER_TIMEOUT_S - 1
+    assert s.ensure_cache_available(new, 0) is False
+    assert s.take_unavailable_requests() == set()
+
+    now[0] += 2
+    # `old` is now past its budget; `new` is not.
+    assert s.ensure_cache_available(new, 0) is False
+    assert s.take_unavailable_requests() == set()
+    assert s.request_finished(new) == (False, None)
+    assert set(s._deferred_since) == {("old", "h1")}
+    assert s.ensure_cache_available(old, 0) is False
+    assert s.take_unavailable_requests() == {"old"}
+    assert "h1" not in s._in_flight
     s.shutdown()
 
 
@@ -250,7 +344,7 @@ def test_metadata_only_entry_admits_without_transfer(monkeypatch):
     s.shutdown()
 
 
-def test_orphan_not_ready_entry_falls_back_no_realloc(monkeypatch):
+def test_orphan_not_ready_entry_defers_no_realloc(monkeypatch):
     # Post-quarantine, post-tombstone-consumed orphan: a not-ready cache
     # entry exists for the mm_hash, but the hash is tracked in none of
     # _in_flight / _step_completed / _tombstones. Its blocks are held by a
@@ -274,25 +368,13 @@ def test_orphan_not_ready_entry_falls_back_no_realloc(monkeypatch):
     monkeypatch.setattr(s._cache, "alloc", _spy_alloc)
     req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
 
-    # Must not raise; request falls back to local compute (admitted True),
-    # the orphan entry is untouched, and alloc is never called again.
-    assert s.ensure_cache_available(req, 0) is True
+    # Must not raise; the request is deferred while the DMA settles, the
+    # orphan entry is untouched, and alloc is never called again.
+    assert s.ensure_cache_available(req, 0) is False
     assert calls == []
     assert s._cache.get("h1") is entry
     assert not entry.ready
-    s.shutdown()
-
-
-def test_alloc_failure_falls_back_to_local(monkeypatch):
-    s = _consumer_sched(monkeypatch)
-
-    # Force the cache to reject the allocation.
-    monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
-
-    # _start_xfer returns False -> request admitted for local recompute.
-    assert s.ensure_cache_available(req, 0) is True
-    assert "h1" not in s._in_flight
+    assert s.take_unavailable_requests() == set()
     s.shutdown()
 
 
