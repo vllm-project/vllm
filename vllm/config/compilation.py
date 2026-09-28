@@ -25,6 +25,7 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
+    from vllm.compilation.cache_policy import CompileCachePolicy
     from vllm.config import VllmConfig
     from vllm.v1.attention.backend import AttentionCGSupport
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -1068,6 +1069,7 @@ class CompilationConfig:
         vllm_config: "VllmConfig",
         prefix: str = "",
         is_encoder: bool = False,
+        cache_policy: "CompileCachePolicy | None" = None,
     ) -> str | Callable:
         """Initialize the backend for the compilation config from a vllm config.
 
@@ -1076,6 +1078,7 @@ class CompilationConfig:
             prefix: Cache directory prefix for this compiled module.
             is_encoder: Whether this module is used in an encoder (as
                 opposed to a text backbone).
+            cache_policy: Effective policy of the owning compiled module.
 
         Returns:
             The backend for the compilation config.
@@ -1107,7 +1110,9 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
+        return VllmBackend(
+            vllm_config, prefix=prefix, is_encoder=is_encoder, cache_policy=cache_policy
+        )
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related

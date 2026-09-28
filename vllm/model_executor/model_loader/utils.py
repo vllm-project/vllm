@@ -12,6 +12,7 @@ from torch import nn
 from typing_extensions import assert_never
 
 import vllm.envs as envs
+from vllm.compilation.cache_policy import CompileCachePolicy, use_compile_cache_policy
 from vllm.config import (
     LoadConfig,
     ModelConfig,
@@ -87,11 +88,15 @@ def initialize_model(
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
 
+    cache_policy = CompileCachePolicy.resolve(vllm_config, model_config=model_config)
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
+        with (
+            set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix),
+            use_compile_cache_policy(vllm_config, cache_policy),
+        ):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
             record_metadata_for_reloading(model)
             return model
@@ -123,7 +128,10 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
+    with (
+        set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix),
+        use_compile_cache_policy(vllm_config, cache_policy),
+    ):
         model = model_class(**kwargs)
         record_metadata_for_reloading(model)
 

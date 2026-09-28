@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -36,6 +37,257 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from . import silly_attention  # noqa: F401
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize("is_hf", [True, False])
+@pytest.mark.parametrize("entry", ["wrapper", "backend"])
+@pytest.mark.forked
+def test_hf_factory_uses_effective_mega_policy(monkeypatch, is_hf, entry):
+    """HF can use legacy Inductor even when mega was requested globally."""
+    from vllm.compilation.compiler_interface import InductorAdaptor
+    from vllm.compilation.decorators import support_torch_compile
+    from vllm.config import set_current_vllm_config
+    from vllm.envs import disable_envs_cache
+
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "0")
+    disable_envs_cache()
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    model = MagicMock(spec=ModelConfig)
+    model.using_transformers_backend.return_value = is_hf
+    config.model_config = model
+
+    @support_torch_compile(dynamic_arg_dims={"x": 0})
+    class Module(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+
+        def forward(self, x):
+            return x + 1
+
+    with set_current_vllm_config(config):
+        if not is_hf:
+            with pytest.raises(AssertionError, match="STANDALONE_COMPILE"):
+                if entry == "wrapper":
+                    Module(vllm_config=config)
+                else:
+                    config.compilation_config.init_backend(config)
+        elif entry == "wrapper":
+            Module(vllm_config=config)
+        else:
+            backend = config.compilation_config.init_backend(config)
+            assert isinstance(backend.compiler_manager.compiler, InductorAdaptor)
+    disable_envs_cache()
+
+
+@pytest.mark.parametrize("requested", ["auto", "transformers", "vllm"])
+@pytest.mark.parametrize("resolved_hf", [True, False])
+@pytest.mark.forked
+def test_hf_cache_policy_uses_resolved_backend(monkeypatch, requested, resolved_hf):
+    from vllm.compilation.cache_policy import CompileCachePolicy
+    from vllm.envs import disable_envs_cache
+
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    disable_envs_cache()
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    model = MagicMock(spec=ModelConfig)
+    model.model_impl = requested
+    model.using_transformers_backend.return_value = resolved_hf
+    config.model_config = model
+    policy = CompileCachePolicy.resolve(config)
+    assert policy.use_model_aot is not resolved_hf
+    assert policy.use_mega_artifact is not resolved_hf
+    assert policy.use_vllm_artifact_cache is not resolved_hf
+
+
+@pytest.mark.parametrize("fail_compile", [False, True])
+@pytest.mark.forked
+def test_hf_cache_policy_restores_functorch_config(monkeypatch, fail_compile):
+    from vllm.compilation.backends import CompilerManager
+    from vllm.compilation.cache_policy import CompileCachePolicy
+    from vllm.config.utils import Range
+    from vllm.envs import disable_envs_cache
+
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    disable_envs_cache()
+    native = CompileCachePolicy.resolve()
+    config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE, backend="inductor")
+    manager = CompilerManager(config, CompileCachePolicy(False, False, False))
+    graph = torch.fx.symbolic_trace(lambda x: x + 1)
+
+    def compile_graph(*args, **kwargs):
+        assert torch._functorch.config.bundled_autograd_cache is False
+        if fail_compile:
+            raise RuntimeError("test compilation failure")
+        return graph, None
+
+    monkeypatch.setattr(manager.compiler, "compile", compile_graph)
+    expected_error = (
+        pytest.raises(RuntimeError, match="test compilation failure")
+        if fail_compile
+        else nullcontext()
+    )
+    with torch._functorch.config.patch(bundled_autograd_cache=True):
+        with expected_error:
+            result = manager.compile(graph, [torch.ones(2)], {}, config, Range(1, 8))
+            assert torch.equal(result(torch.ones(2)), torch.full((2,), 2.0))
+        assert torch._functorch.config.bundled_autograd_cache is True
+    assert CompileCachePolicy.resolve() == native
+    assert native.use_model_aot and native.use_mega_artifact
+    assert os.environ["VLLM_USE_AOT_COMPILE"] == "1"
+
+
+@pytest.mark.forked
+def test_hf_cache_ignores_legacy_index_and_initializes_lower_cache(
+    tmp_path, monkeypatch
+):
+    from vllm.compilation.backends import CompilerManager
+    from vllm.compilation.cache_policy import CompileCachePolicy
+
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "old-tmp"))
+    explicit_triton = tmp_path / "user-triton"
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(explicit_triton))
+    base = tmp_path / "rank_0_0"
+    local = base / "module" / "decoder"
+    local.mkdir(parents=True)
+    index = local / "vllm_compile_cache.py"
+    index.write_text("invalid old index; must never be parsed")
+    manager = CompilerManager(
+        CompilationConfig(mode=CompilationMode.VLLM_COMPILE, backend="inductor"),
+        CompileCachePolicy(False, False, False),
+    )
+    manager.initialize_cache(
+        str(local), prefix="module/decoder", base_cache_dir=str(base)
+    )
+    assert manager.cache == {}
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(base / "inductor_cache")
+    assert os.environ["TRITON_CACHE_DIR"] == str(explicit_triton)
+    manager.is_cache_updated = True
+    manager.save_to_file()
+    assert index.read_text() == "invalid old index; must never be parsed"
+
+
+@pytest.mark.parametrize("disable", [False, True])
+@pytest.mark.forked
+def test_hf_lower_cache_directory_lifecycle(tmp_path, monkeypatch, disable):
+    from vllm.compilation.backends import CompilerManager
+    from vllm.compilation.cache_policy import CompileCachePolicy
+
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    previous = str(tmp_path / "previous")
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", previous)
+    for model in ("first", "second"):
+        directory = tmp_path / model
+        manager = CompilerManager(
+            CompilationConfig(mode=CompilationMode.VLLM_COMPILE, backend="inductor"),
+            CompileCachePolicy(False, False, False),
+        )
+        manager.initialize_cache(str(directory), disable_cache=disable)
+        if disable:
+            assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == previous
+            assert "TRITON_CACHE_DIR" not in os.environ
+            assert not directory.exists()
+        else:
+            assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(
+                directory / "inductor_cache"
+            )
+            assert os.environ["TRITON_CACHE_DIR"] == str(directory / "triton_cache")
+
+
+@pytest.mark.forked
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+def test_hf_target_does_not_override_native_eagle_cache_policy(
+    tmp_path, monkeypatch, dist_init, method
+):
+    from transformers import LlamaConfig
+
+    from vllm.compilation.cache_policy import CompileCachePolicy
+    from vllm.envs import disable_envs_cache
+    from vllm.model_executor.model_loader.utils import initialize_model
+
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    disable_envs_cache()
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "draft"
+    hf = LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        vocab_size=128,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+    )
+    hf.save_pretrained(target_path)
+    hf.save_pretrained(draft_path)
+    target = ModelConfig(
+        model=str(target_path),
+        model_impl="transformers",
+        dtype="float16",
+        max_model_len=64,
+    )
+    parallel = ParallelConfig()
+    spec = SpeculativeConfig(
+        model=str(draft_path),
+        method=method,
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=parallel,
+    )
+    config = VllmConfig(
+        model_config=target,
+        parallel_config=parallel,
+        speculative_config=spec,
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
+    )
+    assert target.using_transformers_backend()
+    assert not spec.draft_model_config.using_transformers_backend()
+    # The real loader receives the target VllmConfig plus a separate draft owner.
+    with torch.device("cpu"):
+        draft = initialize_model(config, model_config=spec.draft_model_config)
+    assert config.model_config is target
+    assert draft.model.cache_policy == CompileCachePolicy(True, True, True)
+
+    class TargetOwnerProbe(torch.nn.Module):
+        def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+            super().__init__()
+            assert CompileCachePolicy.resolve(vllm_config) == CompileCachePolicy(
+                False, False, False
+            )
+
+    class FailingDraftOwnerProbe(torch.nn.Module):
+        def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+            super().__init__()
+            assert CompileCachePolicy.resolve(vllm_config) == CompileCachePolicy(
+                True, True, True
+            )
+            initialize_model(
+                vllm_config, model_config=target, model_class=TargetOwnerProbe
+            )
+            assert CompileCachePolicy.resolve(vllm_config) == CompileCachePolicy(
+                True, True, True
+            )
+            raise RuntimeError("draft initialization failed")
+
+    with pytest.raises(RuntimeError, match="draft initialization failed"):
+        initialize_model(
+            config,
+            model_config=spec.draft_model_config,
+            model_class=FailingDraftOwnerProbe,
+        )
+    assert CompileCachePolicy.resolve(config) == CompileCachePolicy(False, False, False)
 
 
 def test_version():
