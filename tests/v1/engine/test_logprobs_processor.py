@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from vllm.logprobs import create_sample_logprobs
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
@@ -72,8 +73,14 @@ def test_prompt_token_id_logprobs_are_popped_once():
     processor = _make_processor(num_logprobs=1)
     assert processor.pop_prompt_token_id_logprobs() is None
 
-    processor._update_prompt_token_id_logprobs(
-        torch.tensor([[-0.5, -1.5], [-2.5, -3.5]], dtype=torch.float32)
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="req-0",
+            new_token_ids=[],
+            prompt_token_id_logprobs=torch.tensor(
+                [[-0.5, -1.5], [-2.5, -3.5]], dtype=torch.float32
+            ),
+        )
     )
 
     scores = processor.pop_prompt_token_id_logprobs()

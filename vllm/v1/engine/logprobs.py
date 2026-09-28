@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
-import torch
 
 from vllm.logger import init_logger
 from vllm.logprobs import (
@@ -189,10 +188,6 @@ class LogprobsProcessor:
                 self.num_prompt_logprobs,
             )
 
-    def _update_prompt_token_id_logprobs(self, scores: torch.Tensor) -> None:
-        """Store fixed-ID prompt scores; they arrive whole, not per chunk."""
-        self.prompt_token_id_logprobs = scores.numpy()
-
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs.
 
@@ -368,4 +363,4 @@ class LogprobsProcessor:
         if output.new_prompt_logprobs_tensors is not None:
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
         if output.prompt_token_id_logprobs is not None:
-            self._update_prompt_token_id_logprobs(output.prompt_token_id_logprobs)
+            self.prompt_token_id_logprobs = output.prompt_token_id_logprobs.numpy()
