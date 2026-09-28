@@ -71,6 +71,9 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.common.encoder_cudagraph import (
+    MiniMaxM3EncoderCudaGraphMixin,
+)
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
 from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLDummyInputsBuilder,
@@ -1079,7 +1082,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
 class MiniMaxM3SparseForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal,
+    MiniMaxM3EncoderCudaGraphMixin,
+    SupportsPP,
+    SupportsEagle3,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
