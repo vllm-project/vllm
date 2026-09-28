@@ -3,8 +3,12 @@
 
 use std::sync::Arc;
 
-use tracing::info;
-use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles, load_model_config};
+use thiserror_ext::AsReport as _;
+use tracing::{info, warn};
+use vllm_parser::unified::hf::ResponseTemplate;
+use vllm_text::backend::hf::{
+    HfTextBackend, ResolvedModelFiles, load_model_config, load_tokenizer_config,
+};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
 
@@ -32,6 +36,8 @@ pub struct HfChatBackend {
     tokenizer: DynTokenizer,
     chat_renderer: DynChatRenderer,
     multimodal_model_info: Option<MultimodalModelInfo>,
+    /// Compiled `response_template` from `tokenizer_config.json`, for the `hf` parser.
+    response_template: Option<Arc<ResponseTemplate>>,
 }
 
 impl HfChatBackend {
@@ -61,6 +67,7 @@ impl HfChatBackend {
             )?
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
+        let response_template = load_response_template(&files)?;
 
         let renderer = options.renderer.resolve(model_type);
         let chat_renderer: DynChatRenderer = match renderer {
@@ -105,7 +112,30 @@ impl HfChatBackend {
             tokenizer,
             chat_renderer,
             multimodal_model_info,
+            response_template,
         })
+    }
+}
+
+/// Load and compile the checkpoint's `response_template`, if any.
+///
+/// A template this implementation cannot execute is logged and ignored, so that
+/// only requests selecting the `hf` parser fail.
+fn load_response_template(files: &ResolvedModelFiles) -> Result<Option<Arc<ResponseTemplate>>> {
+    let Some(template) =
+        load_tokenizer_config(files.tokenizer_config_path.as_deref())?.response_template
+    else {
+        return Ok(None);
+    };
+    match ResponseTemplate::from_json(&template) {
+        Ok(template) => {
+            info!("loaded response_template for the `hf` parser");
+            Ok(Some(Arc::new(template)))
+        }
+        Err(error) => {
+            warn!(error = %error.as_report(), "ignoring response_template the `hf` parser cannot execute");
+            Ok(None)
+        }
     }
 }
 
@@ -128,14 +158,17 @@ impl ChatBackend for HfChatBackend {
             return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
         }
 
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
-            &self.model_id,
-            self.tokenizer.clone(),
-            options.tool_call_parser,
-            options.reasoning_parser,
-            options.tool_strict_level,
-        )?))
+        Ok(Box::new(
+            DefaultChatOutputProcessor::with_response_template(
+                request,
+                &self.model_id,
+                self.tokenizer.clone(),
+                self.response_template.as_ref(),
+                options.tool_call_parser,
+                options.reasoning_parser,
+                options.tool_strict_level,
+            )?,
+        ))
     }
 }
 
