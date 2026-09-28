@@ -19,6 +19,7 @@ from vllm.profiler.op_capture.capture import (
     ForwardHarness,
     OpCapture,
     SelectionMetadata,
+    capture_batches,
     capture_model_ops,
 )
 from vllm.profiler.op_capture.meta_ops import (
@@ -26,7 +27,11 @@ from vllm.profiler.op_capture.meta_ops import (
     register_meta_impls,
 )
 from vllm.profiler.op_capture.recorder import OpRecorder, RecordedOp
-from vllm.profiler.op_capture.report import format_report
+from vllm.profiler.op_capture.report import (
+    format_batches,
+    format_report,
+    write_capture_files,
+)
 from vllm.profiler.op_capture.trace import (
     TraceDiff,
     capture_execution_trace,
@@ -46,12 +51,15 @@ __all__ = [
     "SelectionMetadata",
     "TraceDiff",
     "UnsupportedMetaOpError",
+    "capture_batches",
     "capture_execution_trace",
     "capture_model_ops",
     "compare_devices",
     "compare_traces",
+    "format_batches",
     "format_diff",
     "format_report",
     "load_trace",
     "register_meta_impls",
+    "write_capture_files",
 ]

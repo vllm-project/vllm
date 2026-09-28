@@ -322,7 +322,8 @@ def placeholder_outputs(
         kwargs: Its keyword arguments.
 
     Returns:
-        One placeholder per declared return, unpacked when there is one.
+        One placeholder per declared return, unpacked when there is one, or
+        None when the op returns nothing.
 
     Raises:
         UnsupportedMetaOpError: If the op has no tensor argument to shape by, or
@@ -346,6 +347,8 @@ def placeholder_outputs(
                 f"No placeholder for {_qualified_name(schema)}, which returns "
                 f"{return_type}"
             )
+    if not outputs:
+        return None
     return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
 

@@ -3,7 +3,9 @@
 """Records the operators a model dispatches, attributed to the issuing module."""
 
 import sys
+import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -14,6 +16,7 @@ from torch.nn.modules.module import (
 )
 from torch.utils._python_dispatch import TorchDispatchMode
 
+import vllm
 from vllm.profiler.op_capture.meta_ops import (
     LEAF_NAMESPACES,
     UnsupportedMetaOpError,
@@ -34,6 +37,24 @@ _DTYPE_ABBREVIATIONS = {
     torch.uint8: "u8",
     torch.bool: "bool",
 }
+
+
+def vllm_location(exception: BaseException) -> str:
+    """Innermost vLLM source line on `exception`'s traceback, outside this package.
+
+    Returns:
+        `"path:line in function"` relative to the repository root, or `""`.
+
+    """
+    vllm_root = Path(vllm.__file__).parent
+    package = Path(__file__).parent
+    location = ""
+    for frame in traceback.extract_tb(exception.__traceback__):
+        path = Path(frame.filename)
+        if path.is_relative_to(vllm_root) and not path.is_relative_to(package):
+            relative = path.relative_to(vllm_root.parent)
+            location = f"{relative}:{frame.lineno} in {frame.name}"
+    return location
 
 
 def describe(value: Any) -> str:
@@ -86,6 +107,10 @@ class RecordedOp:
     outputs: tuple[str, ...] = ()
     placeholder: bool = False
     """Whether the outputs are placeholders, the op's shapes being unknown."""
+    body_error: str = ""
+    """Why this custom op's own kernel stopped on the meta device, `""` if it
+    did not. Its outputs then come from its fake kernel, or are placeholders,
+    and the ops its kernel would have dispatched after the error are missing."""
 
     @property
     def is_custom(self) -> bool:
@@ -116,6 +141,9 @@ class OpRecorder(TorchDispatchMode):
             `"Meta"` for a meta-device capture.
         keep_going: Give an op that raises `UnsupportedMetaOpError`
             placeholder outputs and carry on, instead of propagating the error.
+            On the meta device, likewise finish a custom op whose kernel fails
+            partway -- reading a tensor's value, say -- with its fake kernel,
+            or placeholders.
 
     """
 
@@ -134,6 +162,7 @@ class OpRecorder(TorchDispatchMode):
         self._stack: list[tuple[nn.Module, str, str]] = []
         self._handles: list[Any] = []
         self._keep_going = keep_going
+        self._on_meta = dispatch_key == "Meta"
         self._raised_in: list[tuple[BaseException, str]] = []
         self._entered = 0
         self._depth = 0
@@ -225,6 +254,29 @@ class OpRecorder(TorchDispatchMode):
         self.ops.append(record)
         return record
 
+    def _finish_with_fake(
+        self,
+        func: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        exception: Exception,
+    ) -> Any:
+        """Outputs of a custom op whose kernel failed, from its fake kernel.
+
+        Falls back to placeholder outputs for an op registered without one.
+
+        Raises:
+            Exception: `exception`, if neither can produce the outputs.
+
+        """
+        try:
+            return func.redispatch(self._keyset, *args, **kwargs)
+        except Exception:
+            try:
+                return placeholder_outputs(func._schema, args, kwargs)
+            except UnsupportedMetaOpError:
+                raise exception from None
+
     def __torch_dispatch__(
         self,
         func: Any,
@@ -249,6 +301,13 @@ class OpRecorder(TorchDispatchMode):
                         result = body(*args, **kwargs)
                     else:
                         result = func.redispatch(self._keyset, *args, **kwargs)
+            except Exception as exception:
+                if not (self._keep_going and self._on_meta):
+                    raise
+                result = self._finish_with_fake(func, args, kwargs, exception)
+                record.body_error = f"{type(exception).__name__}: {exception}"
+                if location := vllm_location(exception):
+                    record.body_error += f" (at {location})"
             finally:
                 self._depth -= 1
         else:

@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Human-readable renderings of an operator capture."""
 
+import json
+import os
 from collections import Counter
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
 from itertools import groupby
+from pathlib import Path
 
-from vllm.profiler.op_capture.capture import OpCapture, SelectionMetadata
+from vllm.profiler.op_capture.capture import BatchSpec, OpCapture, SelectionMetadata
 from vllm.profiler.op_capture.recorder import RecordedOp
 
 _PLATFORM_CAVEAT = (
@@ -32,6 +36,12 @@ def format_selection(selection: SelectionMetadata) -> str:
         "heads": f"{selection.num_query_heads} query, "
         f"{selection.num_kv_heads} kv, head size {selection.head_size}",
     }
+    if windows := Counter(selection.sliding_windows.values()):
+        rows["sliding window"] = ", ".join(
+            f"{window} ({count} layers)" for window, count in sorted(windows.items())
+        )
+    if selection.moe_experts:
+        rows["moe experts"] = ", ".join(selection.moe_experts)
     width = max(len(key) for key in rows)
     lines = ["Selection metadata"]
     lines += [f"  {key:<{width}}  {value}" for key, value in rows.items()]
@@ -81,6 +91,12 @@ def format_gaps(capture: OpCapture) -> str | None:
         platform = capture.selection.platform
         lines.append(f"  No {platform} kernel registered (would fail on device):")
         lines += [f"    {name}" for name in capture.missing_kernels]
+    if body_errors := {op.name: op.body_error for op in capture.body_error_ops}:
+        lines.append(
+            "  Custom ops whose kernel failed on the meta device, outputs faked "
+            "(the ops they would have dispatched next are missing):"
+        )
+        lines += [f"    {name}: {error}" for name, error in body_errors.items()]
     if placeholders := Counter(op.name for op in capture.placeholder_ops):
         lines.append(
             "  Output shapes unknown, placeholders used (add to OVERRIDES; "
@@ -178,3 +194,95 @@ def format_report(capture: OpCapture, show_shapes: bool = False) -> str:
     if capture.trace_path is not None:
         sections.append(f"Chakra execution trace: {capture.trace_path}")
     return "\n\n".join(section for section in sections if section)
+
+
+def _batch_label(batch: BatchSpec) -> str:
+    return (
+        f"{batch.num_reqs} reqs, {batch.num_tokens} tokens, "
+        f"{batch.num_computed_tokens} computed per req"
+    )
+
+
+def format_batches(captures: Sequence[OpCapture]) -> str:
+    """Render which operators only some of several batches reach.
+
+    Args:
+        captures: Captures of the same model on different batches.
+
+    Returns:
+        Per-batch totals, then each operator missing from at least one batch
+        with the batches that do reach it.
+
+    """
+    names = [{op.name for op in capture.ops} for capture in captures]
+    lines = ["Batches"]
+    for index, (capture, reached) in enumerate(zip(captures, names)):
+        lines.append(
+            f"  [{index}] {_batch_label(capture.batch)}: "
+            f"{len(capture.ops)} calls, {len(reached)} distinct"
+        )
+    reached_by_all = names[0].intersection(*names[1:])
+    partial = sorted(set().union(*names) - reached_by_all)
+    if partial:
+        width = max(len(name) for name in partial)
+        lines.append("  Reached by only some batches:")
+        for name in partial:
+            where = ", ".join(
+                f"[{index}]" for index, reached in enumerate(names) if name in reached
+            )
+            lines.append(f"    {name:<{width}}  {where}")
+    return "\n".join(lines)
+
+
+def _annotation(op: RecordedOp, selection: SelectionMetadata) -> str:
+    if not op.is_custom or op.module not in selection.attention_layers:
+        return ""
+    window = selection.sliding_windows.get(op.module)
+    return f" [sliding_window={window}]" if window else " [full]"
+
+
+def write_capture_files(capture: OpCapture, directory: str | os.PathLike) -> Path:
+    """Write a capture as files, for diffing captures or feeding other tools.
+
+    Writes `report.txt` (`format_report` with shapes), `ops.txt` (distinct
+    operators, sorted), `ops.sequence.txt` (every operator in order, indented
+    by nesting depth, with shapes and module; attention layers' custom ops are
+    tagged `[sliding_window=N]` or `[full]`) and `capture.json` (batch,
+    selection metadata and gaps).
+
+    Args:
+        capture: Capture to write.
+        directory: Directory to write into, created if missing.
+
+    Returns:
+        The directory.
+
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    selection = capture.selection
+    (directory / "report.txt").write_text(format_report(capture, show_shapes=True))
+    (directory / "ops.txt").write_text(
+        "".join(f"{name}\n" for name in sorted({op.name for op in capture.ops}))
+    )
+    (directory / "ops.sequence.txt").write_text(
+        "".join(
+            f"{'  ' * op.depth}{op.signature} -> {', '.join(op.outputs) or '()'}"
+            f"  @{op.module or '<top>'}{_annotation(op, selection)}\n"
+            for op in capture.ops
+        )
+    )
+    summary = {
+        "model": capture.model,
+        "batch": asdict(capture.batch),
+        "selection": asdict(selection),
+        "ops": len(capture.ops),
+        "distinct_ops": len({op.name for op in capture.ops}),
+        "failure": None if capture.failure is None else asdict(capture.failure),
+        "missing_kernels": capture.missing_kernels,
+        "placeholder_ops": sorted({op.name for op in capture.placeholder_ops}),
+        "body_errors": {op.name: op.body_error for op in capture.body_error_ops},
+        "materialized": capture.materialized,
+    }
+    (directory / "capture.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return directory

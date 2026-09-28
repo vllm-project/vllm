@@ -20,14 +20,17 @@ from vllm.profiler.op_capture import (
     OpCapture,
     OpRecorder,
     UnsupportedMetaOpError,
+    capture_batches,
     capture_model_ops,
     compare_devices,
     format_diff,
     meta_ops,
     register_meta_impls,
+    write_capture_files,
 )
 from vllm.profiler.op_capture import recorder as recorder_module
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.torch_utils import DIRECT_REGISTERED_OPS, direct_register_custom_op
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LAYER_PREFIX = "model.layers."
@@ -70,6 +73,17 @@ def leaf_library(monkeypatch) -> torch.library.Library:
     library._destroy()
 
 
+@pytest.fixture
+def glue_library() -> torch.library.Library:
+    """A namespace of Python custom ops, as `direct_register_custom_op` makes."""
+    namespace = "_test_glue"
+    library = torch.library.Library(namespace, "FRAGMENT")
+    yield library
+    for name in [name for name in DIRECT_REGISTERED_OPS if name.startswith(namespace)]:
+        del DIRECT_REGISTERED_OPS[name]
+    library._destroy()
+
+
 def test_meta_load_format_resolves_to_meta_loader():
     loader = get_model_loader(LoadConfig(load_format="meta"))
     assert isinstance(loader, MetaModelLoader)
@@ -89,6 +103,34 @@ def test_batch_over_scheduler_budget_is_refused():
         ForwardHarness(
             MODEL, batch=BatchSpec(num_reqs=2, num_tokens=2048), engine_args=engine_args
         )
+
+
+def test_batch_beyond_max_model_len_is_refused():
+    engine_args = EngineArgs(model=MODEL, max_model_len=1024)
+    with pytest.raises(ValueError, match="max_model_len"):
+        ForwardHarness(
+            MODEL,
+            batch=BatchSpec(num_tokens=8, num_computed_tokens=1024),
+            engine_args=engine_args,
+        )
+
+
+def test_capture_batches_runs_each_batch_on_one_model():
+    """Each capture sees its own batch's shapes, with the model built once."""
+    batches = [
+        BatchSpec(num_tokens=8),
+        BatchSpec(num_reqs=2, num_tokens=2, num_computed_tokens=16),
+    ]
+    engine_args = EngineArgs(
+        model=MODEL, max_model_len=1024, hf_overrides={"num_hidden_layers": 1}
+    )
+    captures = capture_batches(MODEL, batches, engine_args=engine_args)
+    assert [capture.batch for capture in captures] == batches
+    embeddings = [
+        next(op for op in capture.ops if op.name.startswith("aten::embedding"))
+        for capture in captures
+    ]
+    assert [op.inputs[-1] for op in embeddings] == ["i64[8]", "i64[2]"]
 
 
 def test_capture_allocates_no_accelerator_memory():
@@ -173,6 +215,34 @@ def test_keep_going_substitutes_placeholders_for_unknown_shapes(leaf_library):
         out.add_(1)
     assert out.shape == x.shape
     assert [op.placeholder for op in recorder.ops] == [True, False]
+
+
+def test_keep_going_finishes_a_failing_custom_op_with_its_fake(glue_library):
+    """A kernel reading a tensor's value on meta still yields the ops around it."""
+
+    def reads_a_value(x: torch.Tensor) -> torch.Tensor:
+        y = x.abs()
+        if y.sum().item():
+            y.add_(1)
+        return y
+
+    direct_register_custom_op(
+        "reads_a_value",
+        reads_a_value,
+        fake_impl=lambda x: torch.empty_like(x),
+        target_lib=glue_library,
+    )
+    x = torch.empty(4, 2, device="meta")
+    with OpRecorder(torch.nn.Module(), keep_going=True) as recorder:
+        out = torch.ops._test_glue.reads_a_value(x).mul(2)
+
+    assert out.shape == x.shape
+    glue, *inner, after = recorder.ops
+    assert glue.body_error.startswith("RuntimeError: ")
+    assert [op.name for op in inner[:2]] == ["aten::abs", "aten::sum"]
+    assert all(op.depth == 1 for op in inner) and after.depth == 0
+    with OpRecorder(torch.nn.Module()), pytest.raises(RuntimeError):
+        torch.ops._test_glue.reads_a_value(x)
 
 
 def test_op_registered_for_another_backend_only_is_flagged(leaf_library):
@@ -291,6 +361,18 @@ def test_meta_triton_launch_bypassing_grid_fails_loudly():
         pytest.raises(UnsupportedMetaOpError, match="fill_kernel"),
     ):
         fill_kernel.run(out, n=8, grid=(1,), warmup=False)
+
+
+def test_capture_files_list_every_op(capture, tmp_path):
+    write_capture_files(capture, tmp_path)
+
+    distinct = (tmp_path / "ops.txt").read_text().splitlines()
+    assert distinct == sorted({op.name for op in capture.ops})
+    sequence = (tmp_path / "ops.sequence.txt").read_text().splitlines()
+    assert len(sequence) == len(capture.ops)
+    attention = [line for line in sequence if line.startswith(ATTENTION_OP)]
+    assert len(attention) == capture.selection.num_attention_layers
+    assert all(line.endswith("[full]") for line in attention)
 
 
 @pytest.mark.slow_test

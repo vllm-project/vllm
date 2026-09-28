@@ -16,7 +16,7 @@ A tensor on `torch.device("meta")` has a shape and a dtype but no memory; operat
 4. **Create a single-rank Gloo process group**, which model code expects. At world size 1 no collective reaches the backend.
 5. **Build the model** through `MetaModelLoader`, under `torch.device("meta")` and without loading weights.
 6. **Plan the KV cache for real.** Layers are grouped by attention backend, the layout is resolved, and the cache is sized for one request at `max_model_len`, allocated (shaped but empty) and bound to the layers. Encoder-only layers, which keep no cache, get their own metadata group as in the model runner.
-7. **Build attention metadata** with the backend's own metadata builder for the requested `BatchSpec`.
+7. **Build attention metadata** with the backend's own metadata builder for the requested `BatchSpec`, rebuilt per batch when several are captured on one model.
 
 The forward pass then runs inside `set_forward_context(...)` as in a real step. A `TorchDispatchMode` records every dispatched operator, and module hooks attribute each one to the innermost module that issued it. Recording covers the model call and `compute_logits`, or the pooler for a pooling model. Input preparation is the harness's own, and sampling is not recorded because it reads logit values that do not exist on `meta`.
 
@@ -70,6 +70,8 @@ Selection metadata
   heads              14 query, 2 kv, head size 64
 ```
 
+A model with sliding-window layers or MoE layers adds rows such as `sliding window  128 (18 layers)` and `moe experts  XPUExpertsMxFp4`.
+
 then the module tree, with identical sibling layers collapsed and `*` marking custom ops (extra indentation marks an op issued from inside another op):
 
 ```text
@@ -91,10 +93,12 @@ then the module tree, with identical sibling layers collapsed and `*` marking cu
 
 and finally operator counts, total and per attention layer.
 
-Other flags:
+Every engine argument is accepted, e.g. `--max-model-len`, `--trust-remote-code` or `--kv-cache-dtype`. Other flags:
 
 - `--shapes` prints operand shapes and dtypes next to every operator.
-- `--num-reqs 4 --num-tokens 32 --num-computed-tokens 128` changes the batch, here to a decode-like step with 128 tokens already cached per request.
+- `--batch 4,32,128` changes the batch to 4 requests and 32 tokens in total, with 128 tokens already cached per request. Repeat `--batch` to capture several batches on one built model; a **Batches** section then lists the operators only some of them reach. Layers pick kernels by batch, so one batch rarely reaches every path: DeepSeek-V4's sparse-attention indexer, for instance, only runs once the context outgrows its top-k (`--batch 2,16 --batch 1,16,4096 --max-model-len 8192`).
+- `--output-dir DIR` also writes `ops.txt` (distinct operators), `ops.sequence.txt` (every operator in order with shapes and module, attention ops tagged `[sliding_window=N]` or `[full]`), `capture.json` (batch, selection metadata and gaps) and `report.txt`, one subdirectory per batch when there are several.
+- `--hf-overrides '{"quantization_config": null}'` captures a quantized checkpoint's unquantized path, e.g. when this platform lacks its quantization kernels. The result is not what the checkpoint would run.
 - `--trace /tmp/qwen05.et.json` also writes a Chakra execution trace through PyTorch's `ExecutionTraceObserver`.
 - `--verify-against xpu` captures the same model and batch on `meta` and on the given device, normalizes both execution traces and diffs them, exiting non-zero on a mismatch. It needs enough device memory for the model.
 
@@ -119,10 +123,11 @@ Platform gaps
     model.layers.0.attn.compressor.ape
 ```
 
-It lists four kinds of gap:
+It lists five kinds of gap:
 
 - **Where the forward pass stopped.** Model code failed outside any kernel, for example on an op the platform's extension does not define or a call with the wrong arguments. The report gives the module, the error and the vLLM source line. The ops recorded up to that point are kept.
 - **Ops with no kernel for this platform.** A meta capture never runs a real kernel, so an op registered only for another backend would otherwise pass unnoticed. Every captured op is checked against the platform's dispatch key (`capture.missing_kernels`).
+- **Custom ops whose kernel failed on `meta`**, typically by reading a tensor's value. The op is finished with its fake kernel's outputs, or placeholders when it has none, so the forward pass carries on. The kernels it would have dispatched after the error are missing (`op.body_error`).
 - **Ops with unknown output shapes.** These get placeholder outputs shaped like their first tensor argument and are marked `placeholder`. Shapes after the first placeholder are guesses, so a shape error that follows one may be a knock-on effect, and the report says so. Add the op to `OVERRIDES` and rerun.
 - **Tensors model code placed on the real device**, by passing `device=` explicitly instead of following the default device (`capture.materialized`).
 
@@ -145,6 +150,8 @@ print(format_report(capture))
 print([op.name for op in capture.custom_ops])
 ```
 
+`capture_batches(model, [BatchSpec(...), ...])` captures several batches on one built model and returns one `OpCapture` per batch; `format_batches(captures)` renders the operators only some of them reach, and `write_capture_files(capture, directory)` writes the files `--output-dir` does.
+
 `engine_args` reaches anything else a config can express, such as `quantization` or `kv_cache_dtype`; the harness overrides only `model`, `load_format` and `enforce_eager`. `compare_traces(meta_path, real_path)` diffs two traces already on disk, and `load_trace(path)` reads one as normalized operators.
 
 ## Limitations
@@ -152,10 +159,10 @@ print([op.name for op in capture.custom_ops])
 - **The eager path is captured.** The harness sets `enforce_eager`, which also makes vLLM enable all custom ops. A default-config step instead runs under `torch.compile` with `custom_ops=["none"]`, so `CustomOp` layers such as `SiluAndMul` take their native forward, Inductor and the compilation passes fuse the result, and graph capture pads the batch. Ops dispatched through vLLM IR follow `kernel_config.ir_op_priority` either way. A capture therefore matches an `--enforce-eager` step; passing `compilation_config={"custom_ops": ["none"]}` in `engine_args` shows the pre-Inductor sequence instead.
 - **Branches on a tensor's device see `meta`.** Code that checks `tensor.is_cuda` or `tensor.device.type` rather than `current_platform` takes its non-CUDA branch, e.g. the SM100 skinny-GEMM dispatch in `vllm/model_executor/layers/utils.py` and the Triton slot-mapping path in `vllm/v1/attention/backends/mla/indexer.py`. On CUDA a capture differs from the real step at such sites.
 - **Kernels called outside the dispatcher are not covered**, apart from raw Triton launches. Libraries such as FlashInfer, DeepGEMM, CuTe DSL and aiter's Python API take tensors directly unless vLLM wraps the call in a custom op with a fake impl. Those that go through DLPack refuse meta tensors (`BufferError: Cannot pack tensors on meta`), which `--keep-going` reports as where the forward pass stopped. An extension that reads `data_ptr()` instead gets a null pointer, so on a real accelerator it may launch a kernel on it.
-- **Values are undefined.** Nothing data-dependent is real, including MoE routing; only shapes and the operator sequence are. Model code that reads a value on the host, e.g. `.item()`, fails on `meta`.
+- **Values are undefined.** Nothing data-dependent is real, including MoE routing; only shapes and the operator sequence are. Model code that reads a value on the host, e.g. `.item()`, fails on `meta`. With `--keep-going`, a custom op whose kernel does so is finished with fake outputs; outside one, the forward pass stops there.
 - **Text inputs only.** A multimodal model runs its language model over text tokens, without its vision or audio encoder. Encoder-decoder models, such as Whisper, are refused.
 - **Single process only.** The harness needs `tp=pp=dp=1`. A capture still matches one rank of a tensor-parallel run, minus the collectives and with per-rank shapes.
-- **The batch must fit one scheduler step**, i.e. within `max_num_batched_tokens` and `max_num_seqs`, because metadata builders size their buffers by those.
+- **The batch must fit one scheduler step**, i.e. within `max_num_batched_tokens` and `max_num_seqs`, because metadata builders size their buffers by those, and within `max_model_len`.
 - **Raw Triton kernels appear in the operator list, not the execution trace**, since they never go through the dispatcher.
 - **A capture is platform-specific.** Keep the selection metadata with the operator list.
 - **`load_format="meta"` is not a serving mode**; it builds unmaterialized weights for shape-only use.

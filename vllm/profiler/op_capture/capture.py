@@ -11,8 +11,7 @@ comes from the `meta` load format, so an HF config is all that is needed.
 """
 
 import os
-import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from itertools import chain
@@ -39,6 +38,9 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -51,7 +53,7 @@ from vllm.profiler.op_capture.meta_ops import (
     register_meta_impls,
     skip_meta_triton_launches,
 )
-from vllm.profiler.op_capture.recorder import OpRecorder, RecordedOp
+from vllm.profiler.op_capture.recorder import OpRecorder, RecordedOp, vllm_location
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -187,6 +189,12 @@ class SelectionMetadata:
     num_query_heads: int
     num_kv_heads: int
     head_size: int
+    attention_layers: tuple[str, ...] = ()
+    """Names of the attention layers, in model order."""
+    sliding_windows: dict[str, int] = field(default_factory=dict)
+    """Window of every sliding-window attention layer, keyed by layer name."""
+    moe_experts: tuple[str, ...] = ()
+    """Class names of the fused-experts implementations the MoE layers use."""
 
 
 @dataclass(frozen=True)
@@ -204,18 +212,10 @@ class CaptureFailure:
     def from_exception(
         cls, exception: BaseException, module: str | None
     ) -> "CaptureFailure":
-        vllm_root = Path(vllm.__file__).parent
-        package = Path(__file__).parent
-        location = ""
-        for frame in traceback.extract_tb(exception.__traceback__):
-            path = Path(frame.filename)
-            if path.is_relative_to(vllm_root) and not path.is_relative_to(package):
-                relative = path.relative_to(vllm_root.parent)
-                location = f"{relative}:{frame.lineno} in {frame.name}"
         return cls(
             error=f"{type(exception).__name__}: {exception}",
             module=module or "",
-            location=location,
+            location=vllm_location(exception),
         )
 
 
@@ -249,6 +249,11 @@ class OpCapture:
         """Ops given placeholder outputs; shapes after the first are guesses."""
         return [op for op in self.ops if op.placeholder]
 
+    @property
+    def body_error_ops(self) -> list[RecordedOp]:
+        """Custom ops whose kernel failed on meta, their outputs faked."""
+        return [op for op in self.ops if op.body_error]
+
 
 class ForwardHarness:
     """Builds a model and runs its forward path with no engine, worker or runner.
@@ -279,6 +284,7 @@ class ForwardHarness:
         batch: BatchSpec | None = None,
         engine_args: EngineArgs | None = None,
     ):
+        self.model_id = model
         self.batch = batch or BatchSpec()
         self.is_meta = torch.device(device).type == "meta"
         self.device = torch.device(device)
@@ -304,17 +310,7 @@ class ForwardHarness:
                 "tensor, pipeline and data parallel sizes of 1; got "
                 f"{parallel_config.world_size_across_dp} ranks."
             )
-        scheduler_config = self.vllm_config.scheduler_config
-        if (
-            self.batch.num_tokens > scheduler_config.max_num_batched_tokens
-            or self.batch.num_reqs > scheduler_config.max_num_seqs
-        ):
-            raise ValueError(
-                f"{self.batch} exceeds the scheduler budget of "
-                f"{scheduler_config.max_num_batched_tokens} tokens and "
-                f"{scheduler_config.max_num_seqs} requests per step; raise "
-                f"`max_num_batched_tokens` or `max_num_seqs` in `engine_args`."
-            )
+        self._check_batch(self.batch)
 
         self.model: torch.nn.Module | None = None
         self.attn_groups: list[list[AttentionGroup]] = []
@@ -326,6 +322,40 @@ class ForwardHarness:
         self._recorder: OpRecorder | None = None
         self.failure: CaptureFailure | None = None
         self._exit_stack = ExitStack()
+
+    def _check_batch(self, batch: BatchSpec) -> None:
+        scheduler_config = self.vllm_config.scheduler_config
+        if (
+            batch.num_tokens > scheduler_config.max_num_batched_tokens
+            or batch.num_reqs > scheduler_config.max_num_seqs
+        ):
+            raise ValueError(
+                f"{batch} exceeds the scheduler budget of "
+                f"{scheduler_config.max_num_batched_tokens} tokens and "
+                f"{scheduler_config.max_num_seqs} requests per step; raise "
+                f"`max_num_batched_tokens` or `max_num_seqs` in `engine_args`."
+            )
+        max_model_len = self.vllm_config.model_config.max_model_len
+        if batch.seq_len > max_model_len:
+            raise ValueError(
+                f"{batch} reaches {batch.seq_len} tokens per request, beyond "
+                f"max_model_len={max_model_len}; raise it in `engine_args`."
+            )
+
+    def set_batch(self, batch: BatchSpec) -> None:
+        """Run later forward passes on `batch`, reusing the built model and cache.
+
+        Raises:
+            ValueError: If the batch exceeds the scheduler budget or
+                `max_model_len`.
+
+        """
+        self._check_batch(batch)
+        self.batch = batch
+        self.failure = None
+        if self.model is not None:
+            self._slot_mappings = {}
+            self._attn_metadata = self._build_attn_metadata()
 
     def __enter__(self) -> "ForwardHarness":
         if self.is_meta:
@@ -696,7 +726,25 @@ class ForwardHarness:
             num_query_heads=getattr(first, "num_heads", 0),
             num_kv_heads=getattr(first, "num_kv_heads", 0),
             head_size=getattr(first, "head_size", 0),
+            attention_layers=tuple(layers),
+            sliding_windows={
+                name: window
+                for name, layer in layers.items()
+                if isinstance(window := getattr(layer, "sliding_window", None), int)
+            },
+            moe_experts=self._moe_experts(),
         )
+
+    def _moe_experts(self) -> tuple[str, ...]:
+        assert self.model is not None, "Use ForwardHarness as a context manager"
+        names = set()
+        for module in self.model.modules():
+            method = getattr(module, "quant_method", None)
+            if isinstance(method, FusedMoEMethodBase):
+                kernel = method.moe_kernel
+                experts = kernel.fused_experts if kernel is not None else method
+                names.add(type(experts).__name__)
+        return tuple(sorted(names))
 
     def materialized_tensors(self) -> list[str]:
         """Parameters and buffers that model code placed on a real device."""
@@ -721,6 +769,75 @@ class ForwardHarness:
         assert not materialized, f"Tensors left the meta device: {materialized}"
 
 
+def _capture(
+    harness: ForwardHarness, keep_going: bool, trace_path: Path | None
+) -> OpCapture:
+    from vllm.profiler.op_capture.trace import capture_execution_trace
+
+    with nullcontext() if trace_path is None else capture_execution_trace(trace_path):
+        recorder = harness.record(keep_going=keep_going)
+    materialized: list[str] = []
+    if harness.is_meta and keep_going:
+        materialized = harness.materialized_tensors()
+    elif harness.is_meta:
+        harness.assert_on_meta()
+    dispatch_key = current_platform.dispatch_key
+    missing = {
+        op.name
+        for op in recorder.ops
+        if not op.name.startswith("triton::")
+        and not has_kernel_for(op.name, dispatch_key)
+    }
+    return OpCapture(
+        model=harness.model_id,
+        batch=harness.batch,
+        selection=harness.selection_metadata(),
+        ops=recorder.ops,
+        module_types=recorder.module_types,
+        trace_path=None if trace_path is None else str(trace_path),
+        missing_kernels=tuple(sorted(missing)),
+        failure=harness.failure,
+        materialized=tuple(materialized),
+    )
+
+
+def capture_batches(
+    model: str,
+    batches: Sequence[BatchSpec],
+    *,
+    device: str = "meta",
+    engine_args: EngineArgs | None = None,
+    keep_going: bool = False,
+) -> list[OpCapture]:
+    """Capture the operators a model executes on each of several batches.
+
+    Layers pick kernels by batch -- prefill or decode, short or long context --
+    so one batch rarely reaches every code path. The model is built once.
+
+    Args:
+        model: Model id or local path. Only its HF config is needed on `meta`.
+        batches: Batch shapes to run, in order.
+        device: As for `capture_model_ops`.
+        engine_args: As for `capture_model_ops`. `max_model_len` must cover
+            the longest batch.
+        keep_going: As for `capture_model_ops`.
+
+    Returns:
+        One capture per batch, in the same order.
+
+    """
+    if not batches:
+        raise ValueError("capture_batches needs at least one batch")
+    with ForwardHarness(
+        model, device=device, batch=batches[0], engine_args=engine_args
+    ) as harness:
+        captures = []
+        for batch in batches:
+            harness.set_batch(batch)
+            captures.append(_capture(harness, keep_going, trace_path=None))
+        return captures
+
+
 def capture_model_ops(
     model: str,
     *,
@@ -741,46 +858,20 @@ def capture_model_ops(
             recorded forward pass there.
         engine_args: Base engine args, for overrides such as `max_model_len`.
         keep_going: Collect every gap in one run rather than stopping at the
-            first: ops with unknown output shapes get placeholder outputs, and a
-            forward pass that still fails returns what it recorded, with
-            `failure` set. A model that fails to build still raises.
+            first: ops with unknown output shapes get placeholder outputs, a
+            custom op whose kernel fails on `meta` is finished by its fake
+            kernel, and a forward pass that still fails returns what it
+            recorded, with `failure` set. A model that fails to build still
+            raises.
 
     Returns:
         The ordered operator list together with the selection metadata it is
         only valid under.
 
     """
-    from vllm.profiler.op_capture.trace import capture_execution_trace
-
     with ForwardHarness(
         model, device=device, batch=batch, engine_args=engine_args
     ) as harness:
-        with (
-            nullcontext()
-            if trace_path is None
-            else capture_execution_trace(Path(trace_path))
-        ):
-            recorder = harness.record(keep_going=keep_going)
-        materialized: list[str] = []
-        if harness.is_meta and keep_going:
-            materialized = harness.materialized_tensors()
-        elif harness.is_meta:
-            harness.assert_on_meta()
-        dispatch_key = current_platform.dispatch_key
-        missing = {
-            op.name
-            for op in recorder.ops
-            if not op.name.startswith("triton::")
-            and not has_kernel_for(op.name, dispatch_key)
-        }
-        return OpCapture(
-            model=model,
-            batch=harness.batch,
-            selection=harness.selection_metadata(),
-            ops=recorder.ops,
-            module_types=recorder.module_types,
-            trace_path=None if trace_path is None else str(trace_path),
-            missing_kernels=tuple(sorted(missing)),
-            failure=harness.failure,
-            materialized=tuple(materialized),
+        return _capture(
+            harness, keep_going, None if trace_path is None else Path(trace_path)
         )

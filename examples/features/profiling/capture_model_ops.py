@@ -5,10 +5,23 @@
 Builds the model on `torch.device("meta")` from its HF config and drives vLLM's
 real forward path over it, so a model far larger than the available hardware --
 or one whose weights are not to hand -- still yields its ordered operator
-sequence, custom kernels included.
+sequence, custom kernels included. Every engine argument is accepted.
 
     python examples/features/profiling/capture_model_ops.py \
-        --model Qwen/Qwen3-30B-A3B
+        --model Qwen/Qwen3-30B-A3B --max-model-len 8192
+
+Pass `--batch REQS,TOKENS[,COMPUTED]` more than once to capture several batches
+-- a prefill and a long-context decode, say -- on one built model and see which
+operators only some of them reach:
+
+    python examples/features/profiling/capture_model_ops.py \
+        --model Qwen/Qwen3-30B-A3B --max-model-len 8192 \
+        --batch 1,512 --batch 8,8,4096
+
+Pass `--output-dir` to also write each capture as files (`ops.txt`,
+`ops.sequence.txt`, `capture.json`, `report.txt`), and
+`--hf-overrides '{"quantization_config": null}'` to capture a quantized
+checkpoint's unquantized path.
 
 Pass `--verify-against <device>` to also run on hardware and assert the two
 Chakra execution traces agree, as a regression check:
@@ -24,58 +37,96 @@ import argparse
 import sys
 from pathlib import Path
 
+from vllm.engine.arg_utils import EngineArgs
 from vllm.profiler.op_capture import (
     BatchSpec,
+    capture_batches,
     capture_model_ops,
     compare_devices,
+    format_batches,
     format_diff,
     format_report,
+    write_capture_files,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
+def parse_batch(value: str) -> BatchSpec:
+    fields = [int(field) for field in value.split(",")]
+    if not 2 <= len(fields) <= 3:
+        raise argparse.ArgumentTypeError("expected REQS,TOKENS[,COMPUTED]")
+    return BatchSpec(*fields)
+
+
 def create_parser() -> FlexibleArgumentParser:
-    parser = FlexibleArgumentParser()
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
-    parser.add_argument("--shapes", action="store_true", help="Show operand shapes.")
-    parser.add_argument(
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    capture_group = parser.add_argument_group("Capture parameters")
+    capture_group.add_argument(
+        "--batch",
+        type=parse_batch,
+        action="append",
+        metavar="REQS,TOKENS[,COMPUTED]",
+        help="Batch to capture; repeat for several. Default: one 8-token prefill.",
+    )
+    capture_group.add_argument(
+        "--shapes", action="store_true", help="Show operand shapes."
+    )
+    capture_group.add_argument(
         "--trace", type=Path, default=None, help="Write a Chakra execution trace here."
     )
-    parser.add_argument(
+    capture_group.add_argument(
+        "--output-dir", type=Path, default=None, help="Also write capture files here."
+    )
+    capture_group.add_argument(
         "--keep-going",
         action="store_true",
         help="Record past ops that cannot run here and report them all.",
     )
-    parser.add_argument(
+    capture_group.add_argument(
         "--verify-against",
         default=None,
         metavar="DEVICE",
         help="Also capture on this device and compare execution traces.",
     )
-
-    batch_group = parser.add_argument_group("Batch parameters")
-    batch_group.add_argument("--num-reqs", type=int, default=1)
-    batch_group.add_argument("--num-tokens", type=int, default=8)
-    batch_group.add_argument("--num-computed-tokens", type=int, default=0)
-
     return parser
 
 
 def main(args: argparse.Namespace) -> int:
-    batch = BatchSpec(
-        num_reqs=args.num_reqs,
-        num_tokens=args.num_tokens,
-        num_computed_tokens=args.num_computed_tokens,
-    )
+    engine_args = EngineArgs.from_cli_args(args)
+    batches = args.batch or [BatchSpec()]
     if args.verify_against is not None:
-        diff = compare_devices(args.model, args.verify_against, batch=batch)
-        print(format_diff(diff))
-        return 0 if diff.equal else 1
+        equal = True
+        for batch in batches:
+            diff = compare_devices(
+                args.model, args.verify_against, batch=batch, engine_args=engine_args
+            )
+            print(format_diff(diff))
+            equal &= diff.equal
+        return 0 if equal else 1
 
-    capture = capture_model_ops(
-        args.model, batch=batch, trace_path=args.trace, keep_going=args.keep_going
-    )
-    print(format_report(capture, show_shapes=args.shapes))
+    if len(batches) == 1:
+        captures = [
+            capture_model_ops(
+                args.model,
+                batch=batches[0],
+                trace_path=args.trace,
+                engine_args=engine_args,
+                keep_going=args.keep_going,
+            )
+        ]
+    else:
+        captures = capture_batches(
+            args.model, batches, engine_args=engine_args, keep_going=args.keep_going
+        )
+    for index, capture in enumerate(captures):
+        print(format_report(capture, show_shapes=args.shapes), end="\n\n")
+        if args.output_dir is not None:
+            subdir = (
+                args.output_dir if len(captures) == 1 else args.output_dir / str(index)
+            )
+            print(f"Wrote {write_capture_files(capture, subdir)}", end="\n\n")
+    if len(captures) > 1:
+        print(format_batches(captures))
     return 0
 
 
