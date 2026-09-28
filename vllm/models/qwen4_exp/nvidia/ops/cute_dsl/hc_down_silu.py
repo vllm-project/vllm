@@ -65,55 +65,6 @@ _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
 }
 
 
-_cutedsl_available: bool | None = None
-
-
-def is_available() -> bool:
-    global _cutedsl_available
-    if _cutedsl_available is not None:
-        return _cutedsl_available
-    try:
-        import cutlass  # noqa: F401
-        import cutlass.cute  # noqa: F401
-
-        _cutedsl_available = True
-    except ImportError:
-        _cutedsl_available = False
-        logger.info("cuteDSL (CUTLASS Python) not available, hc_down_silu disabled")
-    return _cutedsl_available
-
-
-def _tuned_splitk_configs() -> dict[int, tuple[int, int, int]]:
-    if current_platform.is_device_capability_family(100):
-        return _SM100F_TUNED_SPLITK
-    return {}
-
-
-_cute_ctx = None
-
-
-def _cute():
-    global _cute_ctx
-    if _cute_ctx is not None:
-        return _cute_ctx
-    import cutlass.cute as cute
-    from cuda.bindings.driver import CUstream
-
-    _cute_ctx = (cute, CUstream)
-    return _cute_ctx
-
-
-def _stream():
-    _, CUstream = _cute()
-    from vllm.utils.torch_utils import current_stream
-
-    return CUstream(current_stream().cuda_stream)
-
-
-def _use_pdl() -> bool:
-    return current_platform.is_arch_support_pdl()
-
-
 class HcDownSiluGemm:
     """Dispatch/compile cache for the fused mHC down+SiLU GEMM."""
 
@@ -141,9 +92,12 @@ class HcDownSiluGemm:
             return self.CompileKey(
                 backend="dotprod", M=m, K=_WEIGHT_K, bs=_DEFAULT_DOTPROD_BS
             )
-        split_k, num_stages, tile_n = _tuned_splitk_configs().get(
-            m, _DEFAULT_SPLITK_CONFIG
+        tuned = (
+            _SM100F_TUNED_SPLITK
+            if current_platform.is_device_capability_family(100)
+            else {}
         )
+        split_k, num_stages, tile_n = tuned.get(m, _DEFAULT_SPLITK_CONFIG)
         return self.CompileKey(
             backend="splitk",
             split_k=split_k,
@@ -165,7 +119,8 @@ class HcDownSiluGemm:
         return hidden_states, router_weight, output
 
     def _compile_splitk(self, compile_key: CompileKey) -> None:
-        cute, _ = _cute()
+        import cutlass.cute as cute
+
         from ._hc_down_silu_splitk import HcDownSiluSplitK
 
         hidden_states, router_weight, output = self._fake_gemm_tensors(
@@ -178,7 +133,7 @@ class HcDownSiluGemm:
             tile_n=compile_key.tile_n,
             num_stages=compile_key.num_stages,
             split_k=compile_key.split_k,
-            use_pdl=_use_pdl(),
+            use_pdl=current_platform.is_arch_support_pdl(),
             rank=_RANK,
             hc=_HC,
         )
@@ -187,7 +142,7 @@ class HcDownSiluGemm:
             hidden_states,
             router_weight,
             output,
-            _stream(),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
         self._splitk_cache[
@@ -201,7 +156,8 @@ class HcDownSiluGemm:
         )
 
     def _compile_dotprod(self, compile_key: CompileKey) -> None:
-        cute, _ = _cute()
+        import cutlass.cute as cute
+
         from ._hc_down_silu_dotprod import HcDownSiluDotprod
 
         N = cute.sym_int()
@@ -214,7 +170,7 @@ class HcDownSiluGemm:
         gemm = HcDownSiluDotprod(
             k=compile_key.K,
             bs=compile_key.bs,
-            use_pdl=_use_pdl(),
+            use_pdl=current_platform.is_arch_support_pdl(),
             prefetch_pdl_weights=self._prefetch_pdl_weights,
             rank=_RANK,
             hc=_HC,
@@ -227,7 +183,7 @@ class HcDownSiluGemm:
             compile_key.M,
             compile_key.K,
             1,  # runtime N placeholder for fake-tensor compile
-            _stream(),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
         self._compiled_cache[(compile_key.M, compile_key.K, compile_key.bs)] = compiled
@@ -334,13 +290,12 @@ class HcDownSiluGemm:
                 (compile_key.M, compile_key.K, compile_key.bs)
             ]
 
-        stream = _stream()
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
         out_gemm = output[:, :_N_COMPUTE]
         if compile_key.backend == "splitk":
-            kernel(hidden_states, w_gemm, out_gemm, stream, 1.0)
+            kernel(hidden_states, w_gemm, out_gemm, 1.0)
         else:
-            kernel(hidden_states, w_gemm, out_gemm, _N_COMPUTE, stream)
+            kernel(hidden_states, w_gemm, out_gemm, _N_COMPUTE)
         return output
 
 
@@ -357,7 +312,6 @@ def is_fused_eligible(weight: torch.Tensor, lora_rank: int, hc_count: int) -> bo
         and weight.dtype == torch.bfloat16
         and current_platform.is_cuda()
         and current_platform.has_device_capability(90)
-        and is_available()
     )
 
 
@@ -403,7 +357,7 @@ def request_hc_down_silu_warmup(m_values: Iterable[int]) -> None:
             outside the fused dispatch range are ignored.
 
     """
-    if not is_available() or not current_platform.has_device_capability(90):
+    if not current_platform.has_device_capability(90):
         return
     m_set = {int(m) for m in m_values if 1 <= m <= _MAX_FUSED_M}
     # M=1 dispatches to the weight-prefetching PDL variant.

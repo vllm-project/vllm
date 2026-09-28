@@ -4,10 +4,7 @@
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.nvidia.ops.cute_dsl.hc_down_silu import (
-    hc_down_silu,
-    is_available,
-)
+from vllm.models.qwen4_exp.nvidia.ops.cute_dsl.hc_down_silu import hc_down_silu
 from vllm.models.qwen4_exp.nvidia.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -31,8 +28,8 @@ LORA_RANK = 320
 DOWN_N = LORA_RANK + HC + 12  # merged down+inject weight, 16-row padded
 
 requires_cute_dsl = pytest.mark.skipif(
-    not is_available() or not current_platform.has_device_capability(90),
-    reason="fused HC down+SiLU requires cuteDSL and SM90+",
+    not current_platform.has_device_capability(90),
+    reason="fused HC down+SiLU requires SM90+",
 )
 
 
