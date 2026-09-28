@@ -806,6 +806,8 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
         libibverbs-dev \
+        # NIXL's LIBFABRIC plugin links libhwloc.so.15
+        libhwloc15 \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
@@ -1037,6 +1039,16 @@ RUN set -eux; \
     fi; \
     rm /tmp/install_gdrcopy.sh
 
+# Install the AWS EFA userspace (libfabric, rdma-core libraries, aws-ofi-nccl)
+# under /opt/amazon. The system rdma-core stays in place for IB/RoCE; the
+# entrypoint enables the EFA stack only when an EFA NIC is visible (see
+# NET_STACK in docker/entrypoints/efa-entrypoint.sh).
+ARG EFA_INSTALLER_VERSION=1.50.0
+COPY tools/install_efa_userspace.sh /tmp/install_efa_userspace.sh
+COPY --chmod=755 docker/entrypoints/efa-entrypoint.sh /usr/local/bin/efa-entrypoint.sh
+RUN bash /tmp/install_efa_userspace.sh "${EFA_INSTALLER_VERSION}" \
+    && rm /tmp/install_efa_userspace.sh
+
 # Install vllm-openai dependencies (saves ~2.6s per build)
 # These are stable packages that don't depend on vLLM itself
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer
@@ -1248,6 +1260,11 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+# With INSTALL_KV_CONNECTORS=true, install the AWS EFA build of Mooncake
+# instead. It serves the same `mooncake` module but is built without Mooncake
+# EP/PG.
+ARG MOONCAKE_EFA=false
+ARG MOONCAKE_EFA_VERSION=0.3.13.post1
 ARG INSTALL_RUBIN_PRERELEASE
 ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
@@ -1302,6 +1319,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
             uv pip install --system -c /tmp/kv-constraints.txt "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
+        fi; \
+        if [ "${MOONCAKE_EFA}" = "true" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
+            MOONCAKE_EFA_PACKAGE=mooncake-transfer-engine-efa; \
+            if [ "${CUDA_MAJOR}" = "13" ]; then MOONCAKE_EFA_PACKAGE=mooncake-transfer-engine-efa-cuda13; fi; \
+            uv pip uninstall --system mooncake-transfer-engine mooncake-transfer-engine-cuda13 2>/dev/null || true; \
+            uv pip install --system --no-deps "${MOONCAKE_EFA_PACKAGE}==${MOONCAKE_EFA_VERSION}"; \
         fi; \
         rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
     fi
@@ -1375,7 +1398,7 @@ FROM vllm-openai-base AS vllm-sagemaker
 
 COPY examples/deployment/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
-ENTRYPOINT ["./sagemaker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/efa-entrypoint.sh", "./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
@@ -1385,7 +1408,7 @@ FROM vllm-openai-base AS vllm-openai
 # user (UID 2000, GID 0) is already created in the `vllm-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
-ENTRYPOINT ["vllm", "serve"]
+ENTRYPOINT ["/usr/local/bin/efa-entrypoint.sh", "vllm", "serve"]
 #################### OPENAI API SERVER ####################
 
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
@@ -1406,5 +1429,5 @@ FROM vllm-openai AS vllm-openai-nonroot
 
 USER vllm
 WORKDIR /home/vllm
-ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/efa-entrypoint.sh", "/usr/local/bin/vllm-nonroot-entrypoint.sh"]
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################

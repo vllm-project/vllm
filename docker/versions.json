@@ -79,11 +79,20 @@
     "GDRCOPY_OS_VERSION": {
       "default": "Ubuntu24_04"
     },
+    "EFA_INSTALLER_VERSION": {
+      "default": "1.50.0"
+    },
     "TIMM_VERSION": {
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
       "default": ">=0.15.7"
+    },
+    "MOONCAKE_EFA": {
+      "default": "false"
+    },
+    "MOONCAKE_EFA_VERSION": {
+      "default": "0.3.13.post1"
     }
   }
 }
