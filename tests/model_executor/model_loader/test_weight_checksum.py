@@ -23,26 +23,29 @@ class _Model(nn.Module):
         self.linear = nn.Linear(2, 2)
         nn.init.ones_(self.linear.weight)
         nn.init.ones_(self.linear.bias)
+        # A strided view, which cannot be reinterpreted as bytes in place.
+        self.strided = nn.Parameter(torch.arange(1.0, 7.0)[::2])
+        self.scalar = nn.Parameter(torch.tensor(2.0))
+        # Loading never restores buffers, so reset must leave them alone.
         self.register_buffer("k_scale", torch.tensor(2.0))
-        self.register_buffer("scratch", torch.ones(2), persistent=False)
-        self.register_buffer("inv_freq", torch.ones(2))
 
 
-def test_digests_cover_parameters_and_persistent_weight_buffers():
+def test_digests_cover_every_parameter():
     assert set(compute_tensor_digests(_Model())) == {
         "linear.weight",
         "linear.bias",
-        "k_scale",
+        "strided",
+        "scalar",
     }
 
 
-def test_zero_weights_changes_every_covered_tensor_only():
+def test_zero_weights_changes_every_parameter_and_no_buffer():
     model = _Model()
     before = compute_tensor_digests(model)
     zero_weights(model)
     after = compute_tensor_digests(model)
     assert all(before[name] != after[name] for name in before)
-    assert model.scratch.eq(1).all() and model.inv_freq.eq(1).all()
+    assert model.k_scale.item() == 2.0
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):

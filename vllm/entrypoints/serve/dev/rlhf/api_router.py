@@ -238,7 +238,7 @@ async def weight_checker(
     """Checksum, reset, or compare model weights against a baseline."""
     client = engine_client(raw_request)
     if request.action == "reset":
-        await client.collective_rpc("reset_weights")
+        await client.collective_rpc_all_engines("reset_weights")
         return JSONResponse(content={"status": "reset"})
     baseline = request.baseline
     if request.action == "compare" and baseline is None:
@@ -248,7 +248,9 @@ async def weight_checker(
         )
 
     checksums: dict[str, str] = {}
-    for worker_checksums in await client.compute_weight_checksums():
+    for worker_checksums in await client.collective_rpc_all_engines(
+        "compute_weight_checksums"
+    ):
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,

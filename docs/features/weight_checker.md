@@ -1,7 +1,7 @@
 # Weight Checker
 
 The Weight Checker verifies that an RL weight update landed on every rank. It
-hashes each weight tensor with SHA-256, so a caller can save the original
+hashes each model parameter with SHA-256, so a caller can save the original
 digests, reset the weights, transfer them back, and confirm they match.
 
 Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
@@ -14,8 +14,8 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 | `{"action": "compare", "baseline": {key: sha256_hex}}` | `{"match": bool, "mismatches": [key]}` |
 
 Keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:ep{ep}:{tensor_name}`, so each
-shard is checked separately. `checksum` and `compare` cover parameters and
-persistent buffers; `reset` zeroes the same tensors. The endpoint keeps no
+shard is checked separately. All actions cover the target model's parameters,
+which is what weight loading writes; `reset` zeroes them. The endpoint keeps no
 state, so the caller holds the baseline. Invalid requests return HTTP 400.
 
 ## RL weight-update check
@@ -49,5 +49,8 @@ curl -X POST $URL/resume
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
+- Buffers, draft models and LoRA adapters are not checked.
 - The engine must be awake: sleep level 2 discards the weight storage.
+- `--offload-backend prefetch` is not supported: parameters point at staging
+  buffers, not the offloaded weights.
 - Hashing copies every weight to CPU, so keep it off latency-sensitive paths.
