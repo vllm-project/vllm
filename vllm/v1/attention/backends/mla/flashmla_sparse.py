@@ -55,6 +55,10 @@ from vllm.v1.attention.ops.flashmla import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
+# FlashMLA's schedule planner keeps a few ints per batch entry in shared
+# memory, so the per-token layout plans at most this many tokens per call.
+_MAX_TOKENS_PER_SCHED_PLAN = 8192
+
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
@@ -1156,12 +1160,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # (q may exclude prefill tokens routed to dense MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
         if self.dcp_world_size > 1:
-            # The indexer emits global token ids; keep this rank's shard and
-            # convert to local slots. compact_valid_to_front=False keeps the
-            # scattered -1s, which the fp8 kernel masks natively and the
-            # empty-row neutralization below relies on. req_id is sliced to
-            # topk_indices rows (the converter grids from req_id).
-            topk_indices = triton_filter_and_convert_dcp_index(
+            # The indexer emits global token ids; keep this rank's shard as local
+            # slots packed into a prefix whose length the kernel takes as
+            # topk_length, so it skips the slots other ranks own. req_id is
+            # sliced to topk_indices rows (the converter grids from req_id).
+            topk_indices, topk_length = triton_filter_and_convert_dcp_index(
                 req_id_per_token,
                 block_table,
                 topk_indices,
@@ -1170,8 +1173,20 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
-                compact_valid_to_front=False,
+                return_valid_counts=True,
             )
+            out, lse = self._fp8_flash_mla_kernel_per_token(
+                q, kv_c_and_k_pe_cache, topk_indices, topk_length
+            )
+            # Rows where this rank owns none of the selected tokens have
+            # undefined out/lse; (0, -inf) is the identity element of the
+            # cross-rank LSE merge, so it drops this rank from those rows.
+            empty_rows = topk_length == 0
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+            # The head-padding slice can leave `out` non-contiguous, and the
+            # merge feeds it to reduce_scatter.
+            return out.contiguous(), lse
         else:
             # Convert per-request indices to global slots (decode) or workspace
             # offsets (prefill).
@@ -1196,29 +1211,67 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     NUM_TOPK_TOKENS=topk_indices.shape[1],
                 )
 
-        _attn_out, _lse = self._fp8_flash_mla_kernel(
+        _attn_out, _ = self._fp8_flash_mla_kernel(
             q=q.unsqueeze(0),  # unsqueeze to add batch_dim: (T, H, D) -> (1, T, H, D)
             kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
             topk_indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
             kernel_metadata=fp8_metadata,
         )
         # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
-        out = _attn_out.squeeze(0)
+        return _attn_out.squeeze(0), None
 
-        if not self.need_to_return_lse_for_decode:
-            return out, None
+    def _pad_q_heads_for_fp8_kernel(self, q: torch.Tensor) -> torch.Tensor:
+        # The FP8 sparse kernel only supports h_q = 64 or 128; heads are dim -2.
+        actual_num_heads = q.size(-2)
+        padded_num_heads = self.fp8_decode_padded_heads
+        if actual_num_heads >= padded_num_heads:
+            return q
+        logger.warning_once(
+            f"Padding num_heads from {actual_num_heads} to "
+            f"{padded_num_heads} for FP8 sparse decode kernel"
+        )
+        q_padded = q.new_zeros((*q.shape[:-2], padded_num_heads, q.size(-1)))
+        q_padded[..., :actual_num_heads, :] = q
+        return q_padded
 
-        # Kernel LSE is (1, H, T); the DCP merge consumes (T, H).
-        lse = _lse.squeeze(0).transpose(0, 1)
-        # Rows where this rank owns none of the selected tokens (all indices
-        # -1) have undefined out/lse; (0, -inf) is the identity element of the
-        # cross-rank LSE merge, so it drops this rank from those rows.
-        empty_rows = (topk_indices == -1).all(dim=-1)
-        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
-        # The head-padding slice above can leave `out` non-contiguous, and the
-        # merge feeds it to reduce_scatter.
-        return out.contiguous(), lse
+    def _fp8_flash_mla_kernel_per_token(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_length: torch.Tensor,
+        attn_sink: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """FP8 sparse attention with one batch entry per token.
+
+        FlashMLA takes topk_length per batch entry. The schedule depends on
+        the lengths, which differ between layers, so each call plans afresh.
+        Returns out (T, H, D_v) and lse (T, H).
+        """
+        num_tokens, actual_num_heads = q.shape[0], q.shape[1]
+        q = self._pad_q_heads_for_fp8_kernel(q)
+        out = q.new_empty((num_tokens, 1, q.shape[1], self.kv_lora_rank))
+        k_cache = kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2)
+        lses = []
+        for start in range(0, num_tokens, _MAX_TOKENS_PER_SCHED_PLAN):
+            end = min(start + _MAX_TOKENS_PER_SCHED_PLAN, num_tokens)
+            _, lse = flash_mla_with_kvcache(
+                q=q[start:end].unsqueeze(1),
+                k_cache=k_cache,
+                block_table=None,
+                cache_seqlens=None,
+                head_dim_v=512,
+                tile_scheduler_metadata=get_mla_metadata()[0],
+                is_fp8_kvcache=True,
+                indices=topk_indices[start:end].unsqueeze(1),
+                topk_length=topk_length[start:end],
+                softmax_scale=self.softmax_scale,
+                attn_sink=attn_sink,
+                out=out[start:end],
+            )
+            lses.append(lse.squeeze(-1))
+        lse = lses[0] if len(lses) == 1 else torch.cat(lses)
+        return out.squeeze(1)[:, :actual_num_heads], lse[:, :actual_num_heads]
 
     def _fp8_flash_mla_kernel(
         self,
@@ -1230,16 +1283,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
         padded_num_heads = self.fp8_decode_padded_heads
-
-        # Pad query if needed (kernel only supports h_q = 64 or 128)
-        if actual_num_heads < padded_num_heads:
-            logger.warning_once(
-                f"Padding num_heads from {actual_num_heads} to "
-                f"{padded_num_heads} for FP8 sparse decode kernel"
-            )
-            q_padded = q.new_zeros((q.size(0), q.size(1), padded_num_heads, q.size(3)))
-            q_padded[:, :, :actual_num_heads, :] = q
-            q = q_padded
+        q = self._pad_q_heads_for_fp8_kernel(q)
 
         out, lse = flash_mla_with_kvcache(
             q=q,
