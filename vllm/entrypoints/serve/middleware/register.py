@@ -33,7 +33,15 @@ def init_entrypoints_middleware(
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
         from .authenticate import AuthenticationMiddleware
 
-        app.add_middleware(AuthenticationMiddleware, tokens=tokens)
+        # The guarded set is derived from the app's route table (see
+        # build_guarded_prefixes), so the middleware gets a provider for the
+        # live route list instead of a hand-maintained prefix list: routes
+        # registered after this point are guarded by default too.
+        app.add_middleware(
+            AuthenticationMiddleware,
+            tokens=tokens,
+            routes_provider=lambda: app.routes,
+        )
 
     if args.enable_request_id_headers:
         from .x_request_id import XRequestIdMiddleware

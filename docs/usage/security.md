@@ -143,117 +143,44 @@ networks.
 Consult your operating system or application platform documentation for specific
 firewall configuration instructions.
 
-## API Key Authentication Limitations
+## API Key Authentication
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for endpoints under the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) enables Bearer token authentication on vLLM's HTTP server. The set of guarded endpoints is **derived from the routes actually registered on the server** (core routers, dev-mode routers and endpoint plugin routes alike): every registered endpoint requires authentication, except the public endpoints listed below. The guard therefore cannot drift from the served API surface — a newly registered route is protected by default.
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
-### Protected Endpoints (Require API Key)
+### Public Endpoints (No API Key Required)
 
-When `--api-key` is configured, the following endpoints require Bearer token authentication:
-
-- `/v1/models` - List available models
-- `/v1/chat/completions` - Chat completions
-- `/v1/chat/completions/batch` - Batch chat completions
-- `/v1/chat/completions/render` - Render chat completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
-- `/v1/chat/completions/derender` - Derender chat completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
-- `/v1/completions` - Text completions
-- `/v1/completions/render` - Render completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
-- `/v1/completions/derender` - Derender completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
-- `/v1/embeddings` - Generate embeddings
-- `/v1/audio/transcriptions` - Audio transcription
-- `/v1/audio/translations` - Audio translation
-- `/v1/messages` - Anthropic-compatible messages API
-- `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
-- `/v1/messages/count_tokens` - Count tokens for Anthropic messages
-- `/v1/responses` - Create a response
-- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
-- `/v1/responses/{response_id}` - Retrieve a response
-- `/v1/responses/{response_id}/cancel` - Cancel a response
-- `/v1/score` - Scoring API
-- `/v1/rerank` - Reranking API
-- `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`)
-- `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
-- `/v2/embed` - Cohere Embed API
-- `/v2/rerank` - Cohere Rerank API
-
-### Unprotected Endpoints (No API Key Required)
-
-The following endpoints **do not require authentication** even when `--api-key` is configured:
-
-**Inference endpoints:**
-
-- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
-- `/generative_scoring` - Generative scoring API
-- `/pooling` - Pooling API
-- `/classify` - Classification API
-- `/score` - Scoring API (non-`/v1` variant)
-- `/rerank` - Reranking API (non-`/v1` variant)
-
-**Operational control endpoints (only when `"generate"` task is supported):**
-
-- `/pause` - Pause generation (causes denial of service)
-- `/resume` - Resume generation
-- `/is_paused` - Check if generation is paused
-- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
-- `/scale_elastic_ep` - Trigger scaling operations
-- `/is_scaling_elastic_ep` - Check if scaling is in progress
-- `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
-- `/update_weights` - Update model weights (can alter model behavior)
-- `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
-
-**Utility endpoints:**
-
-- `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
-- `/detokenize` - Detokenize tokens
-- `/health` - Health check
-- `/ping` - SageMaker health check
+- `/health` - Health check (used by orchestrators and load balancers)
+- `/ping` - SageMaker health check (required by the SageMaker hosting contract)
+- `/load` - Server load metrics (used by autoscalers)
 - `/version` - Version information
-- `/load` - Server load metrics
+- `/metrics` - Prometheus metrics (see the note below on exposing them)
+- `/docs`, `/redoc`, `/openapi.json` - API documentation (absent with `--disable_fastapi_docs`)
+- `/static` - Offline documentation assets (only with `--enable-offline-docs`)
 
-**Tokenizer information endpoint (only when `--enable-tokenizer-info-endpoint` is set):**
+**Note on `/metrics`:** metrics are public by default because the Prometheus scrape model does not carry the application's API key in typical setups, and guarding them by default would break monitoring out of the box. They do leak operational information (model names, request rates, queue depth). When the server is reachable beyond a trusted network, scrape via localhost, keep `/metrics` behind a reverse proxy rule, or deploy a dedicated metrics listener instead of exposing the API server directly.
 
-This endpoint is **only available when the `--enable-tokenizer-info-endpoint` flag is set**. It may expose sensitive information such as chat templates and tokenizer configuration:
+### Everything Else Requires Authentication
 
-- `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
+When `--api-key` is configured, every other endpoint registered on the server requires a valid Bearer token, including (non-exhaustive):
 
-**Development endpoints (only when `VLLM_SERVER_DEV_MODE=1`):**
+- The OpenAI-compatible API (`/v1/...`), Anthropic (`/v1/messages...`) and Cohere (`/cohere/...`) endpoints
+- Inference-equivalent endpoints outside `/v1`: `/invocations` (SageMaker), `/generative_scoring`, `/pooling`, `/classify`, `/score`, `/rerank`, `/tokenize`, `/detokenize`
+- Operational control endpoints: `/start_profile`, `/stop_profile`, `/scale_elastic_ep`, `/is_scaling_elastic_ep`, `/fault_tolerance/*`, `/kv_event_sources`, `/abort_requests`
+- Development endpoints (only when `VLLM_SERVER_DEV_MODE=1`): `/server_info`, `/reset_prefix_cache`, `/reset_mm_cache`, `/reset_encoder_cache`, `/sleep`, `/wake_up`, `/is_sleeping`, `/collective_rpc`, and the RLHF weight-update family (`/pause`, `/resume`, `/update_weights`, ...)
 
-These endpoints are **only available when the environment variable `VLLM_SERVER_DEV_MODE` is set to `1`**. They are intended for development and debugging purposes and should never be enabled in production:
+### Compatibility Note
 
-- `/server_info` - Get detailed server configuration
-- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
-- `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
-- `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
-- `/sleep` - Put engine to sleep (causes denial of service)
-- `/wake_up` - Wake engine from sleep
-- `/is_sleeping` - Check if engine is sleeping
-- `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
-
-**Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
-
-These endpoints are only available when profiling is enabled and should only be used for local development:
-
-- `/start_profile` - Start PyTorch profiler
-- `/stop_profile` - Stop PyTorch profiler
-
-**Note:** The `/invocations` endpoint is particularly concerning as it provides unauthenticated access to the same inference capabilities as the protected `/v1` endpoints.
+Endpoints in the last two bullets above were previously reachable without a token: the guard was a hand-maintained list of four path prefixes (`/v1`, `/v2`, `/inference`, `/cohere`), and any endpoint registered outside them — including the inference-equivalent ones — silently stayed public. If a client relied on unauthenticated access to such an endpoint, it now needs the API key.
 
 ### Security Implications
 
-An attacker who can reach the vLLM HTTP server can:
-
-1. **Bypass authentication** by using endpoints outside the protected path prefixes, such as `/invocations`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank`, to run arbitrary inference without credentials
-2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
-3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
-4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
-5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
+1. **Authentication is enforced on the served surface, not on a prefix list.** Inference, operational control and development endpoints can no longer be reached by sidestepping the guarded prefixes.
+2. **`/metrics` remains public by default** (see the note above) — protect it at the network layer when it exposes information you do not want to share.
+3. **Dev-mode and profiler endpoints remain dangerous** even when authenticated; never enable `VLLM_SERVER_DEV_MODE=1` in production.
 
 ### Recommended Security Practices
 
@@ -274,7 +201,7 @@ Similarly, never enable profiler endpoints in production.
 The most effective approach is to deploy vLLM behind a reverse proxy (such as nginx, Envoy, or a Kubernetes Gateway) that:
 
 - Explicitly allowlists only the endpoints you want to expose to end users
-- Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
+- Blocks all other endpoints, including the operational control and development endpoints
 - Implements additional authentication, rate limiting, and logging at the proxy layer
 
 ## Request Parameter Resource Limits
@@ -359,7 +286,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 1. **Only allowlist plugins you trust.** Set `VLLM_PLUGINS` to the exact plugin names you intend to run and never wildcard or copy an allowlist between deployments without reviewing what each named plugin does.
 2. **Audit routes before deploying.** A plugin's `attach_router` can add routes under any path, including ones that duplicate existing `/v1/*` paths. There is currently no route conflict enforcement (tracked as a follow-up to RFC [#46565](https://github.com/vllm-project/vllm/issues/46565)), so a malicious or buggy plugin can **shadow a core route** and silently replace its behavior. Prefer plugins that namespace their routes under a distinct prefix (e.g. `/plugins/<plugin-name>/...`) instead of reusing `/v1/...` and review `app.routes` after startup if you need certainty about what is actually being served.
-3. **Treat plugin routes like any other unauthenticated by default surface.** `--api-key` only protects the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes (see [API Key Authentication Limitations](#api-key-authentication-limitations)). A plugin route outside those prefixes is unauthenticated unless the plugin implements its own authentication. Deploy behind a reverse proxy that allowlists only the plugin routes you intend to expose externally.
+3. **Plugin routes are authenticated by default.** `--api-key` guards every registered endpoint except the public ones (see [API Key Authentication](#api-key-authentication)), and endpoint-plugin routes are registered on the same app, so they are guarded too. A plugin route becomes public only if it registers under a path covered by the public endpoints; audit `app.routes` after startup if you need certainty about what is actually being served.
 4. **Remember the `vllm.general_plugins` pairing.** A plugin that also needs new engine side behavior ships that half separately via `vllm.general_plugins` which loads in every worker process under the default (load all unless restricted) posture. Allowlisting the endpoint plugin does not by itself restrict its paired engine side plugin. Need to review both.
 
 ## gRPC Interface
