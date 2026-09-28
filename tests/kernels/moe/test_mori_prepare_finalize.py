@@ -9,6 +9,12 @@ from types import SimpleNamespace
 import torch
 
 
+def _describe(tensor):
+    if tensor is None:
+        return "None (the op was never called)"
+    return f"a different tensor of shape {tuple(tensor.shape)}"
+
+
 def _import_mori_prepare_finalize(monkeypatch):
     # This is a contract test for vLLM's adapter; it does not need a real MoRI
     # installation or GPU kernels.
@@ -81,8 +87,22 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
         quant_config=quant_config,
     )
 
-    assert dispatch_ids.shape[0] == router_topk_ids.shape[0] * 16
-    assert mori_op.dispatch_indices is router_topk_ids
+    # Read the shapes before the identity asserts below, which narrow these
+    # names to the fake op's Optional attribute type.
+    router_shape = tuple(router_topk_ids.shape)
+    dispatch_shape = tuple(dispatch_ids.shape)
+    expected_rows = router_shape[0] * 16
+
+    assert dispatch_shape[0] == expected_rows, (
+        "prepare() must return the ids dispatch() produced: EP=16 expands "
+        f"{router_shape[0]} tokens to {expected_rows} rows, but prepare() "
+        f"returned {dispatch_shape[0]} rows"
+    )
+    assert mori_op.dispatch_indices is router_topk_ids, (
+        "dispatch() must be handed this rank's own pre-dispatch routing of "
+        f"shape {router_shape}, but it received "
+        f"{_describe(mori_op.dispatch_indices)}"
+    )
 
     output = torch.empty_like(hidden_states)
     adapter.finalize(
@@ -94,5 +114,15 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
         weight_and_reduce_impl=SimpleNamespace(),
     )
 
-    assert mori_op.combine_indices is router_topk_ids
-    assert mori_op.combine_indices is not dispatch_ids
+    assert mori_op.combine_indices is router_topk_ids, (
+        "combine() reduces over this rank's own routing, so it must be handed "
+        f"the pre-dispatch tensor of shape {router_shape}, but it received "
+        f"{_describe(mori_op.combine_indices)}. finalize() most likely "
+        "forwarded its own topk_ids, which the modular kernel has already "
+        "rebound to the ids dispatch() returned (ROCm/mori#475)"
+    )
+    assert mori_op.combine_indices is not dispatch_ids, (
+        f"combine() was handed the dispatched ids of shape {dispatch_shape} "
+        "instead of this rank's pre-dispatch routing, which silently corrupts "
+        "the reduction (ROCm/mori#475)"
+    )
