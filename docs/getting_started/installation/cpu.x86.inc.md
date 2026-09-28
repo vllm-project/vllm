@@ -154,6 +154,7 @@ uv pip install dist/*.whl
       "torch==X.Y.Z+cpu"   # <-------
     ]
     ```
+    - **AVX10.2 Unknown Attribute Errors**: When compiling from source on legacy or consumer x86 CPUs (such as Intel 10th/11th Gen), the build can fail at object files `[431/504]` or `[451/504]` inside `sgl-kernels` if your local GCC compiler toolchain lacks support for the `avx10.2` target attribute string. To resolve this compile-time syntax failure, you must comment out the unsupported AVX10.2 function blocks and their respective dispatch checks inside `csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp`, and manually hardcode the `avx10_2_available()` feature variable to `false` inside `csrc/cpu/sgl-kernels/common.h`. This completely bypasses the unrecognized paths and safely forces the build system to fall back onto your processor's active AVX-512 or AVX2 execution lanes.
 
 --8<-- [end:build-wheel-from-source]
 --8<-- [start:pre-built-images]
