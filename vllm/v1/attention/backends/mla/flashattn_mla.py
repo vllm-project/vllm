@@ -330,6 +330,49 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FlashAttnMLA on XPU does not support decode context parallelism"
             )
 
+    def _forward_mqa_xpu(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashAttnMLAMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        num_decodes = attn_metadata.num_decodes
+        decode_cu_seqlens_q = attn_metadata.query_start_loc[: num_decodes + 1]
+
+        cache = kv_c_and_k_pe_cache
+        if cache.dim() == 3:
+            cache = cache.unsqueeze(-2)
+        assert cache.dim() == 4 and cache.size(-2) == 1, (
+            "kv_c_and_k_pe_cache must be [num_blocks, block_size, "
+            "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
+        )
+
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
+        if not q.is_contiguous():
+            q = q.contiguous()
+
+        attn_out = flash_attn_varlen_func(
+            q,
+            cache,
+            cache.narrow(-1, 0, self.kv_lora_rank),
+            max_seqlen_q=1,
+            cu_seqlens_q=decode_cu_seqlens_q,
+            max_seqlen_k=attn_metadata.decode.max_seq_len,
+            seqused_k=attn_metadata.decode.seq_lens,
+            block_table=attn_metadata.decode.block_table,
+            softmax_scale=self.scale,
+            causal=False,
+            fa_version=2,
+            return_softmax_lse=self.need_to_return_lse_for_decode,
+        )
+
+        if self.need_to_return_lse_for_decode:
+            o, lse = attn_out
+            # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
+            return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
+        return attn_out, None
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -340,6 +383,9 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
+        if current_platform.is_xpu():
+            return self._forward_mqa_xpu(q, kv_c_and_k_pe_cache, attn_metadata)
+
         if type(q) is tuple:
             q_nope, q_pe = q
         else:
@@ -349,44 +395,6 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
-
-        if current_platform.is_xpu():
-            num_decodes = attn_metadata.num_decodes
-            decode_cu_seqlens_q = attn_metadata.query_start_loc[: num_decodes + 1]
-
-            cache = kv_c_and_k_pe_cache
-            if cache.dim() == 3:
-                cache = cache.unsqueeze(-2)
-            assert cache.dim() == 4 and cache.size(-2) == 1, (
-                "kv_c_and_k_pe_cache must be [num_blocks, block_size, "
-                "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
-            )
-
-            if type(q) is tuple:
-                q = torch.cat([q_nope, q_pe], dim=-1)
-            if not q.is_contiguous():
-                q = q.contiguous()
-
-            attn_out = flash_attn_varlen_func(
-                q,
-                cache,
-                cache.narrow(-1, 0, self.kv_lora_rank),
-                max_seqlen_q=1,
-                cu_seqlens_q=decode_cu_seqlens_q,
-                max_seqlen_k=attn_metadata.decode.max_seq_len,
-                seqused_k=attn_metadata.decode.seq_lens,
-                block_table=attn_metadata.decode.block_table,
-                softmax_scale=self.scale,
-                causal=False,
-                fa_version=2,
-                return_softmax_lse=self.need_to_return_lse_for_decode,
-            )
-
-            if self.need_to_return_lse_for_decode:
-                o, lse = attn_out
-                # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
-                return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
-            return attn_out, None
 
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
