@@ -200,3 +200,22 @@ def test_staged_write_inflight(uva_target, dtype):
         for event, snapshot, reference in pending:
             event.synchronize()
             torch.testing.assert_close(snapshot.cpu(), reference, rtol=0, atol=0)
+
+
+@pytest.mark.slow_test
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU.")
+def test_staged_write_row_offset_beyond_int32():
+    """The last row starts past 2**31, so an int32 row offset would wrap.
+
+    A smaller buffer cannot show the fault. Once the last row stays inside the
+    buffer, the product of row and stride already leaves int32.
+    """
+    rows, cols = 65536, 32769
+    staged = StagedWriteTensor((rows, cols), torch.int32, torch.device("cuda:0"))
+
+    staged.stage_write(rows - 1, 0, [1, 2, 3, 4])
+    staged.apply_write()
+    torch.accelerator.synchronize()
+
+    assert staged.gpu[rows - 1, :4].tolist() == [1, 2, 3, 4]
+    assert staged.gpu[rows - 1, 4].item() == 0

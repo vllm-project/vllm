@@ -326,7 +326,8 @@ def _apply_write_kernel(
     else:
         row_ptr = output_ptr
         row_stride = output_stride
-    row_ptr += row_idx * row_stride + start_idx
+    # row_idx * row_stride overflows int32 for large KV caches.
+    row_ptr += row_idx.to(tl.int64) * row_stride + start_idx
 
     for i in range(0, content_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)

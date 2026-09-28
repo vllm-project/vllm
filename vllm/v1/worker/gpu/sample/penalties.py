@@ -228,7 +228,9 @@ def _bincount_kernel(
 ):
     token_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    # max_num_reqs * max_model_len pushes req_state_idx * stride past int32.
+    # Widen the index here, so every stride product below stays in int64.
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
 
     prefill_len = tl.load(prefill_len_ptr + req_state_idx)
     if block_idx * BLOCK_SIZE >= prefill_len:
