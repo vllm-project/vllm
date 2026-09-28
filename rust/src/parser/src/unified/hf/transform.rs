@@ -11,7 +11,8 @@ use std::sync::LazyLock;
 use regex_automata::meta::Regex;
 use serde_json::{Map, Value};
 
-use super::{Result, invalid, value};
+use super::{Result, invalid};
+use crate::unified::{self, parsing_failed};
 
 /// `\{(\w+(?:\.\w+)*)\}`: a whole-string placeholder such as `{content}` or
 /// `{content.args}`.
@@ -87,19 +88,19 @@ impl Transform {
     }
 
     /// Recursively instantiate this template against `scope`.
-    pub fn apply(&self, scope: &Map<String, Value>) -> Result<Value> {
+    pub fn apply(&self, scope: &Map<String, Value>) -> unified::Result<Value> {
         Ok(match self {
             Self::Object(entries) => Value::Object(
                 entries
                     .iter()
                     .map(|(key, transform)| Ok((key.clone(), transform.apply(scope)?)))
-                    .collect::<Result<_>>()?,
+                    .collect::<unified::Result<_>>()?,
             ),
             Self::Array(transforms) => Value::Array(
                 transforms
                     .iter()
                     .map(|transform| transform.apply(scope))
-                    .collect::<Result<_>>()?,
+                    .collect::<unified::Result<_>>()?,
             ),
             Self::Literal(value) => value.clone(),
             Self::Placeholder(path) => {
@@ -107,20 +108,20 @@ impl Transform {
                 let (root, keys) = path.split_first().expect("placeholder path is non-empty");
                 let Some(mut value) = scope.get(root) else {
                     let available: Vec<_> = scope.keys().collect();
-                    return Err(value!(
+                    return Err(parsing_failed!(
                         "transform placeholder '{{{dotted}}}' is not defined. Available: {available:?}"
                     ));
                 };
                 for key in keys {
                     let Some(object) = value.as_object() else {
-                        return Err(value!(
+                        return Err(parsing_failed!(
                             "transform placeholder '{{{dotted}}}' cannot index into {} at '{key}'",
                             python_type_name(value)
                         ));
                     };
                     let Some(next) = object.get(key) else {
                         let available: Vec<_> = object.keys().collect();
-                        return Err(value!(
+                        return Err(parsing_failed!(
                             "transform placeholder '{{{dotted}}}' is missing key '{key}'. Available: {available:?}"
                         ));
                     };
@@ -149,7 +150,7 @@ impl FieldTransform {
         field_name: &str,
         parsed: Value,
         captures: &[(String, String)],
-    ) -> Result<Value> {
+    ) -> unified::Result<Value> {
         let captures: Map<String, Value> = captures
             .iter()
             .map(|(name, text)| (name.clone(), Value::String(text.clone())))
@@ -162,7 +163,7 @@ impl FieldTransform {
         }
 
         let Value::Array(items) = parsed else {
-            return Err(value!(
+            return Err(parsing_failed!(
                 "Field '{field_name}': transform_each requires the parsed content to be a list, got {}.",
                 python_type_name(&parsed)
             ));
@@ -171,7 +172,7 @@ impl FieldTransform {
             .into_iter()
             .map(|item| {
                 let Value::Object(item) = item else {
-                    return Err(value!(
+                    return Err(parsing_failed!(
                         "Field '{field_name}': transform_each requires each list element to be a dict, got {}.",
                         python_type_name(&item)
                     ));
@@ -180,7 +181,7 @@ impl FieldTransform {
                 scope.extend(item);
                 self.template.apply(&scope)
             })
-            .collect::<Result<_>>()
+            .collect::<unified::Result<_>>()
             .map(Value::Array)
     }
 }
@@ -237,19 +238,19 @@ mod tests {
                 .unwrap_err()
         };
         expect_test::expect![[r#"
-            Value {
+            ParsingFailed {
                 message: "transform placeholder '{name}' is not defined. Available: [\"content\"]",
             }
         "#]]
         .assert_debug_eq(&apply(json!("{name}"), json!({"content": 1})));
         expect_test::expect![[r#"
-            Value {
+            ParsingFailed {
                 message: "transform placeholder '{content.a}' cannot index into int at 'a'",
             }
         "#]]
         .assert_debug_eq(&apply(json!("{content.a}"), json!({"content": 1})));
         expect_test::expect![[r#"
-            Value {
+            ParsingFailed {
                 message: "transform placeholder '{content.b}' is missing key 'b'. Available: [\"a\"]",
             }
         "#]]

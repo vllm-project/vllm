@@ -4,7 +4,7 @@
 //! Compiled `response_template`.
 //!
 //! Validation follows `response_templates.py`; the compiled form additionally
-//! maps fields to parser roles and precomputes each state's boundary candidates.
+//! maps fields to parser roles and precomputes each state's boundary markers.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,7 @@ pub struct ResponseTemplate {
     /// Boundaries watched outside explicit regions: every explicit open plus the
     /// implicit region's close.
     pub(super) idle_watch: Vec<Watch>,
-    pub(super) idle_candidates: Vec<String>,
+    pub(super) idle_markers: Vec<String>,
     warned_missing_anchor: AtomicBool,
 }
 
@@ -42,7 +42,7 @@ pub(super) struct Region {
     /// `None`: the region runs to the end of the stream.
     pub close: Option<Boundary>,
     pub close_watch: Vec<Watch>,
-    pub close_candidates: Vec<String>,
+    pub close_markers: Vec<String>,
     pub optional: bool,
     pub kind: RegionKind,
 }
@@ -97,7 +97,7 @@ pub(super) struct ToolCallRegion {
     pub transform: Option<FieldTransform>,
     /// Opener capture group that provides the function name, allowing the tool
     /// call to start before its arguments are complete.
-    pub early_name: Option<String>,
+    pub name_group: Option<String>,
 }
 
 /// A region delimiter.
@@ -174,14 +174,14 @@ impl ResponseTemplate {
                 kind: WatchKind::Close,
             });
         }
-        let idle_candidates = candidates(&regions, &idle_watch);
+        let idle_markers = markers(&regions, &idle_watch);
 
         let mut template = Self {
             start_anchor,
             regions,
             implicit,
             idle_watch,
-            idle_candidates,
+            idle_markers,
             warned_missing_anchor: AtomicBool::new(false),
         };
         for region in 0..template.regions.len() {
@@ -194,7 +194,7 @@ impl ResponseTemplate {
                 })
                 .into_iter()
                 .collect();
-            template.regions[region].close_candidates = candidates(&template.regions, &close_watch);
+            template.regions[region].close_markers = markers(&template.regions, &close_watch);
             template.regions[region].close_watch = close_watch;
         }
         Ok(template)
@@ -314,11 +314,11 @@ impl Region {
                         "{scope}: 'join' requires each match to parse to a string"
                     ));
                 }
-                let early_name = early_name(transform.as_ref(), open.as_ref());
+                let name_group = name_group(transform.as_ref(), open.as_ref());
                 RegionKind::ToolCalls(ToolCallRegion {
                     content,
                     transform,
-                    early_name,
+                    name_group,
                 })
             }
         };
@@ -328,7 +328,7 @@ impl Region {
             open,
             close,
             close_watch: Vec::new(),
-            close_candidates: Vec::new(),
+            close_markers: Vec::new(),
             optional: field.optional,
             kind,
         })
@@ -337,7 +337,7 @@ impl Region {
 
 /// The opener capture group that a non-`transform_each` transform uses as the
 /// function name, if any.
-fn early_name(transform: Option<&FieldTransform>, open: Option<&Boundary>) -> Option<String> {
+fn name_group(transform: Option<&FieldTransform>, open: Option<&Boundary>) -> Option<String> {
     let (
         FieldTransform {
             template,
@@ -415,7 +415,7 @@ impl Boundary {
     }
 
     /// Literals whose occurrences are the only positions this boundary can match at.
-    pub fn candidates(&self) -> &[String] {
+    pub fn markers(&self) -> &[String] {
         match self {
             Self::Literals(literals) => literals,
             Self::Pattern(pattern) => pattern.prefixes(),
@@ -432,12 +432,12 @@ impl Boundary {
 
     /// Resolve this boundary at the start of `text`.
     pub fn resolve(&self, text: &str, eof: bool) -> Resolution {
-        let candidates = self.candidates();
-        // A candidate the available text is a proper prefix of: more input decides.
+        let markers = self.markers();
+        // A marker the available text is a proper prefix of: more input decides.
         let partial = !eof
-            && candidates
+            && markers
                 .iter()
-                .any(|candidate| candidate.len() > text.len() && candidate.starts_with(text));
+                .any(|marker| marker.len() > text.len() && marker.starts_with(text));
         match self {
             Self::Literals(literals) => {
                 if partial {
@@ -452,7 +452,7 @@ impl Boundary {
                 }
             }
             Self::Pattern(pattern) => {
-                if candidates.iter().any(|prefix| text.starts_with(prefix.as_str())) {
+                if markers.iter().any(|marker| text.starts_with(marker.as_str())) {
                     pattern.resolve(text, eof)
                 } else if partial {
                     Resolution::Pending
@@ -464,8 +464,8 @@ impl Boundary {
     }
 }
 
-/// Collect the scan candidates of `watch`, deduplicated.
-fn candidates(regions: &[Region], watch: &[Watch]) -> Vec<String> {
+/// Collect the scan markers of `watch`, deduplicated.
+fn markers(regions: &[Region], watch: &[Watch]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for entry in watch {
         let region = &regions[entry.region];
@@ -473,9 +473,9 @@ fn candidates(regions: &[Region], watch: &[Watch]) -> Vec<String> {
             WatchKind::Open => region.open.as_ref(),
             WatchKind::Close => region.close.as_ref(),
         };
-        for candidate in boundary.into_iter().flat_map(Boundary::candidates) {
-            if !out.contains(candidate) {
-                out.push(candidate.clone());
+        for marker in boundary.into_iter().flat_map(Boundary::markers) {
+            if !out.contains(marker) {
+                out.push(marker.clone());
             }
         }
     }

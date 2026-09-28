@@ -33,9 +33,10 @@ use super::template::{
     FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
     Watch, WatchKind,
 };
-use super::{unsupported, value};
 use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
-use crate::unified::{Result, UnifiedParser, UnifiedParserOutput, parsing_failed};
+use crate::unified::{
+    Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, parsing_failed,
+};
 use crate::utils::{incomplete, parse_buffered_event, safe_text_len_mul};
 
 /// Prompt tail windows, in tokens, searched for the start anchor before
@@ -51,18 +52,18 @@ pub struct HfUnifiedParser {
     tool_schemas: ToolSchemas,
     tokenizer: DynTokenizer,
     buffer: DecodedText,
-    current: Current,
+    mode: HfMode,
     /// Number of closed occurrences per region.
     closed: Vec<usize>,
     /// Strip state per region: per occurrence with `repeats`, per stream otherwise.
     strip: Vec<StripState>,
-    next_tool_index: usize,
+    emitted_tool_count: usize,
 }
 
-/// The region currently receiving text.
-enum Current {
+/// Parser mode: the region currently receiving text.
+enum HfMode {
     /// No implicit field is declared: text outside regions is discarded.
-    Sink,
+    Discard,
     /// The implicit region, opened lazily on its first byte.
     Implicit(Occurrence),
     /// An explicit region, opened by its open boundary.
@@ -80,7 +81,7 @@ struct Occurrence {
     /// Buffered body of a tool-call region.
     body: String,
     /// Index of the tool call started at the opener, if any.
-    tool_index: Option<usize>,
+    active_tool_index: Option<usize>,
     /// `join` separator still to emit before this occurrence's content.
     separator: Option<String>,
 }
@@ -95,11 +96,11 @@ struct StripState {
     held: DecodedText,
 }
 
-/// One parsed step of the buffered input.
-enum Step {
+/// One parsed event of the buffered input.
+enum HfEvent {
     /// Text routed into the current region.
     Text,
-    /// A boundary of the current state's watch list.
+    /// A boundary of the current mode's watch list.
     Boundary {
         watch: Watch,
         captures: Vec<(String, String)>,
@@ -125,9 +126,9 @@ impl BoundaryMatch {
     }
 }
 
-/// How the step loop treats its input.
+/// How the event loop treats its input.
 #[derive(Clone, Copy)]
-enum Mode {
+enum Phase {
     /// Prompt text after the start anchor: state transitions only, no events.
     Prefill,
     /// Generated text; more may follow.
@@ -136,7 +137,7 @@ enum Mode {
     Eof,
 }
 
-impl Mode {
+impl Phase {
     fn emits(self) -> bool {
         !matches!(self, Self::Prefill)
     }
@@ -148,12 +149,12 @@ impl HfUnifiedParser {
         let mut parser = Self {
             closed: vec![0; template.regions.len()],
             strip: template.regions.iter().map(StripState::new).collect(),
-            current: Current::Sink,
+            mode: HfMode::Discard,
             template,
             tool_schemas: ToolSchemas::from_tools(tools),
             tokenizer,
             buffer: DecodedText::default(),
-            next_tool_index: 0,
+            emitted_tool_count: 0,
         };
         parser.reset_to_implicit();
         parser
@@ -164,17 +165,17 @@ impl HfUnifiedParser {
         self.buffer.clear();
         self.closed.fill(0);
         self.strip = self.template.regions.iter().map(StripState::new).collect();
-        self.next_tool_index = 0;
+        self.emitted_tool_count = 0;
         self.reset_to_implicit();
     }
 
     /// Return to the implicit region, or the sink when there is none.
     fn reset_to_implicit(&mut self) {
-        self.current = match self.template.implicit {
+        self.mode = match self.template.implicit {
             Some(region) => {
-                Current::Implicit(self.occurrence(region, false, Vec::new(), String::new()))
+                HfMode::Implicit(self.occurrence(region, false, Vec::new(), String::new()))
             }
-            None => Current::Sink,
+            None => HfMode::Discard,
         };
     }
 
@@ -205,43 +206,43 @@ impl HfUnifiedParser {
             captures,
             raw_open,
             body: String::new(),
-            tool_index: None,
+            active_tool_index: None,
             separator,
         }
     }
 
     /// Parse buffered input until more is needed.
-    fn drive(&mut self, output: &mut UnifiedParserOutput, mode: Mode) -> Result<()> {
+    fn drive(&mut self, output: &mut UnifiedParserOutput, phase: Phase) -> Result<()> {
         let template = Arc::clone(&self.template);
         loop {
-            let (watch, candidates) = match &self.current {
-                Current::Explicit(occurrence) => {
+            let (watch, markers) = match &self.mode {
+                HfMode::Explicit(occurrence) => {
                     let region = &template.regions[occurrence.region];
                     (
                         region.close_watch.as_slice(),
-                        region.close_candidates.as_slice(),
+                        region.close_markers.as_slice(),
                     )
                 }
-                Current::Sink | Current::Implicit(_) => (
+                HfMode::Discard | HfMode::Implicit(_) => (
                     template.idle_watch.as_slice(),
-                    template.idle_candidates.as_slice(),
+                    template.idle_markers.as_slice(),
                 ),
             };
-            let eof = matches!(mode, Mode::Eof);
+            let eof = matches!(phase, Phase::Eof);
             let Some((step, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
-                parse_step(input, &template, watch, candidates, eof)
+                parse_next_event(input, &template, watch, markers, eof)
             })?
             else {
                 return Ok(());
             };
             let piece = self.buffer.drain_prefix(consumed_len);
             match step {
-                Step::Text => self.route(piece, output, mode),
-                Step::Boundary { watch, captures } => {
-                    self.close_current(output, mode)?;
+                HfEvent::Text => self.route(piece, output, phase),
+                HfEvent::Boundary { watch, captures } => {
+                    self.close_current(output, phase)?;
                     match watch.kind {
                         WatchKind::Open => {
-                            self.open_explicit(watch.region, captures, piece.text, output, mode)
+                            self.open_explicit(watch.region, captures, piece.text, output, phase)
                         }
                         // The implicit region's close: start a fresh implicit occurrence.
                         WatchKind::Close => {}
@@ -252,10 +253,10 @@ impl HfUnifiedParser {
     }
 
     /// Route a text piece into the current region.
-    fn route(&mut self, piece: DecodedText, output: &mut UnifiedParserOutput, mode: Mode) {
-        let (occurrence, region) = match &mut self.current {
-            Current::Sink => return,
-            Current::Implicit(occurrence) | Current::Explicit(occurrence) => {
+    fn route(&mut self, piece: DecodedText, output: &mut UnifiedParserOutput, phase: Phase) {
+        let (occurrence, region) = match &mut self.mode {
+            HfMode::Discard => return,
+            HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) => {
                 let region = &self.template.regions[occurrence.region];
                 (occurrence, region)
             }
@@ -270,7 +271,7 @@ impl HfUnifiedParser {
         let reasoning = text.role == TextRole::Reasoning;
         if piece.text.is_empty() {
             // Zero-width tokens still count as reasoning.
-            if reasoning && mode.emits() {
+            if reasoning && phase.emits() {
                 output.push_reasoning(piece);
             }
             return;
@@ -278,7 +279,7 @@ impl HfUnifiedParser {
         occurrence.opened = true;
 
         let strip = &mut self.strip[occurrence.region];
-        if !mode.emits() {
+        if !phase.emits() {
             // Prompt text is never emitted; it only decides whether later
             // leading whitespace is still stripped.
             strip.started |= !piece.text.chars().all(is_python_space);
@@ -304,12 +305,12 @@ impl HfUnifiedParser {
         captures: Vec<(String, String)>,
         raw_open: String,
         output: &mut UnifiedParserOutput,
-        mode: Mode,
+        phase: Phase,
     ) {
         let mut occurrence = self.occurrence(region, true, captures, raw_open);
-        let early_name = match &self.template.regions[region].kind {
+        let opener_name = match &self.template.regions[region].kind {
             RegionKind::ToolCalls(ToolCallRegion {
-                early_name: Some(group),
+                name_group: Some(group),
                 ..
             }) => occurrence
                 .captures
@@ -318,29 +319,29 @@ impl HfUnifiedParser {
                 .map(|(_, text)| text.clone()),
             _ => None,
         };
-        if let Some(name) = early_name
-            && mode.emits()
+        if let Some(name) = opener_name
+            && phase.emits()
         {
             let tool_index = self.allocate_tool_index();
-            occurrence.tool_index = Some(tool_index);
+            occurrence.active_tool_index = Some(tool_index);
             output.push_call(ToolCallDelta {
                 tool_index,
                 name: Some(name),
                 arguments: String::new(),
             });
         }
-        self.current = Current::Explicit(occurrence);
+        self.mode = HfMode::Explicit(occurrence);
     }
 
     /// Close the current region and reset to the implicit region.
     ///
     /// Skipped (aside from the reset) when the current region never opened --
     /// avoids vacuous open/close pairs at every explicit boundary.
-    fn close_current(&mut self, output: &mut UnifiedParserOutput, mode: Mode) -> Result<()> {
+    fn close_current(&mut self, output: &mut UnifiedParserOutput, phase: Phase) -> Result<()> {
         let template = Arc::clone(&self.template);
-        let current = std::mem::replace(&mut self.current, Current::Sink);
-        let occurrence = match current {
-            Current::Implicit(occurrence) | Current::Explicit(occurrence) if occurrence.opened => {
+        let mode = std::mem::replace(&mut self.mode, HfMode::Discard);
+        let occurrence = match mode {
+            HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) if occurrence.opened => {
                 Some(occurrence)
             }
             _ => None,
@@ -359,7 +360,7 @@ impl HfUnifiedParser {
         }
         self.reset_to_implicit();
         // Regions closed inside the prompt contribute nothing to the output.
-        let Some(occurrence) = occurrence.filter(|_| mode.emits()) else {
+        let Some(occurrence) = occurrence.filter(|_| phase.emits()) else {
             return Ok(());
         };
 
@@ -384,7 +385,7 @@ impl HfUnifiedParser {
                     }
                     None => parsed,
                 };
-                self.emit_calls(value, occurrence.tool_index, output)?;
+                self.emit_calls(value, occurrence.active_tool_index, output)?;
             }
         }
         Ok(())
@@ -420,8 +421,8 @@ impl HfUnifiedParser {
     }
 
     fn allocate_tool_index(&mut self) -> usize {
-        let tool_index = self.next_tool_index;
-        self.next_tool_index += 1;
+        let tool_index = self.emitted_tool_count;
+        self.emitted_tool_count += 1;
         tool_index
     }
 
@@ -555,7 +556,7 @@ enum ArgumentsValue {
 fn call_parts(call: Value, tool_schemas: &ToolSchemas) -> Result<(String, String)> {
     let (ToolCallValue::Wrapped { function } | ToolCallValue::Bare(function)) =
         ToolCallValue::deserialize(&call).map_err(|_| {
-            value!(
+            parsing_failed!(
                 "tool call must be {{\"function\": {{\"name\": ..., \"arguments\": ...}}}} or \
                  {{\"name\": ..., \"arguments\": ...}} with a string name, got {call}"
             )
@@ -575,27 +576,28 @@ fn call_parts(call: Value, tool_schemas: &ToolSchemas) -> Result<(String, String
 
 /// Serialize tool-call arguments to JSON text.
 fn serialize_arguments(arguments: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(arguments)
-        .map_err(|error| value!("failed to serialize tool arguments: {}", error.as_report()).into())
+    serde_json::to_string(arguments).map_err(|error| {
+        parsing_failed!("failed to serialize tool arguments: {}", error.as_report())
+    })
 }
 
-/// Parse one step: safe text before the next candidate, or a boundary at it.
-fn parse_step(
+/// Parse one event: safe text before the next marker, or a boundary at it.
+fn parse_next_event(
     input: &mut Partial<&str>,
     template: &ResponseTemplate,
     watch: &[Watch],
-    candidates: &[String],
+    markers: &[String],
     eof: bool,
-) -> ModalResult<Step> {
-    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-    match safe_text_len_mul(input, &candidate_refs) {
+) -> ModalResult<HfEvent> {
+    let marker_refs: Vec<&str> = markers.iter().map(String::as_str).collect();
+    match safe_text_len_mul(input, &marker_refs) {
         Ok(0) => {}
-        Ok(_) => return Ok(Step::Text),
-        // At the end of the stream a partial candidate is plain text.
+        Ok(_) => return Ok(HfEvent::Text),
+        // At the end of the stream a partial marker is plain text.
         Err(ErrMode::Incomplete(_)) if eof => {
             let len = input.eof_offset();
             input.next_slice(len);
-            return Ok(Step::Text);
+            return Ok(HfEvent::Text);
         }
         Err(error) => return Err(error),
     }
@@ -627,13 +629,13 @@ fn parse_step(
             captures,
         }) => {
             input.next_slice(len);
-            Ok(Step::Boundary { watch, captures })
+            Ok(HfEvent::Boundary { watch, captures })
         }
         None => {
-            // Not a boundary: the candidate's first character is plain text.
+            // Not a boundary: the marker's first character is plain text.
             let len = text.chars().next().map_or(0, char::len_utf8);
             input.next_slice(len);
-            Ok(Step::Text)
+            Ok(HfEvent::Text)
         }
     }
 }
@@ -643,11 +645,10 @@ impl UnifiedParser for HfUnifiedParser {
     where
         Self: Sized + 'static,
     {
-        Err(unsupported!(
-            "the `hf` parser is built from the checkpoint's response_template; construct it with \
-             `HfUnifiedParser::new`"
-        )
-        .into())
+        Err(UnifiedParserError::NoNamedConstructor {
+            parser: "hf",
+            built_from: "the checkpoint's response_template",
+        })
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
@@ -662,7 +663,7 @@ impl UnifiedParser for HfUnifiedParser {
         // A partial boundary at the end of the prompt stays buffered, so the
         // generated text can complete it.
         self.buffer = DecodedText::unattributed(remainder);
-        self.drive(&mut UnifiedParserOutput::default(), Mode::Prefill)
+        self.drive(&mut UnifiedParserOutput::default(), Phase::Prefill)
     }
 
     fn preserve_special_tokens(&self) -> bool {
@@ -675,16 +676,16 @@ impl UnifiedParser for HfUnifiedParser {
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
-        self.drive(output, Mode::Stream)
+        self.drive(output, Phase::Stream)
     }
 
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
         let mut output = UnifiedParserOutput::default();
-        self.drive(&mut output, Mode::Eof)?;
+        self.drive(&mut output, Phase::Eof)?;
         // Trailing zero-width tokens carry no text for the step loop to consume.
         let rest = self.buffer.take();
-        self.route(rest, &mut output, Mode::Eof);
-        self.close_current(&mut output, Mode::Eof)?;
+        self.route(rest, &mut output, Phase::Eof);
+        self.close_current(&mut output, Phase::Eof)?;
         for (region, strip) in self.template.regions.iter().zip(&mut self.strip) {
             let held = take(&mut strip.held);
             if matches!(&region.kind, RegionKind::Text(text) if text.role == TextRole::Reasoning) {
@@ -712,8 +713,8 @@ impl UnifiedParser for HfUnifiedParser {
 
     fn reset(&mut self) -> String {
         let mut raw = String::new();
-        if let Current::Implicit(occurrence) | Current::Explicit(occurrence) =
-            std::mem::replace(&mut self.current, Current::Sink)
+        if let HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) =
+            std::mem::replace(&mut self.mode, HfMode::Discard)
         {
             raw.push_str(&occurrence.raw_open);
             raw.push_str(&occurrence.body);

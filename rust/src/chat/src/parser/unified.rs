@@ -5,10 +5,9 @@
 
 use std::sync::LazyLock;
 
-pub use vllm_parser::unified::hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use vllm_parser::unified::{
-    Gemma4UnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser, InklingUnifiedParser,
-    KimiK3UnifiedParser, UnifiedParser,
+    Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser,
+    InklingUnifiedParser, KimiK3UnifiedParser, ResponseTemplate, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 

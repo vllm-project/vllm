@@ -33,7 +33,11 @@ use thiserror_ext::Macro;
 /// Result alias for response-template operations.
 pub type Result<T> = std::result::Result<T, HfTemplateError>;
 
-/// Errors produced while loading a `response_template` or evaluating its values.
+/// Errors produced while loading a `response_template`.
+///
+/// Failures while parsing generated output are
+/// [`UnifiedParserError::ParsingFailed`](super::UnifiedParserError::ParsingFailed), as for
+/// the other unified parsers.
 #[derive(Debug, Clone, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::unified::hf", mangle))]
 pub enum HfTemplateError {
@@ -46,7 +50,4 @@ pub enum HfTemplateError {
     /// The model provides no template.
     #[error("the model's tokenizer_config.json provides no response_template")]
     Missing,
-    /// A region value could not be parsed or transformed.
-    #[error("failed to evaluate response_template value: {message}")]
-    Value { message: String },
 }

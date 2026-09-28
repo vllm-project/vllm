@@ -13,7 +13,8 @@ use serde_json::{Map, Number, Value};
 use thiserror_ext::AsReport as _;
 
 use super::spec::{ContentKind, deserialize};
-use super::{Result, invalid, unsupported, value};
+use super::{Result, invalid, unsupported};
+use crate::unified::{self, parsing_failed};
 
 // Sentinel characters for lax-JSON string pre-extraction — ASCII control chars
 // that should never appear in real LLM output.
@@ -165,16 +166,15 @@ impl ContentParser {
     }
 
     /// Parse one region body.
-    pub fn parse(&self, text: &str) -> Result<Value> {
+    pub fn parse(&self, text: &str) -> unified::Result<Value> {
         match self {
             Self::Text(args) => Ok(Value::String(args.apply(text).to_string())),
-            Self::Int(args) => {
-                python_int(args.apply(text)).ok_or_else(|| value!("int: invalid literal {text:?}"))
-            }
+            Self::Int(args) => python_int(args.apply(text))
+                .ok_or_else(|| parsing_failed!("int: invalid literal {text:?}")),
             Self::Float(args) => python_float(args.apply(text))
                 .and_then(Number::from_f64)
                 .map(Value::Number)
-                .ok_or_else(|| value!("float: invalid or non-finite literal {text:?}")),
+                .ok_or_else(|| parsing_failed!("float: invalid or non-finite literal {text:?}")),
             Self::Bool(args) => {
                 let text = args.apply(text).to_lowercase();
                 Ok(Value::Bool(text == "true" || text == "1"))
@@ -206,9 +206,9 @@ impl TextArgs {
 
 impl JsonArgs {
     /// JSON parser with optional dialect knobs for LLM-emitted quirks.
-    fn parse(&self, text: &str) -> Result<Value> {
+    fn parse(&self, text: &str) -> unified::Result<Value> {
         if !self.string_delims.is_empty() && text.contains([LAX_OPEN, LAX_CLOSE]) {
-            return Err(value!(
+            return Err(parsing_failed!(
                 "json: input contains reserved sentinel characters (\\x01/\\x02); cannot parse safely."
             ));
         }
@@ -224,19 +224,20 @@ impl JsonArgs {
         }
 
         for (index, string) in captured.iter().enumerate() {
-            let quoted = serde_json::to_string(string)
-                .map_err(|error| value!("json: failed to quote string: {}", error.as_report()))?;
+            let quoted = serde_json::to_string(string).map_err(|error| {
+                parsing_failed!("json: failed to quote string: {}", error.as_report())
+            })?;
             working = working.replace(&format!("{LAX_OPEN}{index}{LAX_CLOSE}"), &quoted);
         }
 
         match serde_json::from_str(&working) {
             Ok(value) => Ok(value),
             Err(_) if self.allow_non_json => Ok(Value::String(self.text.apply(text).to_string())),
-            Err(error) if working == text => Err(value!(
+            Err(error) if working == text => Err(parsing_failed!(
                 "json parser could not parse region as JSON.\nContent: {text:?}\nError: {}",
                 error.as_report()
             )),
-            Err(error) => Err(value!(
+            Err(error) => Err(parsing_failed!(
                 "json: could not parse after dialect transforms.\nOriginal: {text:?}\nTransformed: {working:?}\nError: {}",
                 error.as_report()
             )),
@@ -246,13 +247,13 @@ impl JsonArgs {
 
 impl XmlInlineArgs {
     /// Parse shallow XML-ish tags into a dict.
-    fn parse(&self, text: &str) -> Result<Value> {
+    fn parse(&self, text: &str) -> unified::Result<Value> {
         let mut out = Map::new();
         for captures in self.tag_pattern.captures_iter(text) {
-            let key = captures
-                .get_group(self.key_group)
-                .map(|span| &text[span.range()])
-                .ok_or_else(|| value!("xml-inline: named group 'key' did not participate"))?;
+            let key =
+                captures.get_group(self.key_group).map(|span| &text[span.range()]).ok_or_else(
+                    || parsing_failed!("xml-inline: named group 'key' did not participate"),
+                )?;
             let raw = match self.value_group {
                 // The pattern has no `value` group.
                 None => Some(""),
@@ -262,7 +263,7 @@ impl XmlInlineArgs {
                 Some(raw) => sub_parse(raw, self.value_parser.as_deref())?,
                 None if self.value_parser.is_none() => Value::Null,
                 None => {
-                    return Err(value!(
+                    return Err(parsing_failed!(
                         "xml-inline: named group 'value' did not participate"
                     ));
                 }
@@ -286,7 +287,7 @@ impl XmlInlineArgs {
 
 impl KvLinesArgs {
     /// Parse line-delimited `key<sep>value` pairs into a dict.
-    fn parse(&self, text: &str) -> Result<Value> {
+    fn parse(&self, text: &str) -> unified::Result<Value> {
         let mut out = Map::new();
         for line in text.split(self.line_sep.as_str()) {
             let line = self.text.apply(line);
@@ -304,7 +305,7 @@ impl KvLinesArgs {
 }
 
 /// Parse `raw` with an optional nested value parser.
-fn sub_parse(raw: &str, value_parser: Option<&ContentParser>) -> Result<Value> {
+fn sub_parse(raw: &str, value_parser: Option<&ContentParser>) -> unified::Result<Value> {
     match value_parser {
         None => Ok(Value::String(raw.to_string())),
         Some(parser) => parser.parse(raw),

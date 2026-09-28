@@ -764,10 +764,7 @@ fn malformed_tool_arguments_fail_the_parser() {
     let error =
         parse_events(&template, &[], "", &["<|tool_call>call:f{a:}<tool_call|>"]).unwrap_err();
     assert!(
-        matches!(
-            error,
-            UnifiedParserError::HfTemplate(HfTemplateError::Value { .. })
-        ),
+        matches!(error, UnifiedParserError::ParsingFailed { .. }),
         "{error:?}"
     );
 }
@@ -937,11 +934,9 @@ fn tool_call_value_shapes() {
         json!({"tool_calls": [{"name": "f", "arguments": {}}, {"name": "g", "arguments": "raw"}]})
     );
     expect_test::expect![[r#"
-        HfTemplate(
-            Value {
-                message: "tool call must be {\"function\": {\"name\": ..., \"arguments\": ...}} or {\"name\": ..., \"arguments\": ...} with a string name, got {\"name\":1}",
-            },
-        )
+        ParsingFailed {
+            message: "tool call must be {\"function\": {\"name\": ..., \"arguments\": ...}} or {\"name\": ..., \"arguments\": ...} with a string name, got {\"name\":1}",
+        }
     "#]]
         .assert_debug_eq(&parse(r#"<tool_call>{"name": 1}</tool_call>"#).unwrap_err());
 }
