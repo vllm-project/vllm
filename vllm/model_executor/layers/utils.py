@@ -317,12 +317,13 @@ def use_aiter_decode_gemm(n, m, k, dtype, bias):
     if dtype not in [torch.float16, torch.bfloat16]:
         return False
     try:
-        from aiter.tuned_gemm import get_GEMM_A16W16_config
+        from aiter.tuned_gemm import get_GEMM_A16W16_config, is_flydsl_decode_config
 
         cfg = get_GEMM_A16W16_config(n, m, k, bias is not None, str(dtype), str(dtype))
-    except Exception:  # aiter absent, or no configs for this arch
+    except Exception:  # aiter absent or too old, or no configs for this arch
         return False
-    return cfg is not None and cfg.get("libtype") == "flydsl_decode"
+    # aiter decides which rows are decode rows; vLLM does not match on labels.
+    return is_flydsl_decode_config(cfg)
 
 
 def rocm_unquantized_gemm_impl(
