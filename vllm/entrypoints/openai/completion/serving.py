@@ -88,6 +88,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        raw_request: Request | None = None,
     ) -> list[EngineInput] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -103,6 +104,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return error_check_ret
 
         self._preflight(request.n or 1)
+
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        # Resolved here (before rendering) so the renderer and every
+        # downstream consumer see the effective value.
+        request.cache_salt = self._get_cache_salt(request, raw_request)
 
         return await self.online_renderer.render_completion(request)
 
@@ -132,7 +138,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 "Streaming is not currently supported with beam search"
             )
 
-        result = await self.render_completion_request(request)
+        result = await self.render_completion_request(request, raw_request)
         if isinstance(result, ErrorResponse):
             return result
 

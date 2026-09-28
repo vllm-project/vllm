@@ -564,6 +564,8 @@ vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed i
 
 `cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
 
+The salt can also be supplied with the `X-VLLM-CACHE-SALT` HTTP request header on the same endpoints. This is useful when an intermediary (e.g. an API gateway or service mesh) injects per-tenant salts without rewriting request bodies. When both the header and the body field are present, the header takes precedence.
+
 #### Usage with the OpenAI Python client
 
 ```python
@@ -587,6 +589,20 @@ response = client.chat.completions.create(
   "cache_salt": "per-user-or-per-tenant-secret"
 }
 ```
+
+#### Usage with the header
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_headers={
+        "X-VLLM-CACHE-SALT": "per-user-or-per-tenant-secret",
+    },
+)
+```
+
+The header value follows the same validation rules as the body field: a non-empty string of at most 128 characters that does not contain `@`, `/`, `\`, or NUL. An invalid header value fails the request with a 400 error.
 
 ### How to choose a salt value
 

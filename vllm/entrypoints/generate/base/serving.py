@@ -24,7 +24,13 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.engine.typing import AnyRequest, CacheSaltRequest
+from vllm.entrypoints.serve.utils.request_headers import (
+    CACHE_SALT_HEADER,
+    PRIORITY_HEADER,
+    SESSION_ID_HEADER,
+    parse_request_headers,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput
@@ -43,8 +49,10 @@ logger = init_logger(__name__)
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
-SESSION_ID_HEADER = "X-Session-ID"
-PRIORITY_HEADER = "X-Vllm-Priority"
+
+# Header names are defined in (and parsed by) request_headers.py; kept
+# importable from here for existing callers.
+__all__ = ["SESSION_ID_HEADER", "PRIORITY_HEADER", "CACHE_SALT_HEADER"]
 
 
 def build_per_request_timing_metrics(
@@ -241,22 +249,13 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         if raw_request is None:
             return None
 
-        rank_str = raw_request.headers.get("X-data-parallel-rank")
-        if rank_str is None:
-            return None
-
-        try:
-            return int(rank_str)
-        except ValueError:
-            return None
+        return parse_request_headers(raw_request.headers).data_parallel_rank
 
     @staticmethod
     def _get_session_id_from_headers(raw_request: Request | None) -> str | None:
         if raw_request is None:
             return None
-        if value := raw_request.headers.get(SESSION_ID_HEADER):
-            return value
-        return None
+        return parse_request_headers(raw_request.headers).session_id
 
     @staticmethod
     def _get_session_id(
@@ -279,13 +278,28 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         raw_request: Request | None,
     ) -> int:
         if raw_request is not None:
-            priority = raw_request.headers.get(PRIORITY_HEADER)
+            priority = parse_request_headers(raw_request.headers).priority
             if priority is not None:
-                try:
-                    return int(priority)
-                except ValueError:
-                    pass
+                return priority
         return request.priority
+
+    @staticmethod
+    def _get_cache_salt(
+        request: CacheSaltRequest,
+        raw_request: Request | None,
+    ) -> str | None:
+        """Resolve the request's cache salt.
+
+        The ``X-VLLM-CACHE-SALT`` header takes precedence over the request
+        body's ``cache_salt`` field, mirroring how ``X-Vllm-Priority``
+        overrides the body's ``priority``. A malformed header raises
+        ``VLLMValidationError`` (see ``parse_request_headers``).
+        """
+        if raw_request is not None:
+            cache_salt = parse_request_headers(raw_request.headers).cache_salt
+            if cache_salt is not None:
+                return cache_salt
+        return request.cache_salt
 
     async def _with_kv_transfer_rejection_cleanup(
         self,

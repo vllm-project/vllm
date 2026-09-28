@@ -51,6 +51,10 @@ class RendererChatRequest(RendererRequest, Protocol):
         raise NotImplementedError
 
 
+class CacheSaltRequest(Protocol):
+    cache_salt: str | None
+
+
 CompletionLikeRequest: TypeAlias = (
     CompletionRequest
     | TokenizeCompletionRequest

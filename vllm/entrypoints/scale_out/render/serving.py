@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from fastapi import Request
+
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import (
@@ -76,6 +79,7 @@ class ServingRender(BaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -91,6 +95,11 @@ class ServingRender(BaseServing):
             return self.create_error_response(
                 "Beam search is not supported by the render endpoint"
             )
+
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        # Resolved here (before rendering) so the renderer and every
+        # downstream consumer see the effective value.
+        request.cache_salt = GenerateBaseServing._get_cache_salt(request, raw_request)
 
         result = await self.online_renderer.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
@@ -142,6 +151,7 @@ class ServingRender(BaseServing):
     async def render_messages_request(
         self,
         request: AnthropicMessagesRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess an Anthropic Messages request.
 
@@ -152,11 +162,12 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
-        return await self.render_chat_request(chat_req)
+        return await self.render_chat_request(chat_req, raw_request)
 
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        raw_request: Request | None = None,
     ) -> list[GenerateRequest] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -166,6 +177,8 @@ class ServingRender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        request.cache_salt = GenerateBaseServing._get_cache_salt(request, raw_request)
         result = await self.online_renderer.render_completion(
             request, skip_mm_cache=True
         )
@@ -216,10 +229,13 @@ class ServingRender(BaseServing):
     async def render_responses_request(
         self,
         request: ResponsesRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        request.cache_salt = GenerateBaseServing._get_cache_salt(request, raw_request)
         if request.previous_response_id is not None:
             return self.create_error_response(
                 message=(

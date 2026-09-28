@@ -334,6 +334,11 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         self._preflight()
 
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        # Resolved here (before rendering) so the renderer and every
+        # downstream consumer see the effective value.
+        request.cache_salt = self._get_cache_salt(request, raw_request)
+
         if request.store and not self.enable_store:
             # Disable the store option.
             # NOTE(woosuk): Although returning an error is possible, we opted
