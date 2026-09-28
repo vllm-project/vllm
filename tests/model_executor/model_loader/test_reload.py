@@ -1470,3 +1470,33 @@ def test_late_derived_schema_and_child_pwal_value_survive_attention_restore():
     finalize_layerwise_reload(model, Mock(spec=ModelConfig))
     assert layer.packed is stable
     assert torch.equal(stable, torch.full((2,), 7.0))
+
+
+def test_first_derived_value_created_during_reload_survives_placement():
+    class Layer(_DerivedBufferLayer):
+        pass
+
+    layer = Layer()
+    model = torch.nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+    assert layer.weight_squared is None
+    initialize_layerwise_reload(model)
+    weight = torch.full((2, 2), 3.0)
+    layer.weight.weight_loader(layer.weight, weight)
+    finalize_layerwise_reload(model, Mock(spec=ModelConfig))
+    assert torch.equal(layer.weight_squared, weight.square())
+    assert layer.quant_method.helper.weight_squared is layer.weight_squared
+
+
+def test_reload_preparation_failure_precedes_any_meta_placement():
+    class Unsupported(torch.nn.Module):
+        def prepare_for_reload(self):
+            raise NotImplementedError("unsupported reload")
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), Unsupported())
+    record_metadata_for_reloading(model)
+    original = model[0].weight
+    with pytest.raises(NotImplementedError, match="unsupported reload"):
+        initialize_layerwise_reload(model)
+    assert model[0].weight is original
+    assert not model[0].weight.is_meta

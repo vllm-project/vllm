@@ -99,12 +99,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     model._do_torchao_reload = False
 
     for layer in model.modules():
-        info = get_layerwise_info(layer)
-
-        # Skip if the layer has already been initialized
-        if info.can_load():
+        if get_layerwise_info(layer).can_load():
             continue
-
         quant_method = getattr(layer, "quant_method", None)
         prepare_quant = getattr(quant_method, "prepare_for_reload", None)
         if prepare_quant is not None:
@@ -112,6 +108,13 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         prepare_for_reload = getattr(layer, "prepare_for_reload", None)
         if prepare_for_reload is not None:
             prepare_for_reload()
+
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+
+        # Skip if the layer has already been initialized
+        if info.can_load():
+            continue
 
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
@@ -454,11 +457,18 @@ def _copy_and_restore_kernel_tensors(
 
 def _copy_derived_buffers(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     assert info.kernel_tensors is not None
-    for name, stable in info.kernel_tensors[1].items():
-        if name in getattr(layer, "_vllm_derived_buffers", ()):
-            temporary = layer._buffers.get(name)
-            if temporary is not None and not temporary.is_meta:
-                copy_derived_buffer(stable, temporary, name)
+    buffers = info.kernel_tensors[1]
+    for name in getattr(layer, "_vllm_derived_buffers", ()):
+        temporary = layer._buffers.get(name)
+        if temporary is None or temporary.is_meta:
+            continue
+        stable = buffers.get(name)
+        if stable is None:
+            # No graph could reference an unmaterialized placeholder. Its first
+            # produced value becomes the stable allocation for future reloads.
+            buffers[name] = temporary
+        else:
+            copy_derived_buffer(stable, temporary, name)
 
 
 def _finish_staged_reload_transforms(model: torch.nn.Module) -> None:
