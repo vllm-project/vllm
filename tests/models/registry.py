@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -1233,7 +1233,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
-            "vision_config": PretrainedConfig(
+            "vision_config": PreTrainedConfig(
                 args={
                     "min_num_patches": 1,
                     "max_num_patches": 12,
@@ -1501,6 +1501,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
+    ),
+    # LiLiCorr checkpoints are not published yet.
+    "LiLiCorrDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="LiLiCorrDraftModel",
+        is_available_online=False,
+        use_original_num_layers=True,
     ),
     "DFlash2DraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.8-27B",
