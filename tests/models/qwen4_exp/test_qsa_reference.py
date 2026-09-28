@@ -17,6 +17,7 @@ from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.worker.utils import clear_layer_kv_caches
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -365,7 +366,9 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     assert set(slots.tolist()).isdisjoint((committed % capacity).tolist())
 
 
-def _qsa_key_cache(block_size: int, compress_ratio: int) -> qsa_cache.QSAKeyStateCache:
+def _qsa_key_cache(
+    block_size: int, compress_ratio: int, **kwargs
+) -> qsa_cache.QSAKeyStateCache:
     return qsa_cache.QSAKeyStateCache(
         head_size=64,
         dtype=torch.bfloat16,
@@ -375,6 +378,7 @@ def _qsa_key_cache(block_size: int, compress_ratio: int) -> qsa_cache.QSAKeyStat
             compilation_config=SimpleNamespace(static_forward_context={})
         ),
         compress_ratio=compress_ratio,
+        **kwargs,
     )
 
 
@@ -400,6 +404,23 @@ def test_qsa_state_caches_adapt_the_unified_logical_layout() -> None:
     assert compressed_cache.kv_cache.shape == (2, 8, 1, 64)
     assert raw_cache.kv_cache.data_ptr() == raw_view.data_ptr()
     assert compressed_cache.kv_cache.data_ptr() == compressed_view.data_ptr()
+
+
+def test_clearing_qsa_key_cache_releases_its_storage() -> None:
+    """Profiling teardown clears `kv_cache`; no derived view may keep it alive."""
+    raw_cache = _qsa_key_cache(
+        block_size=32, compress_ratio=4, cache_rope_positions=True
+    )
+    kv = torch.zeros(2, 1, 8, raw_cache.head_size, dtype=torch.bfloat16)
+    references_before_bind = torch._C._storage_Use_Count(kv.untyped_storage()._cdata)
+    raw_cache.bind_kv_cache(kv)
+    assert raw_cache.key_cache.shape[-1] == 64
+    assert raw_cache.rope_position_cache.dtype == torch.int64
+
+    clear_layer_kv_caches([raw_cache])
+
+    references = torch._C._storage_Use_Count(kv.untyped_storage()._cdata)
+    assert references == references_before_bind
 
 
 @pytest.mark.parametrize(
