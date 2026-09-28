@@ -14,7 +14,6 @@ both with PDL. The model uses its Linear module above M=48.
 
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import Any, Literal
 
@@ -34,19 +33,12 @@ _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
     **{m: (6, 4, 16) for m in range(33, MAX_FUSED_M + 1)},
 }
 
+# FMA: (backend, M, K, threadblock_size); MMA: (backend, split_k, stages, tile_n).
+CompileKey = tuple[Literal["fma", "mma"], int, int, int]
+
 
 class HcDownSiluGemm:
     """Dispatch/compile cache for the fused mHC down+SiLU GEMM."""
-
-    @dataclass(frozen=True, slots=True)
-    class CompileKey:
-        backend: Literal["fma", "mma"]
-        M: int = 0
-        K: int = 0
-        threadblock_size: int = 0
-        split_k: int = 0
-        num_stages: int = 0
-        tile_n: int = 0
 
     def __init__(
         self, rank: int, hc: int, k: int, *, prefetch_pdl_weights: bool = False
@@ -55,23 +47,14 @@ class HcDownSiluGemm:
         self.hc = hc
         self.k = k
         self._prefetch_pdl_weights = prefetch_pdl_weights
-        # FMA: keyed on (M, K, threadblock_size), because M and K are Constexpr.
-        self._fma_cache: dict[tuple[int, int, int], Any] = {}
-        # MMA: keyed on (split_k, num_stages, tile_n), fully shape-dynamic.
-        self._mma_cache: dict[tuple[int, int, int], Any] = {}
+        self._compiled: dict[CompileKey, Any] = {}
         self._warmup_m: set[int] = set()
         self._warmup_registered = False
 
     def dispatch(self, m: int) -> CompileKey:
         if m <= 4 or self.k < 2048:
-            return self.CompileKey(backend="fma", M=m, K=self.k, threadblock_size=128)
-        split_k, num_stages, tile_n = _SM100F_TUNED_SPLITK[m]
-        return self.CompileKey(
-            backend="mma",
-            split_k=split_k,
-            num_stages=num_stages,
-            tile_n=tile_n,
-        )
+            return ("fma", m, self.k, 128)
+        return ("mma", *_SM100F_TUNED_SPLITK[m])
 
     @staticmethod
     def _fake_gemm_tensors(*, M, K, N, divisibility: int):
@@ -88,6 +71,7 @@ class HcDownSiluGemm:
 
         from ._hc_down_silu_mma import HcDownSiluMma
 
+        _, split_k, num_stages, tile_n = compile_key
         hidden_states, router_weight, output = self._fake_gemm_tensors(
             M=cute.sym_int(),
             K=cute.sym_int(),
@@ -95,13 +79,13 @@ class HcDownSiluGemm:
             divisibility=8,
         )
         gemm = HcDownSiluMma(
-            tile_n=compile_key.tile_n,
-            num_stages=compile_key.num_stages,
-            split_k=compile_key.split_k,
+            tile_n=tile_n,
+            num_stages=num_stages,
+            split_k=split_k,
             rank=self.rank,
             hc=self.hc,
         )
-        compiled = cute.compile(
+        self._compiled[compile_key] = cute.compile(
             gemm,
             hidden_states,
             router_weight,
@@ -109,14 +93,11 @@ class HcDownSiluGemm:
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
-        self._mma_cache[
-            (compile_key.split_k, compile_key.num_stages, compile_key.tile_n)
-        ] = compiled
         logger.debug(
             "Compiled hc_down_silu_mma: sk=%d ns=%d tile_n=%d",
-            compile_key.split_k,
-            compile_key.num_stages,
-            compile_key.tile_n,
+            split_k,
+            num_stages,
+            tile_n,
         )
 
     def _compile_fma(self, compile_key: CompileKey) -> None:
@@ -124,54 +105,45 @@ class HcDownSiluGemm:
 
         from ._hc_down_silu_fma import HcDownSiluFma
 
+        _, M, K, threadblock_size = compile_key
         N = cute.sym_int()
         hidden_states, router_weight, output = self._fake_gemm_tensors(
-            M=compile_key.M,
-            K=compile_key.K,
+            M=M,
+            K=K,
             N=N,
             divisibility=8,
         )
         gemm = HcDownSiluFma(
-            k=compile_key.K,
-            threadblock_size=compile_key.threadblock_size,
+            k=K,
+            threadblock_size=threadblock_size,
             prefetch_pdl_weights=self._prefetch_pdl_weights,
             rank=self.rank,
             hc=self.hc,
         )
-        compiled = cute.compile(
+        self._compiled[compile_key] = cute.compile(
             gemm,
             hidden_states,
             router_weight,
             output,
-            compile_key.M,
-            compile_key.K,
+            M,
+            K,
             1,  # runtime N placeholder for fake-tensor compile
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
-        self._fma_cache[
-            (compile_key.M, compile_key.K, compile_key.threadblock_size)
-        ] = compiled
         logger.debug(
             "Compiled hc_down_silu_fma: M=%d, K=%d, threadblock_size=%d",
-            compile_key.M,
-            compile_key.K,
-            compile_key.threadblock_size,
+            M,
+            K,
+            threadblock_size,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if compile_key.backend == "mma":
-            mma_cache_key = (
-                compile_key.split_k,
-                compile_key.num_stages,
-                compile_key.tile_n,
-            )
-            if mma_cache_key not in self._mma_cache:
-                self._compile_mma(compile_key)
+        if compile_key in self._compiled:
             return
-
-        fma_cache_key = (compile_key.M, compile_key.K, compile_key.threadblock_size)
-        if fma_cache_key not in self._fma_cache:
+        if compile_key[0] == "mma":
+            self._compile_mma(compile_key)
+        else:
             self._compile_fma(compile_key)
 
     def request_warmup(self, m_values: Iterable[int]) -> None:
@@ -220,18 +192,11 @@ class HcDownSiluGemm:
         w_gemm = router_weight[:n_compute]
         compile_key = self.dispatch(M)
         self.compile(compile_key)
-        if compile_key.backend == "mma":
-            kernel = self._mma_cache[
-                (compile_key.split_k, compile_key.num_stages, compile_key.tile_n)
-            ]
-        else:
-            kernel = self._fma_cache[
-                (compile_key.M, compile_key.K, compile_key.threadblock_size)
-            ]
+        kernel = self._compiled[compile_key]
 
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
         out_gemm = output[:, :n_compute]
-        if compile_key.backend == "mma":
+        if compile_key[0] == "mma":
             kernel(hidden_states, w_gemm, out_gemm, 1.0)
         else:
             kernel(hidden_states, w_gemm, out_gemm, n_compute)
