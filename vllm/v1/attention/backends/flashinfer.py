@@ -500,20 +500,11 @@ class FlashInferBackend(AttentionBackend):
             vllm_config.cache_config.get_resolved_kv_cache_layout()
             != KVCacheLayout.BLHNC
             or not isinstance(spec, AttentionSpec)
-        ):
-            return kernel_block_size
-        if (
-            spec.kv_quant_mode != KVQuantMode.NONE
+            or spec.kv_quant_mode != KVQuantMode.NONE
             or spec.tokens_per_state != 1
             or spec.head_size != spec.head_size_v
-            or spec.num_heads != spec.num_kv_heads
-            or spec.state_content_size_bytes
-            != 2 * spec.head_size * get_dtype_size(spec.dtype)
         ):
-            raise NotImplementedError(
-                "Packed FlashInfer re-paging requires one unquantized state "
-                "per token with equal K/V dimensions in a [B,H,M,2D] view."
-            )
+            return kernel_block_size
         transfer = vllm_config.kv_transfer_config
         if transfer is not None and any(
             transfer.has_connector(name)
@@ -974,31 +965,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _resolve_repage_geometry(
         self, block_table: torch.Tensor
     ) -> PackedKVPageGeometry | None:
-        if self.kv_cache_layout != KVCacheLayout.BLHNC or not self.layer_names:
+        if self.kv_cache_layout != KVCacheLayout.BLHNC:
             return None
         context = self.vllm_config.compilation_config.static_forward_context
         cache = context[self.layer_names[0]].kv_cache
         if cache is self._repage_source:
             return self._repage_geometry
         geometry = None
-        if cache.ndim == 4 and cache.shape[2] != self.page_size:
-            FlashInferBackend.get_kv_cache_view_block_size(
-                self.kv_cache_spec.copy_with_new_block_size(cache.shape[2]),
-                self.page_size,
-                self.vllm_config,
-            )
-            if (
-                cache.shape[1] != self.num_kv_heads
-                or cache.shape[3] != 2 * self.head_dim
-            ):
-                raise ValueError(
-                    "Packed FlashInfer cache does not match its layer spec."
-                )
+        if cache.shape[2] != self.page_size:
             geometry = PackedKVPageGeometry.from_cache(cache, self.page_size)
-            for name in self.layer_names[1:]:
-                other = context[name].kv_cache
-                if PackedKVPageGeometry.from_cache(other, self.page_size) != geometry:
-                    raise ValueError("FlashInfer metadata group has mixed KV geometry.")
             # The runner also pads the table's width for token alignment.
             width = block_table.shape[1]
             self._repage_block_tables = torch.empty(
@@ -1617,22 +1592,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             paged_kv_indices = None
 
-        if repage_geometry is not None and (
-            (num_prefills > 0 and prefill_use_trtllm)
-            or (num_decodes > 0 and decode_with_flashinfer_trtllm_api)
-        ):
-            assert self._repage_block_tables is not None
-            repage_seq_lens = seq_lens
-            if self.use_dcp:
-                assert common_attn_metadata.dcp_local_seq_lens is not None
-                repage_seq_lens = common_attn_metadata.dcp_local_seq_lens
-            block_table_tensor = repage_block_table(
-                block_table_tensor,
-                repage_seq_lens,
-                self._repage_block_tables,
-                repage_geometry,
-            )
-
         # Early-out for cascade attention
         if use_cascade:
             assert num_blocks_np is not None
@@ -1685,6 +1644,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return attn_metadata
 
         # Step 3: Handle prefill and decode pathways case by case
+        needs_trtllm_block_tables = (num_prefills > 0 and prefill_use_trtllm) or (
+            num_decodes > 0 and decode_with_flashinfer_trtllm_api
+        )
+        trtllm_seq_lens = seq_lens
+        if self.use_dcp and needs_trtllm_block_tables:
+            assert common_attn_metadata.dcp_local_seq_lens is not None
+            trtllm_seq_lens = common_attn_metadata.dcp_local_seq_lens
+
+        if repage_geometry is not None and needs_trtllm_block_tables:
+            assert self._repage_block_tables is not None
+            block_table_tensor = repage_block_table(
+                block_table_tensor,
+                trtllm_seq_lens,
+                self._repage_block_tables,
+                repage_geometry,
+            )
+
         ## PREFILL PATHWAY
         if num_prefills > 0:
             # Slices for shared prefill metadata
@@ -1843,12 +1819,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if num_decodes > 0:
             if decode_with_flashinfer_trtllm_api:
                 assert self.flashinfer_trtllm_api_decode_kernel is not None
-                seq_lens_decode = seq_lens[:num_decodes]
-                if self.use_dcp:
-                    assert common_attn_metadata.dcp_local_seq_lens is not None
-                    seq_lens_decode = common_attn_metadata.dcp_local_seq_lens[
-                        :num_decodes
-                    ]
+                seq_lens_decode = trtllm_seq_lens[:num_decodes]
                 q_len_per_req, q_cu_seq_lens, ragged_q_lens = (
                     self._compute_decode_query_lens(
                         qo_indptr, qo_indptr_cpu, num_decodes, num_decode_tokens

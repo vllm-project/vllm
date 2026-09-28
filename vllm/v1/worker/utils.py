@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
     create_kv_cache_views,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -442,27 +443,28 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
+        view_block_size = kernel_block_size
+        dense_page_size = math.prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
         if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
-
-        if (
+            view_block_size = spec.storage_block_size
+        elif (
             vllm_config is not None
             and kernel_block_size is not None
             and kernel_block_size != spec.block_size
-            and tensor.block_stride != spec.page_size_bytes
+            and tensor.block_stride != dense_page_size
         ):
             context = vllm_config.compilation_config.static_forward_context
-            view_sizes = {
+            view_block_sizes = {
                 context[name]
                 .get_attn_backend()
                 .get_kv_cache_view_block_size(spec, kernel_block_size, vllm_config)
                 for name in tensor.layers
             }
-            if len(view_sizes) != 1:
+            if len(view_block_sizes) != 1:
                 raise ValueError(
                     "Layers sharing a KV tensor require the same view size."
                 )
-            kernel_block_size = view_sizes.pop()
+            view_block_size = view_block_sizes.pop()
 
         views = create_kv_cache_views(
             buf,
@@ -470,7 +472,7 @@ def allocate_kv_cache(
             num_blocks,
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=view_block_size,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
