@@ -23,13 +23,31 @@ refine the initial configuration. Sweep tuning is an optional validation step.
 
 ## Getting Started
 
-Use `serve_with_recipe.sh` to generate the recipe configuration and start vLLM
-in one step:
+Use `serve_with_recipe.sh` to fetch the selected deployment from
+[vLLM Recipes](https://recipes.vllm.ai/), generate the configuration, and start
+vLLM in one step:
 
 ```bash
 tools/recipes/serve_with_recipe.sh \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6
+```
+
+The converter queries `recipes.vllm.ai` at runtime, so it can use the latest
+published recipe for the requested model and hardware without rebuilding the
+vLLM image.
+
+### Find the hardware name
+
+Open [vLLM Recipes](https://recipes.vllm.ai/), select the model, and choose the
+target in the **Hardware** picker. The selected page URL contains the hardware
+key. For example, `?hardware=xeon6` maps to `--hardware xeon6`.
+
+You can also run the converter without arguments for interactive model,
+hardware, and strategy discovery:
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py
 ```
 
 For `xeon6`, the script enables hardware detection automatically. Generated
