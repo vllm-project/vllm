@@ -1,7 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
+
 from vllm.triton_utils import tl, triton
+
+
+def td_compatible(t: torch.Tensor | None) -> bool:
+    """Whether ``t`` can back a 2D tensor descriptor: unit inner stride and a
+    16-byte aligned base and outer strides. ``None`` (unused operand) is fine.
+    """
+    if t is None:
+        return True
+    align = 16 // t.element_size()
+    return (
+        t.stride(-1) == 1
+        and t.data_ptr() % 16 == 0
+        and all(s % align == 0 for s in t.stride()[:-1])
+    )
 
 
 @triton.jit

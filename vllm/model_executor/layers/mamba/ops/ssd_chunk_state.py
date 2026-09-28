@@ -8,8 +8,9 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-from vllm.triton_utils import tl, triton
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp, td_compatible
+from vllm.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.triton_utils.allocation import set_triton_allocator
 
 from .mamba_ssm import softplus
 
@@ -190,7 +191,7 @@ def _chunk_cumsum_fwd_kernel(
             num_warps=2,
         ),
     ],
-    key=["hdim", "dstate", "chunk_size"],
+    key=["hdim", "dstate", "chunk_size", "USE_TD"],
 )
 @triton.jit
 def _chunk_state_fwd_kernel(
@@ -227,6 +228,9 @@ def _chunk_state_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    # Load/store the 2D tiles through tensor descriptors (Intel Xe 2D block
+    # reads); the pointer path below is dead-code-eliminated when set.
+    USE_TD: tl.constexpr = False,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
@@ -260,18 +264,40 @@ def _chunk_state_fwd_kernel(
 
     chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
+    if USE_TD:
+        # Descriptors zero-pad outside `shape`, which replaces the masks.
+        # x is stored [seqlen, hdim], so load it that way and transpose the tile.
+        x_desc = tl.make_tensor_descriptor(
+            x_ptr,
+            shape=[chunk_size_limit, hdim],
+            strides=[stride_x_seqlen, 1],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_M],
+        )
+        b_desc = tl.make_tensor_descriptor(
+            b_ptr,
+            shape=[chunk_size_limit, dstate],
+            strides=[stride_b_seqlen, 1],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+        )
+
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
-        x = tl.load(
-            x_ptrs,
-            mask=(offs_m[:, None] < hdim) & (offs_k[None, :] < chunk_size_limit - k),
-            other=0.0,
-        )
-        b = tl.load(
-            b_ptrs,
-            mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate),
-            other=0.0,
-        ).to(tl.float32)
+        if USE_TD:
+            x = tl.trans(x_desc.load([k, pid_m * BLOCK_SIZE_M]))
+            b = b_desc.load([k, pid_n * BLOCK_SIZE_N]).to(tl.float32)
+        else:
+            x = tl.load(
+                x_ptrs,
+                mask=(offs_m[:, None] < hdim)
+                & (offs_k[None, :] < chunk_size_limit - k),
+                other=0.0,
+            )
+            b = tl.load(
+                b_ptrs,
+                mask=(offs_k[:, None] < chunk_size_limit - k)
+                & (offs_n[None, :] < dstate),
+                other=0.0,
+            ).to(tl.float32)
         dA_cs_k = tl.load(
             dA_cumsum_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0
         ).to(tl.float32)
@@ -283,21 +309,33 @@ def _chunk_state_fwd_kernel(
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
 
-        x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
-        b_ptrs += BLOCK_SIZE_K * stride_b_seqlen
+        if not USE_TD:
+            # TD loads take absolute tile offsets instead.
+            x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
+            b_ptrs += BLOCK_SIZE_K * stride_b_seqlen
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
 
     states = acc.to(states_ptr.dtype.element_ty)
 
     states_ptr += pid_c * stride_states_chunk + pid_h * stride_states_head
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    states_ptrs = states_ptr + (
-        offs_m[:, None] * stride_states_hdim + offs_n[None, :] * stride_states_dstate
-    )
-    c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
-    tl.store(states_ptrs, states, mask=c_mask)
+    if USE_TD:
+        states_desc = tl.make_tensor_descriptor(
+            states_ptr,
+            shape=[hdim, dstate],
+            strides=[stride_states_hdim, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        )
+        states_desc.store([pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N], states)
+    else:
+        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        states_ptrs = states_ptr + (
+            offs_m[:, None] * stride_states_hdim
+            + offs_n[None, :] * stride_states_dstate
+        )
+        c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
+        tl.store(states_ptrs, states, mask=c_mask)
 
 
 def _chunk_cumsum_fwd(
@@ -369,6 +407,11 @@ def _chunk_state_fwd(
             (nchunks, nheads, headdim, dstate), device=x.device, dtype=states_dtype
         )
 
+    # TD tiles need a unit inner stride and 16-byte aligned bases/row strides.
+    use_td = use_tensor_descriptor() and all(td_compatible(t) for t in (x, B, states))
+    if use_td:
+        set_triton_allocator(x.device)
+
     grid = lambda META: (
         triton.cdiv(headdim, META["BLOCK_SIZE_M"])
         * triton.cdiv(dstate, META["BLOCK_SIZE_N"]),
@@ -403,5 +446,6 @@ def _chunk_state_fwd(
             stride_dA_cs_head=dA_cumsum.stride(0),
             stride_dA_cs_chunk=dA_cumsum.stride(1),
             stride_dA_cs_csize=dA_cumsum.stride(2),
+            USE_TD=use_td,
         )
     return states
