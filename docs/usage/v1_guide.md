@@ -77,9 +77,20 @@ For each item, its support in vLLM V1 falls into one of the following states:
     and decode phases.
 
 The V1 scheduler supports multiple scheduling policies, including First-Come,
-First-Served (FCFS) and priority-based scheduling (where requests are processed
-based on assigned priority, with FCFS as a tie-breaker), configurable via the
-`--scheduling-policy` argument.
+First-Served (FCFS), priority-based scheduling (where requests are processed
+based on assigned priority, with FCFS as a tie-breaker), and `residual_sjf`.
+`residual_sjf` is for decoder-only text generation: it orders waiting requests
+by their remaining local prefill work after local prefix-cache hits. A
+request that waits for `--residual-sjf-max-wait-ms` (10,000 by default) is
+promoted in FCFS order. It does not query remote KV connectors while ranking
+candidates, so remote cache-transfer cost is not part of this policy. The exact
+dynamic ranking scans current waiting candidates on every admission; measure
+scheduler CPU overhead separately from model throughput for deep queues.
+
+The max-wait value controls the mean/tail tradeoff: smaller values behave
+closer to FCFS (flatter tail), larger values improve mean TTFT/E2E at the
+cost of P95/P99. Start at 1/2 to 1/3 of the target P95 wait and adjust
+after load testing against the P99 budget.
 
 ### Hardware
 
