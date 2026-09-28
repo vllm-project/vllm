@@ -37,6 +37,9 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    # Source-dropping module transforms consume staged checkpoint tensors.
+    reload_restore_pending: bool = False
+
     # Completion waits until child/deferred layers also have stable storage.
     post_weights_reload_pending: bool = False
 

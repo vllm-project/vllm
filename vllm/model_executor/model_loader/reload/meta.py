@@ -109,7 +109,7 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerMetadata:
         {
             name: (
                 None
-                if buffer is None
+                if buffer is None or name in getattr(layer, "_vllm_derived_buffers", ())
                 else sanitize_layer_refs(to_meta_tensor(buffer), layer)
             )
             for name, buffer in layer._buffers.items()
@@ -148,6 +148,12 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
             if buffer is not None:
                 buffer = restore_layer_refs(buffer, layer)
             layer.register_buffer(name, buffer, persistent=name not in non_persistent)
+
+    # Some derived buffers are declared during PWAL or a runtime class swap,
+    # after constructor metadata was captured. Keep their schema on reload.
+    for name in getattr(layer, "_vllm_derived_buffers", ()):
+        if name not in layer._buffers:
+            layer.register_buffer(name, None, persistent=False)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):

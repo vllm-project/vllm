@@ -105,6 +105,10 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
+        prepare_for_reload = getattr(layer, "prepare_for_reload", None)
+        if prepare_for_reload is not None:
+            prepare_for_reload()
+
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
@@ -244,7 +248,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     for layer in model.modules():
         info = get_layerwise_info(layer)
         if not info.can_load():
-            info.reset()
+            if not info.reload_restore_pending:
+                info.reset()
             continue
 
         # Deferred attention-like layers are processed after all other layers
@@ -264,6 +269,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             # buffers on such layers are restored rather than left deleted.
             if info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
+            _copy_derived_buffers(layer, info)
             _place_kernel_tensors(layer, info)
             info.post_weights_reload_pending = True
 
@@ -275,7 +281,10 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
-        info.reset()
+        if not info.reload_restore_pending:
+            info.reset()
+
+    _finish_staged_reload_transforms(model)
 
     # Process attention layers after all other layers are done
     for layer, info in deferred_attn:
@@ -301,6 +310,8 @@ def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
     is_reload = info.kernel_tensors is not None
+    if is_reload:
+        _copy_derived_buffers(layer, info)
     if info.kernel_tensors is None:
         if info.load_numel > 0:
             _layerwise_process(layer, info)
@@ -366,6 +377,15 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
 
+    if info.kernel_tensors is not None and getattr(
+        layer, "_vllm_defer_weights_reload", False
+    ):
+        # Keep checkpoint tensors alive until their owning module's transform.
+        # That transform owns any PWAL needed before stable storage returns.
+        info.reload_restore_pending = True
+        info.load_numel_total = None
+        return
+
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
@@ -412,13 +432,10 @@ def _copy_and_restore_kernel_tensors(
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
+    _copy_derived_buffers(layer, info)
     derived_names = getattr(layer, "_vllm_derived_buffers", ())
     for name, buffer in buffers.items():
         if name in derived_names:
-            temporary = layer._buffers.get(name)
-            if temporary is not None:
-                copy_derived_buffer(buffer, temporary, name)
-            # A secondary cache may instead be refreshed by the completion hook.
             continue
         if name not in layer._buffers:
             continue
@@ -429,6 +446,33 @@ def _copy_and_restore_kernel_tensors(
     _place_kernel_tensors(layer, info)
     if run_post_weights_reload:
         info.post_weights_reload_pending = True
+
+
+def _copy_derived_buffers(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    assert info.kernel_tensors is not None
+    for name, stable in info.kernel_tensors[1].items():
+        if name in getattr(layer, "_vllm_derived_buffers", ()):
+            temporary = layer._buffers.get(name)
+            if temporary is not None and not temporary.is_meta:
+                copy_derived_buffer(stable, temporary, name)
+
+
+def _finish_staged_reload_transforms(model: torch.nn.Module) -> None:
+    """Produce runtime values before discarding opted-in checkpoint sources."""
+    modules = list(model.modules())
+    for layer in reversed(modules):
+        hook = getattr(layer, "process_weights_for_reload", None)
+        if hook is not None and any(
+            get_layerwise_info(child).reload_restore_pending
+            for child in layer.modules()
+        ):
+            hook()
+
+    for layer in reversed(modules):
+        info = get_layerwise_info(layer)
+        if info.reload_restore_pending:
+            _copy_and_restore_kernel_tensors(layer, info)
+            info.reset()
 
 
 def _run_post_weights_reload(layer: torch.nn.Module) -> None:

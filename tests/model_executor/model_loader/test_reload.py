@@ -1418,3 +1418,55 @@ def test_parent_completion_waits_for_unloaded_child_storage():
     assert model.calls == 1
     assert model.mirror.data_ptr() == pointer
     assert torch.equal(model.mirror, model.child.weight)
+
+
+def test_staged_parent_transform_consumes_sources_before_stable_restore():
+    """Source modules survive repeated packing without retaining raw weights."""
+
+    class Parent(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.source = torch.nn.Linear(2, 2, bias=False)
+            self.source._vllm_defer_weights_reload = True
+            register_derived_buffer(self, "packed")
+
+        def process_weights_for_reload(self):
+            set_derived_buffer(self, "packed", self.source.weight.detach().square())
+            self.source.weight = torch.nn.Parameter(torch.empty(0))
+
+    model = Parent()
+    record_metadata_for_reloading(model)
+    first = torch.arange(4, dtype=torch.float32).view(2, 2)
+    with torch.no_grad():
+        model.source.weight.copy_(first)
+    model.process_weights_for_reload()
+    stable = model.packed
+    pointer = stable.data_ptr()
+    for value in (first + 5, first):
+        initialize_layerwise_reload(model)
+        model.source.weight.weight_loader(model.source.weight, value)
+        assert model.source.weight.numel() == 4
+        finalize_layerwise_reload(model, Mock(spec=ModelConfig))
+        assert model.source.weight.numel() == 0
+        assert model.packed is stable
+        assert stable.data_ptr() == pointer
+        assert torch.equal(stable, value.square())
+
+
+def test_late_derived_schema_and_child_pwal_value_survive_attention_restore():
+    class Attention(_ReloadableAttentionLayer):
+        def process_weights_after_loading(self, act_dtype):
+            pass
+
+    layer = Attention()
+    model = torch.nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+    register_derived_buffer(layer, "packed")
+    stable = set_derived_buffer(layer, "packed", torch.ones(2))
+    initialize_layerwise_reload(model)
+    assert layer.packed is None
+    # A child's PWAL may publish this while the attention parent is deferred.
+    set_derived_buffer(layer, "packed", torch.full((2,), 7.0))
+    finalize_layerwise_reload(model, Mock(spec=ModelConfig))
+    assert layer.packed is stable
+    assert torch.equal(stable, torch.full((2,), 7.0))
