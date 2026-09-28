@@ -270,6 +270,7 @@ def _make_fake_awq_layer_and_method(
         auto_awq_module.AutoAWQLinearMethod
     )
     method.quant_config = _FakeQuantConfig()
+    method.process_weights_after_loading(layer)
     return layer, method
 
 

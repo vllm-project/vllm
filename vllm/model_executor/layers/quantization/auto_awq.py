@@ -896,10 +896,15 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         k = layer.qweight.shape[0]
         n = layer.qweight.shape[1] * self.quant_config.pack_factor
         num_groups = layer.scales.shape[0]
+        # Cache this here (rather than recomputing in apply()) since it queries
+        # current_platform's device capability, which torch.compile's Dynamo
+        # tracer cannot handle inside the model's compiled forward path.
+        layer.awq_bi_gemm_tuned_for_shape = (
+            AWQ_FUSED_FP32_SUPPORTED and awq_fused_gemm_is_tuned_for_shape(n, k)
+        )
         if (
             envs.VLLM_BATCH_INVARIANT
-            and AWQ_FUSED_FP32_SUPPORTED
-            and awq_fused_gemm_is_tuned_for_shape(n, k)
+            and layer.awq_bi_gemm_tuned_for_shape
             and num_groups > 0
             and k % num_groups == 0
             and k // num_groups == 128
@@ -927,10 +932,7 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         # for Triton override
         use_fused_bi_gemm = (
             envs.VLLM_BATCH_INVARIANT
-            and AWQ_FUSED_FP32_SUPPORTED
-            and awq_fused_gemm_is_tuned_for_shape(
-                qweight.shape[1] * pack_factor, qweight.shape[0]
-            )
+            and layer.awq_bi_gemm_tuned_for_shape
             and reshaped_x.dtype == torch.float16
             and scales.dtype == torch.float16
             and qweight.dtype == torch.int32

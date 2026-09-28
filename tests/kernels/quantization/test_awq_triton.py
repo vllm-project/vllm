@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.awq_triton import (
+    _AWQ_GEMM_FUSED_FP32_KERNEL,
     _HOPPER_TUNED_TILES,
     AWQ_FUSED_FP32_SUPPORTED,
     AWQ_TRITON_SUPPORTED_GROUP_SIZES,
@@ -234,6 +235,19 @@ def test_awq_gemm_fused_fp32(M, N, K):
     torch.testing.assert_close(output_fused, output_ref, atol=1e-1, rtol=1e-1)
 
 
+@pytest.mark.parametrize("N,K", [(64, 256), *_HOPPER_TUNED_TILES.keys()])
+def test_awq_gemm_fused_fp32_warmup_inputs_dispatch_to_same_key(N, K):
+    """__call__ re-dispatches from the warmup input's M, so each warmup key's
+    inputs must dispatch back to that key or a different tile gets compiled.
+    (64, 256) is untuned on every arch, so it covers both SM89 fallback tiles.
+    """
+    kernel = _AWQ_GEMM_FUSED_FP32_KERNEL
+    keys = kernel.get_warmup_keys(N=N, K=K, GROUP_SIZE=128)
+    for key in keys:
+        m = kernel.warmup_inputs(key)["input"].shape[0]
+        assert kernel.dispatch(m=m, N=N, K=K, GROUP_SIZE=128) == key
+
+
 @fused_fp32_skip
 def test_awq_gemm_fused_fp32_rejects_non_exact_group_count():
     # K=16416, 128 groups: 16416 // 128 == 128 (integer-division truncation)
@@ -306,8 +320,10 @@ def test_awq_gemm_fused_fp32_hopper_tuned_shapes(N, K, M):
     assert not torch.any(torch.isinf(output_fused))
     assert not torch.any(torch.isnan(output_fused))
 
+    # An FP16 torch.matmul reference is itself outside tolerance at these K
+    # when cuBLAS uses reduced-precision FP16 reduction (seen on SM120).
     dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
-    output_ref = torch.matmul(input, dequantized_weights)
+    output_ref = torch.matmul(input.float(), dequantized_weights.float()).half()
     torch.testing.assert_close(output_fused, output_ref, atol=1e-1, rtol=1e-1)
 
 

@@ -25,9 +25,8 @@ AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
 # dequant+matmul path across M in {1, 32, 129, 256} (see PR #57047 discussion
 # of the SM89-tuned heuristic regressing on Hopper for smaller-N shapes).
 # Keyed by the exact (N, K) weight shape -- not a generalized N/K threshold,
-# since only these shapes have been measured. Unlisted (N, K) on SM90+ fall
-# back to the SM89-tuned heuristic below, which is not known to be optimal
-# there but has not regressed on any measured shape.
+# since only these shapes have been measured. Unlisted (N, K) use the legacy
+# path (see awq_fused_gemm_is_tuned_for_shape).
 _HOPPER_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
     # (N, K): (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, num_stages)
     (2560, 4096): (128, 64, 64, 4),  # o_proj
@@ -36,22 +35,38 @@ _HOPPER_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
     (19456, 2560): (128, 128, 64, 3),  # gate_up_proj
 }
 
+# Measured on RTX PRO 6000 Blackwell (SM120). Only shapes that beat the legacy
+# path for M <= 256 while staying within ~12% of it at M = 4096 are listed;
+# o_proj/down_proj had no such tile and stay on the legacy path.
+_SM120_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
+    (6144, 2560): (128, 128, 32, 3),  # qkv_proj
+    (19456, 2560): (128, 128, 32, 3),  # gate_up_proj
+}
+
+# Tuned tiles are only valid on the exact architecture they were measured on.
+_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = (
+    {}
+    if not current_platform.is_cuda()
+    else _HOPPER_TUNED_TILES
+    if current_platform.is_device_capability(90)
+    else _SM120_TUNED_TILES
+    if current_platform.is_device_capability(120)
+    else {}
+)
+
 
 def awq_fused_gemm_is_tuned_for_shape(n: int, k: int) -> bool:
     """True iff the fused kernel is known to beat the legacy dequant+matmul
     path for this device and (N, K) weight shape.
 
     SM89 always dispatches: the existing (32,32)/(128,64) heuristic was
-    tuned and proven there for the shapes already shipping. Hopper+ only
-    dispatches for the exact shapes measured in ``_HOPPER_TUNED_TILES`` --
-    not a generalized N/K threshold, since only those shapes have real H100
-    measurements. An unlisted shape on Hopper+ falls back to the legacy path.
+    tuned and proven there for the shapes already shipping. Other
+    architectures only dispatch for the exact (N, K) shapes measured on that
+    exact architecture (``_TUNED_TILES``); anything else uses the legacy path.
     """
     if current_platform.is_device_capability(89):
         return True
-    if current_platform.has_device_capability(90):
-        return (n, k) in _HOPPER_TUNED_TILES
-    return False
+    return (n, k) in _TUNED_TILES
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -163,8 +178,8 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
         # The warmup tracer only supports a single expression-shaped body
         # (conditional expressions, no if-statements/tuple-unpacking), so
         # the Hopper-tuned-vs-fallback choice is expressed with ternaries.
-        tuned_raw = _HOPPER_TUNED_TILES.get((N, K))
-        use_tuned = tuned_raw is not None and current_platform.has_device_capability(90)
+        tuned_raw = _TUNED_TILES.get((N, K))
+        use_tuned = tuned_raw is not None
         tuned = tuned_raw if tuned_raw is not None else (0, 0, 0, 0)
         block_m = tuned[0] if use_tuned else (32 if m <= 128 else 128)
         block_n = tuned[1] if use_tuned else (32 if m <= 128 else 64)
@@ -192,9 +207,10 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        # M is do_not_specialize'd, so any positive value produces a valid
-        # warmup launch for this compile key.
-        m = max(compile_key.BLOCK_SIZE_M, 1)
+        # M is do_not_specialize'd, but __call__ re-dispatches from the input
+        # shape; one past BLOCK_SIZE_M lands on the same side of the SM89
+        # fallback's M <= 128 threshold as the key being warmed.
+        m = compile_key.BLOCK_SIZE_M + 1
         num_groups = compile_key.K // compile_key.GROUP_SIZE
         return dict(
             input=TritonWarmupTensor(torch.float16, shape=(m, compile_key.K)),
