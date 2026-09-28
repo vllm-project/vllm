@@ -327,6 +327,25 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
+        # Note(arpera):
+        # Xgrammar lacks support of multi-branch allOf
+        # For instance, this schema:
+        # {
+        #   "allOf": [
+        #     { "type": "string" },
+        #     { "enum": ["yes", "no"] }
+        #   ]
+        # }
+        # would accept any kind of json, such as
+        # `"maybe"`, `""`, `42`, `{}`, `[]`, `{"a": 1}`, etc.
+        # which is NOT what is expected.
+        # Reported this issue to xgrammar team to track progress on resolving:
+        # https://github.com/mlc-ai/xgrammar/issues/937
+        if "allOf" in obj:
+            allof = obj["allOf"]
+            if not isinstance(allof, list) or len(allof) != 1:
+                return True
+
         # Recursively check all nested objects and arrays
         for value in obj.values():
             if isinstance(value, dict):
