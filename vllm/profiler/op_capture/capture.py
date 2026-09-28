@@ -65,6 +65,7 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
+    mamba_get_block_table_tensor,
     resolve_kv_cache_layout,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -74,6 +75,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
@@ -609,7 +611,9 @@ class ForwardHarness:
         for group_id, groups in enumerate(self.attn_groups):
             common = self._common_attn_metadata(self.kernel_block_sizes[group_id])
             for group in groups:
-                built = group.get_metadata_builder().build(0, common)
+                builder = group.get_metadata_builder()
+                self._set_aligned_state_indices(builder, group.kv_cache_spec, common)
+                built = builder.build(0, common)
                 metadata.update((name, built) for name in group.layer_names)
                 self._slot_mappings.update(
                     (name, common.slot_mapping) for name in group.layer_names
@@ -626,6 +630,41 @@ class ForwardHarness:
                 built = group.get_metadata_builder().build(0, common)
                 metadata.update((name, built) for name in group.layer_names)
         return metadata
+
+    def _set_aligned_state_indices(
+        self,
+        builder: Any,
+        kv_cache_spec: KVCacheSpec,
+        common: CommonAttentionMetadata,
+    ) -> None:
+        """Hand a builder its aligned Mamba state indices, as Model Runner V2 does.
+
+        Raises:
+            NotImplementedError: If the builder takes them on a platform whose
+                runner cannot compute them.
+
+        """
+        config = self.vllm_config
+        if not (
+            config.use_v2_model_runner
+            and config.cache_config.mamba_cache_mode == "align"
+            and isinstance(kv_cache_spec, MambaSpec)
+            and hasattr(builder, "mamba_aligned_state_indices")
+        ):
+            return
+        if not current_platform.is_cuda_alike():
+            raise NotImplementedError(
+                f"{type(builder).__name__} takes aligned Mamba state indices, "
+                "which Model Runner V2 computes with a CUDA-only kernel "
+                "(MambaSpecDecodeGPUContext.compute_aligned_state_indices), so "
+                f"the {current_platform.device_name} runner cannot build its "
+                "metadata. Under VLLM_USE_V2_MODEL_RUNNER=0 the builder computes "
+                "them itself."
+            )
+        # The rows the runner's kernel gathers, per request.
+        builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            common.block_table_tensor, common.seq_lens, kv_cache_spec, "align"
+        )
 
     def _record_triton_launch(
         self, name: str, args: tuple[Any, ...], kwargs: dict[str, Any]

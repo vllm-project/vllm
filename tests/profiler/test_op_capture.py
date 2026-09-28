@@ -32,9 +32,11 @@ from vllm.profiler.op_capture import (
 from vllm.profiler.op_capture import recorder as recorder_module
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import DIRECT_REGISTERED_OPS, direct_register_custom_op
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadataBuilder
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 VL_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
+MAMBA_MODEL = "state-spaces/mamba-130m-hf"
 LAYER_PREFIX = "model.layers."
 ATTENTION_OP = "vllm::unified_attention_with_output"
 
@@ -315,6 +317,38 @@ def test_keep_going_reports_where_the_forward_pass_stopped(monkeypatch):
     assert not capture.missing_kernels
 
 
+def test_aligned_mamba_state_indices_follow_model_runner_v2(monkeypatch):
+    """A builder that takes precomputed aligned state indices gets them as the
+    V2 runner computes them, or the platform's runner cannot build it."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(
+        Mamba1AttentionMetadataBuilder,
+        "mamba_aligned_state_indices",
+        None,
+        raising=False,
+    )
+    engine_args = EngineArgs(
+        model=MAMBA_MODEL,
+        max_model_len=1024,
+        enable_prefix_caching=True,
+        mamba_cache_mode="align",
+    )
+    harness = ForwardHarness(
+        MAMBA_MODEL, batch=BatchSpec(num_reqs=2, num_tokens=8), engine_args=engine_args
+    )
+    if not current_platform.is_cuda_alike():
+        with pytest.raises(NotImplementedError, match="CUDA-only kernel"), harness:
+            pass
+        return
+
+    with harness:
+        (group,) = [group for groups in harness.attn_groups for group in groups]
+        indices = group.get_metadata_builder().mamba_aligned_state_indices
+    num_state_slots = 1 + group.kv_cache_spec.num_speculative_blocks
+    assert indices.shape == (2, num_state_slots)
+    assert indices.dtype == torch.int32
+
+
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU model runner")
 def test_capture_applies_the_model_runner_torch_cuda_aliases(monkeypatch):
     """Model code calls `torch.cuda` on XPU, as the real model runner allows."""
@@ -436,7 +470,7 @@ def test_meta_capture_matches_hardware():
         ("BAAI/bge-small-en-v1.5", BatchSpec(num_reqs=2, num_tokens=16), 512),
         # Mamba decode reads the prefill flags and the SSU backend.
         (
-            "state-spaces/mamba-130m-hf",
+            MAMBA_MODEL,
             BatchSpec(num_reqs=4, num_tokens=4, num_computed_tokens=16),
             1024,
         ),
