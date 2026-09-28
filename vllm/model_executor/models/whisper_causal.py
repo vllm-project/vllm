@@ -42,15 +42,13 @@ from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
 
 from .utils import make_layers
 
-AiterFlashAttentionBackend: type[AttentionBackend] | None
+AiterFlashAttentionBackend: type[AttentionBackend] | None = None
 try:
-    from vllm.v1.attention.backends.rocm_aiter_fa import (
-        AiterFlashAttentionBackend as _AiterFlashAttentionBackend,
-    )
+    from vllm.v1.attention.backends import rocm_aiter_fa
 
-    AiterFlashAttentionBackend = _AiterFlashAttentionBackend
+    AiterFlashAttentionBackend = rocm_aiter_fa.AiterFlashAttentionBackend
 except ImportError:
-    AiterFlashAttentionBackend = None
+    pass
 
 logger = logging.getLogger(__name__)
 
