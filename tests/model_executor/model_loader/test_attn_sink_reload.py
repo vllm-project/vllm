@@ -175,7 +175,7 @@ def test_padded_sink_deferred_attention_finalize(monkeypatch, tp_rank: int):
     layer = _SinkLayer()
     layer.load_weights(_checkpoint_a(), head_start, head_end)
     kernel_ptr = layer.sink.data_ptr()
-    post_load_dtypes = []
+    post_load_dtypes: list[torch.dtype] = []
     layer.process_weights_after_loading = post_load_dtypes.append
     monkeypatch.setattr(
         layerwise, "is_deferred_attention_layer", lambda candidate: candidate is layer
@@ -326,3 +326,35 @@ def test_load_padded_attn_sink_rejects_head_range_wider_than_param():
 
     with pytest.raises(ValueError, match="does not fit the runtime sink parameter"):
         load_padded_attn_sink(param, _checkpoint(), 0, LOCAL_HEADS)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_padded_sink_live_update_reaches_kernel_tensor_on_cuda(tp_rank: int):
+    """A live update must survive the reload when the sink lives on a device.
+
+    The reload moves real storage: the parameter is restored onto the meta
+    device and materialized again before the kernel tensor is refreshed. On CPU
+    that is incidental; on CUDA the update has to traverse a device boundary to
+    reach the tensor the attention kernel reads.
+    """
+    device = torch.device("cuda")
+    head_start = LOCAL_HEADS * tp_rank
+    head_end = head_start + LOCAL_HEADS
+
+    def to_device(weights):
+        return [(name, weight.to(device)) for name, weight in weights]
+
+    layer = _SinkLayer().to(device)
+    layer.load_weights(to_device(_checkpoint_a()), head_start, head_end)
+    kernel_ptr = layer.sink.data_ptr()
+
+    _live_reload(layer, head_start, head_end, to_device(_checkpoint_b()))
+
+    assert layer.sink.data_ptr() == kernel_ptr
+    assert layer.sink.is_cuda
+    assert torch.equal(
+        layer.sink.data[:LOCAL_HEADS],
+        _expected_local(_checkpoint_b(), head_start, head_end).to(device),
+    )
+    assert torch.isneginf(layer.sink.data[LOCAL_HEADS:]).all()
