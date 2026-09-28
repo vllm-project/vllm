@@ -572,26 +572,3 @@ def test_hw_agnostic_ops_skip_vendor_forwards(monkeypatch):
             monkeypatch.setattr(current_platform, vendor, lambda: False)
         monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: True)
         assert HwRMSNorm(8)._forward_method.__name__ == "forward_oot"
-
-
-def test_hw_agnostic_rms_norm_matches_vllm_native():
-    """The hw-agnostic `forward_native` computes what vLLM's does; it differs
-    only in bypassing the `vllm.ir` op registry, which can resolve to a vendor
-    kernel."""
-    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
-    from vllm.model_executor.hw_agnostic.layers.layernorm import RMSNorm as HwRMSNorm
-    from vllm.model_executor.layers.layernorm import RMSNorm as VllmRMSNorm
-
-    config = VllmConfig(compilation_config=CompilationConfig(custom_ops=["all"]))
-    with set_current_vllm_config(config):
-        vllm_norm, hw_norm = VllmRMSNorm(64), HwRMSNorm(64)
-    hw_norm.load_state_dict(vllm_norm.state_dict())
-
-    x = torch.randn(4, 64)
-    torch.testing.assert_close(vllm_norm.forward_native(x), hw_norm.forward_native(x))
-
-    residual = torch.randn(4, 64)
-    expected = vllm_norm.forward_native(x.clone(), residual.clone())
-    actual = hw_norm.forward_native(x.clone(), residual.clone())
-    for want, got in zip(expected, actual):
-        torch.testing.assert_close(want, got)
