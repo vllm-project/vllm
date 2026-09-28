@@ -50,7 +50,9 @@ curl -X POST $URL/resume
   each one.
 - Buffers, draft models and LoRA adapters are not checked.
 - CPU backends that repack linear weights hide them from the checker.
-- The engine must be awake: sleep level 2 discards the weight storage.
+- MoE weights padded beyond the checkpoint shape (DeepEP hidden size, MXFP4)
+  keep uninitialized padding, so `compare` reports them as mismatches.
+- The engine must be awake: sleep levels 1 and 2 release the weight memory.
 - `--offload-backend prefetch` is not supported: parameters point at staging
   buffers, not the offloaded weights.
 - Hashing copies every weight to CPU, so keep it off latency-sensitive paths.
