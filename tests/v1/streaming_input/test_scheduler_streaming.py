@@ -707,10 +707,15 @@ def test_session_resumes_after_stop_while_preempted(chunk_queued_before_stop):
     scheduler.running.remove(session)
     scheduler._preempt_request(session, timestamp=0.0)
     scheduler.update_from_output(in_flight, _model_output("session", [STOP_TOKEN]))
+    # The parked variant holds a streaming-input slot until the next chunk.
+    assert scheduler.num_waiting_for_streaming_input == (
+        0 if chunk_queued_before_stop else 1
+    )
     if not chunk_queued_before_stop:
         scheduler.add_request(next_chunk)
     output = scheduler.schedule()
 
+    assert scheduler.num_waiting_for_streaming_input == 0
     expected = list(range(10)) + [10, 20, 21]
     assert list(session.all_token_ids) == expected
     assert list(session.prompt_token_ids) == expected
