@@ -1,0 +1,2 @@
+Qwen3-0.6B-FP8.yaml
+Qwen3-1.7B-MXFP4.yaml

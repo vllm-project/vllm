@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -648,23 +649,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
 
-    def _enable_multi_stream_overlap(self) -> bool:
-        """ROCm multi-stream gates: streams and capture region.
-
-        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
-        the attention inputs on the owning stream. Forking side streams
-        there would rely on runtime HIP event sync, which is unreliable in
-        this overlap on ROCm (event waits can hang), so multi-stream only
-        runs where the fork/join becomes static graph edges: inside capture,
-        or with non-dict metadata (full cudagraph or the profile run), which
-        has no eager breaks. Covers both the HCA and CSA forks.
-        """
-        attn_metadata = get_forward_context().attn_metadata
-        return self.aux_stream_list is not None and (
-            torch.cuda.is_current_stream_capturing()
-            or not isinstance(attn_metadata, dict)
-        )
-
     def _run_sequential_pipeline(
         self,
         hidden_states: torch.Tensor,
@@ -708,7 +692,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             device=hidden_states.device,
         )
 
-        if self._enable_multi_stream_overlap():
+        if current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
+        ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
             self._prepare_and_attn_fn(
@@ -768,7 +754,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         # Re-check: forward's gate ran inside a captured segment that
         # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not self._enable_multi_stream_overlap():
+        if not current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
+        ):
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
@@ -1175,6 +1163,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.n_local_groups,
                 self.o_lora_rank,
                 self.wo_a,
+                inverse_rope=False,
             )
             zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
@@ -1245,9 +1234,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
+        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
+        # the rotation into the decode reduce would apply it twice. Only the
+        # BF16 einsum path hands its rotation off to the decode.
+        fuse_inv_rope = self._wo_a_fp8_weight is None
+        rotated = 0
         if num_decodes > 0:
-            self._forward_decode(
+            rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
+                positions=positions[:num_decode_tokens] if fuse_inv_rope else None,
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,
@@ -1261,17 +1256,31 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     and rocm_metadata.for_cudagraph_capture
                 ),
             )
+        if fuse_inv_rope:
+            # Only the decode reduce rotates its own rows, and only the leading
+            # `rotated` of them; prefill rows and any decode path that did not
+            # fuse still owe the standalone pass. Settle that here rather than
+            # in _o_proj: the split is batch-dependent and _o_proj runs
+            # compiled, where such a value freezes at its trace-time value.
+            rocm_inverse_rope_rows_(
+                output[rotated:, : self.n_local_heads, :],
+                positions[rotated:],
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+            )
 
     def _forward_decode(
         self,
         q: torch.Tensor,
+        positions: torch.Tensor | None,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
         adaptive_splits: bool,
-    ) -> None:
+    ) -> int:
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -1303,7 +1312,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        rocm_sparse_attn_decode(
+        return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
@@ -1323,6 +1332,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             rope_head_dim=self.rope_head_dim,
             output=output,
             adaptive_splits=adaptive_splits,
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
