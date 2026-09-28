@@ -105,6 +105,10 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
+        quant_method = getattr(layer, "quant_method", None)
+        prepare_quant = getattr(quant_method, "prepare_for_reload", None)
+        if prepare_quant is not None:
+            prepare_quant(layer)
         prepare_for_reload = getattr(layer, "prepare_for_reload", None)
         if prepare_for_reload is not None:
             prepare_for_reload()

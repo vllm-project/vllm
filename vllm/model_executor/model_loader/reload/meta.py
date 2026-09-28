@@ -116,6 +116,7 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerMetadata:
             if name not in SKIP_TENSORS
             and (
                 buffer is None
+                or name in getattr(layer, "_vllm_derived_buffers", ())
                 or not _is_non_persistent_parameter_alias_buffer(
                     layer, name, buffer, parameter_storage_ptrs
                 )
