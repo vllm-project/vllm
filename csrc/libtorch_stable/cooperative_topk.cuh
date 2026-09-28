@@ -82,10 +82,10 @@ enum class OverflowProbeStatus : uint32_t {
   kFirstDigitReady = 2,
 };
 
-// Bounds one coarse FP16 bin in the monotonic ordered-FP32 key space.
-struct CoarseBinRange {
-  uint32_t base_key;
-  bool finite;
+struct OverflowProbeState {
+  OverflowProbeStatus status;
+  uint32_t pivot_or_prefix;
+  uint32_t remaining;
 };
 
 struct OverflowProbeSummary {
@@ -107,19 +107,6 @@ __device__ __forceinline__ uint32_t ordered_fp32_from_fp16_key(
 __device__ __forceinline__ uint32_t ordered_fp32_from_bf16_key(
     uint32_t key) {
   return (key << 16) | ((key & 0x8000u) ? 0u : 0xFFFFu);
-}
-
-__device__ __forceinline__ CoarseBinRange coarse_bin_range(
-    uint32_t coarse_bin) {
-  const uint16_t lower_key =
-      static_cast<uint16_t>(coarse_bin << (16 - kHistBits));
-  const uint16_t lower_bits =
-      (lower_key & 0x8000u)
-          ? static_cast<uint16_t>(lower_key & 0x7FFFu)
-          : static_cast<uint16_t>(~lower_key);
-  const uint32_t ordered_lower = ordered_fp32_from_fp16_key(lower_key);
-  return {.base_key = ordered_lower > 8192 ? ordered_lower - 8192 : 0,
-          .finite = (lower_bits & 0x7C00u) != 0x7C00u};
 }
 
 __device__ __forceinline__ void mbarrier_init(uint64_t* a, uint32_t n) {
@@ -487,7 +474,7 @@ __device__ __noinline__ OverflowProbeStatus probe_reduced_precision_overflow(
   __shared__ OverflowProbeSummary summary;
   auto* exact_histogram = reinterpret_cast<uint32_t*>(scratch);
 
-  const auto range = coarse_bin_range(coarse_bin);
+  const auto range = hist4096::coarse_refine_range<kHistBits>(coarse_bin);
 
   for (uint32_t bin = tx; bin < kBf16Bins;
        bin += hist4096::kBlockSize) {
@@ -668,7 +655,7 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
   const uint32_t needed = TopK - coarse_above;
   auto* exact_histogram = reinterpret_cast<uint32_t*>(scratch);
 
-  const auto range = coarse_bin_range(coarse_bin);
+  const auto range = hist4096::coarse_refine_range<kHistBits>(coarse_bin);
   if (!range.finite) {
     return OverflowProbeStatus::kFullRescan;
   }
@@ -820,23 +807,22 @@ __device__ bool emit_staged_candidates(
 template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
 __device__ __noinline__ void exact_topk_rescan_cluster(
     const float* __restrict__ row_input, int32_t* __restrict__ row_output,
-    uint32_t my_start, uint32_t my_len, uint32_t coarse_bin,
-    uint32_t coarse_above, uint32_t start_round, uint32_t initial_prefix,
-    uint32_t initial_remaining, bool has_known_pivot, uint32_t known_pivot,
-    SmemType* smem, int32_t* s_topk) {
+    uint32_t seq_len, uint32_t my_start, uint32_t my_len, uint32_t coarse_bin,
+    uint32_t coarse_above, OverflowProbeState probe, SmemType* smem,
+    int32_t* s_topk) {
   const uint32_t tx = threadIdx.x;
-  const auto range = coarse_bin_range(coarse_bin);
+  const auto range = hist4096::coarse_refine_range<kHistBits>(coarse_bin);
 
-  uint32_t prefix = initial_prefix;
-  uint32_t remaining = has_known_pivot
-                           ? initial_remaining
-                           : (start_round != 0
-                                  ? initial_remaining
-                                  : (range.finite ? TopK - coarse_above
-                                                  : TopK));
+  const bool has_known_pivot = probe.status == OverflowProbeStatus::kKnownPivot;
+  const uint32_t start_round =
+      probe.status == OverflowProbeStatus::kFirstDigitReady ? 1 : 0;
+  uint32_t prefix = start_round == 0 ? 0 : probe.pivot_or_prefix;
+  uint32_t remaining = probe.status == OverflowProbeStatus::kFullRescan
+                           ? (range.finite ? TopK - coarse_above : TopK)
+                           : probe.remaining;
   const uint32_t rounds = range.finite ? 2 : ExactRadix::kRounds;
   const bool stage_final_candidates =
-      range.finite && start_round == 1 && my_len >= 16384;
+      range.finite && start_round == 1 && seq_len >= CS * kSizePerStage;
   uint32_t staged_above = 0;
   uint32_t staged_candidates = 0;
   for (uint32_t round = start_round;
@@ -898,11 +884,11 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
   }
 
   const uint32_t pivot = has_known_pivot
-                             ? known_pivot
+                             ? probe.pivot_or_prefix
                              : (range.finite ? range.base_key + prefix
                                              : prefix);
 
-  if (stage_final_candidates && !has_known_pivot &&
+  if (stage_final_candidates &&
       emit_staged_candidates<TopK, CS>(
           row_input, row_output, my_start, pivot, remaining, staged_above,
           staged_candidates, smem, s_topk)) {
@@ -942,21 +928,21 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
 template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
 __device__ __noinline__ void recover_coarse_overflow(
     const float* __restrict__ row_input, int32_t* __restrict__ row_output,
-    uint32_t my_start, uint32_t my_len, SmemType* smem, int32_t* s_topk) {
+    uint32_t seq_len, uint32_t my_start, uint32_t my_len, SmemType* smem,
+    int32_t* s_topk) {
   const uint32_t coarse_bin = smem->match.bin;
   const uint32_t coarse_above = smem->match.above_count;
   const auto probe_status = probe_coarse_overflow<TopK, CS, UseResident>(
       row_input, my_start, my_len, coarse_bin, coarse_above, smem, s_topk);
-  const bool has_known_pivot =
-      probe_status == OverflowProbeStatus::kKnownPivot;
-  const uint32_t start_round =
-      probe_status == OverflowProbeStatus::kFirstDigitReady ? 1 : 0;
+  const OverflowProbeState probe = {
+      .status = probe_status,
+      .pivot_or_prefix = smem->match.bin,
+      .remaining = smem->match.above_count,
+  };
 
   exact_topk_rescan_cluster<TopK, CS, UseResident>(
-      row_input, row_output, my_start, my_len, coarse_bin, coarse_above,
-      start_round, start_round == 0 ? 0 : smem->match.bin,
-      smem->match.above_count, has_known_pivot,
-      has_known_pivot ? smem->match.bin : 0, smem, s_topk);
+      row_input, row_output, seq_len, my_start, my_len, coarse_bin, coarse_above,
+      probe, smem, s_topk);
 }
 
 // Keep the two-candidate-per-thread refinement out of the common kernel body.
@@ -1092,7 +1078,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
   if (__builtin_expect(
           smem->match.equal_count > kCoarseTieCapacity, 0)) {
     recover_coarse_overflow<TopK, CS, kFused>(
-        row_input, row_output, my_start, my_len, smem, s_topk);
+        row_input, row_output, seq_len, my_start, my_len, smem, s_topk);
     return;
   }
 
@@ -1271,18 +1257,11 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   // Large path: init mbarriers + state, then dispatch fused or twopass
   const uint32_t per_block =
       (params.stride + CS - 1) / CS;  // how many elements per block
-  constexpr uint32_t kFusedMax = ((CS == 16)  ? kFusedStagesCS16
-                                  : (CS == 8) ? kFusedStagesCS8
-                                              : kMaxSinglePassStages) *
-                                 kSizePerStage;
-  const bool use_singlepass =
-      per_block <=
-      kFusedMax;  // single pass or TMA streaming: histogram+scatter
-
-  // Select smem type and stage count at compile time based on CS
   constexpr uint32_t kFusedStages = (CS == 16)  ? kFusedStagesCS16
                                     : (CS == 8) ? kFusedStagesCS8
                                                 : kMaxSinglePassStages;
+  constexpr uint32_t kFusedMax = kFusedStages * kSizePerStage;
+  const bool use_singlepass = per_block <= kFusedMax;
   using FusedSmem = SmemFused<kFusedStages>;
 
   extern __shared__ uint8_t sr[];

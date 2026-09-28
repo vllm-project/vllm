@@ -216,21 +216,19 @@ __device__ __noinline__ bool histogram_medium_topk(
   }
   __syncthreads();
 
-  if (__builtin_expect(shared_buffered_count[0] <= MAX_BUFFERED_ITEMS, 1)) {
-    for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-      const float logit_value = logits[idx + logits_offset];
-      const uint32_t bin = convert_to_uint32_v2(logit_value) >> 21;
-      if (bin > threshold_bin) {
-        const int output_pos = atomicAdd(&shared_output_count, 1);
-        output_indices[output_pos] = idx;
-      } else if (bin == threshold_bin) {
-        const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
-        if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
-          buffered_indices[0][buffer_pos] = idx;
-          const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
-          const int next_bin = (fp32_bits >> 16) & 0xFF;
-          atomicAdd(&shared_histogram[0][next_bin], 1);
-        }
+  for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
+    const float logit_value = logits[idx + logits_offset];
+    const uint32_t bin = convert_to_uint32_v2(logit_value) >> 21;
+    if (bin > threshold_bin) {
+      const int output_pos = atomicAdd(&shared_output_count, 1);
+      output_indices[output_pos] = idx;
+    } else if (bin == threshold_bin) {
+      const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
+      if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
+        buffered_indices[0][buffer_pos] = idx;
+        const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
+        const int next_bin = (fp32_bits >> 16) & 0xFF;
+        atomicAdd(&shared_histogram[0][next_bin], 1);
       }
     }
   }
@@ -735,44 +733,23 @@ struct vec_t {
 template <typename DType, bool UseWideCoarse = false>
 struct FilteredTopKTraits;
 
-// Specialization for float (32-bit): use the high 11 bits of the exact ordered
-// FP32 key. Besides reducing candidate-buffer pressure, this prefix can be
-// reused directly by the exact overflow fallback.
-template <>
-struct FilteredTopKTraits<float, false> {
+// Both float paths use the exact ordered-FP32 key; only the coarse-bin width
+// and refinement digit layout differ.
+template <bool UseWideCoarse>
+struct FilteredTopKTraits<float, UseWideCoarse> {
   using OrderedType = uint32_t;
-  static constexpr int COARSE_BITS = 11;
+  static constexpr int COARSE_BITS = UseWideCoarse ? 12 : 11;
   static constexpr int COARSE_RADIX = 1 << COARSE_BITS;
-  static constexpr int NUM_REFINE_ROUNDS = 3;
-  static constexpr int FIRST_REFINE_SHIFT = 16;
-  static constexpr int REFINE_BITS = 8;
+  static constexpr int NUM_REFINE_ROUNDS = UseWideCoarse ? 2 : 3;
+  static constexpr int FIRST_REFINE_SHIFT = UseWideCoarse ? 10 : 16;
+  static constexpr int REFINE_BITS = UseWideCoarse ? 10 : 8;
 
   __device__ __forceinline__ static uint16_t ToCoarseKey(float x) {
     return static_cast<uint16_t>(ToOrdered(x) >> (32 - COARSE_BITS));
   }
 
   __device__ __forceinline__ static OrderedType ToOrdered(float x) {
-    uint32_t bits = __float_as_uint(x);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-  }
-};
-
-template <>
-struct FilteredTopKTraits<float, true> {
-  using OrderedType = uint32_t;
-  static constexpr int COARSE_BITS = 12;
-  static constexpr int COARSE_RADIX = 1 << COARSE_BITS;
-  static constexpr int NUM_REFINE_ROUNDS = 2;
-  static constexpr int FIRST_REFINE_SHIFT = 10;
-  static constexpr int REFINE_BITS = 10;
-
-  __device__ __forceinline__ static uint16_t ToCoarseKey(float x) {
-    return static_cast<uint16_t>(ToOrdered(x) >> (32 - COARSE_BITS));
-  }
-
-  __device__ __forceinline__ static OrderedType ToOrdered(float x) {
-    uint32_t bits = __float_as_uint(x);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+    return topk_histogram_4096::convert_to_uint32_v2(x);
   }
 };
 
@@ -785,6 +762,7 @@ __device__ bool try_sampled_exact_topk(
     int* candidate_count, int* output_counter, int* radix_prefix,
     int* radix_remaining) {
   using Traits = FilteredTopKTraits<DType>;
+  using Radix = hist4096::ExactRadixTraits<false>;
   constexpr uint32_t kItemsPerThread = 2;
   constexpr uint32_t kSampleSize = BlockSize * kItemsPerThread;
   using SampleSort =
@@ -864,18 +842,17 @@ __device__ bool try_sampled_exact_topk(
   __syncthreads();
 
 #pragma unroll
-  for (uint32_t round = 0; round < 4; ++round) {
-    if (tx < 256) histogram[tx] = 0;
+  for (uint32_t round = 0; round < Radix::kRounds; ++round) {
+    if (tx < Radix::kBins) histogram[tx] = 0;
     __syncthreads();
 
     const uint32_t prefix = static_cast<uint32_t>(*radix_prefix);
-    const uint32_t prefix_mask =
-        (round == 0) ? 0u : (~0u << (32 - 8 * round));
-    const uint32_t shift = 24 - 8 * round;
+    const uint32_t prefix_mask = Radix::prefix_mask(round);
+    const uint32_t shift = Radix::shift(round);
     for (int i = tx; i < num_candidates; i += BlockSize) {
       const uint32_t ordered = static_cast<uint32_t>(candidate_keys[i]);
       if ((ordered & prefix_mask) == prefix) {
-        atomicAdd(&histogram[(ordered >> shift) & 0xFF], 1);
+        atomicAdd(&histogram[(ordered >> shift) & Radix::digit_mask(round)], 1);
       }
     }
     __syncthreads();
@@ -883,7 +860,7 @@ __device__ bool try_sampled_exact_topk(
     if (tx == 0) {
       int count_above = 0;
       const int remaining = *radix_remaining;
-      for (int bin = 255; bin >= 0; --bin) {
+      for (int bin = static_cast<int>(Radix::kBins) - 1; bin >= 0; --bin) {
         const int count = histogram[bin];
         if (count_above + count >= remaining) {
           *radix_remaining = remaining - count_above;

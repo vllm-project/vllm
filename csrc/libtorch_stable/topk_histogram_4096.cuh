@@ -280,44 +280,11 @@ __device__ void exact_topk_rescan(
   }
 
   const uint32_t pivot = smem->prefix;
-  if constexpr (FinalCandidateCapacity > 0) {
-    if (tx == 0) smem->histogram[0] = 0;
-    __syncthreads();
-
-    const uint32_t candidate_count = smem->candidate_count;
-    const uint32_t equal_count = smem->remaining;
-    const uint32_t equal_base = TopK - equal_count;
-    const auto collect = [&](uint32_t idx, float score) {
-      const uint32_t ordered = convert_to_uint32_v2(score);
-      if (ordered > pivot) {
-        const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-        output[pos] = static_cast<int32_t>(idx);
-      } else if (ordered == pivot) {
-        const uint32_t pos = atomicAdd(&smem->histogram[0], 1);
-        if (pos < equal_count) {
-          output[equal_base + pos] = static_cast<int32_t>(idx);
-        }
-      }
-    };
-
-    if (candidate_count <= FinalCandidateCapacity) {
-      for (uint32_t i = tx; i < candidate_count; i += BlockSize) {
-        const uint32_t idx = final_candidates[i];
-        collect(idx, scores[idx]);
-      }
-    } else {
-      scan_scores<BlockSize, VecSize>(
-          scores, length, [&](uint32_t idx, float score) {
-            if ((convert_to_uint32_v2(score) & 0xFFFFFC00u) ==
-                (pivot & 0xFFFFFC00u)) {
-              collect(idx, score);
-            }
-          });
-    }
-    __syncthreads();
-  } else if constexpr (FuseOutputScan) {
+  if constexpr (FuseOutputScan) {
     if (tx == 0) {
-      smem->output_counter = 0;
+      if constexpr (FinalCandidateCapacity == 0) {
+        smem->output_counter = 0;
+      }
       smem->histogram[0] = 0;
     }
     __syncthreads();
@@ -336,7 +303,26 @@ __device__ void exact_topk_rescan(
         }
       }
     };
-    scan_scores<BlockSize, VecSize>(scores, length, collect);
+
+    if constexpr (FinalCandidateCapacity > 0) {
+      const uint32_t candidate_count = smem->candidate_count;
+      if (candidate_count <= FinalCandidateCapacity) {
+        for (uint32_t i = tx; i < candidate_count; i += BlockSize) {
+          const uint32_t idx = final_candidates[i];
+          collect(idx, scores[idx]);
+        }
+      } else {
+        scan_scores<BlockSize, VecSize>(
+            scores, length, [&](uint32_t idx, float score) {
+              if ((convert_to_uint32_v2(score) & 0xFFFFFC00u) ==
+                  (pivot & 0xFFFFFC00u)) {
+                collect(idx, score);
+              }
+            });
+      }
+    } else {
+      scan_scores<BlockSize, VecSize>(scores, length, collect);
+    }
     __syncthreads();
   } else {
     if (tx == 0) smem->output_counter = 0;
@@ -381,6 +367,64 @@ __device__ __forceinline__ uint32_t extract_coarse_bin_N(float x) {
   return key >> (16 - kBits);
 }
 
+constexpr uint32_t kCoarseRefineBins = 2048;
+constexpr uint32_t kCoarseRefineDigitBits = 11;
+using CoarseRefineScan = cub::BlockScan<uint32_t, kBlockSize>;
+
+struct CoarseRefineSmem {
+  uint32_t histogram[kCoarseRefineBins];
+  CoarseRefineScan::TempStorage scan;
+  uint32_t prefix;
+  uint32_t remaining;
+  uint32_t output_counter;
+  uint32_t equal_counter;
+  uint32_t valid;
+};
+
+struct CoarseRefineRange {
+  uint32_t base_key;
+  bool finite;
+};
+
+template <uint32_t HistBits>
+__device__ __forceinline__ CoarseRefineRange coarse_refine_range(
+    uint32_t coarse_bin) {
+  static_assert(HistBits == 10 || HistBits == 12);
+  const uint16_t lower_half_key =
+      static_cast<uint16_t>(coarse_bin << (16 - HistBits));
+  const uint16_t lower_half_bits =
+      (lower_half_key & 0x8000u)
+          ? static_cast<uint16_t>(lower_half_key & 0x7FFFu)
+          : static_cast<uint16_t>(~lower_half_key);
+  const uint32_t lower_key =
+      convert_to_uint32_v2(__half2float(__ushort_as_half(lower_half_bits)));
+  return {.base_key = lower_key > 8192 ? lower_key - 8192 : 0,
+          .finite = (lower_half_bits & 0x7C00u) != 0x7C00u};
+}
+
+__device__ __forceinline__ void select_coarse_refine_digit(
+    CoarseRefineSmem* smem, uint32_t prefix, uint32_t shift) {
+  const uint32_t bin0 = 2 * threadIdx.x;
+  const uint32_t count0 = smem->histogram[bin0];
+  const uint32_t count1 = smem->histogram[bin0 + 1];
+  const uint32_t local_sum = count0 + count1;
+  const uint32_t remaining = smem->remaining;
+  uint32_t lower_prefix;
+  uint32_t total;
+  CoarseRefineScan(smem->scan)
+      .ExclusiveSum(local_sum, lower_prefix, total);
+  uint32_t count_above = total - lower_prefix - local_sum;
+  if (count_above < remaining && count_above + count1 >= remaining) {
+    smem->remaining = remaining - count_above;
+    smem->prefix = prefix | ((bin0 + 1) << shift);
+  }
+  count_above += count1;
+  if (count_above < remaining && count_above + count0 >= remaining) {
+    smem->remaining = remaining - count_above;
+    smem->prefix = prefix | (bin0 << shift);
+  }
+}
+
 // Refine an overflowing FP16 histogram bin from values already resident in
 // registers. A 12-bit FP16 bin spans at most 22 ordered-FP32 bits for finite
 // values, so two radix-2048 passes select the exact pivot.
@@ -388,38 +432,21 @@ template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
 __device__ __forceinline__ bool exact_topk_refine_registers(
     const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem) {
-  constexpr uint32_t kBins = 2048;
-  constexpr uint32_t kDigitBits = 11;
+  constexpr uint32_t kBins = kCoarseRefineBins;
+  constexpr uint32_t kDigitBits = kCoarseRefineDigitBits;
   constexpr uint32_t kDigitMask = kBins - 1;
   constexpr uint32_t kDeltaLimit = 1u << (2 * kDigitBits);
   static_assert(HistBits == 12);
   static_assert(kBins == 2 * kBlockSize);
-  using RefineScan = cub::BlockScan<uint32_t, kBlockSize>;
-  struct RefineSmem {
-    uint32_t histogram[kBins];
-    typename RefineScan::TempStorage scan;
-    uint32_t prefix;
-    uint32_t remaining;
-    uint32_t output_counter;
-    uint32_t equal_counter;
-    uint32_t valid;
-  };
-
-  auto* smem = static_cast<RefineSmem*>(_smem);
+  auto* smem = static_cast<CoarseRefineSmem*>(_smem);
   const uint32_t tx = threadIdx.x;
-  const uint16_t lower_half_key = static_cast<uint16_t>(coarse_bin << 4);
-  const uint16_t lower_half_bits =
-      (lower_half_key & 0x8000u)
-          ? static_cast<uint16_t>(lower_half_key & 0x7FFFu)
-          : static_cast<uint16_t>(~lower_half_key);
-  const uint32_t lower_key =
-      convert_to_uint32_v2(__half2float(__ushort_as_half(lower_half_bits)));
-  const uint32_t base_key = lower_key > 8192 ? lower_key - 8192 : 0;
+  const auto range = coarse_refine_range<HistBits>(coarse_bin);
+  const uint32_t base_key = range.base_key;
 
   if (tx == 0) {
     smem->prefix = 0;
     smem->remaining = TopK - num_above;
-    smem->valid = (lower_half_bits & 0x7C00u) != 0x7C00u;
+    smem->valid = range.finite;
   }
   __syncthreads();
 
@@ -456,24 +483,7 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
 
     if (smem->valid == 0) return false;
 
-    const uint32_t bin0 = 2 * tx;
-    const uint32_t count0 = smem->histogram[bin0];
-    const uint32_t count1 = smem->histogram[bin0 + 1];
-    const uint32_t local_sum = count0 + count1;
-    const uint32_t remaining = smem->remaining;
-    uint32_t lower_prefix;
-    uint32_t total;
-    RefineScan(smem->scan).ExclusiveSum(local_sum, lower_prefix, total);
-    uint32_t count_above = total - lower_prefix - local_sum;
-    if (count_above < remaining && count_above + count1 >= remaining) {
-      smem->remaining = remaining - count_above;
-      smem->prefix = prefix | ((bin0 + 1) << shift);
-    }
-    count_above += count1;
-    if (count_above < remaining && count_above + count0 >= remaining) {
-      smem->remaining = remaining - count_above;
-      smem->prefix = prefix | (bin0 << shift);
-    }
+    select_coarse_refine_digit(smem, prefix, shift);
     __syncthreads();
   }
 
@@ -519,38 +529,21 @@ template <uint32_t TopK, uint32_t HistBits, uint32_t VecSize>
 __device__ __noinline__ bool exact_topk_refine_rescan(
     const float* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem) {
-  constexpr uint32_t kBins = 2048;
-  constexpr uint32_t kDigitBits = 11;
+  constexpr uint32_t kBins = kCoarseRefineBins;
+  constexpr uint32_t kDigitBits = kCoarseRefineDigitBits;
   constexpr uint32_t kDigitMask = kBins - 1;
   constexpr uint32_t kDeltaLimit = 1u << (2 * kDigitBits);
   static_assert(HistBits == 12);
   static_assert(kBins == 2 * kBlockSize);
-  using RefineScan = cub::BlockScan<uint32_t, kBlockSize>;
-  struct RefineSmem {
-    uint32_t histogram[kBins];
-    typename RefineScan::TempStorage scan;
-    uint32_t prefix;
-    uint32_t remaining;
-    uint32_t output_counter;
-    uint32_t equal_counter;
-    uint32_t valid;
-  };
-
-  auto* smem = static_cast<RefineSmem*>(_smem);
+  auto* smem = static_cast<CoarseRefineSmem*>(_smem);
   const uint32_t tx = threadIdx.x;
-  const uint16_t lower_half_key = static_cast<uint16_t>(coarse_bin << 4);
-  const uint16_t lower_half_bits =
-      (lower_half_key & 0x8000u)
-          ? static_cast<uint16_t>(lower_half_key & 0x7FFFu)
-          : static_cast<uint16_t>(~lower_half_key);
-  const uint32_t lower_key =
-      convert_to_uint32_v2(__half2float(__ushort_as_half(lower_half_bits)));
-  const uint32_t base_key = lower_key > 8192 ? lower_key - 8192 : 0;
+  const auto range = coarse_refine_range<HistBits>(coarse_bin);
+  const uint32_t base_key = range.base_key;
 
   if (tx == 0) {
     smem->prefix = 0;
     smem->remaining = TopK - num_above;
-    smem->valid = (lower_half_bits & 0x7C00u) != 0x7C00u;
+    smem->valid = range.finite;
   }
   __syncthreads();
 
@@ -578,24 +571,7 @@ __device__ __noinline__ bool exact_topk_refine_rescan(
 
     if (smem->valid == 0) return false;
 
-    const uint32_t bin0 = 2 * tx;
-    const uint32_t count0 = smem->histogram[bin0];
-    const uint32_t count1 = smem->histogram[bin0 + 1];
-    const uint32_t local_sum = count0 + count1;
-    const uint32_t remaining = smem->remaining;
-    uint32_t lower_prefix;
-    uint32_t total;
-    RefineScan(smem->scan).ExclusiveSum(local_sum, lower_prefix, total);
-    uint32_t count_above = total - lower_prefix - local_sum;
-    if (count_above < remaining && count_above + count1 >= remaining) {
-      smem->remaining = remaining - count_above;
-      smem->prefix = prefix | ((bin0 + 1) << shift);
-    }
-    count_above += count1;
-    if (count_above < remaining && count_above + count0 >= remaining) {
-      smem->remaining = remaining - count_above;
-      smem->prefix = prefix | (bin0 << shift);
-    }
+    select_coarse_refine_digit(smem, prefix, shift);
     __syncthreads();
   }
 
