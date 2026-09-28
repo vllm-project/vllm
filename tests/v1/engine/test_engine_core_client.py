@@ -248,6 +248,19 @@ def test_dplb_non_late_interaction_still_uses_lb():
     assert client.lb_engines[1][0] == 1
 
 
+def test_dplb_in_flight_request_stays_on_same_engine():
+    client = _make_dplb_client()
+    request = make_request(SamplingParams(max_tokens=1))
+    engine = client.core_engines[2]
+    client.reqs_in_flight[request.request_id] = engine
+    client.engine_inflight[engine] = 1
+
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == engine
+    assert client.engine_inflight[engine] == 1
+
+
 def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     """A stats snapshot rebind wipes the optimistic lb_engines increments;
     the exact in-flight floor must keep a burst spreading round-robin."""

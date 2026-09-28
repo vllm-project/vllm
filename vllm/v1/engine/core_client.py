@@ -1587,6 +1587,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         ) // client_count
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
+            # This is for streaming-input session affinity.
+            return engine
+
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
             eng_index := get_late_interaction_engine_index(
