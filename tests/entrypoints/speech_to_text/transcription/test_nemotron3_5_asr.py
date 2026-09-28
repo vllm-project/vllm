@@ -31,7 +31,7 @@ def test_nemotron_transcription_and_request_isolation(tmp_path):
 
     processor = AutoProcessor.from_pretrained(MODEL)
     token_id = processor.tokenizer.encode("hello", add_special_tokens=False)[0]
-    model = Nemotron3_5AsrForRNNT(config)
+    model = Nemotron3_5AsrForRNNT(config).eval()
     with torch.no_grad():
         model.joint.head.weight.zero_()
         model.joint.head.bias.fill_(-10)
@@ -57,6 +57,7 @@ def test_nemotron_transcription_and_request_isolation(tmp_path):
         expected[seconds] = processor.decode(
             output.sequences[0], skip_special_tokens=True
         )
+    assert expected[1.0] != expected[0.5]
 
     def audio_file(seconds: float) -> io.BytesIO:
         buffer = io.BytesIO()

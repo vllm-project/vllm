@@ -746,8 +746,11 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     and cache-aware streaming are not supported. Its renderer and logprobs
     limit are configured automatically. Generic beam search requests alternative
     token scores and is rejected by the existing logprobs-limit validation.
-    Decoding is always greedy: generic sampling controls do not change RNNT
-    decisions, and the adapter's output scores are not RNNT probabilities.
+    Decoding uses greedy RNNT decisions; temperature and top-k/top-p do not
+    change them. The adapter's output scores are not RNNT probabilities.
+    Token-masking controls, such as allowed-token lists, bad words, and structured
+    outputs, are unsupported: masking the chosen token can leave no valid
+    sampler choice.
     `max_logprobs=0` limits alternative-token scores; it does not disable the
     chosen-token score requested with `logprobs=0`. That score currently reflects
     the forced token choice, not model confidence.

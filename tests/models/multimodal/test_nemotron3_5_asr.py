@@ -22,7 +22,6 @@ from transformers.models.nemotron3_5_asr.modeling_nemotron3_5_asr import (
 
 from vllm.model_executor.models.config import Nemotron3_5AsrForRNNTConfig
 from vllm.model_executor.models.nemotron3_5_asr import (
-    Nemotron3_5AsrAudioEncoder,
     Nemotron3_5AsrDecodeState,
     Nemotron3_5AsrForRNNT,
     _decode_next_tokens,
@@ -146,31 +145,37 @@ def test_nemotron_audio_encoder_preserves_batch_and_valid_lengths(
     torch.manual_seed(0)
     config = _get_tiny_config()
     config.encoder_config.num_hidden_layers = 2
-    model = Nemotron3_5AsrAudioEncoder(config).eval()
+    model = Nemotron3_5AsrForRNNT(vllm_config=_get_vllm_config(config)).eval()
     input_features = torch.randn(2, num_mel_frames, 8)
     attention_mask = torch.zeros(2, num_mel_frames, dtype=torch.bool)
     attention_mask[0, : num_mel_frames - 1] = True
     attention_mask[1, :17] = True
 
     with torch.inference_mode():
-        output, output_mask = model(
+        output, output_mask = model.audio_encoder(
             input_features,
             attention_mask,
             prompt_ids=torch.tensor([2, 3]),
         )
-        unpadded_output, unpadded_mask = model(
-            input_features[1:2, :17],
-            torch.ones(1, 17, dtype=torch.bool),
-            prompt_ids=torch.tensor([3]),
+        batched = model.embed_multimodal(
+            input_features=input_features,
+            attention_mask=attention_mask,
+            prompt_ids=torch.tensor([2, 3]),
+        )
+        unpadded = model.embed_multimodal(
+            input_features=[input_features[0, :-1], input_features[1, :17]],
+            attention_mask=[attention_mask[0, :-1], attention_mask[1, :17]],
+            prompt_ids=torch.tensor([2, 3]),
         )
 
     assert output.shape == (2, physical_frames, 8)
     assert output_mask is not None
     assert output_mask.sum(-1).tolist() == [valid_frames, 3]
     assert torch.isfinite(output).all()
-    assert unpadded_mask is not None
-    assert unpadded_mask.sum().item() == 3
-    torch.testing.assert_close(output[1, :3], unpadded_output[0, :3])
+    assert len(batched) == len(unpadded) == 2
+    for row in range(2):
+        torch.testing.assert_close(batched[row], output[row, output_mask[row]])
+        torch.testing.assert_close(unpadded[row], batched[row])
 
 
 class _ScriptedJoint(torch.nn.Module):
