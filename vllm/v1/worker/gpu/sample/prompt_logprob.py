@@ -70,7 +70,7 @@ class PromptLogprobsWorker:
         input_batch: InputBatch,
         prompt_lens: np.ndarray,
     ) -> dict[str, torch.Tensor]:
-        """Score each request's fixed IDs on this chunk; emit on the last chunk."""
+        """Fill scores row (prompt row - req.start) per chunk; emit on the last."""
         if not self.token_id_scores:
             return {}
         logits_mode = self.logprobs_mode in ("raw_logits", "processed_logits")

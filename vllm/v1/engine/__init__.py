@@ -236,7 +236,7 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-    # [num_scored_rows, num_token_ids] for SamplingParams.prompt_logprob_token_ids.
+    # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
 
     @property

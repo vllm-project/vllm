@@ -138,6 +138,7 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        # The stream schema has no field for the scores.
         if request.stream and sampling_params.prompt_logprob_token_ids is not None:
             return self.create_error_response(
                 "prompt_logprob_token_ids are not available when stream=true."
