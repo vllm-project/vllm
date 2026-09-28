@@ -428,9 +428,16 @@ vLLM supports PEFT sequence-classification adapters that save a complete, single
 
 See [classification_with_lora_offline.py](../../examples/pooling/classify/classification_with_lora_offline.py) for an offline classification example using a LoRA adapter.
 
+To batch adapters with different `num_labels`, set the maximum number of labels:
+
+```bash
+vllm serve model --enable-lora --max-lora-cls-labels 8
+```
+
+The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
+
 This support has the following limitations:
 
-- All adapters in one engine must have the same `num_labels` and hidden size as the base classification head. An incompatible adapter is rejected when it is loaded.
 - A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
 - Token-classification adapters are not supported by this feature.
 
