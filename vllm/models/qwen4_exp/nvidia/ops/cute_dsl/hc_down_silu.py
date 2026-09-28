@@ -26,16 +26,13 @@ logger = logging.getLogger(__name__)
 
 # The fused kernel stops winning past M ~ 64 on Qwen3.8-Next-Flash.
 MAX_FUSED_M = 48
-# Split-K settings were tuned only for this (rank, hc, K) shape.
-_TUNED_SHAPE = (320, 4, 10240)
 
 _DEFAULT_FMA_MAX_M = 4
 _DEFAULT_FMA_BS = 128
 # (split_k, num_stages, tile_n)
 _DEFAULT_SPLITK_CONFIG = (6, 4, 16)
 
-# SM100f-specific tuned split-K configs for the mHC down shape (K=10240,
-# N_compute=324), swept on GB300 under the bit-identity constraint.
+# SM100f split-K configs tuned on Qwen3.8-Flash-Next (K=10240, N=324).
 _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
     8: (6, 5, 8),
     16: (6, 5, 8),
@@ -75,8 +72,7 @@ class HcDownSiluGemm:
             return self.CompileKey(backend="fma", M=m, K=self.k, bs=_DEFAULT_FMA_BS)
         tuned = (
             _SM100F_TUNED_SPLITK
-            if (self.rank, self.hc, self.k) == _TUNED_SHAPE
-            and current_platform.is_device_capability_family(100)
+            if current_platform.is_device_capability_family(100)
             else {}
         )
         split_k, num_stages, tile_n = tuned.get(m, _DEFAULT_SPLITK_CONFIG)
