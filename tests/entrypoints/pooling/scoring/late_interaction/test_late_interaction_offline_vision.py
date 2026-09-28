@@ -5,7 +5,7 @@ import weakref
 
 import pytest
 
-from .util import make_base64_image, make_image_mm_param
+from ..util import make_base64_image, make_image_mm_param
 
 MODEL_NAME = "vidore/colpali-v1.3-hf"
 
