@@ -105,6 +105,7 @@ class DeepseekV4ForConditionalGeneration(
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -149,6 +150,8 @@ class DeepseekV4ForConditionalGeneration(
                     )
                 self.vision.to(dtype=model_config.dtype)
                 self.aligner.to(dtype=model_config.dtype)
+                if self.multimodal_config.mm_device_do_normalize:
+                    self.vision.enable_mm_device_normalize()
 
         with self._mark_language_model(vllm_config):
             # The arch convertor routes any config with a vision tower to
@@ -219,7 +222,6 @@ class DeepseekV4ForConditionalGeneration(
         perm: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         assert self.vision is not None and self.aligner is not None
-        patches = patches.to(self.aligner.w1.weight.dtype)
 
         embeds: list[torch.Tensor] = []
         vit_offset = 0
