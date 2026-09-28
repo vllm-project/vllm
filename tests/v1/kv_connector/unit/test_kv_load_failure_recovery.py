@@ -68,6 +68,186 @@ def test_failed_receive_completion_honors_failure_policy(policy):
         assert request.request_id in next_output.num_scheduled_tokens
 
 
+def test_async_loads_count_toward_active_request_limit():
+    vllm_config = create_vllm_config(
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        kv_load_failure_policy="recompute",
+    )
+    scheduler = create_scheduler(vllm_config)
+
+    num_external_computed_tokens = scheduler.block_size
+    requests = [create_request(num_tokens=2 * scheduler.block_size) for _ in range(3)]
+    for request in requests:
+        scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens for request in requests
+    }
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.running) == 0
+    assert len(scheduler.skipped_waiting) == 2
+    assert len(scheduler.waiting) == 1
+    assert scheduler_output.total_num_scheduled_tokens == 0
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+    for request in scheduler.skipped_waiting:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving={request.request_id for request in requests[:2]},
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.running) == 2
+    assert len(scheduler.skipped_waiting) == 0
+    assert len(scheduler.waiting) == 1
+    assert scheduler_output.total_num_scheduled_tokens == 2 * scheduler.block_size
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+
+def test_priority_scheduling_promotes_async_loads_behind_new_request():
+    vllm_config = create_vllm_config(
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        kv_load_failure_policy="recompute",
+    )
+    vllm_config.scheduler_config.policy = "priority"
+    scheduler = create_scheduler(vllm_config)
+
+    num_external_computed_tokens = scheduler.block_size
+    loading_requests = [
+        create_request(num_tokens=2 * scheduler.block_size) for _ in range(2)
+    ]
+    for priority, request in enumerate(loading_requests, start=1):
+        request.priority = priority
+        scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens for request in loading_requests
+    }
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.running) == 0
+    assert len(scheduler.skipped_waiting) == 2
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving={request.request_id for request in loading_requests},
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    new_request = create_request(num_tokens=2 * scheduler.block_size)
+    new_request.priority = 0
+    scheduler.add_request(request=new_request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert {request.request_id for request in scheduler.running} == {
+        request.request_id for request in loading_requests
+    }
+    assert new_request.status == RequestStatus.WAITING
+    assert len(scheduler.skipped_waiting) == 1
+    assert scheduler.skipped_waiting.peek_request().request_id == new_request.request_id
+    assert scheduler_output.total_num_scheduled_tokens == 2 * scheduler.block_size
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+
+def test_async_load_deadlock_head_of_line_blocking():
+    vllm_config = create_vllm_config(
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+        block_size=16,
+        kv_load_failure_policy="recompute",
+    )
+    # Set the total number of blocks in the GPU pool to 24 blocks
+    scheduler = create_scheduler(vllm_config, num_blocks=24)
+
+    # Req A: wants 16 blocks
+    req_a = create_request(num_tokens=16 * scheduler.block_size)
+    scheduler.add_request(request=req_a)
+
+    # Req B: wants 16 blocks
+    req_b = create_request(num_tokens=16 * scheduler.block_size)
+    scheduler.add_request(request=req_b)
+
+    scheduler.connector = Mock()
+    loaded_reqs = set()
+
+    def get_num_new_matched_tokens(request: Request, _: int) -> tuple[int, bool]:
+        if request.request_id == req_b.request_id:
+            return 16 * scheduler.block_size, True
+        if request.request_id == req_a.request_id:
+            if request.request_id not in loaded_reqs:
+                loaded_reqs.add(request.request_id)
+                return 16 * scheduler.block_size, True
+            else:
+                return 0, False
+        return 0, False
+
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        get_num_new_matched_tokens
+    )
+
+    scheduler.connector.take_events.return_value = ()
+
+    # Step 1: Schedule Req A to load.
+    scheduler.schedule()
+    assert len(scheduler.skipped_waiting) == 1
+    assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # Step 2: Now, Req B is preempted (put in skipped_waiting).
+    # Since Req B is preempted, we manually set its status and prepend it.
+    req_b.status = RequestStatus.PREEMPTED
+    scheduler.kv_cache_manager.free(req_b)  # offload
+    scheduler.skipped_waiting.prepend_request(req_b)
+    # Now skipped_waiting has [Req B (PREEMPTED), Req A (WAITING_FOR_REMOTE_KVS)]
+
+    # Step 3: Req A finishes loading!
+    # Update from output with finished recving.
+    from vllm.v1.outputs import KVConnectorOutput
+
+    conn_output = KVConnectorOutput(finished_recving={req_a.request_id})
+    scheduler._update_from_kv_xfer_finished(conn_output)
+    # Now Req A is promoted to WAITING (but still in skipped_waiting).
+    # skipped_waiting has [Req B (PREEMPTED), Req A (WAITING)]
+
+    # Step 4: Schedule!
+    # Since Req B is at the head of skipped_waiting, it tries to schedule Req B.
+    # Req B wants to allocate blocks, but GPU only has enough blocks for
+    # 1 request (since Req A is holding blocks).
+    # So Req B fails and returns None.
+    # In FCFS, it should NOT deadlock: it should continue and schedule Req A!
+    print("SKIPPED WAITING:", [r.request_id for r in scheduler.skipped_waiting])
+    for r in scheduler.skipped_waiting:
+        print(
+            f"Req {r.request_id} blocks:",
+            scheduler.kv_cache_manager.get_blocks(r.request_id),
+        )
+    print("EMPTY:", scheduler.kv_cache_manager.empty_kv_cache_blocks)
+    scheduler.schedule()
+
+    # Assert that Req A was scheduled to run!
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == req_a.request_id
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [
