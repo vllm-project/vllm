@@ -15,9 +15,11 @@ import traceback
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from itertools import chain
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 import vllm.ir
@@ -35,9 +37,15 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    initialize_mamba_ssu_backend,
+)
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 from vllm.platforms import current_platform
+from vllm.pooling_params import PoolingParams
 from vllm.profiler.op_capture.meta_ops import (
     has_kernel_for,
     register_meta_impls,
@@ -46,7 +54,8 @@ from vllm.profiler.op_capture.meta_ops import (
 from vllm.profiler.op_capture.recorder import OpRecorder, RecordedOp
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     resolve_kv_cache_layout,
@@ -57,7 +66,12 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_kv_cache_groups,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    EncoderOnlyAttentionSpec,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -144,6 +158,11 @@ class BatchSpec:
     @property
     def seq_len(self) -> int:
         return self.num_computed_tokens + self.query_len
+
+    @property
+    def is_prefill(self) -> bool:
+        """Whether the requests are still in their prompt, not decoding."""
+        return self.num_computed_tokens == 0 or self.query_len > 1
 
 
 @dataclass(frozen=True)
@@ -248,6 +267,7 @@ class ForwardHarness:
         ValueError: If the config asks for more than one rank; the harness is
             single-process. Or if the batch exceeds the scheduler's per-step
             token or request budget, which no real step could.
+        NotImplementedError: If the model is encoder-decoder.
 
     """
 
@@ -272,6 +292,11 @@ class ForwardHarness:
             engine_args.load_format = "meta"
         self.vllm_config: VllmConfig = engine_args.create_engine_config()
 
+        if self.vllm_config.model_config.is_encoder_decoder:
+            raise NotImplementedError(
+                "ForwardHarness runs no encoder, so it cannot capture "
+                f"encoder-decoder models such as {model}."
+            )
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.world_size_across_dp != 1:
             raise ValueError(
@@ -293,6 +318,7 @@ class ForwardHarness:
 
         self.model: torch.nn.Module | None = None
         self.attn_groups: list[list[AttentionGroup]] = []
+        self.encoder_only_groups: list[AttentionGroup] = []
         self.kernel_block_sizes: list[int] = []
         self.kv_cache_specs: dict[str, KVCacheSpec] = {}
         self._attn_metadata: dict[str, Any] = {}
@@ -370,9 +396,46 @@ class ForwardHarness:
         initialize_model_parallel(1, 1)
         self._exit_stack.callback(destroy_model_parallel)
 
+    def _init_encoder_only_attn(self) -> None:
+        """Give encoder-only layers, which keep no KV cache, metadata builders.
+
+        As the model runner does: one `EncoderOnlyAttentionSpec` group per
+        backend and head configuration, bound to an empty cache tensor.
+        """
+        config = self.vllm_config
+        cache_config = config.cache_config
+        dtype = kv_cache_dtype_str_to_dtype(
+            cache_config.cache_dtype, config.model_config
+        )
+        groups: dict[tuple, AttentionGroup] = {}
+        for name, layer in get_layers_from_vllm_config(config, Attention).items():
+            if layer.attn_type != AttentionType.ENCODER_ONLY:
+                continue
+            layer.kv_cache = torch.empty(0, dtype=dtype, device=self.device)
+            backend = layer.get_attn_backend()
+            key = (
+                backend.full_cls_name(),
+                layer.num_heads,
+                layer.num_kv_heads,
+                layer.head_size,
+            )
+            if key not in groups:
+                spec = EncoderOnlyAttentionSpec(
+                    block_size=cache_config.block_size,
+                    num_kv_heads=layer.num_kv_heads,
+                    head_size=layer.head_size,
+                    dtype=dtype,
+                )
+                groups[key] = AttentionGroup(backend, [], spec, len(groups))
+            groups[key].layer_names.append(name)
+        self.encoder_only_groups = list(groups.values())
+        for group in self.encoder_only_groups:
+            group.create_metadata_builders(config, self.device)
+
     def _init_kv_cache(self) -> None:
         """Group layers by backend, size the cache, and bind it to the layers."""
         config = self.vllm_config
+        self._init_encoder_only_attn()
         layers: dict[str, AttentionLayerBase] = get_layers_from_vllm_config(
             config, cast(type[Any], AttentionLayerBase)
         )
@@ -396,6 +459,11 @@ class ForwardHarness:
             [self.kv_cache_specs],
             [_kv_cache_budget(config, self.kv_cache_specs)],
         )[0]
+        initialize_mamba_ssu_backend(
+            config.mamba_config,
+            kv_cache_config,
+            use_replayssm=config.cache_config.use_replayssm,
+        )
 
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             # Split as the model runner does: a group's layers share a
@@ -464,6 +532,7 @@ class ForwardHarness:
             ),
             seq_lens_cpu_upper_bound=seq_lens_cpu,
             positions=self._positions(),
+            is_prefilling=torch.full((batch.num_reqs,), batch.is_prefill),
         )
 
     def _build_attn_metadata(self) -> dict[str, Any]:
@@ -476,6 +545,17 @@ class ForwardHarness:
                 self._slot_mappings.update(
                     (name, common.slot_mapping) for name in group.layer_names
                 )
+        if self.encoder_only_groups:
+            # Encoder-only attention reads neither, but the builders expect both.
+            common = replace(
+                self._common_attn_metadata(1),
+                block_table_tensor=torch.zeros(
+                    (self.batch.num_reqs, 1), dtype=torch.int32, device=self.device
+                ),
+            )
+            for group in self.encoder_only_groups:
+                built = group.get_metadata_builder().build(0, common)
+                metadata.update((name, built) for name in group.layer_names)
         return metadata
 
     def _record_triton_launch(
@@ -492,11 +572,41 @@ class ForwardHarness:
             .add_(batch.num_computed_tokens)
         )
 
-    def run_forward(self) -> torch.Tensor:
-        """Run one forward pass and the logits computation.
+    def _pooling_metadata(self, model: VllmModelForPooling) -> PoolingMetadata:
+        """Pool every request's whole prompt, as the model runner does.
+
+        The task is the pooler config's, else the first the pooler supports.
+        """
+        batch = self.batch
+        pooler_config = self.vllm_config.model_config.pooler_config
+        task = (pooler_config and pooler_config.task) or min(
+            model.pooler.get_supported_tasks()
+        )
+        params = PoolingParams(task=task)
+        params.verify(self.vllm_config.model_config)
+        model.pooler.get_pooling_updates(task).apply(params)
+        prompt_lens = torch.full((batch.num_reqs,), batch.seq_len, dtype=torch.int32)
+        token_ids_cpu = torch.zeros((batch.num_reqs, batch.seq_len), dtype=torch.int32)
+        metadata = PoolingMetadata(
+            prompt_lens=prompt_lens,
+            prompt_token_ids=token_ids_cpu.to(self.device),
+            prompt_token_ids_cpu=token_ids_cpu,
+            pooling_params=[params] * batch.num_reqs,
+            pooling_states=[PoolingStates() for _ in range(batch.num_reqs)],
+        )
+        metadata.build_pooling_cursor(
+            np.full(batch.num_reqs, batch.query_len),
+            seq_lens_cpu=prompt_lens,
+            device=self.device,
+        )
+        return metadata
+
+    def run_forward(self) -> Any:
+        """Run one forward pass and its head: logits, or the pooler's output.
 
         Returns:
-            The logits tensor, one row per request.
+            The logits tensor, one row per request, or the pooler's output for
+            a pooling model.
 
         """
         assert self.model is not None, "Use ForwardHarness as a context manager"
@@ -519,6 +629,12 @@ class ForwardHarness:
             ),
         ):
             hidden_states = self.model(input_ids=input_ids, positions=positions)
+            if self.vllm_config.model_config.runner_type == "pooling":
+                model = cast(VllmModelForPooling, self.model)
+                return model.pooler(
+                    hidden_states=hidden_states,
+                    pooling_metadata=self._pooling_metadata(model),
+                )
             return self.model.compute_logits(hidden_states[last_token_indices])
 
     def record(self, keep_going: bool = False) -> OpRecorder:
@@ -551,6 +667,9 @@ class ForwardHarness:
                 self._recorder = None
         return recorder
 
+    def _all_attn_groups(self) -> list[AttentionGroup]:
+        return [*chain.from_iterable(self.attn_groups), *self.encoder_only_groups]
+
     def selection_metadata(self) -> SelectionMetadata:
         """Collect the hardware-dependent choices this capture depends on."""
         config = self.vllm_config
@@ -565,14 +684,15 @@ class ForwardHarness:
             quantization=config.model_config.quantization,
             attention_backends={
                 group.layer_names[0]: ".".join(group.backend.full_cls_name())
-                for groups in self.attn_groups
-                for group in groups
+                for group in self._all_attn_groups()
             },
             kv_cache_layout=config.cache_config.kv_cache_layout or "none",
             kv_cache_dtype=config.cache_config.cache_dtype,
             block_size=config.cache_config.block_size or 0,
             kernel_block_sizes=tuple(self.kernel_block_sizes),
-            num_attention_layers=len(self.kv_cache_specs),
+            num_attention_layers=sum(
+                len(group.layer_names) for group in self._all_attn_groups()
+            ),
             num_query_heads=getattr(first, "num_heads", 0),
             num_kv_heads=getattr(first, "num_kv_heads", 0),
             head_size=getattr(first, "head_size", 0),

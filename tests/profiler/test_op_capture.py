@@ -302,3 +302,29 @@ def test_meta_capture_matches_hardware():
         MODEL, current_platform.device_type, batch=BatchSpec(num_tokens=8)
     )
     assert diff.equal, format_diff(diff)
+
+
+@pytest.mark.parametrize(
+    ("model", "batch", "max_model_len"),
+    [
+        # Encoder-only attention keeps no KV cache, and a pooler replaces logits.
+        ("BAAI/bge-small-en-v1.5", BatchSpec(num_reqs=2, num_tokens=16), 512),
+        # Mamba decode reads the prefill flags and the SSU backend.
+        (
+            "state-spaces/mamba-130m-hf",
+            BatchSpec(num_reqs=4, num_tokens=4, num_computed_tokens=16),
+            1024,
+        ),
+    ],
+)
+def test_meta_capture_matches_hardware_beyond_decoders(model, batch, max_model_len):
+    """Models the runner prepares differently from a decoder still match."""
+    if current_platform.is_cpu():
+        pytest.skip("No accelerator to compare against")
+    engine_args = EngineArgs(
+        model=model, max_model_len=max_model_len, load_format="dummy"
+    )
+    diff = compare_devices(
+        model, current_platform.device_type, batch=batch, engine_args=engine_args
+    )
+    assert diff.equal, format_diff(diff)
