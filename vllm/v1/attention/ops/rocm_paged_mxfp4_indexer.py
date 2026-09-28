@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4.1 sparse indexer on aiter's paged MXFP4 MQA-logits kernel.
+"""Sparse attention indexer on aiter's paged MXFP4 MQA-logits kernel.
 
 gfx950 only. The kernel reads the preshuffled paged indexer K cache in place,
-so no layer gathers K into a contiguous buffer, prefill included. The
+so no layer gathers K into a contiguous buffer, prefill included. Any model
+whose indexer supplies the inputs `rocm_mxfp4_sparse_attn_indexer` documents
+can run the dense path. DeepSeek-V4.1's two-level indexer adds to it: the
 candidate source takes its block maxima from the same walk that writes its
 logits, and the candidate consumers can walk the candidate pool instead of
-the whole context: the pool is resolved once per step and shared by all four.
+the whole context: the pool is resolved once per step and shared by all of
+them.
 """
 
 import functools
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
@@ -36,8 +38,8 @@ if TYPE_CHECKING:
         DeepseekV32IndexerPrefillChunkMetadata,
     )
     from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
-        DeepseekV41RocmMxfp4IndexerMetadata,
         RocmMxfp4GatherLaunch,
+        RocmMxfp4IndexerMetadata,
         RocmMxfp4NativeDecode,
         RocmMxfp4PrefillPlan,
     )
@@ -58,52 +60,11 @@ def _aiter():
 
 
 @functools.cache
-def _aiter_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
-    """The aiter indexer key writer and query quantizer."""
-    from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
-        k_norm_rope_mxfp4_cache,
-    )
-    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
-
-    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
-
-
-@functools.cache
 def _aiter_topk() -> Callable[..., None]:
     """The aiter per-row top-k."""
     from aiter.ops.topk import top_k_per_row_decode
 
     return top_k_per_row_decode
-
-
-@functools.cache
-def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
-    """Why this platform cannot run the ROCm MXFP4 indexer, or None."""
-    from vllm.platforms.rocm import on_gfx950
-
-    if not on_gfx950():
-        return "the ROCm MXFP4 indexer kernels are gfx950 only"
-    try:
-        pa = _aiter()
-        _aiter_cache_ops()
-        _aiter_topk()
-    except ImportError as e:
-        return f"aiter's paged MXFP4 indexer ops are unavailable ({e})"
-    try:
-        params = inspect.signature(pa.paged_mxfp4_mqa_logits).parameters
-    except (AttributeError, TypeError, ValueError):
-        return "aiter's paged MXFP4 MQA-logits kernel has no signature to check"
-    if "row_ends" not in params or "query_start_loc" not in params:
-        return (
-            "aiter's paged MXFP4 MQA-logits kernel predates its row_ends / "
-            "query_start_loc API"
-        )
-    if not callable(getattr(pa, "cache_format", None)):
-        return (
-            "aiter's paged MXFP4 module has no cache_format(), which vLLM reads "
-            "the indexer K page layout from"
-        )
-    return None
 
 
 class RocmPagedMxfp4CacheLayout(NamedTuple):
@@ -161,65 +122,6 @@ def rocm_paged_mxfp4_cache_layout(
             "RocmPagedMxfp4CacheLayout cannot express"
         )
     return RocmPagedMxfp4CacheLayout(n_per_tile, d_per_tile, scale_lanes)
-
-
-def rocm_mxfp4_indexer_k_store(
-    k_pre: torch.Tensor,
-    positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    rms_norm_weight: torch.Tensor,
-    rms_norm_eps: float,
-    k_cache: torch.Tensor,
-    kv_slot_mapping: torch.Tensor,
-    compress_ratio: int,
-    use_fp4_cache: bool,
-    *,
-    num_heads: int,
-) -> None:
-    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
-    writes the key in the order its MQA-logits kernel reads with ``num_heads``
-    query heads."""
-    assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
-    layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
-    k_norm_rope_mxfp4_cache, _ = _aiter_cache_ops()
-    k_norm_rope_mxfp4_cache(
-        k_pre,
-        positions,
-        cos_sin_cache,
-        rms_norm_weight,
-        rms_norm_eps,
-        k_cache,
-        kv_slot_mapping,
-        compress_ratio,
-        shuffle=layout,
-    )
-
-
-def rocm_mxfp4_indexer_q_quant(
-    positions: torch.Tensor,
-    index_q: torch.Tensor,
-    index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
-    index_weights_softmax_scale: float,
-    index_weights_head_scale: float,
-    use_fp4: bool = True,
-    weights_out_dtype: torch.dtype = torch.float32,
-) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
-    ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
-    weights)."""
-    assert use_fp4 and weights_out_dtype == torch.float32, (
-        "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
-    )
-    _, q_rope_mxfp4_quant = _aiter_cache_ops()
-    q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
-        index_q,
-        positions,
-        index_q_cos_sin_cache,
-        index_weights,
-        index_weights_softmax_scale * index_weights_head_scale,
-    )
-    return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
 
 
 def rocm_mxfp4_decode_schedule_words(
@@ -399,7 +301,7 @@ def _remap_compact_topk(
 class _Layer:
     """One indexer layer's inputs and outputs for this step."""
 
-    metadata: "DeepseekV41RocmMxfp4IndexerMetadata"
+    metadata: "RocmMxfp4IndexerMetadata"
     kv: torch.Tensor
     q: torch.Tensor
     q_scale: torch.Tensor
@@ -451,15 +353,15 @@ def _layer(
     candidate_block_size: int,
 ) -> _Layer:
     from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
-        DeepseekV41RocmMxfp4IndexerMetadata,
+        RocmMxfp4IndexerMetadata,
     )
 
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     assert isinstance(attn_metadata, dict)
     metadata = attn_metadata[k_cache_prefix]
-    assert isinstance(metadata, DeepseekV41RocmMxfp4IndexerMetadata), (
-        "the ROCm MXFP4 indexer needs DeepseekV41RocmMxfp4IndexerBackend metadata"
+    assert isinstance(metadata, RocmMxfp4IndexerMetadata), (
+        "the ROCm MXFP4 indexer needs RocmMxfp4IndexerMetadataBuilder metadata"
     )
     kv = _kv_view(kv_cache, head_dim)
     num_heads = q_values.shape[1]
@@ -682,7 +584,13 @@ def rocm_mxfp4_sparse_attn_indexer(
     """Dense indexer: every layer that scores the whole context, the
     candidate source included. With ``candidate_blocks`` and not
     ``candidate_write`` the scores are masked to the pool first, as the
-    shared path does."""
+    shared path does.
+
+    The model supplies ``q_values`` [T, H, D // 2] packed e2m1, ``q_scale``
+    holding each head's D // 32 ue8m0 bytes (one int32 per head at D = 128),
+    fp32 ``weights`` with the softmax and head scales folded in, and
+    ``kv_cache`` pages in `rocm_paged_mxfp4_cache_layout` order for H heads.
+    """
     if not isinstance(get_forward_context().attn_metadata, dict):
         reserve_rocm_mxfp4_indexer_workspace(
             hidden_states,

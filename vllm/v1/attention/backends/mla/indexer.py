@@ -65,12 +65,26 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
-        from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-            rocm_mxfp4_indexer_unsupported_reason,
-        )
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import on_gfx950
 
-        if (reason := rocm_mxfp4_indexer_unsupported_reason()) is not None:
-            raise ValueError(f"indexer_kv_dtype='mxfp4' on ROCm: {reason}.")
+        # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
+        # would silently keep their FP8 one.
+        model_config = vllm_config.model_config
+        if model_config is None or model_config.hf_config.model_type != "deepseek_v41":
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
+                "DeepSeek-V4.1-Flash."
+            )
+        if not on_gfx950():
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm requires gfx950 (MI350X/MI355X)."
+            )
+        if not rocm_aiter_ops.is_enabled():
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; enable "
+                "aiter with VLLM_ROCM_USE_AITER=1."
+            )
         return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(

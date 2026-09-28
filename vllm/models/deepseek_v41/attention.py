@@ -1321,8 +1321,9 @@ class DeepseekV4Indexer(nn.Module):
         attn_cls = SparseAttnIndexer
         if k_cache.rocm_mxfp4:
             from vllm.model_executor.layers import rocm_paged_mxfp4_indexer as rocm
+            from vllm.models.deepseek_v41.amd.rocm import rocm_mxfp4_indexer_ops
 
-            self._k_store, self._q_rope_quant = rocm.rocm_mxfp4_indexer_ops(self.n_head)
+            self._k_store, self._q_rope_quant = rocm_mxfp4_indexer_ops(self.n_head)
             mqa_cls, attn_cls = rocm.RocmSparseMQAIndexer, rocm.RocmSparseAttnIndexer
 
         # Candidate consumers can score only the candidate blocks (opt-in);

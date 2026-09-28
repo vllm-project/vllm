@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4.1 indexer backend for the ROCm paged MXFP4 path.
+"""Indexer metadata for the ROCm paged MXFP4 path.
 
 Extends the dense indexer metadata with what aiter's paged MXFP4 MQA-logits
 kernel needs to read the cache in place: each prefill chunk as its requests,
-packed through query_start_loc into one launch, the decode rows as next_n-row
-sequences on uniform steps, and, with
-``AttentionConfig.indexer_sparse_logits``, the per-step state the candidate
-consumers share. Selected for every V4.1 indexer cache when
-``indexer_kv_dtype="mxfp4"`` on ROCm.
+packed through query_start_loc into one launch, and the decode rows as
+next_n-row sequences on uniform steps. `RocmMxfp4IndexerMetadataBuilder` plans
+this for any model's indexer, and a two-level indexer's candidate blocks once
+a subclass sets their size. DeepSeek-V4.1's builder does, and with
+``AttentionConfig.indexer_sparse_logits`` adds the per-step state the
+candidate consumers share.
 """
 
 import bisect
@@ -133,17 +134,20 @@ def native_decode(
 
 
 @dataclass
-class DeepseekV41RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
+class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     prefill_plans: list[RocmMxfp4PrefillPlan] = field(default_factory=list)
     """Parallel to ``prefill.chunks``."""
     decode_row_lens: torch.Tensor | None = None
     """[rows] int32 compressed context of each decode query row."""
     decode_block_ends: torch.Tensor | None = None
+    """[rows] int32 candidate blocks each decode row sees, for the source's
+    pool."""
     decode_native: RocmMxfp4NativeDecode | None = None
     """The same rows as next_n-row sequences, for the dense launches."""
     decode_schedule: torch.Tensor | None = None
     """The dense decode launches' work schedule, built once for the step."""
     decode_use_gather: bool = False
+    """Whether the candidate consumers gather for the decode rows."""
     decode_gather: tuple[dict, torch.Tensor] | None = None
     """The pool the first consumer resolved for the decode rows."""
     gather_launches: list[RocmMxfp4GatherLaunch] = field(default_factory=list)
@@ -301,7 +305,7 @@ class DeepseekV41RocmMxfp4IndexerBackend(DeepseekV41IndexerBackend):
         return DeepseekV41RocmMxfp4IndexerMetadataBuilder
 
 
-class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
+class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
     """Dense indexer metadata plus the in-place paged launches' layout.
 
     Requirements are checked here, at engine start.
@@ -336,44 +340,16 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
         num_heads, head_dim = hf_config.index_n_heads, hf_config.index_head_dim
         self.num_heads, self.head_dim = num_heads, head_dim
         self.page_entries = kv_cache_spec.block_size // self.compress_ratio
-        layout = rocm_paged_mxfp4_cache_layout(num_heads, head_dim, self.page_entries)
-        # The consumers' gather and ragged steps take a row per query token.
-        # Uniform steps also launch the dense layers on next_n-row sequences,
-        # see native_decode.
+        self.cache_layout = rocm_paged_mxfp4_cache_layout(
+            num_heads, head_dim, self.page_entries
+        )
+        # Ragged steps take a row per query token, as do the candidate
+        # consumers' gathers. Uniform steps also launch the dense layers on
+        # next_n-row sequences, see native_decode.
         self.use_flattening = True
-
-        self.candidate_block_size = getattr(hf_config, "candidate_block_size", 0)
-        self.num_candidate_cols = 0
-        if vllm_config.attention_config.indexer_sparse_logits:
-            prefix = "attention_config.indexer_sparse_logits"
-            block = self.candidate_block_size
-            topk_blocks = getattr(hf_config, "candidate_topk_blocks", 0)
-            if block <= 0 or topk_blocks <= 0:
-                raise ValueError(
-                    f"{prefix} requires a two-level (candidate block) indexer "
-                    "model such as DeepSeek-V4.1."
-                )
-            if topk_blocks & (topk_blocks - 1):
-                raise ValueError(
-                    f"{prefix} on ROCm resolves the candidate pool with a sort "
-                    f"that needs a power-of-two block count, not {topk_blocks}."
-                )
-            if self.page_entries % block or block > layout.n_per_tile:
-                raise ValueError(
-                    f"{prefix} on ROCm needs {block}-entry candidate blocks to "
-                    f"tile a {self.page_entries}-entry indexer page and fit in "
-                    f"one {layout.n_per_tile}-entry shuffle group."
-                )
-            self.num_candidate_cols = topk_blocks * block
-            self.gather_rows = rocm_mxfp4_consumer_rows(self.num_candidate_cols)
-            logger.info_once(
-                "DeepSeek V4.1 indexer: candidate consumers score the %d "
-                "candidate positions with aiter's paged MXFP4 gather once the "
-                "context is %.1fx (decode) / %.1fx (prefill) as long.",
-                self.num_candidate_cols,
-                _GATHER_MIN_CUT_DECODE,
-                _GATHER_MIN_CUT_PREFILL,
-            )
+        # A two-level (candidate block) indexer's builder sets these.
+        self.candidate_block_size = 0
+        self.min_gather_width: float | None = None
 
         int32 = dict(dtype=torch.int32, device=device)
         self.decode_block_ends_buffer = torch.zeros(
@@ -413,17 +389,14 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
             request_offset,
         )
 
-    def _gather_pays(self, context: int, cut: float) -> bool:
-        return self.num_candidate_cols > 0 and context >= cut * self.num_candidate_cols
-
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> DeepseekV41RocmMxfp4IndexerMetadata:
+    ) -> RocmMxfp4IndexerMetadata:
         base = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        metadata = DeepseekV41RocmMxfp4IndexerMetadata(
+        metadata = RocmMxfp4IndexerMetadata(
             **{f.name: getattr(base, f.name) for f in fields(base)}
         )
         cm = common_attn_metadata
@@ -457,9 +430,6 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 self.logits_width,
                 metadata.decode_native,
             )
-            metadata.decode_use_gather = self._gather_pays(
-                base.max_seq_len // self.compress_ratio, _GATHER_MIN_CUT_DECODE
-            )
         if base.prefill is not None:
             assert cm.seq_lens_cpu_upper_bound is not None
             metadata.prefill_plans = plan_prefill_chunks(
@@ -469,13 +439,78 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 context_lens,
                 self.compress_ratio,
                 self.candidate_block_size,
-                self.num_candidate_cols * _GATHER_MIN_CUT_PREFILL
-                if self.num_candidate_cols
-                else None,
+                self.min_gather_width,
                 cm.query_start_loc,
             )
-            if self.num_candidate_cols:
-                metadata.gather_launches = plan_gather_launches(
-                    base.prefill.chunks, metadata.prefill_plans, self.gather_rows
+        return metadata
+
+
+class DeepseekV41RocmMxfp4IndexerMetadataBuilder(RocmMxfp4IndexerMetadataBuilder):
+    """DeepSeek-V4.1's two-level indexer: sets the candidate block size the
+    base plans with and, with ``indexer_sparse_logits``, adds the consumers'
+    gathers."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        **kwargs,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
+        hf_config = vllm_config.model_config.hf_text_config
+        self.candidate_block_size = getattr(hf_config, "candidate_block_size", 0)
+        self.num_candidate_cols = 0
+        if vllm_config.attention_config.indexer_sparse_logits:
+            prefix = "attention_config.indexer_sparse_logits"
+            block = self.candidate_block_size
+            topk_blocks = getattr(hf_config, "candidate_topk_blocks", 0)
+            layout = self.cache_layout
+            if block <= 0 or topk_blocks <= 0:
+                raise ValueError(
+                    f"{prefix} requires a two-level (candidate block) indexer "
+                    "model such as DeepSeek-V4.1."
                 )
+            if topk_blocks & (topk_blocks - 1):
+                raise ValueError(
+                    f"{prefix} on ROCm resolves the candidate pool with a sort "
+                    f"that needs a power-of-two block count, not {topk_blocks}."
+                )
+            if self.page_entries % block or block > layout.n_per_tile:
+                raise ValueError(
+                    f"{prefix} on ROCm needs {block}-entry candidate blocks to "
+                    f"tile a {self.page_entries}-entry indexer page and fit in "
+                    f"one {layout.n_per_tile}-entry shuffle group."
+                )
+            self.num_candidate_cols = topk_blocks * block
+            self.min_gather_width = self.num_candidate_cols * _GATHER_MIN_CUT_PREFILL
+            self.gather_rows = rocm_mxfp4_consumer_rows(self.num_candidate_cols)
+            logger.info_once(
+                "DeepSeek V4.1 indexer: candidate consumers score the %d "
+                "candidate positions with aiter's paged MXFP4 gather once the "
+                "context is %.1fx (decode) / %.1fx (prefill) as long.",
+                self.num_candidate_cols,
+                _GATHER_MIN_CUT_DECODE,
+                _GATHER_MIN_CUT_PREFILL,
+            )
+
+    def _gather_pays(self, context: int, cut: float) -> bool:
+        return self.num_candidate_cols > 0 and context >= cut * self.num_candidate_cols
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmMxfp4IndexerMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        if metadata.decode is not None:
+            metadata.decode_use_gather = self._gather_pays(
+                metadata.max_seq_len // self.compress_ratio, _GATHER_MIN_CUT_DECODE
+            )
+        if metadata.prefill is not None and self.num_candidate_cols:
+            metadata.gather_launches = plan_gather_launches(
+                metadata.prefill.chunks, metadata.prefill_plans, self.gather_rows
+            )
         return metadata

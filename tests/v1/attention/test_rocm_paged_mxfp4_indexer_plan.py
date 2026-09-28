@@ -7,9 +7,6 @@ long request, and both have to come back with the right rows and the right
 block-table rows.
 """
 
-import types
-
-import pytest
 import torch
 
 from vllm.v1.attention.backends.mla.indexer import (
@@ -186,54 +183,3 @@ def test_decode_launches_native_on_uniform_steps():
     assert native_decode(rows[:5], row_block_table, [2, 1, 2], 2, context_lens) is None
     assert native_decode(rows, row_block_table, [2, 2, 2], 2, context_lens) is None
     assert native_decode(rows[:4], row_block_table, [1] * 4, 1, context_lens) is None
-
-
-@pytest.mark.parametrize(
-    "fmt, layout",
-    [
-        # today's cache_format, which implies the scale order and lane split
-        ({"n_per_tile": 32, "d_per_tile": 16, "block_kv": 64}, (32, 16, 2)),
-        ({"n_per_tile": 16, "d_per_tile": 16, "scale_lanes": 4}, (16, 16, 4)),
-        # a key renamed, and a scale order the writer does not implement
-        ({"n_per_tile": 32, "k_width": 16}, None),
-        ({"n_per_tile": 32, "d_per_tile": 16, "scale_mode": 0}, None),
-    ],
-)
-def test_cache_layout_from_aiter_fails_closed(monkeypatch, fmt, layout):
-    """The K writer's page order is read from aiter's cache_format, an API
-    that may move: what it reports either maps onto the order the writer
-    implements or stops startup, never a silently misordered cache."""
-    aiter = types.SimpleNamespace(cache_format=lambda *args: fmt)
-    monkeypatch.setattr(ops, "_aiter", lambda: aiter)
-    build = ops.rocm_paged_mxfp4_cache_layout.__wrapped__  # bypass the cache
-    if layout is None:
-        with pytest.raises(ValueError, match="cache_format"):
-            build(32, 128, 128)
-    else:
-        found = build(32, 128, 128)
-        assert (found.n_per_tile, found.d_per_tile, found.scale_lanes) == layout
-
-
-def test_unsupported_without_aiter_cache_ops(monkeypatch):
-    """The key writer and the query quantizer live in aiter now: an aiter
-    without them stops the MXFP4 indexer at startup instead of mid-step."""
-    import vllm.platforms.rocm as rocm_platform
-
-    def logits(*, row_ends=None, query_start_loc=None):
-        pass
-
-    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: True)
-    monkeypatch.setattr(
-        ops,
-        "_aiter",
-        lambda: types.SimpleNamespace(
-            paged_mxfp4_mqa_logits=logits, cache_format=lambda *a: {}
-        ),
-    )
-
-    def no_cache_ops():
-        raise ImportError("cannot import name 'k_norm_rope_mxfp4_cache'")
-
-    monkeypatch.setattr(ops, "_aiter_cache_ops", no_cache_ops)
-    reason = ops.rocm_mxfp4_indexer_unsupported_reason.__wrapped__()
-    assert reason is not None and "k_norm_rope_mxfp4_cache" in reason

@@ -21,12 +21,21 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
 from vllm.config import CUDAGraphMode
+from vllm.models.deepseek_v41.amd.rocm import (
+    rocm_mxfp4_indexer_k_store,
+    rocm_mxfp4_indexer_q_quant,
+)
+from vllm.models.deepseek_v41.common.ops import (
+    fused_indexer_q_rope_quant,
+    indexer_k_norm_rope_store,
+)
+from vllm.platforms.rocm import on_gfx950
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
-    DeepseekV41RocmMxfp4IndexerMetadata,
+    RocmMxfp4IndexerMetadata,
     native_decode,
     plan_gather_launches,
     plan_prefill_chunks,
@@ -34,8 +43,8 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
-if (_reason := ops.rocm_mxfp4_indexer_unsupported_reason()) is not None:
-    pytest.skip(_reason, allow_module_level=True)
+if not on_gfx950():
+    pytest.skip("gfx950-only", allow_module_level=True)
 
 HEADS, HEAD_DIM = 32, 128
 WIDTH = HEAD_DIM // 2 + HEAD_DIM // 32
@@ -67,9 +76,13 @@ def _workspace():
 class _Case:
     """Requests with their keys written into a block-major pool (ratio-2 and
     ratio-1 pages side by side in every block) and into natural-order caches
-    the reference reads."""
+    the reference reads. The bf16 inputs are kept for the end-to-end test."""
 
     def __init__(self, seq_lens, block, seed=0):
+        from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
+            k_norm_rope_mxfp4_cache,
+        )
+
         torch.manual_seed(seed)
         self.seq_lens = seq_lens
         num_blocks = sum(cdiv(n, block) for n in seq_lens) + 3
@@ -113,12 +126,14 @@ class _Case:
             r: torch.zeros(self.offsets[-1], 1, WIDTH, dtype=torch.uint8, device=DEVICE)
             for r in (1, 2)
         }
-        cos_sin = torch.randn(MAX_LEN, 64, device=DEVICE)
-        norm = torch.rand(HEAD_DIM, device=DEVICE) + 0.5
+        self.cos_sin = cos_sin = torch.randn(MAX_LEN, 64, device=DEVICE)
+        self.norm = norm = torch.rand(HEAD_DIM, device=DEVICE) + 0.5
+        self.k_pre = {}
         for req, n in enumerate(seq_lens):
             if n == 0:
                 continue
             k_pre = torch.randn(n, HEAD_DIM, device=DEVICE).to(torch.bfloat16)
+            self.k_pre[req] = k_pre
             pos = torch.arange(n, device=DEVICE)
             for ratio, cache in self.cache.items():
                 comp = pos // ratio
@@ -127,7 +142,7 @@ class _Case:
                 page = self.block_table[req, comp // entries].long()
                 slot = torch.where(boundary, page * entries + comp % entries, -1)
                 nat = torch.where(boundary, self.offsets[req] + comp, -1)
-                ops.rocm_mxfp4_indexer_k_store(
+                rocm_mxfp4_indexer_k_store(
                     k_pre,
                     pos,
                     cos_sin,
@@ -139,7 +154,6 @@ class _Case:
                     True,
                     num_heads=HEADS,
                 )
-                k_norm_rope_mxfp4_cache, _ = ops._aiter_cache_ops()
                 k_norm_rope_mxfp4_cache(
                     k_pre, pos, cos_sin, norm, 1e-6, self.natural[ratio], nat, ratio
                 )
@@ -209,7 +223,7 @@ def _decode_metadata(case, rows, ratio, query_lens):
         dtype=torch.int32,
         device=DEVICE,
     )
-    return DeepseekV41RocmMxfp4IndexerMetadata(
+    return RocmMxfp4IndexerMetadata(
         seq_lens=None,
         max_seq_len=max(case.seq_lens),
         slot_mapping=None,
@@ -260,7 +274,7 @@ def _prefill_metadata(
         0.0 if gather else None,
         torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE),
     )
-    return DeepseekV41RocmMxfp4IndexerMetadata(
+    return RocmMxfp4IndexerMetadata(
         seq_lens=None,
         max_seq_len=max(case.seq_lens),
         slot_mapping=None,
@@ -465,3 +479,102 @@ def test_prefill_layers_match_reference(
             case, rows, r, chunks, query_start_loc, gather_rows, gather
         ),
     )
+
+
+def _fp8_keys(case, ratio, req):
+    """A request's keys through vLLM's FP8 indexer K writer, dequantized."""
+    k_pre = case.k_pre[req]
+    pos = torch.arange(k_pre.shape[0], device=DEVICE)
+    slot = torch.where((pos + 1) % ratio == 0, pos // ratio, -1)
+    cache = torch.zeros(
+        k_pre.shape[0] // ratio, 1, HEAD_DIM + 4, dtype=torch.uint8, device=DEVICE
+    )
+    indexer_k_norm_rope_store(
+        k_pre, pos, case.cos_sin, case.norm, 1e-6, cache, slot, ratio, False
+    )
+    values = cache[:, 0, :HEAD_DIM].view(current_platform.fp8_dtype()).float()
+    return values * cache[:, 0, HEAD_DIM:].view(torch.float32)
+
+
+def _topk_indices(q, weights, keys, ends, k):
+    """Top-k of sum_h relu(q_h . key) * weights_h over each row's [0, end)."""
+    scores = (torch.einsum("thd,nd->thn", q, keys).relu() * weights[..., None]).sum(1)
+    cols = torch.arange(keys.shape[0], device=DEVICE)
+    return scores.masked_fill(cols >= ends[:, None], float("-inf")).topk(k).indices
+
+
+def _recall(selected, reference):
+    """Per row, the fraction of the reference top-k that ``selected`` picked."""
+    return (selected[:, :, None] == reference[:, None, :]).any(1).float().mean(1)
+
+
+@BLOCKS
+@pytest.mark.parametrize("ratio", [2, 1])
+@pytest.mark.parametrize("step", ["decode", "prefill"])
+def test_selection_from_bf16_tracks_fp8(monkeypatch, step, ratio, block):
+    """End to end from bf16 K and Q: vLLM's MXFP4 K store and Q quant, the
+    paged pool, metadata from the planning functions the builder calls, and
+    the indexer op pick mostly what vLLM's FP8 K/Q quantizers pick on the same
+    inputs. aiter tests the kernels' numerics; wiring bugs drop the overlap
+    well below the threshold."""
+    if step == "decode":
+        case = _Case([3000, 2600, 1900, 3500, 1200, 2200, 3900, 1600], block, seed=1)
+        rows = [(req, n - 1) for req, n in enumerate(case.seq_lens)]
+        metadata = _decode_metadata(case, rows, ratio, [1] * len(rows))
+    else:
+        new_tokens = [300, 200, 250]
+        case = _Case([1500, 900, 2000], block, seed=1)
+        rows = [
+            (req, n - q + i)
+            for req, (n, q) in enumerate(zip(case.seq_lens, new_tokens))
+            for i in range(q)
+        ]
+        metadata = _prefill_metadata(
+            case,
+            rows,
+            ratio,
+            [(0, len(new_tokens), 0, len(rows))],
+            [0, *itertools.accumulate(new_tokens)],
+            1 << 20,
+            gather=False,
+        )
+    num_rows = len(rows)
+    q_bf16 = torch.randn(num_rows, HEADS, HEAD_DIM, device=DEVICE).to(torch.bfloat16)
+    w = torch.randn(num_rows, HEADS, device=DEVICE)
+    pos = torch.tensor([p for _, p in rows], device=DEVICE)
+    scales = (HEAD_DIM**-0.5, HEADS**-0.5)
+
+    (q, q_scale), weights = rocm_mxfp4_indexer_q_quant(
+        pos, q_bf16, case.cos_sin, w, *scales
+    )
+    _forward_context(monkeypatch, metadata)
+    out = torch.full((num_rows, TOPK), 7, dtype=torch.int32, device=DEVICE)
+    ops.rocm_mxfp4_sparse_attn_indexer(
+        torch.empty(num_rows, 1, device=DEVICE),
+        "indexer",
+        case.cache[ratio],
+        q,
+        q_scale,
+        weights,
+        TOPK,
+        HEAD_DIM,
+        MAX_LEN // ratio,
+        out,
+        compress_ratio=ratio,
+    )
+    ends = (pos + 1) // ratio
+    assert bool(((out >= 0) & (out < ends[:, None])).all())
+    assert all(row.unique().numel() == TOPK for row in out)
+
+    q8, w8 = fused_indexer_q_rope_quant(
+        pos, q_bf16, case.cos_sin, w, *scales, use_fp4=False
+    )
+    overlap = []
+    for req in range(len(case.seq_lens)):
+        mine = torch.tensor([r == req for r, _ in rows], device=DEVICE)
+        fp8_topk = _topk_indices(
+            q8[mine].float(), w8[mine], _fp8_keys(case, ratio, req), ends[mine], TOPK
+        )
+        overlap.append(_recall(out[mine], fp8_topk))
+    # MXFP4 rounding alone keeps about 0.8 of FP8's picks; chance is under 0.06.
+    assert torch.cat(overlap).mean().item() >= 0.7

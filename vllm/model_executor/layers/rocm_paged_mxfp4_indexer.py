@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm counterparts of the DeepSeek V4.1 indexer's ops and layers, on aiter's
-paged MXFP4 kernels.
+"""Sparse attention indexer layers on aiter's paged MXFP4 kernels, for ROCm.
 
-With ``indexer_kv_dtype="mxfp4"`` on gfx950, aiter writes the indexer K cache
-in the order its MQA-logits kernel reads, quantizes the query next to it, and
-the kernel scores the cache in place. Requires the
-`DeepseekV41RocmMxfp4IndexerBackend` metadata.
+With ``indexer_kv_dtype="mxfp4"`` on gfx950, the model writes the indexer K
+cache in the order aiter's MQA-logits kernel reads (see
+`rocm_paged_mxfp4_cache_layout`), and the kernel scores the cache in place.
+Requires `RocmMxfp4IndexerMetadataBuilder` metadata.
 """
-
-import functools
-from collections.abc import Callable
 
 import torch
 from torch import nn
@@ -18,31 +14,15 @@ from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-    rocm_mxfp4_indexer_k_store,
-    rocm_mxfp4_indexer_q_quant,
-    rocm_mxfp4_indexer_unsupported_reason,
     rocm_mxfp4_sparse_attn_indexer,
     rocm_mxfp4_sparse_mqa_indexer,
 )
 
 
-def rocm_mxfp4_indexer_ops(
-    num_heads: int,
-) -> tuple[
-    Callable[..., None],
-    Callable[..., tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]],
-]:
-    """The K store and Q quant of an indexer with ``num_heads`` query heads,
-    called as `indexer_k_norm_rope_store` and `fused_indexer_q_rope_quant`."""
-    return (
-        functools.partial(rocm_mxfp4_indexer_k_store, num_heads=num_heads),
-        rocm_mxfp4_indexer_q_quant,
-    )
-
-
 class RocmSparseAttnIndexer(SparseAttnIndexer):
     """`SparseAttnIndexer` whose HIP path walks the paged MXFP4 cache with
-    aiter's kernel, and publishes the candidate pool from the source layer."""
+    aiter's kernel. A two-level indexer's source layer also publishes its
+    candidate pool here."""
 
     def forward_hip(
         self,
@@ -75,9 +55,9 @@ class RocmSparseAttnIndexer(SparseAttnIndexer):
 
 
 class RocmSparseMQAIndexer(nn.Module):
-    """Candidate-consuming indexer on aiter's paged MXFP4 MQA-logits kernel:
-    the consumers score only the candidate pool the source layer published,
-    read straight from the paged cache.
+    """DeepSeek-V4.1's candidate-consuming indexer on aiter's paged MXFP4
+    MQA-logits kernel: the consumers score only the candidate pool the source
+    layer published, read straight from the paged cache.
 
     Built and called as `SparseMQAIndexer` is, so the model can take either.
     """
@@ -97,8 +77,6 @@ class RocmSparseMQAIndexer(nn.Module):
         candidate_block_size: int,
     ):
         super().__init__()
-        if (reason := rocm_mxfp4_indexer_unsupported_reason()) is not None:
-            raise ValueError(f"RocmSparseMQAIndexer: {reason}.")
         self.k_cache = k_cache
         self.topk_tokens = topk_tokens
         self.head_dim = head_dim
