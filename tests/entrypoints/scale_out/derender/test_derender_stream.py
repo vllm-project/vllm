@@ -170,6 +170,7 @@ def _make_stream_chunk(
     usage: dict | None = None,
     metrics: PerRequestMetrics | None = None,
     logprobs: dict | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
     return GenerateStreamResponse(
@@ -184,6 +185,7 @@ def _make_stream_chunk(
         ],
         usage=UsageInfo(**usage) if usage else None,
         metrics=metrics,
+        prompt_token_ids=prompt_token_ids,
     )
 
 
@@ -410,6 +412,244 @@ class TestDetokenizeDelta:
 
         assert len(set(results)) == 1, "All independent streams must produce same text"
         assert results[0] == self._one_shot(tokenizer, token_ids)
+
+
+# ---------------------------------------------------------------------------
+# Prompt seeded detokenization (matches the engine's primed detokenizer)
+# ---------------------------------------------------------------------------
+
+
+def _decode_stream_expected(
+    tokenizer, prompt_ids: list[int], output_ids: list[int]
+) -> str:
+    """Engine-equivalent decode via `DecodeStream`, primed by stepping the
+    prompt (`DecodeStream(ids=...)` needs tokenizers >= 0.22)."""
+    from tokenizers.decoders import DecodeStream
+
+    stream = DecodeStream(skip_special_tokens=True)
+    for tid in prompt_ids:
+        stream.step(tokenizer.backend_tokenizer, tid)
+    return "".join(
+        s
+        for tid in output_ids
+        if (s := stream.step(tokenizer.backend_tokenizer, tid)) is not None
+    )
+
+
+@pytest.fixture(scope="module")
+def leading_space_ids(tokenizer):
+    """(prompt_ids, output_ids, expected) where seeded and unseeded decode
+    differ by the leading space."""
+    prompt_ids = tokenizer.encode("[INST] Hi [/INST]", add_special_tokens=False)
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+    expected = _decode_stream_expected(tokenizer, prompt_ids, output_ids)
+    unseeded = tokenizer.decode(output_ids, skip_special_tokens=True)
+    assert expected.startswith(" ") and not unseeded.startswith(" "), (
+        "fixture no longer reproduces the leading-space divergence; "
+        "pick a different prompt/output pair"
+    )
+    return prompt_ids, output_ids, expected
+
+
+class TestSeedStreamState:
+    """`_seed_stream_state`: pure helper building the initial decode state."""
+
+    def test_seeds_prev_tokens_from_prompt_tail(self, tokenizer, leading_space_ids):
+        from vllm.renderers.online_derenderer import _seed_stream_state
+
+        prompt_ids, _, _ = leading_space_ids
+        state = _seed_stream_state(tokenizer, prompt_ids, skip_special_tokens=True)
+        assert state.prev_tokens
+        assert state.read_offset == len(state.prev_tokens)
+
+    def test_none_prompt_token_ids_returns_empty_state(self, tokenizer):
+        from vllm.renderers.online_derenderer import _seed_stream_state
+
+        assert (
+            _seed_stream_state(tokenizer, None, skip_special_tokens=True)
+            == DerenderStreamState()
+        )
+
+    def test_empty_prompt_token_ids_returns_empty_state(self, tokenizer):
+        from vllm.renderers.online_derenderer import _seed_stream_state
+
+        assert (
+            _seed_stream_state(tokenizer, [], skip_special_tokens=True)
+            == DerenderStreamState()
+        )
+
+
+class TestPromptSeededLeadingSpace:
+    """Every decode entry point keeps the first token's leading space when
+    given prompt_token_ids."""
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_seeded_via_explicit_prompt_token_ids(
+        self, derenderer, leading_space_ids
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        choices = await derenderer.derender_chat(
+            GenerateResponse(
+                request_id="t",
+                choices=[
+                    GenerateResponseChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+            ),
+            prompt_token_ids=prompt_ids,
+        )
+        assert choices[0].message.content == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_seeded_via_generate_response_fallback(
+        self, derenderer, leading_space_ids
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        choices = await derenderer.derender_chat(
+            GenerateResponse(
+                request_id="t",
+                choices=[
+                    GenerateResponseChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+                prompt_token_ids=prompt_ids,
+            ),
+        )
+        assert choices[0].message.content == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_explicit_takes_precedence_over_fallback(
+        self, derenderer, tokenizer, leading_space_ids
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
+        choices = await derenderer.derender_chat(
+            GenerateResponse(
+                request_id="t",
+                choices=[
+                    GenerateResponseChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+                prompt_token_ids=wrong_ids,
+            ),
+            prompt_token_ids=prompt_ids,
+        )
+        assert choices[0].message.content == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_without_prompt_context_stays_unseeded(
+        self, derenderer, leading_space_ids
+    ):
+        _, output_ids, _ = leading_space_ids
+        choices = await derenderer.derender_chat(
+            GenerateResponse(
+                request_id="t",
+                choices=[
+                    GenerateResponseChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+            ),
+        )
+        assert not choices[0].message.content.startswith(" ")
+
+    @pytest.mark.asyncio
+    async def test_completion_batch_seeded(self, derenderer, leading_space_ids):
+        prompt_ids, output_ids, expected = leading_space_ids
+        choices, _, _ = await derenderer.derender_completion(
+            [
+                GenerateResponse(
+                    request_id="t",
+                    choices=[
+                        GenerateResponseChoice(
+                            index=0, token_ids=output_ids, finish_reason="stop"
+                        )
+                    ],
+                )
+            ],
+            prompt_token_ids=[prompt_ids],
+        )
+        assert choices[0].text == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_first_chunk_seeded(self, derenderer, leading_space_ids):
+        prompt_ids, output_ids, expected = leading_space_ids
+        mid = len(output_ids) // 2
+
+        chunk1, state = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids[:mid]),
+            prompt_token_ids=prompt_ids,
+        )
+        # Only needed on the first chunk; the carried state already holds
+        # the seeded window from here on.
+        chunk2, _ = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids[mid:], finish_reason="stop"),
+            state=state,
+        )
+
+        streamed = (chunk1.choices[0].delta.content or "") + (
+            chunk2.choices[0].delta.content or ""
+        )
+        assert streamed == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("from_generate_chunk", [False, True])
+    async def test_completion_stream_first_chunk_seeded(
+        self, derenderer, leading_space_ids, from_generate_chunk
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        mid = len(output_ids) // 2
+
+        chunk1, state = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                output_ids[:mid],
+                prompt_token_ids=prompt_ids if from_generate_chunk else None,
+            ),
+            prompt_token_ids=None if from_generate_chunk else prompt_ids,
+        )
+        chunk2, _ = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids[mid:], finish_reason="stop"),
+            state=state,
+        )
+
+        assert chunk1.choices[0].text + chunk2.choices[0].text == expected
+
+    @pytest.mark.asyncio
+    async def test_parser_path_ephemeral_state_seeded(
+        self, parsed_derenderer, monkeypatch, leading_space_ids
+    ):
+        """The parser path's per-call detok window is seeded too, so
+        `parse_delta` sees the same text as coupled serving."""
+
+        class _EchoParser(Parser):
+            def parse_delta(
+                self,
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=None,
+                *,
+                finished,
+            ):
+                return DeltaMessage(content=delta_text) if delta_text else None
+
+        monkeypatch.setattr(parsed_derenderer, "parser", _EchoParser)
+        prompt_ids, output_ids, expected = leading_space_ids
+
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids, finish_reason="stop"),
+            chat_request=_chat_request(),
+            prompt_token_ids=prompt_ids,
+        )
+        assert chunk.choices[0].delta.content == expected
 
 
 @pytest.mark.asyncio

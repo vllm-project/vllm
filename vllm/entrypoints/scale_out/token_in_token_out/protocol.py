@@ -421,6 +421,13 @@ class DerenderChatRequest(BaseModel):
     len(GenerateRequest.token_ids) from the render step.
     """
 
+    prompt_token_ids: list[int] | None = None
+    """Prompt token IDs (`GenerateRequest.token_ids` from /render). Seeds
+    detokenization from the prompt tail so the first output token keeps its
+    leading space on SentencePiece tokenizers. Falls back to
+    `generate_response.prompt_token_ids`, then to unseeded decoding.
+    """
+
     chat_request: ChatCompletionRequest | None = None
     """The original (post-adjust_request) ChatCompletionRequest from /render.
 
@@ -455,6 +462,14 @@ class DerenderCompletionRequest(BaseModel):
     If provided, len(prompt_tokens) must equal len(generate_responses).
     """
 
+    prompt_token_ids: list[list[int] | None] | None = None
+    """One prompt token ID list per response, used to seed detokenization.
+    See `DerenderChatRequest.prompt_token_ids`.
+
+    If provided, len(prompt_token_ids) must equal len(generate_responses).
+    A `None` entry falls back to `generate_responses[i].prompt_token_ids`.
+    """
+
     completion_request: CompletionRequest | None = None
     """The original (post-adjust_request) CompletionRequest from /render.
 
@@ -471,6 +486,13 @@ class DerenderCompletionRequest(BaseModel):
             raise ValueError(
                 f"prompt_tokens length ({len(self.prompt_tokens)}) must equal "
                 f"generate_responses length ({len(self.generate_responses)})"
+            )
+        if self.prompt_token_ids is not None and len(self.prompt_token_ids) != len(
+            self.generate_responses
+        ):
+            raise ValueError(
+                f"prompt_token_ids length ({len(self.prompt_token_ids)}) must "
+                f"equal generate_responses length ({len(self.generate_responses)})"
             )
         return self
 
@@ -636,8 +658,9 @@ class DerenderChatStreamRequest(BaseModel):
     Rejected with a 400 (by `ServingDerender`) when a tool or reasoning
     parser is configured and this is omitted. Without it, `parse_delta`
     cannot tell whether the prompt left reasoning open and would silently
-    misclassify reasoning content as plain content. Unused on the plain
-    detokenization path.
+    misclassify reasoning content as plain content. On all paths it also
+    seeds detokenization on the first chunk (see
+    `DerenderChatRequest.prompt_token_ids`).
     """
 
     chat_request: ChatCompletionRequest | None = None
@@ -665,6 +688,12 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     prompt_tokens: int | None = None
     """Prompt token count for usage."""
+
+    prompt_token_ids: list[int] | None = None
+    """Prompt token IDs, used on the first chunk to seed detokenization.
+    Falls back to `generate_chunk.prompt_token_ids`. See
+    `DerenderChatRequest.prompt_token_ids`.
+    """
 
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
