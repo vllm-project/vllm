@@ -9,7 +9,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import partial, reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
@@ -2361,47 +2361,24 @@ def get_kv_cache_groups(
     return groups
 
 
-def _all_kv_groups_tp_replicated(
-    groups: list[KVCacheGroupSpec],
-    vllm_config: VllmConfig,
-) -> bool:
-    """Returns True iff every layer in every group is an MLA spec with
-    ``num_kv_heads == 1`` (so all TP ranks hold identical KV data).
+def _layer_tp_replicas(spec: KVCacheSpec, tp_size: int, dcp_size: int) -> int:
+    if not isinstance(spec, AttentionSpec) or spec.max_tp_shards is None:
+        return 1
+    if spec.dcp_sharded and dcp_size > 1:
+        return 1
+    return max(1, tp_size // spec.max_tp_shards)
 
-    Conservative by design: PP and CP combinations are excluded.  DP is
-    allowed since it does not affect per-TP-rank KV data.  As support for
-    other parallelisms is validated, this check can be relaxed.
-    """
-    pc = vllm_config.parallel_config
-    if (
-        pc.tensor_parallel_size == 1
-        or pc.pipeline_parallel_size != 1
-        or pc.prefill_context_parallel_size != 1
-        or pc.decode_context_parallel_size != 1
-        or pc.world_size != pc.tensor_parallel_size
-    ):
-        return False
 
-    _mla_types: frozenset[type] = frozenset({MLAAttentionSpec, SlidingWindowMLASpec})
-    if not groups:
-        return False
-    for group in groups:
-        spec = group.kv_cache_spec
-        inner: list[KVCacheSpec] = (
-            list(spec.kv_cache_specs.values())
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else [spec]
-        )
-        if not inner:
-            return False
-        if not all(
-            type(s) in _mla_types
-            and isinstance(s, AttentionSpec)
-            and s.num_kv_heads == 1
-            for s in inner
-        ):
-            return False
-    return True
+def kv_cache_groups_tp_replicas(
+    groups: list[KVCacheGroupSpec], tp_size: int, dcp_size: int = 1
+) -> int:
+    """Consecutive TP ranks holding identical KV for every layer."""
+    specs = [spec for g in groups for spec in iter_layer_specs(g.kv_cache_spec)]
+    if not specs:
+        return 1
+    return reduce(
+        math.gcd, (_layer_tp_replicas(s, tp_size, dcp_size) for s in specs), tp_size
+    )
 
 
 def generate_scheduler_kv_cache_config(
@@ -2819,8 +2796,10 @@ def get_kv_cache_configs(
         )
 
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.all_groups_are_tp_replicated = _all_kv_groups_tp_replicated(
-            kv_cache_config.kv_cache_groups, vllm_config
+        kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_cache_config.kv_cache_groups,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
         )
 
     return kv_cache_configs

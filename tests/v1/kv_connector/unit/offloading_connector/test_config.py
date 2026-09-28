@@ -18,8 +18,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_utils import (
-    _all_kv_groups_tp_replicated,
     generate_scheduler_kv_cache_config,
+    kv_cache_groups_tp_replicas,
 )
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -167,6 +167,7 @@ def _mla_spec(
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=head_size,
         dtype=dtype,
         tokens_per_state=tokens_per_state,
@@ -324,8 +325,10 @@ def _replicated_layout(
     config.parallel_config.nnodes = nnodes
     if world_size is not None:
         config.parallel_config.world_size = world_size
-    kv_cache_config.all_groups_are_tp_replicated = _all_kv_groups_tp_replicated(
-        kv_cache_config.kv_cache_groups, config
+    kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+        kv_cache_config.kv_cache_groups,
+        config.parallel_config.tensor_parallel_size,
+        config.parallel_config.decode_context_parallel_size,
     )
 
     # Scheduler and Worker offload config
@@ -350,6 +353,7 @@ def _replicated_layout(
 _SWA_MLA_PAGE = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,
+    max_tp_shards=1,
     head_size=512,
     dtype=torch.float32,
     sliding_window=128,
@@ -363,6 +367,7 @@ def _make_swa_mla_kv_cache_config(
     spec = SlidingWindowMLASpec(
         block_size=16,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=512,
         dtype=torch.float32,
         sliding_window=128,
@@ -403,6 +408,7 @@ def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
         spec = SlidingWindowMLASpec(
             block_size=block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=head_size,
             dtype=dtype,
             sliding_window=sw,
@@ -420,6 +426,7 @@ def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
         spec = MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=head_size,
             dtype=dtype,
         )
@@ -473,6 +480,7 @@ def _make_dsv3_2_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
     spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=512,
         dtype=torch.float32,
     )
@@ -928,6 +936,7 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
                         SlidingWindowMLASpec(
                             block_size=16,
                             num_kv_heads=1,
+                            max_tp_shards=1,
                             head_size=512,
                             dtype=torch.float32,
                             sliding_window=128,
@@ -1109,6 +1118,7 @@ _SWA_SPEC = SlidingWindowSpec(
 _SWA_MLA_SPEC = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,
+    max_tp_shards=1,
     head_size=576,
     dtype=torch.float32,
     sliding_window=128,
@@ -1201,8 +1211,10 @@ def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
             ],
         )
 
-        kv_config.all_groups_are_tp_replicated = _all_kv_groups_tp_replicated(
-            kv_config.kv_cache_groups, config
+        kv_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_config.kv_cache_groups,
+            config.parallel_config.tensor_parallel_size,
+            config.parallel_config.decode_context_parallel_size,
         )
 
         return build_offloading_config(config, kv_config)

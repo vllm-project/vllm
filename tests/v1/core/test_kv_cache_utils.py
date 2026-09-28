@@ -52,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     is_kv_cache_spec_uniform,
+    kv_cache_groups_tp_replicas,
     make_block_hash_with_group_id,
     tensor_data,
 )
@@ -3182,6 +3183,7 @@ def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
@@ -3192,6 +3194,7 @@ def new_swa_mla_spec(head_size=576, sliding_window=128, model_version=None):
     return SlidingWindowMLASpec(
         block_size=16,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=head_size,
         dtype=torch.float32,
         sliding_window=sliding_window,
@@ -4547,33 +4550,18 @@ def test_trailing_layer_fallback_requires_exact_partition():
     assert not any(g.is_eagle_group for g in trimmed)
 
 
-# ---------------------------------------------------------------------------
-# Tests for KVCacheConfig.all_groups_are_tp_replicated
-# ---------------------------------------------------------------------------
-
-
-def _make_tp_vllm_config(tp_size: int, dp_size: int = 1) -> "VllmConfig":
-    from vllm.config import ParallelConfig
-
-    cfg = VllmConfig(
-        model_config=ModelConfig(max_model_len=16),
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=tp_size,
-            data_parallel_size=dp_size,
-        ),
-    )
-    cfg.cache_config.kv_cache_layout = "LBNHC"
-    return cfg
+_GQA_SPEC = FullAttentionSpec(
+    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
+)
+_GQA_SWA_SPEC = SlidingWindowSpec(
+    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32, sliding_window=128
+)
 
 
 @pytest.mark.parametrize(
-    "specs,num_groups",
+    "specs,expected",
     [
-        pytest.param(
-            {"l.0": new_mla_spec(), "l.1": new_mla_spec()},
-            1,
-            id="single-mla-group",
-        ),
+        pytest.param({"l.0": new_mla_spec(), "l.1": new_mla_spec()}, 4, id="mla"),
         pytest.param(
             {
                 "l.0": new_mla_spec(),
@@ -4581,86 +4569,76 @@ def _make_tp_vllm_config(tp_size: int, dp_size: int = 1) -> "VllmConfig":
                 "s.0": new_swa_mla_spec(),
                 "s.1": new_swa_mla_spec(),
             },
-            2,
-            id="mla-and-swa-mla-groups",
+            4,
+            id="mla-and-swa-mla",
         ),
-    ],
-)
-def test_all_groups_tp_replicated_true(specs, num_groups):
-    mem = sum(s.page_size_bytes for s in specs.values()) * 10
-    configs = get_kv_cache_configs(_make_tp_vllm_config(tp_size=2), [specs], [mem])
-    assert len(configs[0].kv_cache_groups) == num_groups
-    assert configs[0].all_groups_are_tp_replicated is True
-
-
-@pytest.mark.parametrize(
-    "specs,num_groups",
-    [
+        pytest.param({"l.0": _GQA_SPEC, "l.1": _GQA_SPEC}, 1, id="gqa"),
         pytest.param(
-            {
-                "l.0": FullAttentionSpec(
-                    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
-                ),
-                "l.1": FullAttentionSpec(
-                    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
-                ),
-            },
+            {"l.0": new_mla_spec(), "l.1": _GQA_SPEC},
             1,
-            id="non-mla-only",
+            id="mla-and-gqa-uniform-group",
         ),
         pytest.param(
             {
                 "l.0": new_mla_spec(),
                 "l.1": new_mla_spec(),
-                "s.0": SlidingWindowSpec(
-                    block_size=16,
-                    num_kv_heads=8,
-                    head_size=64,
-                    dtype=torch.float32,
-                    sliding_window=128,
-                ),
-                "s.1": SlidingWindowSpec(
-                    block_size=16,
-                    num_kv_heads=8,
-                    head_size=64,
-                    dtype=torch.float32,
-                    sliding_window=128,
-                ),
+                "s.0": _GQA_SWA_SPEC,
+                "s.1": _GQA_SWA_SPEC,
             },
             1,
-            id="mla-and-non-mla-groups",
+            id="mla-and-gqa-swa",
         ),
     ],
 )
-def test_all_groups_tp_replicated_false_spec(specs, num_groups):
-    """Non-MLA specs disqualify TP replication regardless of parallelism."""
+def test_kv_tp_replicas(monkeypatch, specs, expected):
+    """Resolved per layer before scheduler flattening hides mixed groups."""
+    from vllm.config import ParallelConfig
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "device_count", lambda: 4)
+    parallel_config = ParallelConfig(tensor_parallel_size=4)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16), parallel_config=parallel_config
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     mem = sum(s.page_size_bytes for s in specs.values()) * 10
-    configs = get_kv_cache_configs(_make_tp_vllm_config(tp_size=2), [specs], [mem])
-    assert len(configs[0].kv_cache_groups) == num_groups
-    assert configs[0].all_groups_are_tp_replicated is False
+    configs = get_kv_cache_configs(vllm_config, [specs], [mem])
+    assert configs[0].kv_tp_replicas == expected
+    scheduler = generate_scheduler_kv_cache_config(configs)
+    assert scheduler.kv_tp_replicas == expected
 
 
 @pytest.mark.parametrize(
-    "tp_size,extra_kwargs,expected",
+    "specs,tp_size,dcp_size,expected",
     [
-        pytest.param(2, {}, True, id="tp2-only"),
-        pytest.param(2, {"data_parallel_size": 2}, True, id="tp2-dp2"),
-        pytest.param(1, {}, False, id="tp1"),
-        pytest.param(1, {"data_parallel_size": 2}, False, id="tp1-dp2"),
-        pytest.param(2, {"pipeline_parallel_size": 2}, False, id="pp"),
-        pytest.param(2, {"prefill_context_parallel_size": 2}, False, id="pcp"),
+        pytest.param([new_mla_spec()], 8, 1, 8, id="mla"),
+        pytest.param([new_mla_spec()], 8, 2, 1, id="mla-dcp"),
+        pytest.param(
+            [replace(new_mla_spec(), max_tp_shards=None)], 8, 1, 1, id="mla-unset"
+        ),
+        pytest.param([replace(_GQA_SPEC, max_tp_shards=2)], 8, 1, 4, id="gqa-partial"),
+        pytest.param([replace(_GQA_SPEC, max_tp_shards=8)], 4, 1, 1, id="gqa-sharded"),
+        pytest.param(
+            [new_mla_spec(), replace(_GQA_SWA_SPEC, max_tp_shards=4)],
+            8,
+            1,
+            2,
+            id="mla-and-gqa-partial",
+        ),
+        pytest.param(
+            [
+                HiddenStateCacheSpec(
+                    block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32
+                )
+            ],
+            8,
+            1,
+            1,
+            id="hidden-state",
+        ),
     ],
 )
-def test_all_groups_tp_replicated_parallelism(tp_size, extra_kwargs, expected):
-    """Verify TP replication gating across parallelism configurations."""
-    from vllm.config import ParallelConfig
-
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(max_model_len=16),
-        parallel_config=ParallelConfig(tensor_parallel_size=tp_size, **extra_kwargs),
-    )
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    specs = {"l.0": new_mla_spec(), "l.1": new_mla_spec()}
-    mem = new_mla_spec().page_size_bytes * 2 * 10
-    configs = get_kv_cache_configs(vllm_config, [specs], [mem])
-    assert configs[0].all_groups_are_tp_replicated is expected
+def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
+    """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
+    groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
+    assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
