@@ -177,6 +177,73 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     torch.testing.assert_close(output, 3 * hidden_states)
 
 
+@pytest.mark.parametrize("above_threshold", [False, True])
+def test_deepseek_v41_sm90_fi_moe_routes_with_eager_gate(
+    v41_moe_config, monkeypatch, above_threshold
+):
+    """The Hopper flashinfer megakernel must keep the eager gate routing.
+
+    DeepGEMM's fused ``bf16_mega_gate`` asserts SM100, so every batch size --
+    including the large ones that select it on Blackwell -- has to route
+    through ``GateLinear`` + ``fused_topk_bias``.
+    """
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("SM90 FP8 FlashInfer MegaMoE requires Hopper")
+
+    v41_moe_config.kernel_config = SimpleNamespace(
+        moe_backend="flashinfer_moe_ep_mega_sm90_fp8"
+    )
+    config = v41_moe_config.model_config.hf_config
+    config.hidden_size = 256
+    config.n_routed_experts = 384
+    config.num_experts_per_tok = 6
+    config.dspark_n_routed_experts = 128
+    # 384 experts -> the fused-gate threshold is 16 tokens.
+    num_tokens = 16 + int(above_threshold)
+    with (
+        set_default_torch_dtype(v41_moe_config.model_config.dtype),
+        torch.device("cuda"),
+    ):
+        moe = DeepseekV41MoE(v41_moe_config, prefix="model.layers.0.ffn")
+        assert moe.use_mega_moe and not moe.use_fused_mega_gate
+        hidden_states = torch.randn(
+            num_tokens, config.hidden_size, dtype=torch.bfloat16
+        )
+
+    with torch.no_grad():
+        moe.gate.weight.normal_(std=0.01)
+        moe.gate.e_score_correction_bias.copy_(torch.arange(384, device="cuda"))
+
+    logits = torch.mm(hidden_states, moe.gate.weight.t(), out_dtype=torch.float32)
+    scores = torch.nn.functional.softplus(logits).sqrt()
+    biased = scores + moe.gate.e_score_correction_bias
+    expected_ids = biased.topk(config.num_experts_per_tok, dim=-1).indices
+    expected_weights = scores.gather(1, expected_ids)
+    expected_weights *= config.routed_scaling_factor / expected_weights.sum(
+        dim=-1, keepdim=True
+    )
+
+    routed = {}
+
+    def check_routing(x, weights, ids, *, activation_clamp):
+        routed["ids"], routed["weights"] = ids, weights
+        assert activation_clamp == config.swiglu_limit
+        return x.clone()
+
+    monkeypatch.setattr(moe.experts, "forward", check_routing)
+    monkeypatch.setattr(moe.shared_experts, "forward", lambda x: 2 * x)
+
+    with torch.no_grad():
+        output = moe(hidden_states, None)
+
+    assert routed["ids"].dtype == torch.int64
+    torch.testing.assert_close(routed["ids"], expected_ids)
+    torch.testing.assert_close(
+        routed["weights"], expected_weights, rtol=1e-3, atol=1e-4
+    )
+    torch.testing.assert_close(output, 3 * hidden_states)
+
+
 @pytest.mark.parametrize(
     "draft_experts,draft_top_k,expected", [(0, 0, (8, 2)), (4, 3, (4, 3))]
 )
@@ -658,6 +725,7 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     moe = DeepseekV4MoE.__new__(DeepseekV4MoE)
     torch.nn.Module.__init__(moe)
     moe.use_mega_moe = True
+    moe.use_fused_mega_gate = True
     moe.gate = FakeGate()
     moe.experts = FakeExperts()
     moe.shared_experts = FakeSharedExperts()

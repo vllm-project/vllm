@@ -265,9 +265,11 @@ class KernelConfig:
       an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
       requantized at load
     - "flashinfer_moe_ep_mega_sm90_fp8": Hopper (SM90) FP8 pull-style CuteDSL
-      megakernel (requires NVSHMEM). Expert weights are dequantized to bf16 at
-      load and requantized to blockwise FP8 by the backend; requires expert
-      parallel and hidden/intermediate sizes divisible by 128
+      megakernel (requires NVSHMEM). MXFP4 expert weights are converted directly
+      to blockwise FP8 at load; NVFP4 weights are dequantized to bf16 and
+      requantized by the backend. Requires expert parallel and
+      hidden/intermediate sizes divisible by 128. Converting MXFP4 experts to
+      FP8 roughly doubles their resident weight memory
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels

@@ -86,6 +86,7 @@ from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_i
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer_moe_ep import (
+    fi_moe_ep_backend_spec,
     is_fi_moe_ep_backend,
     validate_fi_moe_ep_config,
 )
@@ -810,6 +811,13 @@ class DeepseekV4MoE(nn.Module):
         validate_fi_moe_ep_config(vllm_config)
         self.use_mega_moe = moe_backend in MEGA_MOE_BACKENDS
         self.use_fi_mega_moe = is_fi_moe_ep_backend(moe_backend)
+        # The native mega path routes through DeepGEMM's fused SM100 gate
+        # kernel; the Hopper flashinfer megakernel has no such kernel and has
+        # to run the standard eager gate + top-k routing instead.
+        self.use_fused_mega_gate = self.use_mega_moe and (
+            not self.use_fi_mega_moe
+            or fi_moe_ep_backend_spec(moe_backend).uses_fused_mega_gate
+        )
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
@@ -1054,7 +1062,7 @@ class DeepseekV4MoE(nn.Module):
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if hidden_states.shape[0] <= gate_threshold:
+        if not self.use_fused_mega_gate or hidden_states.shape[0] <= gate_threshold:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,

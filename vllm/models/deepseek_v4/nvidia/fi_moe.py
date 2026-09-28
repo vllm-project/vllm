@@ -13,6 +13,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
 from vllm.utils.flashinfer_moe_ep import (
     build_fi_mega_layer,
+    build_sm90_fp8_transformed_weights,
     ensure_fi_moe_ep_runtime,
     fi_moe_ep_backend_spec,
     make_fi_moe_ep_bootstrap,
@@ -253,7 +254,21 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         self._check_runtime_supported()
         ensure_fi_moe_ep_runtime(self._vllm_config)
 
-        if self._nvfp4_prequant and self._megakernel == "nvfp4_cutedsl":
+        weights = None
+        transformed_weights = None
+        if self._megakernel == "sm90_fp8_pull" and not self._nvfp4_prequant:
+            # MXFP4 experts (e2m1 + ue8m0): convert straight from the packed
+            # nibbles into the kernel-ready FP8 layout. e2m1 values are exact
+            # in fp32, so this is bit-identical to the generic
+            # fp4 -> bf16 -> fp8 route while never materializing the bf16 pack.
+            transformed_weights = build_sm90_fp8_transformed_weights(
+                self.w13_weight.data,
+                self.w13_weight_scale.data,
+                self.w2_weight.data,
+                self.w2_weight_scale.data,
+                intermediate_size=self.intermediate_size,
+            )
+        elif self._nvfp4_prequant and self._megakernel == "nvfp4_cutedsl":
             # NVFP4 checkpoint: hand the packed weights + both scale
             # planes straight to the backend (no dequant->requant);
             # per-expert globals become fc1/fc2 epilogue alphas staged
@@ -269,8 +284,10 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             )
             self._epilogue_alphas = (fc1_alpha, fc2_alpha)
         else:
-            # cutedsl (MXFP4 -> bf16) and sm90_fp8_pull (MXFP4 or NVFP4 ->
-            # bf16 -> blockwise FP8 requant by the backend).
+            # cutedsl (MXFP4 -> bf16) and sm90_fp8_pull with an NVFP4
+            # checkpoint (e2m1 + e4m3-per-16 block scales + per-tensor
+            # weight_scale_2, whose product is not exactly representable in
+            # bf16 -- keep the bf16 route so both paths agree bit-for-bit).
             weights = mega_moe_weight_pack_from_params(
                 self.w13_weight,
                 self.w13_weight_scale,
@@ -296,8 +313,9 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             top_k=self.top_k,
             activation_clamp=self._activation_clamp,
             weights=weights,
+            transformed_weights=transformed_weights,
         )
-        del weights
+        del weights, transformed_weights
         # Allocate (or attach to) the pooled workspace before first
         # forward so warmup/capture never hits the lazy path.
         self._mega_layer._ensure_workspace()
