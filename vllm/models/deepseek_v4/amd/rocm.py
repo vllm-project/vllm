@@ -15,6 +15,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -629,8 +630,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         super().__init__(*args, **kwargs)
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
-        self._wqa_wkv_scale: torch.Tensor | None = None
-        self._wo_b_scale: torch.Tensor | None = None
+        register_derived_buffer(self, "_wqa_wkv_scale")
+        register_derived_buffer(self, "_wo_b_scale")
+        for linear in (self.fused_wqa_wkv, self.wo_b, self.wo_a):
+            linear._vllm_defer_weights_reload = True
         self._wo_a_fp8_weight: torch.Tensor | None = None
         self._wo_a_e8m0_scale: torch.Tensor | None = None
         self._wo_a_cos_cache: torch.Tensor | None = None
@@ -849,7 +852,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
-    def prepare_attn_preshuffle(self) -> None:
+    def process_weights_for_reload(self) -> None:
+        from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+        for linear in (self.fused_wqa_wkv, self.wo_b, self.wo_a):
+            if get_layerwise_info(linear).reload_restore_pending:
+                linear.quant_method.process_weights_after_loading(linear)
+        self.prepare_attn_preshuffle(reloading=True)
+
+    def prepare_attn_preshuffle(self, *, reloading: bool = False) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
         if not rocm_aiter_ops.is_enabled():
@@ -861,6 +872,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm.model_executor.utils import replace_parameter
 
         def _prep(linear) -> torch.Tensor | None:
+            if reloading:
+                from vllm.model_executor.model_loader.reload.layerwise import (
+                    get_layerwise_info,
+                )
+
+                if not get_layerwise_info(linear).reload_restore_pending:
+                    return None
             w = getattr(linear, "weight", None)
             if w is None or w.dim() != 2:
                 return None
@@ -880,10 +898,20 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        for name, linear in (
+            ("_wqa_wkv_scale", self.fused_wqa_wkv),
+            ("_wo_b_scale", self.wo_b),
+        ):
+            scale = _prep(linear)
+            if scale is not None:
+                set_derived_buffer(self, name, scale)
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
-            self._prepare_fp8_wo_a()
+            from vllm.model_executor.model_loader.reload.layerwise import (
+                get_layerwise_info,
+            )
+
+            if not reloading or get_layerwise_info(self.wo_a).reload_restore_pending:
+                self._prepare_fp8_wo_a()
 
     def _prepare_fp8_wo_a(self) -> None:
         try:
