@@ -75,6 +75,9 @@ class StatLoggerBase(ABC):
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
 
+    def record_num_queued_tokens(self, num_queued_tokens: int):  # noqa
+        pass
+
 
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
     factories: list[StatLoggerFactory] = []
@@ -546,6 +549,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[waiting_reason] = create_metric_per_engine(
                 gauge_waiting_by_reason, per_engine_labelvalues_with_reason
             )
+
+        # Counted by each API server process across all the engines it routes
+        # to, so there is no engine label and the value is summed over API
+        # server processes.
+        gauge_num_queued_tokens = self._gauge_cls(
+            name="vllm:num_queued_tokens",
+            documentation=(
+                "Number of prompt tokens of requests in the prefill phase, "
+                "as counted by the API server for --max-num-queued-tokens."
+            ),
+            multiprocess_mode="livesum",
+            labelnames=["model_name"],
+        )
+        self.gauge_num_queued_tokens = gauge_num_queued_tokens.labels(model_name)
 
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
@@ -1212,6 +1229,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
+    def record_num_queued_tokens(self, num_queued_tokens: int):
+        self.gauge_num_queued_tokens.set(num_queued_tokens)
+
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
@@ -1299,6 +1319,10 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def record_num_queued_tokens(self, num_queued_tokens: int):
+        for logger in self.stat_loggers:
+            logger.record_num_queued_tokens(num_queued_tokens)
 
     def log(self):
         for logger in self.stat_loggers:

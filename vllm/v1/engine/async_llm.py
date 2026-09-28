@@ -867,6 +867,12 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+                        # Set on every batch, not only batches with request
+                        # outputs, so aborts show up without waiting for other
+                        # requests to produce tokens.
+                        logger_ref[0].record_num_queued_tokens(
+                            output_processor.get_num_queued_tokens()
+                        )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
