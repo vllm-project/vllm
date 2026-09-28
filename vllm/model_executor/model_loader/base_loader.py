@@ -88,7 +88,9 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
+            # Meta tensors hold no data, so there is nothing to repack.
+            if target_device.type != "meta":
+                process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()
 
