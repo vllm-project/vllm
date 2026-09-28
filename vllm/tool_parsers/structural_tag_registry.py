@@ -34,6 +34,17 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.parser.plamo3 import (
+    BEGIN_TOOL_ARGUMENTS,
+    BEGIN_TOOL_NAME,
+    BEGIN_TOOL_REQUEST,
+    BEGIN_TOOL_REQUESTS,
+    END_TOOL_ARGUMENTS,
+    END_TOOL_NAME,
+    END_TOOL_REQUEST,
+    END_TOOL_REQUESTS,
+    EOT,
+)
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 ToolChoice: TypeAlias = (
@@ -407,19 +418,6 @@ def get_minimax_structural_tag(
     return StructuralTag(format=suffix_tag)
 
 
-_PLAMO3_BEGIN_TOOL_REQUESTS = "<|plamo:begin_tool_requests:plamo|>"
-_PLAMO3_END_TOOL_REQUESTS = "<|plamo:end_tool_requests:plamo|>"
-_PLAMO3_BEGIN_TOOL_REQUEST = "<|plamo:begin_tool_request:plamo|>"
-_PLAMO3_END_TOOL_REQUEST = "<|plamo:end_tool_request:plamo|>"
-_PLAMO3_BEGIN_TOOL_NAME = "<|plamo:begin_tool_name:plamo|>"
-_PLAMO3_END_TOOL_NAME = "<|plamo:end_tool_name:plamo|>"
-_PLAMO3_BEGIN_TOOL_ARGUMENTS = (
-    "<|plamo:begin_tool_arguments:plamo|><|plamo:constrain|>json<|plamo:msg|>"
-)
-_PLAMO3_END_TOOL_ARGUMENTS = "<|plamo:end_tool_arguments:plamo|>"
-_PLAMO3_EOT = "<|plamo:tag|>"
-
-
 @register_vllm_structural_tag("plamo3")
 def get_plamo3_structural_tag(
     tools: list[FunctionToolParam],
@@ -434,21 +432,21 @@ def get_plamo3_structural_tag(
     request_tags = [
         TagFormat(
             begin=(
-                _PLAMO3_BEGIN_TOOL_REQUEST
-                + _PLAMO3_BEGIN_TOOL_NAME
+                BEGIN_TOOL_REQUEST
+                + BEGIN_TOOL_NAME
                 + tool.function.name
-                + _PLAMO3_END_TOOL_NAME
-                + _PLAMO3_BEGIN_TOOL_ARGUMENTS
+                + END_TOOL_NAME
+                + BEGIN_TOOL_ARGUMENTS
             ),
             content=JSONSchemaFormat(
                 json_schema=get_function_parameters(tool.function)
             ),
-            end=_PLAMO3_END_TOOL_ARGUMENTS + _PLAMO3_END_TOOL_REQUEST,
+            end=END_TOOL_ARGUMENTS + END_TOOL_REQUEST,
         )
         for tool in tools
     ]
     requests_tag = TagFormat(
-        begin=_PLAMO3_BEGIN_TOOL_REQUESTS,
+        begin=BEGIN_TOOL_REQUESTS,
         content=TagsWithSeparatorFormat(
             tags=request_tags,
             separator="",
@@ -456,15 +454,15 @@ def get_plamo3_structural_tag(
             stop_after_first=tool_choice == "forced",
         ),
         end=[
-            _PLAMO3_END_TOOL_REQUESTS,
-            _PLAMO3_END_TOOL_REQUESTS + _PLAMO3_EOT,
+            END_TOOL_REQUESTS,
+            END_TOOL_REQUESTS + EOT,
         ],
     )
 
     if tool_choice == "auto":
         return StructuralTag(
             format=TriggeredTagsFormat(
-                triggers=[_PLAMO3_BEGIN_TOOL_REQUESTS],
+                triggers=[BEGIN_TOOL_REQUESTS],
                 tags=[requests_tag],
             )
         )
