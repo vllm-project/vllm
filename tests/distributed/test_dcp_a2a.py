@@ -404,7 +404,7 @@ class TestPackedA2AKernels:
         if return_lse:
             actual_out, actual_lse = actual
             _assert_packed_a2a_close(actual_out, expected_out, dtype)
-            torch.testing.assert_close(actual_lse, expected_lse, rtol=1e-4, atol=1e-4)
+            _assert_packed_a2a_close(actual_lse, expected_lse, dtype)
         else:
             _assert_packed_a2a_close(actual, expected_out, dtype)
 
@@ -558,7 +558,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         if return_lse:
             actual_out, actual_lse = actual
             _assert_packed_a2a_close(actual_out, expected_out, dtype)
-            torch.testing.assert_close(actual_lse, expected_lse, rtol=1e-4, atol=1e-4)
+            _assert_packed_a2a_close(actual_lse, expected_lse, dtype)
         else:
             _assert_packed_a2a_close(actual, expected_out, dtype)
     finally:

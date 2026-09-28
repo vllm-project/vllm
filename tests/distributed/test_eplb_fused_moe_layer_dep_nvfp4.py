@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4FusedMoE,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -67,18 +68,10 @@ def make_fused_moe_layer(
         quant_config=quant_config,
     )
 
-    nvfp4_fused_moe = ModelOptNvFp4FusedMoE(quant_config, fml)
-    nvfp4_fused_moe.create_weights(
-        fml,
-        test_config.num_local_experts,
-        test_config.hidden_size,
-        test_config.intermediate_size,
-        params_dtype=torch.uint8,
-        global_num_experts=test_config.num_experts,
-    )
-
     fml = fml.to(device)
     re = fml.routed_experts
+    nvfp4_fused_moe = re.quant_method
+    assert isinstance(nvfp4_fused_moe, ModelOptNvFp4FusedMoE)
     w1_q, w2_q, quant_config = make_test_quant_config(
         test_config.num_local_experts,
         test_config.intermediate_size,
@@ -105,8 +98,6 @@ def make_fused_moe_layer(
 
     nvfp4_fused_moe.process_weights_after_loading(re)
 
-    fml.maybe_init_modular_kernel()
-
     return fml
 
 
@@ -116,6 +107,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
     vllm_config = VllmConfig()
     vllm_config.parallel_config.data_parallel_size = world_size
     vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.parallel_config.enable_eplb = True
     vllm_config.kernel_config.moe_backend = test_config.moe_backend
 
     with set_current_vllm_config(vllm_config):
@@ -127,6 +119,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         ep_rank = torch.distributed.get_rank()
 
         device = torch.device(f"cuda:{ep_rank}")
+        init_workspace_manager(device)
 
         fml_layers = [
             make_fused_moe_layer(ep_rank, layer_idx, test_config).to(device)
@@ -215,7 +208,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 dtype=torch.int32,
                 device=device,
             )
-            fml.eplb_state = EplbLayerState()
+            fml.router.eplb_state = EplbLayerState()
             fml.set_eplb_state(
                 lidx,
                 torch.zeros(

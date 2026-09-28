@@ -4,11 +4,14 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 from torch import nn
 
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.models.deepseek_v32.nvidia import mtp as deepseek_v32_mtp
+
+pytestmark = pytest.mark.cpu_test
 
 
 class _IdentityNorm(nn.Module):

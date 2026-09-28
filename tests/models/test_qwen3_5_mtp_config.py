@@ -9,6 +9,8 @@ from transformers import AutoConfig, PreTrainedConfig
 
 from vllm.config.speculative import SpeculativeConfig
 
+pytestmark = pytest.mark.cpu_test
+
 _CHECKPOINTS = {
     "qwen3_5": "Qwen/Qwen3.8-27B",
     "qwen3_5_moe": "Qwen/Qwen3.6-35B-A3B",

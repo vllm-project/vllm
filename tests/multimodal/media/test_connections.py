@@ -11,6 +11,8 @@ import pytest
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, HTTPResponseSizeExceededError
 
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
+
 _ONE_MIB = 1024 * 1024
 _SMALL_BODY = b"a" * (_ONE_MIB // 2)
 _LARGE_BODY = b"b" * (2 * _ONE_MIB)

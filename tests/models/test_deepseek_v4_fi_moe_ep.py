@@ -29,6 +29,8 @@ from vllm.utils.flashinfer_moe_ep import (
     megakernel_runtime_requirements,
 )
 
+pytestmark = pytest.mark.cpu_test
+
 
 @dataclass
 class _FakeBootstrapConfig:
