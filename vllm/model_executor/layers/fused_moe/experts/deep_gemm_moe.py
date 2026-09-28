@@ -604,7 +604,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         a1q_perm = _resize_cache(
             workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
         )
-        a1q, a1q_scale, expert_ids, inv_perm, align_used = deepgemm_moe_permute(
+        use_psum_layout = current_platform.is_device_capability_family(100)
+        a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(
             aq=a1q,
             aq_scale=a1q_scale,
             topk_ids=topk_ids,
@@ -612,6 +613,7 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             expert_map=expert_map,
             expert_tokens_meta=expert_tokens_meta,
             aq_out=a1q_perm,
+            use_psum_layout=use_psum_layout,
         )
         assert a1q.size(0) == M_sum
 
@@ -625,7 +627,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 (a1q, a1q_scale),
                 (w1.view(torch.int8), self.w1_scale),
                 mm1_out,
-                expert_ids,
+                grouped_layout,
+                use_psum_layout=use_psum_layout,
                 recipe_a=(1, self._ACT_BLOCK_K),
                 recipe_b=(1, self._WEIGHT_BLOCK_K),
             )
@@ -645,7 +648,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 (a2q, a2q_scale),
                 (w2.view(torch.int8), self.w2_scale),
                 mm2_out,
-                expert_ids,
+                grouped_layout,
+                use_psum_layout=use_psum_layout,
                 recipe_a=(1, self._ACT_BLOCK_K),
                 recipe_b=(1, self._WEIGHT_BLOCK_K),
             )
