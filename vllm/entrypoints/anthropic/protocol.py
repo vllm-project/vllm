@@ -233,6 +233,10 @@ class AnthropicMessagesRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_thinking_budget(self) -> "AnthropicMessagesRequest":
+        # P/D prefill legs are sent with max_tokens=1 and never decode; the
+        # decode leg carries the client's max_tokens and is still checked.
+        if self.kv_transfer_params and self.kv_transfer_params.get("do_remote_decode"):
+            return self
         if (
             isinstance(self.thinking, AnthropicThinkingConfigEnabled)
             and self.thinking.budget_tokens >= self.max_tokens
