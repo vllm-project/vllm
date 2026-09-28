@@ -310,3 +310,16 @@ def test_sm100_576_bf16_low_heads_falls_back_from_fa4(monkeypatch):
         selected = next(name for name in order if not reasons(name))
     assert order[0] == "FLASH_ATTN_MLA_SPARSE_FA4", order
     assert selected == "FLASHINFER_MLA_SPARSE"
+
+
+@pytest.mark.parametrize("num_heads", [16, 32, 64])
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "expected"),
+    [
+        ("fp8", ["FLASHINFER_MLA_SPARSE", "FLASHMLA_SPARSE"]),
+        ("nvfp4_ds_mla", ["FLASHMLA_SPARSE", "FLASHINFER_MLA_SPARSE"]),
+    ],
+)
+def test_sm100_quantized_sparse_priority(kv_cache_dtype, expected, num_heads):
+    """FlashInfer serves nvfp4_ds_mla through fp8 staging, so it is opt-in."""
+    assert _sparse_order(kv_cache_dtype, 576, num_heads=num_heads) == expected
