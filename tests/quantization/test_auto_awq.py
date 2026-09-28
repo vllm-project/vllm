@@ -294,8 +294,8 @@ def _count_fused_calls(monkeypatch) -> list[int]:
 @pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
     reason=(
-        "Uses an arbitrary (N, K) shape not in the Hopper-tuned allow-list, "
-        "so it only reliably dispatches fused on exact SM89."
+        "Uses an arbitrary (N, K) shape not in any tuned table, so it only "
+        "dispatches fused on exact SM89."
     ),
 )
 def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch):

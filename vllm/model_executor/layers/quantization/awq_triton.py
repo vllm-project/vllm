@@ -21,36 +21,22 @@ AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
     current_platform.has_device_capability(89)
 )
 
-# Tile configs measured on real H100 (SM90) hardware to beat the legacy
-# dequant+matmul path across M in {1, 32, 129, 256} (see PR #57047 discussion
-# of the SM89-tuned heuristic regressing on Hopper for smaller-N shapes).
-# Keyed by the exact (N, K) weight shape -- not a generalized N/K threshold,
-# since only these shapes have been measured. Unlisted (N, K) use the legacy
-# path (see awq_fused_gemm_is_tuned_for_shape).
-_HOPPER_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
-    # (N, K): (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, num_stages)
-    (2560, 4096): (128, 64, 64, 4),  # o_proj
-    (2560, 9728): (64, 64, 64, 4),  # down_proj
-    (6144, 2560): (128, 64, 64, 3),  # qkv_proj
-    (19456, 2560): (128, 128, 64, 3),  # gate_up_proj
-}
-
-# Measured on RTX PRO 6000 Blackwell (SM120). Only shapes that beat the legacy
-# path for M <= 256 while staying within ~12% of it at M = 4096 are listed;
-# o_proj/down_proj had no such tile and stay on the legacy path.
+# Measured on RTX PRO 6000 Blackwell (SM120), keyed by exact (N, K) weight
+# shape. Only shapes that beat the legacy path for M <= 256 while staying
+# within ~12% of it at M = 4096 are listed; o_proj/down_proj had no such tile.
+# Unlisted (N, K) use the legacy path (see awq_fused_gemm_is_tuned_for_shape).
+# Hopper (SM90) has no table: fused was slower than legacy there for every
+# measured shape under CUDA graphs.
 _SM120_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
+    # (N, K): (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, num_stages)
     (6144, 2560): (128, 128, 32, 3),  # qkv_proj
     (19456, 2560): (128, 128, 32, 3),  # gate_up_proj
 }
 
 # Tuned tiles are only valid on the exact architecture they were measured on.
 _TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = (
-    {}
-    if not current_platform.is_cuda()
-    else _HOPPER_TUNED_TILES
-    if current_platform.is_device_capability(90)
-    else _SM120_TUNED_TILES
-    if current_platform.is_device_capability(120)
+    _SM120_TUNED_TILES
+    if current_platform.is_cuda() and current_platform.is_device_capability(120)
     else {}
 )
 
@@ -153,8 +139,8 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
     """Warmup-aware wrapper for awq_gemm_fused_fp32_kernel.
 
     ``M`` (token count) is excluded from the compile key via
-    ``do_not_specialize``. For (N, K) shapes with a Hopper-tuned tile config
-    (see ``_HOPPER_TUNED_TILES``), the same tile config is used for every M,
+    ``do_not_specialize``. For (N, K) shapes with a tuned tile config
+    (see ``_TUNED_TILES``), the same tile config is used for every M,
     so a fixed row's launch tile never depends on batch size. Otherwise
     ``BLOCK_SIZE_M``/``BLOCK_SIZE_N`` fall back to the SM89-tuned heuristic
     (chosen from which side of the M<=128 threshold a call falls on).
@@ -177,7 +163,7 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
     ) -> CompileKey:
         # The warmup tracer only supports a single expression-shaped body
         # (conditional expressions, no if-statements/tuple-unpacking), so
-        # the Hopper-tuned-vs-fallback choice is expressed with ternaries.
+        # the tuned-vs-fallback choice is expressed with ternaries.
         tuned_raw = _TUNED_TILES.get((N, K))
         use_tuned = tuned_raw is not None
         tuned = tuned_raw if tuned_raw is not None else (0, 0, 0, 0)
@@ -200,7 +186,7 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
     ) -> list[CompileKey]:
         # One representative M on each side of the 128 threshold covers both
         # BLOCK_SIZE_M/N configs the SM89 fallback in dispatch(...) can
-        # select; for Hopper-tuned shapes both traced M values collapse to
+        # select; for tuned shapes both traced M values collapse to
         # the same (M-independent) CompileKey, so this over-covers safely.
         return self._trace_dispatch(self.dispatch)(
             m=(1, 129), N=N, K=K, GROUP_SIZE=GROUP_SIZE

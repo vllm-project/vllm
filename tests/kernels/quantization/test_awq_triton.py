@@ -10,10 +10,10 @@ import torch
 
 from vllm.model_executor.layers.quantization.awq_triton import (
     _AWQ_GEMM_FUSED_FP32_KERNEL,
-    _HOPPER_TUNED_TILES,
     AWQ_FUSED_FP32_SUPPORTED,
     AWQ_TRITON_SUPPORTED_GROUP_SIZES,
     awq_dequantize_triton,
+    awq_fused_gemm_is_tuned_for_shape,
     awq_gemm_fused_fp32,
     awq_gemm_triton,
 )
@@ -26,6 +26,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 device = current_platform.device_type
+
+# (N, K) of Qwen3-4B-AWQ's o_proj, down_proj, qkv_proj and gate_up_proj.
+_REAL_SHAPES = [(2560, 4096), (2560, 9728), (6144, 2560), (19456, 2560)]
 
 
 def reverse_awq_order(t: torch.Tensor):
@@ -235,7 +238,7 @@ def test_awq_gemm_fused_fp32(M, N, K):
     torch.testing.assert_close(output_fused, output_ref, atol=1e-1, rtol=1e-1)
 
 
-@pytest.mark.parametrize("N,K", [(64, 256), *_HOPPER_TUNED_TILES.keys()])
+@pytest.mark.parametrize("N,K", [(64, 256), *_REAL_SHAPES])
 def test_awq_gemm_fused_fp32_warmup_inputs_dispatch_to_same_key(N, K):
     """__call__ re-dispatches from the warmup input's M, so each warmup key's
     inputs must dispatch back to that key or a different tile gets compiled.
@@ -303,13 +306,11 @@ def test_awq_gemm_fused_fp32_batch_invariant(N, K):
 
 
 @fused_fp32_skip
-@pytest.mark.parametrize("N,K", list(_HOPPER_TUNED_TILES.keys()))
+@pytest.mark.parametrize("N,K", _REAL_SHAPES)
 @pytest.mark.parametrize("M", [1, 32, 129, 256])
-def test_awq_gemm_fused_fp32_hopper_tuned_shapes(N, K, M):
-    """Correctness for the real projection shapes with a Hopper-specific
-    tile config (see _HOPPER_TUNED_TILES): on SM89 this exercises the
-    fallback heuristic instead, since the tuned table only applies on
-    has_device_capability(90); either way, output must match the reference.
+def test_awq_gemm_fused_fp32_real_shapes(N, K, M):
+    """Correctness for real projection shapes, with whichever tile this
+    arch dispatches (a tuned tile where one is listed, else the fallback).
     """
     group_size = 128
     set_random_seed(0)
@@ -328,10 +329,14 @@ def test_awq_gemm_fused_fp32_hopper_tuned_shapes(N, K, M):
 
 
 @fused_fp32_skip
-@pytest.mark.parametrize("N,K", list(_HOPPER_TUNED_TILES.keys()))
-def test_awq_gemm_fused_fp32_hopper_tuned_shapes_batch_invariant(N, K):
-    """The Hopper-tuned tile config is fixed per (N, K) regardless of M, so
-    a fixed row's output must be bit-identical across batch sizes."""
+@pytest.mark.parametrize("N,K", _REAL_SHAPES)
+def test_awq_gemm_fused_fp32_real_shapes_batch_invariant(N, K):
+    """A fixed row's output must be bit-identical across batch sizes for
+    real projection shapes that this arch dispatches to the fused kernel."""
+    if not awq_fused_gemm_is_tuned_for_shape(N, K):
+        # e.g. on SM90 the fallback tiles are not bit-identical across the
+        # M=128 switch, but those shapes run the legacy path there.
+        pytest.skip("shape uses the legacy path on this device")
     group_size = 128
     set_random_seed(0)
 
